@@ -170,8 +170,8 @@ The current process-local suite covers batch payload size, inline operation
 size, contending candidates, and metadata-only active-tail recovery. The first measured
 baseline is in
 [`docs/evidence/local-baseline-2026-09-02.md`](evidence/local-baseline-2026-09-02.md).
-It states the cases that remain unmeasured. Add staged-payload, refresh,
-checkpoint, filesystem, and MinIO performance cases before making claims about
+It states the cases that remain unmeasured. Add refresh, checkpoint, filesystem,
+and MinIO performance cases before making claims about
 those paths.
 
 Later gates can compare against a retained machine-readable baseline. Do not
