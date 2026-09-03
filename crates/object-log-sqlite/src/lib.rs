@@ -12,8 +12,7 @@ mod wal;
 
 pub use database::{Database, SqliteCheckpointStatus, StageStatus, StagedWrite};
 
-/// Fixed `SQLite` database page size.
-pub const PAGE_SIZE: u32 = 4_096;
+const PAGE_SIZE: u32 = 4_096;
 
 /// An invalid `SQLite` cache, WAL, durable record, or object-log operation.
 #[derive(Debug, thiserror::Error)]
@@ -40,15 +39,9 @@ pub enum SqliteError {
     /// The disposable cache is not safe to use until recovery completes.
     #[error("the SQLite cache requires recovery")]
     DirtyCache,
-    /// An active garbage collection prevents a protected cache rebuild.
-    #[error("garbage collection is active for this SQLite database")]
-    CollectionActive,
     /// Another live database instance owns the same local cache path.
     #[error("the SQLite cache path is already open")]
     CacheInUse,
-    /// The process-local cache-path registry is not usable.
-    #[error("the SQLite cache-path registry is unavailable")]
-    CacheRegistry,
     /// The generic object-log operation failed.
     #[error("object log: {0}")]
     Log(#[from] object_log::Error),
@@ -69,7 +62,7 @@ mod tests {
 
     use rusqlite::TransactionBehavior;
 
-    use super::{PAGE_SIZE, connection, wal};
+    use super::{PAGE_SIZE, SqliteError, connection, wal};
 
     type TestResult = Result<(), Box<dyn StdError>>;
 
@@ -245,10 +238,22 @@ mod tests {
                     frames.pop();
                 }
             }
-            assert!(
-                wal::validate_complete(&header, &frames).is_err(),
-                "accepted {corruption:?} corruption"
-            );
+            let expected = match corruption {
+                Corruption::Magic | Corruption::Format | Corruption::PageSize => {
+                    "invalid WAL header"
+                }
+                Corruption::HeaderData | Corruption::HeaderChecksum => {
+                    "invalid WAL header checksum"
+                }
+                Corruption::FrameData | Corruption::FrameChecksum => "invalid WAL frame checksum",
+                Corruption::Salt => "WAL frame salt does not match its header",
+                Corruption::PageNumber | Corruption::OutOfRangePageNumber => {
+                    "invalid WAL page number"
+                }
+                Corruption::CommitMarker => "WAL range has no final commit marker",
+                Corruption::Alignment => "invalid WAL frame alignment",
+            };
+            expect_invalid_wal(wal::validate_complete(&header, &frames), expected)?;
         }
 
         conn.execute("INSERT INTO values_table VALUES (zeroblob(32768))", [])?;
@@ -262,8 +267,21 @@ mod tests {
         }
         let mut early_commit = transaction.bytes.to_vec();
         early_commit[4..8].copy_from_slice(&1_u32.to_be_bytes());
-        assert!(wal::validate_record(&valid_header, &early_commit, capture.position).is_err());
+        expect_invalid_wal(
+            wal::validate_record(&valid_header, &early_commit, capture.position),
+            "WAL record has an early commit marker",
+        )?;
         Ok(())
+    }
+
+    fn expect_invalid_wal(
+        result: Result<wal::WalPosition, SqliteError>,
+        expected: &str,
+    ) -> TestResult {
+        match result {
+            Err(SqliteError::InvalidWal(message)) if message == expected => Ok(()),
+            other => Err(format!("expected {expected:?}, got {other:?}").into()),
+        }
     }
 
     fn wal_path(database: &Path) -> PathBuf {

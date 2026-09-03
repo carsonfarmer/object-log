@@ -11,7 +11,7 @@ use rusqlite::{Connection, MAIN_DB};
 use uuid::Uuid;
 
 use crate::connection::open as open_connection;
-use crate::format::{Record, RecordKind};
+use crate::format::Record;
 use crate::policy::Policy;
 use crate::wal::{self, WAL_FRAME_HEADER_BYTES, WAL_HEADER_BYTES, WalCapture, WalPosition};
 use crate::{PAGE_SIZE, SqliteError};
@@ -360,7 +360,7 @@ impl Database {
     }
 
     async fn stage_snapshot(&self, payload: Bytes) -> Result<(Bytes, Vec<ObjectRef>), SqliteError> {
-        self.stage_payload(payload, RecordKind::Snapshot, None)
+        self.stage_payload(payload, PAGE_SIZE as usize, Record::snapshot)
             .await
     }
 
@@ -378,29 +378,29 @@ impl Database {
         }
         self.stage_payload(
             payload,
-            RecordKind::Wal,
-            Some((header, prior.frames, current.frames)),
+            PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES,
+            |len, inline, chunks| {
+                Record::wal(len, inline, chunks, header, prior.frames, current.frames)
+            },
         )
         .await
     }
 
-    async fn stage_payload(
+    async fn stage_payload<F>(
         &self,
         payload: Bytes,
-        kind: RecordKind,
-        boundary: Option<([u8; WAL_HEADER_BYTES], u32, u32)>,
-    ) -> Result<(Bytes, Vec<ObjectRef>), SqliteError> {
+        unit: usize,
+        record: F,
+    ) -> Result<(Bytes, Vec<ObjectRef>), SqliteError>
+    where
+        F: Fn(usize, Option<Bytes>, usize) -> Result<Record, SqliteError>,
+    {
         if payload.len() <= self.log.options().max_inline_operation_bytes {
-            let inline =
-                record(kind, payload.len(), Some(payload.clone()), 0, boundary)?.encode()?;
+            let inline = record(payload.len(), Some(payload.clone()), 0)?.encode()?;
             if inline.len() <= self.log.options().max_inline_operation_bytes {
                 return Ok((inline, Vec::new()));
             }
         }
-        let unit = match kind {
-            RecordKind::Snapshot => PAGE_SIZE as usize,
-            RecordKind::Wal => PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES,
-        };
         let chunk_size = self.log.options().max_object_bytes / unit * unit;
         if chunk_size == 0
             || payload.len().div_ceil(chunk_size) > self.log.options().max_object_refs
@@ -411,30 +411,12 @@ impl Database {
         for chunk in payload.chunks(chunk_size) {
             objects.push(self.log.put_object(Bytes::copy_from_slice(chunk)).await?);
         }
-        let descriptor = record(kind, payload.len(), None, objects.len(), boundary)?.encode()?;
+        let descriptor = record(payload.len(), None, objects.len())?.encode()?;
         Ok((descriptor, objects))
     }
 
     fn conn(&self) -> Result<&Connection, SqliteError> {
         self.connection.as_ref().ok_or(SqliteError::DirtyCache)
-    }
-}
-
-fn record(
-    kind: RecordKind,
-    len: usize,
-    inline: Option<Bytes>,
-    chunks: usize,
-    boundary: Option<([u8; WAL_HEADER_BYTES], u32, u32)>,
-) -> Result<Record, SqliteError> {
-    match (kind, boundary) {
-        (RecordKind::Snapshot, None) => Ok(Record::snapshot(len, inline, chunks)),
-        (RecordKind::Wal, Some((header, prior, current))) => {
-            Ok(Record::wal(len, inline, chunks, header, prior, current))
-        }
-        _ => Err(SqliteError::InvalidRecord(
-            "record kind and boundary do not match".into(),
-        )),
     }
 }
 
@@ -487,7 +469,7 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
 
     if let Some(checkpoint) = checkpoint {
         let descriptor = Record::decode(checkpoint.snapshot(), checkpoint.objects().len())?;
-        if descriptor.kind != RecordKind::Snapshot {
+        if !descriptor.is_snapshot() {
             return Err(SqliteError::InvalidRecord(
                 "checkpoint does not contain a snapshot".into(),
             ));
@@ -499,28 +481,25 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
     for commit in tail {
         let descriptor = Record::decode(commit.operation(), commit.objects().len())?;
         let payload = load_payload(log, view, &descriptor, commit.objects()).await?;
-        match descriptor.kind {
-            RecordKind::Snapshot if snapshot.is_none() && position.frames == 0 => {
+        match (descriptor.is_snapshot(), descriptor.wal_boundary()) {
+            (true, None) if snapshot.is_none() && position.frames == 0 => {
                 validate_snapshot(&payload)?;
                 snapshot = Some(payload);
             }
-            RecordKind::Wal if snapshot.is_some() => {
-                let record_header = descriptor
-                    .wal_header
-                    .ok_or_else(|| SqliteError::InvalidRecord("WAL record has no header".into()))?;
-                if descriptor.prior_mx_frame != Some(position.frames) {
+            (false, Some((record_header, prior, current))) if snapshot.is_some() => {
+                if prior != position.frames {
                     return Err(SqliteError::InvalidRecord(
                         "WAL records do not form one continuous epoch".into(),
                     ));
                 }
-                position = wal::validate_record(&record_header, &payload, position)?;
-                if descriptor.mx_frame != Some(position.frames) {
+                position = wal::validate_record(record_header, &payload, position)?;
+                if current != position.frames {
                     return Err(SqliteError::InvalidRecord(
                         "WAL record does not match its current boundary".into(),
                     ));
                 }
                 if wal.is_empty() {
-                    wal.extend_from_slice(&record_header);
+                    wal.extend_from_slice(record_header);
                 }
                 wal.extend_from_slice(&payload);
             }
@@ -555,12 +534,13 @@ async fn load_payload(
     record: &Record,
     objects: &[ObjectRef],
 ) -> Result<Bytes, SqliteError> {
-    if let Some(payload) = &record.inline {
+    if let Some(payload) = record.inline() {
         return Ok(payload.clone());
     }
-    let unit = match record.kind {
-        RecordKind::Snapshot => PAGE_SIZE as usize,
-        RecordKind::Wal => PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES,
+    let unit = if record.is_snapshot() {
+        PAGE_SIZE as usize
+    } else {
+        PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES
     };
     let options = log.options();
     if objects.len() > options.max_object_refs {
@@ -586,14 +566,14 @@ async fn load_payload(
             .checked_add(object_len)
             .ok_or(SqliteError::PayloadLimit)?;
     }
-    if declared_len != record.payload_len {
+    if declared_len != record.payload_len() {
         return Err(SqliteError::InvalidRecord(
             "record chunks do not match the declared length".into(),
         ));
     }
     let mut payload = Vec::new();
     payload
-        .try_reserve_exact(record.payload_len)
+        .try_reserve_exact(record.payload_len())
         .map_err(|_| SqliteError::PayloadLimit)?;
     for object in objects {
         let chunk = log.read_object(view, object).await?;
@@ -744,8 +724,8 @@ fn validate_options(log: &Log) -> Result<(), SqliteError> {
     let options = log.options();
     let frame_bytes = PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES;
     let descriptors = [
-        Record::snapshot(PAGE_SIZE as usize, None, 1).encode()?,
-        Record::wal(frame_bytes, None, 1, [0; WAL_HEADER_BYTES], 0, 1).encode()?,
+        Record::snapshot(PAGE_SIZE as usize, None, 1)?.encode()?,
+        Record::wal(frame_bytes, None, 1, [0; WAL_HEADER_BYTES], 0, 1)?.encode()?,
     ];
     if options.max_object_refs == 0
         || options.max_object_bytes < frame_bytes
