@@ -20,6 +20,7 @@ pub struct Options {
     pub max_object_refs_per_commit: usize,
     pub max_commit_bytes: usize,
     pub max_head_bytes: usize,
+    pub max_checkpoint_bytes: usize,
 }
 
 impl Default for Options {
@@ -32,6 +33,7 @@ impl Default for Options {
             max_object_refs_per_commit: 1_024,
             max_commit_bytes: 1024 * 1024,
             max_head_bytes: 256 * 1024,
+            max_checkpoint_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -445,6 +447,88 @@ impl Log {
         Ok(records)
     }
 
+    /// Publishes an opaque base that covers one exact prefix of `view`.
+    ///
+    /// The base object becomes durable before the index update. A concurrent
+    /// index update returns [`CheckpointStatus::Conflict`] and preserves the
+    /// current durable history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view, a reference outside its active
+    /// tail, an oversized base, invalid history, or a backend failure. A store
+    /// error during the index update can hide a successful maintenance update.
+    /// The caller must load the index before it retries.
+    pub async fn publish_checkpoint(
+        &self,
+        view: &View,
+        through: &CommitRef,
+        snapshot: Bytes,
+    ) -> Result<CheckpointStatus, Error> {
+        self.validate_cursor(view.cursor())?;
+        let checkpoint = format::Checkpoint {
+            log_id: self.store.log_id().clone(),
+            through_sequence: through.sequence,
+            through_commit: through.digest,
+            snapshot,
+        };
+        let bytes = format::encode_checkpoint(&checkpoint)?;
+        self.validate_checkpoint_bytes(bytes.len())?;
+        let len = u64::try_from(bytes.len())
+            .map_err(|_| Error::LimitExceeded("checkpoint byte length"))?;
+        let object = ObjectRef {
+            kind: ObjectKind::Checkpoint,
+            digest: Digest::of(&bytes),
+            len,
+        };
+        let candidate = self.checkpoint_head(view, through, object.clone())?;
+        let candidate_bytes = format::encode_head(&candidate)?;
+        self.validate_encoded_head(&candidate_bytes)?;
+        self.create_immutable(StoreKey::Checkpoint(object.digest), bytes)
+            .await?;
+
+        match self
+            .store
+            .update(StoreKey::Head, candidate_bytes, view.cursor.version.clone())
+            .await?
+        {
+            UpdateResult::Updated { version } => Ok(CheckpointStatus::Published(View {
+                cursor: Cursor {
+                    head: candidate,
+                    version,
+                },
+            })),
+            UpdateResult::PreconditionFailed => Ok(CheckpointStatus::Conflict(self.load().await?)),
+        }
+    }
+
+    /// Reads and verifies the base snapshot referenced by `view`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the view is foreign or its base is missing,
+    /// oversized, corrupt, or does not cover the declared entry.
+    pub async fn read_checkpoint(&self, view: &View) -> Result<Option<Bytes>, Error> {
+        self.validate_cursor(view.cursor())?;
+        let Some(reference) = view.checkpoint() else {
+            return Ok(None);
+        };
+        let declared_len = usize::try_from(reference.object.len)
+            .map_err(|_| Error::LimitExceeded("checkpoint byte length"))?;
+        self.validate_checkpoint_bytes(declared_len)?;
+        let bytes = self.read_object(&reference.object).await?;
+        let checkpoint = format::decode_checkpoint(&bytes)?;
+        if checkpoint.log_id != *self.store.log_id()
+            || checkpoint.through_sequence != reference.through_sequence
+            || checkpoint.through_commit != reference.through_commit
+        {
+            return Err(Error::InvalidFormat(
+                "a checkpoint does not match its index reference".to_owned(),
+            ));
+        }
+        Ok(Some(checkpoint.snapshot))
+    }
+
     fn view_from_stored(&self, stored: crate::store::StoredObject) -> Result<View, Error> {
         self.validate_encoded_head(&stored.bytes)?;
         let head = format::decode_head(&stored.bytes)?;
@@ -490,6 +574,13 @@ impl Log {
     fn validate_encoded_head(&self, bytes: &Bytes) -> Result<(), Error> {
         if bytes.len() > self.options.max_head_bytes {
             return Err(Error::LimitExceeded("encoded head bytes"));
+        }
+        Ok(())
+    }
+
+    fn validate_checkpoint_bytes(&self, len: usize) -> Result<(), Error> {
+        if len > self.options.max_checkpoint_bytes {
+            return Err(Error::LimitExceeded("encoded checkpoint bytes"));
         }
         Ok(())
     }
@@ -547,6 +638,42 @@ impl Log {
             .checked_add(1)
             .ok_or(Error::LimitExceeded("commit sequence"))?;
         head.tail.push(commit_ref.clone());
+        head.validate()?;
+        Ok(head)
+    }
+
+    fn checkpoint_head(
+        &self,
+        view: &View,
+        through: &CommitRef,
+        object: ObjectRef,
+    ) -> Result<Head, Error> {
+        let mut head = view.cursor.head.clone();
+        let through_index = head
+            .tail
+            .iter()
+            .position(|entry| entry == through)
+            .ok_or_else(|| {
+                Error::InvalidFormat("the checkpoint entry is not in the active tail".to_owned())
+            })?;
+        let removed = head.tail.drain(..=through_index).collect::<Vec<_>>();
+        head.recent_outcomes.extend(removed);
+        if head.recent_outcomes.len() > self.options.resolution_window {
+            let excess = head
+                .recent_outcomes
+                .len()
+                .saturating_sub(self.options.resolution_window);
+            head.recent_outcomes.drain(..excess);
+        }
+        head.checkpoint = Some(CheckpointRef {
+            through_sequence: through.sequence,
+            through_commit: through.digest,
+            object,
+        });
+        head.generation = head
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
         head.validate()?;
         Ok(head)
     }

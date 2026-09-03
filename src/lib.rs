@@ -8,7 +8,9 @@ pub mod store;
 #[cfg(any(test, feature = "test-util"))]
 pub mod sim;
 
-pub use log::{CheckpointStatus, CommitStatus, Log, Options, Refresh, Resolution, View};
+pub use log::{
+    CheckpointStatus, CommitRecord, CommitStatus, Log, Options, Refresh, Resolution, View,
+};
 pub use store::{BackendCapabilities, BackendCapability, ScopedStore};
 
 /// Current durable object-log format version.
