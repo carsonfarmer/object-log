@@ -319,8 +319,8 @@ async fn referenced_objects_are_durable_before_head_publication()
 
     let payload = Bytes::from_static(b"immutable payload");
     let object = log.put_object(payload.clone()).await?;
-    assert_eq!(log.read_object(&object).await?, payload);
     let before = log.load().await?;
+    assert_eq!(log.read_object(&before, &object).await?, payload);
     assert!(before.tail().is_empty());
 
     let prepared = log.prepare(
@@ -363,8 +363,8 @@ async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std:
     let tail = log.read_tail(&committed).await?;
     assert_eq!(tail[0].objects(), std::slice::from_ref(&object));
     assert!(matches!(
-        log.read_object(&object).await,
-        Err(object_log::Error::InvalidFormat(_))
+        log.read_object(&committed, &object).await,
+        Err(object_log::Error::CorruptObject)
     ));
     Ok(())
 }
@@ -399,7 +399,7 @@ async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn
         std::slice::from_ref(&object)
     );
     assert!(matches!(
-        log.read_object(&object).await,
+        log.read_object(&committed, &object).await,
         Err(object_log::Error::CorruptObject)
     ));
     Ok(())

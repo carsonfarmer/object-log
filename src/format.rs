@@ -183,20 +183,12 @@ pub(crate) struct CollectionPlanRef {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 pub(crate) struct CollectionPlan {
     pub log_id: LogId,
     pub collection_epoch: u64,
     pub candidates: Vec<CollectionCandidate>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 impl CollectionPlan {
     fn validate(&self, options: Options) -> Result<(), Error> {
         if self.collection_epoch == 0 {
@@ -235,10 +227,6 @@ impl CollectionPlan {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 pub(crate) struct CollectionCandidate {
     pub key: ImmutableKey,
     pub bytes: u64,
@@ -490,10 +478,6 @@ struct CollectionPlanRefWire {
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
 #[cbor(map)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 struct CollectionPlanWire {
     #[n(1)]
     format_version: u32,
@@ -507,10 +491,6 @@ struct CollectionPlanWire {
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
 #[cbor(map)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 struct CollectionCandidateWire {
     #[cbor(n(1), with = "minicbor::bytes")]
     incarnation: Vec<u8>,
@@ -534,10 +514,6 @@ enum ObjectKindWire {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 enum ImmutableKindWire {
     Commit = 1,
     Blob = 2,
@@ -730,10 +706,6 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
     Ok(prepared)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 pub(crate) fn encode_collection_plan(
     plan: &CollectionPlan,
     options: Options,
@@ -755,10 +727,6 @@ pub(crate) fn encode_collection_plan(
     Ok(bytes)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 pub(crate) fn decode_collection_plan(
     bytes: &[u8],
     options: Options,

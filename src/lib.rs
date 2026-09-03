@@ -138,7 +138,10 @@ impl fmt::Display for TransactionId {
     }
 }
 
-/// A stable identity for one conservative reader retention.
+/// A stable identity for one conservative reader-retention attempt.
+///
+/// Reuse the ID to resolve uncertain updates. Do not reuse it after a confirmed
+/// release. A later retention needs a new ID.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RetentionId(Uuid);
 
@@ -430,6 +433,12 @@ pub enum Error {
     /// Content does not match its declared digest, length, or immutable value.
     #[error("object data failed integrity verification")]
     CorruptObject,
+    /// A read used an unretained view from before a completed collection.
+    #[error("the supplied view expired after garbage collection")]
+    ViewExpired,
+    /// An active collection plan contains data required by a publication.
+    #[error("an active collection plan fences required immutable data")]
+    CollectionFence,
     /// A new immutable commit identity already exists and cannot be accepted.
     #[error("fresh commit physical identity already exists")]
     PhysicalIdentityCollision,

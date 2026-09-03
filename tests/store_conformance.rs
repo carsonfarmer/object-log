@@ -50,8 +50,18 @@ async fn log_namespaces_are_isolated() -> Result<(), Box<dyn StdError>> {
     assert_eq!(first_object.kind(), second_object.kind());
     assert_eq!(first_object.digest(), second_object.digest());
     assert_eq!(first_object.len(), second_object.len());
-    assert_eq!(first.read_object(&first_object).await?, bytes);
-    assert_eq!(second.read_object(&second_object).await?, bytes);
+    assert_eq!(
+        first
+            .read_object(&first.load().await?, &first_object)
+            .await?,
+        bytes
+    );
+    assert_eq!(
+        second
+            .read_object(&second.load().await?, &second_object)
+            .await?,
+        bytes
+    );
     Ok(())
 }
 

@@ -176,10 +176,6 @@ impl ImmutableKey {
 }
 
 /// One emitted entry from a scoped object listing.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ListedObject {
     pub(crate) immutable_key: Option<ImmutableKey>,
@@ -382,10 +378,6 @@ impl ScopedStore {
     ///
     /// Only exact canonical immutable paths have an [`ImmutableKey`]. Callers
     /// must still count unclassified entries when they enforce scan limits.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the GC protocol integration")
-    )]
     pub(crate) fn list_scoped(&self) -> BoxStream<'static, Result<ListedObject, Error>> {
         let scope = self.scope.clone();
         self.store
@@ -406,10 +398,6 @@ impl ScopedStore {
     /// The method drains every backend result. A missing key is a successful
     /// delete. Any other error makes the complete batch result uncertain, and
     /// this method does not retry it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the GC protocol integration")
-    )]
     pub(crate) async fn delete_immutable_batch(&self, keys: &[ImmutableKey]) -> Result<(), Error> {
         if keys.len() > MAX_DELETE_BATCH {
             return Err(Error::LimitExceeded("immutable delete batch"));
@@ -658,10 +646,6 @@ impl ScopedStore {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 fn classify_immutable(scope: &Path, location: &Path) -> Option<ImmutableKey> {
     let mut parts = location.prefix_match(scope)?;
     if parts.next()?.as_ref() != "data" {
@@ -683,10 +667,6 @@ fn classify_immutable(scope: &Path, location: &Path) -> Option<ImmutableKey> {
     ))
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 fn parse_simple_uuid(value: &str) -> Option<Uuid> {
     let uuid = Uuid::parse_str(value).ok()?;
     (uuid.simple().to_string() == value).then_some(uuid)

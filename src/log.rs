@@ -2,14 +2,16 @@
 
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
+use std::collections::{BTreeMap, VecDeque};
 
-use crate::format::{self, Head};
+use crate::format::{self, CollectionCandidate, CollectionPlan, CollectionPlanRef, Head};
 use crate::store::{
-    ConditionalRead, CreateResult, ImmutableKey, ImmutableKind, ScopedStore, StoreKey, UpdateResult,
+    ConditionalRead, CreateResult, ImmutableKey, ImmutableKind, MAX_DELETE_BATCH, ScopedStore,
+    StoreKey, UpdateResult,
 };
 use crate::{
     CheckpointRef, CommitRef, Cursor, Digest, Error, LogId, ObjectKind, ObjectRef,
-    PendingCheckpoint, PendingCommit, PreparedCommit, StorageId, TransactionId,
+    PendingCheckpoint, PendingCommit, PreparedCommit, RetentionId, StorageId, TransactionId,
 };
 
 const MAX_CONCURRENT_READS: usize = 32;
@@ -182,6 +184,14 @@ pub struct CollectionReport {
 }
 
 impl CollectionReport {
+    const fn new(candidate_count: usize, candidate_bytes: u64, delete_attempts: usize) -> Self {
+        Self {
+            candidate_count,
+            candidate_bytes,
+            delete_attempts,
+        }
+    }
+
     /// Returns the number of immutable deletion candidates.
     #[must_use]
     pub const fn candidate_count(&self) -> usize {
@@ -397,6 +407,317 @@ impl Log {
         }
     }
 
+    /// Adds one stable retention to the supplied head view.
+    ///
+    /// A retention protects the complete log namespace. It has no expiry. The
+    /// caller must keep `id` until release is confirmed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view, a durable limit, invalid head data,
+    /// or a backend failure that cannot hide a successful update.
+    pub async fn retain(&self, view: &View, id: RetentionId) -> Result<RetentionStatus, Error> {
+        self.validate_cursor(view.cursor())?;
+        if view.cursor.head.retention_ids.contains(&id) || view.cursor.head.active_plan.is_some() {
+            return match self.refresh(view.cursor()).await? {
+                Refresh::NotModified if view.cursor.head.retention_ids.contains(&id) => {
+                    Ok(RetentionStatus::Applied(view.clone()))
+                }
+                Refresh::NotModified => Ok(RetentionStatus::ActiveCollection(view.clone())),
+                Refresh::Updated(current) if current.cursor.head.retention_ids.contains(&id) => {
+                    Ok(RetentionStatus::Applied(*current))
+                }
+                Refresh::Updated(current) if current.cursor.head.active_plan.is_some() => {
+                    Ok(RetentionStatus::ActiveCollection(*current))
+                }
+                Refresh::Updated(current) => Ok(RetentionStatus::Conflict(*current)),
+            };
+        }
+        if view.cursor.head.retention_ids.len() >= self.options.max_retention_ids {
+            return Err(Error::LimitExceeded("retention IDs"));
+        }
+
+        let mut candidate = view.cursor.head.clone();
+        candidate.retention_ids.insert(id);
+        candidate.generation = candidate
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
+        let bytes = format::encode_head(&candidate)?;
+        self.validate_encoded_head(&bytes)?;
+        match self
+            .store
+            .update(StoreKey::Head, bytes, view.cursor.version.clone())
+            .await
+        {
+            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(View {
+                cursor: Cursor {
+                    head: candidate,
+                    version,
+                },
+            })),
+            Ok(UpdateResult::PreconditionFailed) => {
+                let current = match self.load().await {
+                    Ok(current) => current,
+                    Err(Error::Store(_)) => return Ok(RetentionStatus::Pending),
+                    Err(error) => return Err(error),
+                };
+                if current.cursor.head.retention_ids.contains(&id) {
+                    Ok(RetentionStatus::Applied(current))
+                } else if current.cursor.head.active_plan.is_some() {
+                    Ok(RetentionStatus::ActiveCollection(current))
+                } else {
+                    Ok(RetentionStatus::Conflict(current))
+                }
+            }
+            Err(Error::Store(_)) => Ok(RetentionStatus::Pending),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Removes one stable retention from the supplied head view.
+    ///
+    /// Releasing an ID that is already absent succeeds without a head update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view, invalid head data, or a backend
+    /// failure that cannot hide a successful update.
+    pub async fn release_retention(
+        &self,
+        view: &View,
+        id: RetentionId,
+    ) -> Result<RetentionStatus, Error> {
+        self.validate_cursor(view.cursor())?;
+        if !view.cursor.head.retention_ids.contains(&id) {
+            return match self.refresh(view.cursor()).await? {
+                Refresh::NotModified => Ok(RetentionStatus::Applied(view.clone())),
+                Refresh::Updated(current) if !current.cursor.head.retention_ids.contains(&id) => {
+                    Ok(RetentionStatus::Applied(*current))
+                }
+                Refresh::Updated(current) => Ok(RetentionStatus::Conflict(*current)),
+            };
+        }
+
+        let mut candidate = view.cursor.head.clone();
+        candidate.retention_ids.remove(&id);
+        candidate.generation = candidate
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
+        let bytes = format::encode_head(&candidate)?;
+        self.validate_encoded_head(&bytes)?;
+        match self
+            .store
+            .update(StoreKey::Head, bytes, view.cursor.version.clone())
+            .await
+        {
+            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(View {
+                cursor: Cursor {
+                    head: candidate,
+                    version,
+                },
+            })),
+            Ok(UpdateResult::PreconditionFailed) => {
+                let current = match self.load().await {
+                    Ok(current) => current,
+                    Err(Error::Store(_)) => return Ok(RetentionStatus::Pending),
+                    Err(error) => return Err(error),
+                };
+                if current.cursor.head.retention_ids.contains(&id) {
+                    Ok(RetentionStatus::Conflict(current))
+                } else {
+                    Ok(RetentionStatus::Applied(current))
+                }
+            }
+            Err(Error::Store(_)) => Ok(RetentionStatus::Pending),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Creates a positive deletion plan and installs its head fence.
+    ///
+    /// The method verifies the complete live graph and bounded namespace before
+    /// it creates a plan. It does not delete an object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view, invalid live data, a configured
+    /// bound, or a storage failure before the head update.
+    pub async fn start_collection(&self, view: &View) -> Result<CollectionStart, Error> {
+        self.validate_cursor(view.cursor())?;
+        if view.cursor.head.active_plan.is_some() {
+            return Ok(CollectionStart::Active(view.clone()));
+        }
+        if !view.cursor.head.retention_ids.is_empty() {
+            return Ok(CollectionStart::Retained(view.clone()));
+        }
+
+        let live = self.mark_live(view).await?;
+        let mut candidates = Vec::new();
+        let mut scanned = 0_usize;
+        let mut listed = self.store.list_scoped();
+        while let Some(item) = listed.next().await {
+            scanned = scanned
+                .checked_add(1)
+                .ok_or(Error::LimitExceeded("collection scan objects"))?;
+            if scanned > self.options.max_collection_objects {
+                return Err(Error::LimitExceeded("collection scan objects"));
+            }
+            let item = item?;
+            if let Some(key) = item.immutable_key
+                && !live.contains_key(&key)
+            {
+                candidates.push(CollectionCandidate {
+                    key,
+                    bytes: item.size,
+                });
+            }
+        }
+        candidates.sort_unstable_by_key(|candidate| candidate.key);
+        let candidate_bytes = candidates.iter().try_fold(0_u64, |total, candidate| {
+            total
+                .checked_add(candidate.bytes)
+                .ok_or(Error::LimitExceeded("collection candidate bytes"))
+        })?;
+        let report = CollectionReport::new(candidates.len(), candidate_bytes, 0);
+        if candidates.is_empty() {
+            return Ok(CollectionStart::Empty(report));
+        }
+
+        let epoch = view
+            .collection_epoch()
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("collection epoch"))?;
+        let plan = CollectionPlan {
+            log_id: self.store.log_id().clone(),
+            collection_epoch: epoch,
+            candidates,
+        };
+        let plan_ref = self.create_collection_plan(&plan).await?;
+        let mut candidate = view.cursor.head.clone();
+        candidate.generation = candidate
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
+        candidate.collection_epoch = epoch;
+        candidate.active_plan = Some(plan_ref);
+        let bytes = format::encode_head(&candidate)?;
+        self.validate_encoded_head(&bytes)?;
+        match self
+            .store
+            .update(StoreKey::Head, bytes, view.cursor.version.clone())
+            .await
+        {
+            Ok(UpdateResult::Updated { version }) => Ok(CollectionStart::Installed(
+                View {
+                    cursor: Cursor {
+                        head: candidate,
+                        version,
+                    },
+                },
+                report,
+            )),
+            Ok(UpdateResult::PreconditionFailed) => match self.load().await {
+                Ok(current) => Ok(CollectionStart::Conflict(current)),
+                Err(Error::Store(_)) => Ok(CollectionStart::Pending),
+                Err(error) => Err(error),
+            },
+            Err(Error::Store(_)) => Ok(CollectionStart::Pending),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Deletes one active plan and conditionally clears its exact head fence.
+    ///
+    /// Every retry submits the complete positive deletion set again. Missing
+    /// objects count as successful deletes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view or invalid durable plan data.
+    pub async fn resume_collection(&self, view: &View) -> Result<CollectionFinish, Error> {
+        self.validate_cursor(view.cursor())?;
+        let requested_plan = view.cursor.head.active_plan.as_ref();
+        let current = self.load().await?;
+        let Some(plan_ref) = current.cursor.head.active_plan.as_ref() else {
+            return Ok(CollectionFinish::Complete(
+                current,
+                CollectionReport::new(0, 0, 0),
+            ));
+        };
+        if requested_plan.is_some_and(|requested| requested != plan_ref) {
+            return Ok(CollectionFinish::Conflict(
+                current,
+                CollectionReport::new(0, 0, 0),
+            ));
+        }
+        if requested_plan.is_none() {
+            return Ok(CollectionFinish::Conflict(
+                current,
+                CollectionReport::new(0, 0, 0),
+            ));
+        }
+        let plan = self
+            .read_collection_plan(&current.cursor.head, plan_ref)
+            .await?;
+        let candidate_bytes = plan.candidate_bytes()?;
+        let mut report = CollectionReport::new(plan.candidates.len(), candidate_bytes, 0);
+        for batch in plan.candidates.chunks(MAX_DELETE_BATCH) {
+            report.delete_attempts = report
+                .delete_attempts
+                .checked_add(batch.len())
+                .ok_or(Error::LimitExceeded("collection delete attempts"))?;
+            let keys = batch
+                .iter()
+                .map(|candidate| candidate.key)
+                .collect::<Vec<_>>();
+            match self.store.delete_immutable_batch(&keys).await {
+                Ok(()) => {}
+                Err(Error::Store(_)) => return Ok(CollectionFinish::Pending(report)),
+                Err(error) => return Err(error),
+            }
+        }
+
+        let mut candidate = current.cursor.head.clone();
+        candidate.active_plan = None;
+        candidate.generation = candidate
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
+        let bytes = format::encode_head(&candidate)?;
+        self.validate_encoded_head(&bytes)?;
+        match self
+            .store
+            .update(StoreKey::Head, bytes, current.cursor.version.clone())
+            .await
+        {
+            Ok(UpdateResult::Updated { version }) => Ok(CollectionFinish::Complete(
+                View {
+                    cursor: Cursor {
+                        head: candidate,
+                        version,
+                    },
+                },
+                report,
+            )),
+            Ok(UpdateResult::PreconditionFailed) => {
+                let current = match self.load().await {
+                    Ok(current) => current,
+                    Err(Error::Store(_)) => return Ok(CollectionFinish::Pending(report)),
+                    Err(error) => return Err(error),
+                };
+                if current.cursor.head.active_plan.is_none() {
+                    Ok(CollectionFinish::Complete(current, report))
+                } else {
+                    Ok(CollectionFinish::Conflict(current, report))
+                }
+            }
+            Err(Error::Store(_)) => Ok(CollectionFinish::Pending(report)),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Stores one immutable content-addressed blob with a fresh physical identity.
     ///
     /// # Errors
@@ -439,15 +760,16 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error when the object is absent, corrupt, has the wrong
-    /// length, or cannot be read.
-    pub async fn read_object(&self, object: &ObjectRef) -> Result<Bytes, Error> {
+    /// Returns expiry when a missing object belongs to an older unretained
+    /// view. A missing object in the current epoch is corruption.
+    pub async fn read_object(&self, view: &View, object: &ObjectRef) -> Result<Bytes, Error> {
+        self.validate_cursor(view.cursor())?;
         if object.kind != ObjectKind::Blob {
             return Err(Error::InvalidFormat(
                 "a payload read requires a blob reference".to_owned(),
             ));
         }
-        self.read_immutable(object).await
+        self.read_immutable_for_view(view, object).await
     }
 
     /// Reads and verifies one immutable reference node.
@@ -457,15 +779,16 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error for the wrong object kind, invalid node data,
-    /// configured limits, or a backend failure.
-    pub async fn read_node(&self, object: &ObjectRef) -> Result<ReferenceNode, Error> {
+    /// Returns expiry when a missing node belongs to an older unretained view.
+    /// A missing node in the current epoch is corruption.
+    pub async fn read_node(&self, view: &View, object: &ObjectRef) -> Result<ReferenceNode, Error> {
+        self.validate_cursor(view.cursor())?;
         if object.kind != ObjectKind::Node {
             return Err(Error::InvalidFormat(
                 "a node read requires a reference-node object".to_owned(),
             ));
         }
-        let bytes = self.read_immutable(object).await?;
+        let bytes = self.read_immutable_for_view(view, object).await?;
         let node = format::decode_node(&bytes)?;
         self.validate_dependencies(&node.children)?;
         Ok(ReferenceNode {
@@ -474,19 +797,38 @@ impl Log {
         })
     }
 
-    async fn read_immutable(&self, object: &ObjectRef) -> Result<Bytes, Error> {
+    async fn read_immutable_for_view(
+        &self,
+        view: &View,
+        object: &ObjectRef,
+    ) -> Result<Bytes, Error> {
+        let Some(bytes) = self.read_immutable_optional(object).await? else {
+            return Err(self.missing_read_error(view).await?);
+        };
+        Ok(bytes)
+    }
+
+    async fn read_immutable_optional(&self, object: &ObjectRef) -> Result<Option<Bytes>, Error> {
         let declared_len =
             usize::try_from(object.len).map_err(|_| Error::LimitExceeded("object byte length"))?;
         if declared_len > self.options.max_object_bytes {
             return Err(Error::LimitExceeded("object bytes"));
         }
-        let stored = self
+        let Some(stored) = self
             .store
             .read(self.object_key(object), declared_len)
             .await?
-            .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))?;
+        else {
+            return Ok(None);
+        };
         Self::verify_object(object, &stored.bytes)?;
-        Ok(stored.bytes)
+        Ok(Some(stored.bytes))
+    }
+
+    async fn read_immutable(&self, object: &ObjectRef) -> Result<Bytes, Error> {
+        self.read_immutable_optional(object)
+            .await?
+            .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))
     }
 
     /// Builds one immutable candidate against an exact observed cursor.
@@ -545,8 +887,14 @@ impl Log {
     /// not durable and valid, immutable staging fails, or a winning head is
     /// invalid.
     pub async fn commit(&self, prepared: PreparedCommit) -> Result<CommitStatus, Error> {
-        self.validate_prepared(&prepared).await?;
+        self.validate_prepared(&prepared)?;
         let (commit_ref, commit_bytes) = self.encode_prepared(&prepared)?;
+        self.verify_publication(
+            &prepared.cursor.head,
+            self.commit_immutable_key(&commit_ref),
+            &prepared.objects,
+        )
+        .await?;
         self.create_new_commit(self.commit_key(&commit_ref), commit_bytes)
             .await?;
         let candidate = Self::candidate_head(&prepared, &commit_ref)?;
@@ -580,10 +928,14 @@ impl Log {
                 };
                 match Self::classify_resolution(&pending, current)? {
                     Some(Resolution::Committed(view)) => {
-                        match self.verify_published_commit(&pending.commit_ref).await {
-                            Ok(()) => Ok(CommitStatus::Committed(view)),
-                            Err(Error::Store(_)) => Ok(CommitStatus::Pending(pending)),
-                            Err(error) => Err(error),
+                        if Self::tail_contains(&view, &pending.commit_ref) {
+                            match self.verify_published_commit(&pending.commit_ref).await {
+                                Ok(()) => Ok(CommitStatus::Committed(view)),
+                                Err(Error::Store(_)) => Ok(CommitStatus::Pending(pending)),
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            Ok(CommitStatus::Committed(view))
                         }
                     }
                     Some(Resolution::NotCommitted(view)) => Ok(CommitStatus::Conflict(view)),
@@ -619,7 +971,9 @@ impl Log {
         };
 
         if let Some(resolution) = Self::classify_resolution(&pending, current)? {
-            if let Resolution::Committed(_) = &resolution {
+            if let Resolution::Committed(view) = &resolution
+                && Self::tail_contains(view, &pending.commit_ref)
+            {
                 match self.verify_published_commit(&pending.commit_ref).await {
                     Ok(()) => {}
                     Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
@@ -629,12 +983,19 @@ impl Log {
             return Ok(resolution);
         }
 
-        match self.verify_objects(&pending.prepared.objects).await {
+        let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
+        match self
+            .verify_publication(
+                &pending.prepared.cursor.head,
+                self.commit_immutable_key(&pending.commit_ref),
+                &pending.prepared.objects,
+            )
+            .await
+        {
             Ok(()) => {}
             Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
             Err(error) => return Err(error),
         }
-        let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
         match self
             .ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
             .await
@@ -705,18 +1066,22 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign view, a missing or corrupt commit, a
-    /// mismatched reference, or a broken parent chain.
+    /// Returns expiry for missing commits in an older unretained view. A
+    /// missing commit in the current epoch is corruption.
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
         self.validate_cursor(view.cursor())?;
-        let records = stream::iter(
-            view.tail()
-                .iter()
-                .map(|reference| self.read_commit(reference)),
-        )
+        let log = self.clone();
+        let records = stream::iter(view.tail().to_vec().into_iter().map(move |reference| {
+            let log = log.clone();
+            async move { log.read_commit_optional(&reference).await }
+        }))
         .buffered(MAX_CONCURRENT_READS)
-        .try_collect::<Vec<_>>()
+        .try_collect::<Vec<Option<CommitRecord>>>()
         .await?;
+        if records.iter().any(Option::is_none) {
+            return Err(self.missing_read_error(view).await?);
+        }
+        let records = records.into_iter().flatten().collect::<Vec<_>>();
 
         let mut expected_tip = view
             .checkpoint()
@@ -754,7 +1119,6 @@ impl Log {
     ) -> Result<CheckpointStatus, Error> {
         self.read_tail(view).await?;
         self.validate_dependencies(&objects)?;
-        self.verify_objects(&objects).await?;
         let checkpoint = format::Checkpoint {
             log_id: self.store.log_id().clone(),
             incarnation: self.incarnation,
@@ -765,8 +1129,16 @@ impl Log {
         };
         let bytes = format::encode_checkpoint(&checkpoint)?;
         self.validate_checkpoint_bytes(bytes.len())?;
+        let blocked = self
+            .verify_publication_dependencies(&view.cursor.head, &checkpoint.objects)
+            .await?;
         let object = self
-            .create_fresh_object(ObjectKind::Checkpoint, bytes)
+            .create_fresh_object_with(
+                ObjectKind::Checkpoint,
+                bytes,
+                blocked.as_deref(),
+                StorageId::new,
+            )
             .await?;
         let candidate = Self::checkpoint_head(view, through, object.clone())?;
         let candidate_bytes = format::encode_head(&candidate)?;
@@ -868,7 +1240,7 @@ impl Log {
             Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
             Err(error) => return Err(error),
         }
-        match self.verify_checkpoint(&pending.checkpoint).await {
+        match self.verify_checkpoint_publication(&pending).await {
             Ok(()) => {}
             Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
             Err(error) => return Err(error),
@@ -921,8 +1293,8 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error when the view is foreign or its base is missing,
-    /// oversized, corrupt, or does not cover the declared entry.
+    /// Returns expiry for a missing checkpoint in an older unretained view. A
+    /// missing checkpoint in the current epoch is corruption.
     pub async fn read_checkpoint(&self, view: &View) -> Result<Option<CheckpointRecord>, Error> {
         self.validate_cursor(view.cursor())?;
         let Some(reference) = view.checkpoint() else {
@@ -931,7 +1303,7 @@ impl Log {
         let declared_len = usize::try_from(reference.object.len)
             .map_err(|_| Error::LimitExceeded("checkpoint byte length"))?;
         self.validate_checkpoint_bytes(declared_len)?;
-        let checkpoint = self.load_checkpoint(reference).await?;
+        let checkpoint = self.load_checkpoint_for_view(view, reference).await?;
         Ok(Some(CheckpointRecord {
             snapshot: checkpoint.snapshot,
             objects: checkpoint.objects,
@@ -943,12 +1315,44 @@ impl Log {
         self.verify_objects(&checkpoint.objects).await
     }
 
+    async fn verify_checkpoint_publication(
+        &self,
+        pending: &PendingCheckpoint,
+    ) -> Result<(), Error> {
+        let checkpoint = self.load_checkpoint(&pending.checkpoint).await?;
+        self.verify_publication(
+            &pending.view.cursor.head,
+            self.object_immutable_key(&pending.checkpoint.object),
+            &checkpoint.objects,
+        )
+        .await
+    }
+
     async fn load_checkpoint(
         &self,
         reference: &CheckpointRef,
     ) -> Result<format::Checkpoint, Error> {
         let bytes = self.read_immutable(&reference.object).await?;
-        let checkpoint = format::decode_checkpoint(&bytes)?;
+        self.decode_checkpoint_reference(reference, &bytes)
+    }
+
+    async fn load_checkpoint_for_view(
+        &self,
+        view: &View,
+        reference: &CheckpointRef,
+    ) -> Result<format::Checkpoint, Error> {
+        let bytes = self
+            .read_immutable_for_view(view, &reference.object)
+            .await?;
+        self.decode_checkpoint_reference(reference, &bytes)
+    }
+
+    fn decode_checkpoint_reference(
+        &self,
+        reference: &CheckpointRef,
+        bytes: &Bytes,
+    ) -> Result<format::Checkpoint, Error> {
+        let checkpoint = format::decode_checkpoint(bytes)?;
         self.validate_dependencies(&checkpoint.objects)?;
         if checkpoint.log_id != *self.store.log_id()
             || checkpoint.incarnation != self.incarnation
@@ -960,6 +1364,17 @@ impl Log {
             ));
         }
         Ok(checkpoint)
+    }
+
+    async fn missing_read_error(&self, view: &View) -> Result<Error, Error> {
+        let current = self.load().await?;
+        match current.collection_epoch().cmp(&view.collection_epoch()) {
+            std::cmp::Ordering::Greater => Ok(Error::ViewExpired),
+            std::cmp::Ordering::Equal => Ok(Error::CorruptObject),
+            std::cmp::Ordering::Less => Err(Error::InvalidFormat(
+                "the durable collection epoch precedes the supplied view".to_owned(),
+            )),
+        }
     }
 
     fn view_from_stored(&self, stored: crate::store::StoredObject) -> Result<View, Error> {
@@ -1053,14 +1468,13 @@ impl Log {
         Ok(())
     }
 
-    async fn validate_prepared(&self, prepared: &PreparedCommit) -> Result<(), Error> {
+    fn validate_prepared(&self, prepared: &PreparedCommit) -> Result<(), Error> {
         self.validate_cursor(&prepared.cursor)?;
         self.validate_prepared_sizes(&prepared.operation, &prepared.result)?;
         self.validate_dependencies(&prepared.objects)?;
         if prepared.cursor.head.tail.len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
-        self.verify_objects(&prepared.objects).await?;
         Ok(())
     }
 
@@ -1175,6 +1589,10 @@ impl Log {
             .any(|entry| entry == target)
     }
 
+    fn tail_contains(view: &View, target: &CommitRef) -> bool {
+        view.cursor.head.tail.iter().any(|entry| entry == target)
+    }
+
     fn classify_checkpoint(
         pending: &PendingCheckpoint,
         current: View,
@@ -1220,17 +1638,28 @@ impl Log {
     }
 
     async fn read_commit(&self, reference: &CommitRef) -> Result<CommitRecord, Error> {
+        self.read_commit_optional(reference)
+            .await?
+            .ok_or_else(|| Error::InvalidFormat("a referenced commit is missing".to_owned()))
+    }
+
+    async fn read_commit_optional(
+        &self,
+        reference: &CommitRef,
+    ) -> Result<Option<CommitRecord>, Error> {
         if reference.len
             > u64::try_from(self.options.max_commit_bytes)
                 .map_err(|_| Error::LimitExceeded("encoded commit bytes"))?
         {
             return Err(Error::LimitExceeded("encoded commit bytes"));
         }
-        let stored = self
+        let Some(stored) = self
             .store
             .read(self.commit_key(reference), self.options.max_commit_bytes)
             .await?
-            .ok_or_else(|| Error::InvalidFormat("a referenced commit is missing".to_owned()))?;
+        else {
+            return Ok(None);
+        };
         let len = u64::try_from(stored.bytes.len())
             .map_err(|_| Error::LimitExceeded("commit byte length"))?;
         if len != reference.len || Digest::of(&stored.bytes) != reference.digest {
@@ -1247,13 +1676,13 @@ impl Log {
                 "a commit does not match its head reference".to_owned(),
             ));
         }
-        Ok(CommitRecord {
+        Ok(Some(CommitRecord {
             reference: reference.clone(),
             expected_tip: commit.expected_tip,
             operation: commit.operation,
             result: commit.result,
             objects: commit.objects,
-        })
+        }))
     }
 
     async fn verify_published_commit(&self, reference: &CommitRef) -> Result<(), Error> {
@@ -1267,6 +1696,232 @@ impl Log {
                 self.verify_object_durable(object).await
             })
             .await
+    }
+
+    async fn verify_publication(
+        &self,
+        head: &Head,
+        new_key: ImmutableKey,
+        objects: &[ObjectRef],
+    ) -> Result<(), Error> {
+        let blocked = self.verify_publication_dependencies(head, objects).await?;
+        if blocked
+            .as_deref()
+            .is_some_and(|blocked| Self::is_collection_candidate(blocked, new_key))
+        {
+            return Err(Error::CollectionFence);
+        }
+        Ok(())
+    }
+
+    async fn verify_publication_dependencies(
+        &self,
+        head: &Head,
+        objects: &[ObjectRef],
+    ) -> Result<Option<Vec<CollectionCandidate>>, Error> {
+        let Some(plan_ref) = head.active_plan.as_ref() else {
+            let mut visited = BTreeMap::new();
+            self.mark_object_graph(objects, &mut visited, None).await?;
+            return Ok(None);
+        };
+        let plan = self.read_collection_plan(head, plan_ref).await?;
+        let mut visited = BTreeMap::new();
+        self.mark_object_graph(objects, &mut visited, Some(&plan.candidates))
+            .await?;
+        Ok(Some(plan.candidates))
+    }
+
+    async fn mark_live(&self, view: &View) -> Result<BTreeMap<ImmutableKey, u64>, Error> {
+        let mut live = BTreeMap::new();
+        let tail = self.read_tail(view).await?;
+        for record in &tail {
+            self.insert_live(
+                &mut live,
+                self.commit_immutable_key(&record.reference),
+                record.reference.len,
+            )?;
+        }
+        let mut roots = tail
+            .into_iter()
+            .flat_map(|record| record.objects)
+            .collect::<Vec<_>>();
+        if let Some(reference) = view.checkpoint() {
+            self.insert_live(
+                &mut live,
+                self.object_immutable_key(&reference.object),
+                reference.object.len,
+            )?;
+            let checkpoint = self.load_checkpoint(reference).await?;
+            roots.extend(checkpoint.objects);
+        }
+        self.mark_object_graph(&roots, &mut live, None).await?;
+        Ok(live)
+    }
+
+    async fn mark_object_graph(
+        &self,
+        roots: &[ObjectRef],
+        visited: &mut BTreeMap<ImmutableKey, u64>,
+        blocked: Option<&[CollectionCandidate]>,
+    ) -> Result<(), Error> {
+        let mut pending = VecDeque::new();
+        for object in roots {
+            self.enqueue_object(object, visited, blocked, &mut pending)?;
+        }
+
+        while !pending.is_empty() {
+            let count = pending.len().min(MAX_CONCURRENT_READS);
+            let batch = pending.drain(..count).collect::<Vec<_>>();
+            let log = self.clone();
+            let children = stream::iter(batch.into_iter().map(move |object| {
+                let log = log.clone();
+                async move { log.read_graph_children(&object).await }
+            }))
+            .buffer_unordered(MAX_CONCURRENT_READS)
+            .try_collect::<Vec<_>>()
+            .await?;
+            for children in children {
+                for child in children {
+                    self.enqueue_object(&child, visited, blocked, &mut pending)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn enqueue_object(
+        &self,
+        object: &ObjectRef,
+        visited: &mut BTreeMap<ImmutableKey, u64>,
+        blocked: Option<&[CollectionCandidate]>,
+        pending: &mut VecDeque<ObjectRef>,
+    ) -> Result<(), Error> {
+        if object.kind == ObjectKind::Checkpoint {
+            return Err(Error::InvalidFormat(
+                "application dependencies cannot name a checkpoint".to_owned(),
+            ));
+        }
+        let key = self.object_immutable_key(object);
+        if blocked.is_some_and(|blocked| Self::is_collection_candidate(blocked, key)) {
+            return Err(Error::CollectionFence);
+        }
+        if let Some(declared_len) = visited.get(&key) {
+            if *declared_len != object.len {
+                return Err(Error::CorruptObject);
+            }
+        } else {
+            visited.insert(key, object.len);
+            if visited.len() > self.options.max_collection_objects {
+                return Err(Error::LimitExceeded("collection live objects"));
+            }
+            pending.push_back(object.clone());
+        }
+        Ok(())
+    }
+
+    fn insert_live(
+        &self,
+        live: &mut BTreeMap<ImmutableKey, u64>,
+        key: ImmutableKey,
+        len: u64,
+    ) -> Result<(), Error> {
+        if let Some(declared_len) = live.insert(key, len)
+            && declared_len != len
+        {
+            return Err(Error::CorruptObject);
+        }
+        if live.len() > self.options.max_collection_objects {
+            return Err(Error::LimitExceeded("collection live objects"));
+        }
+        Ok(())
+    }
+
+    fn is_collection_candidate(candidates: &[CollectionCandidate], key: ImmutableKey) -> bool {
+        candidates
+            .binary_search_by_key(&key, |candidate| candidate.key)
+            .is_ok()
+    }
+
+    async fn read_graph_children(&self, object: &ObjectRef) -> Result<Vec<ObjectRef>, Error> {
+        match object.kind {
+            ObjectKind::Blob => {
+                self.verify_object_durable(object).await?;
+                Ok(Vec::new())
+            }
+            ObjectKind::Node => {
+                let bytes = self.read_immutable(object).await?;
+                let node = format::decode_node(&bytes)?;
+                self.validate_dependencies(&node.children)?;
+                Ok(node.children)
+            }
+            ObjectKind::Checkpoint => Err(Error::InvalidFormat(
+                "application dependencies cannot name a checkpoint".to_owned(),
+            )),
+        }
+    }
+
+    async fn create_collection_plan(
+        &self,
+        plan: &CollectionPlan,
+    ) -> Result<CollectionPlanRef, Error> {
+        const MAX_ATTEMPTS: usize = 16;
+
+        let bytes = format::encode_collection_plan(plan, self.options)?;
+        let digest = Digest::of(&bytes);
+        let len = u64::try_from(bytes.len())
+            .map_err(|_| Error::LimitExceeded("collection plan byte length"))?;
+        for _ in 0..MAX_ATTEMPTS {
+            let reference = CollectionPlanRef {
+                storage_id: StorageId::new(),
+                digest,
+                len,
+            };
+            match self
+                .store
+                .create(
+                    StoreKey::Immutable(Self::collection_plan_key(self.incarnation, &reference)),
+                    bytes.clone(),
+                )
+                .await?
+            {
+                CreateResult::Created { .. } => return Ok(reference),
+                CreateResult::AlreadyExists => {}
+            }
+        }
+        Err(Error::LimitExceeded("fresh physical storage identity"))
+    }
+
+    async fn read_collection_plan(
+        &self,
+        head: &Head,
+        reference: &CollectionPlanRef,
+    ) -> Result<CollectionPlan, Error> {
+        let declared_len = usize::try_from(reference.len)
+            .map_err(|_| Error::LimitExceeded("collection plan byte length"))?;
+        if declared_len > self.options.max_collection_plan_bytes {
+            return Err(Error::LimitExceeded("encoded collection plan bytes"));
+        }
+        let key = Self::collection_plan_key(head.incarnation, reference);
+        let stored = self
+            .store
+            .read(StoreKey::Immutable(key), declared_len)
+            .await?
+            .ok_or_else(|| Error::InvalidFormat("the active collection plan is missing".into()))?;
+        if stored.bytes.len() != declared_len || Digest::of(&stored.bytes) != reference.digest {
+            return Err(Error::CorruptObject);
+        }
+        let plan = format::decode_collection_plan(&stored.bytes, self.options)?;
+        if plan.log_id != *self.store.log_id() || plan.collection_epoch != head.collection_epoch {
+            return Err(Error::InvalidFormat(
+                "the collection plan does not match its head fence".into(),
+            ));
+        }
+        if plan.candidates.iter().any(|candidate| candidate.key == key) {
+            return Err(Error::InvalidFormat(
+                "the active collection plan contains its own physical key".into(),
+            ));
+        }
+        Ok(plan)
     }
 
     async fn verify_object_durable(&self, object: &ObjectRef) -> Result<(), Error> {
@@ -1310,7 +1965,7 @@ impl Log {
         kind: ObjectKind,
         bytes: Bytes,
     ) -> Result<ObjectRef, Error> {
-        self.create_fresh_object_with(kind, bytes, StorageId::new)
+        self.create_fresh_object_with(kind, bytes, None, StorageId::new)
             .await
     }
 
@@ -1318,6 +1973,7 @@ impl Log {
         &self,
         kind: ObjectKind,
         bytes: Bytes,
+        blocked: Option<&[CollectionCandidate]>,
         mut new_storage_id: impl FnMut() -> StorageId,
     ) -> Result<ObjectRef, Error> {
         const MAX_ATTEMPTS: usize = 16;
@@ -1333,6 +1989,11 @@ impl Log {
                 len,
             };
             let key = self.object_key(&object);
+            if blocked.is_some_and(|blocked| {
+                Self::is_collection_candidate(blocked, self.object_immutable_key(&object))
+            }) {
+                continue;
+            }
             match self.store.create(key, bytes.clone()).await {
                 Ok(CreateResult::Created { .. }) => return Ok(object),
                 Ok(CreateResult::AlreadyExists) => {}
@@ -1355,26 +2016,43 @@ impl Log {
     }
 
     fn object_key(&self, object: &ObjectRef) -> StoreKey {
+        StoreKey::Immutable(self.object_immutable_key(object))
+    }
+
+    fn object_immutable_key(&self, object: &ObjectRef) -> ImmutableKey {
         let kind = match object.kind {
             ObjectKind::Blob => ImmutableKind::Blob,
             ObjectKind::Node => ImmutableKind::Node,
             ObjectKind::Checkpoint => ImmutableKind::Checkpoint,
         };
-        StoreKey::Immutable(ImmutableKey {
+        ImmutableKey {
             incarnation: self.incarnation,
             kind,
             storage_id: object.storage_id,
             digest: object.digest,
-        })
+        }
     }
 
     fn commit_key(&self, reference: &CommitRef) -> StoreKey {
-        StoreKey::Immutable(ImmutableKey {
+        StoreKey::Immutable(self.commit_immutable_key(reference))
+    }
+
+    fn commit_immutable_key(&self, reference: &CommitRef) -> ImmutableKey {
+        ImmutableKey {
             incarnation: self.incarnation,
             kind: ImmutableKind::Commit,
             storage_id: reference.storage_id,
             digest: reference.digest,
-        })
+        }
+    }
+
+    fn collection_plan_key(incarnation: uuid::Uuid, reference: &CollectionPlanRef) -> ImmutableKey {
+        ImmutableKey {
+            incarnation,
+            kind: ImmutableKind::CollectionPlan,
+            storage_id: reference.storage_id,
+            digest: reference.digest,
+        }
     }
 
     fn verify_object(object: &ObjectRef, bytes: &Bytes) -> Result<(), Error> {
@@ -1461,7 +2139,7 @@ mod tests {
         let mut ids = [collision, replacement].into_iter();
 
         let staged = log
-            .create_fresh_object_with(ObjectKind::Blob, bytes, || {
+            .create_fresh_object_with(ObjectKind::Blob, bytes, None, || {
                 ids.next().unwrap_or(replacement)
             })
             .await?;
@@ -1503,7 +2181,7 @@ mod tests {
         });
 
         let error = log
-            .create_fresh_object_with(ObjectKind::Blob, bytes, || collision)
+            .create_fresh_object_with(ObjectKind::Blob, bytes, None, || collision)
             .await
             .err()
             .ok_or("ambiguous fresh create returned its colliding ID")?;
@@ -1618,11 +2296,355 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn active_plan_rejects_duplicate_physical_refs_with_conflicting_lengths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("conflicting-lengths", Options::default()).await?;
+        let source = log.load().await?;
+        let object = log.put_object(Bytes::from_static(b"object")).await?;
+        let mut conflicting = object.clone();
+        conflicting.len = conflicting.len.saturating_add(1);
+        let fenced = install_plan(
+            &log,
+            &source,
+            vec![CollectionCandidate {
+                key: ImmutableKey::new(
+                    log.incarnation,
+                    ImmutableKind::Blob,
+                    Digest::of(b"unrelated"),
+                ),
+                bytes: 1,
+            }],
+        )
+        .await?;
+        let prepared = log.prepare(
+            fenced.cursor(),
+            TransactionId::new(),
+            Bytes::new(),
+            Bytes::new(),
+            vec![object, conflicting],
+        )?;
+
+        assert!(matches!(
+            log.commit(prepared).await,
+            Err(Error::CorruptObject)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_plan_fences_the_new_commit_physical_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("commit-key-fence", Options::default()).await?;
+        let source = log.load().await?;
+        let transaction_id = TransactionId::new();
+        let storage_id = StorageId::from_uuid(uuid::Uuid::from_u128(41));
+        let mut predicted = log.prepare(
+            source.cursor(),
+            transaction_id,
+            Bytes::from_static(b"operation"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        predicted.storage_id = storage_id;
+        let (predicted_ref, _) = log.encode_prepared(&predicted)?;
+        let fenced = install_plan(
+            &log,
+            &source,
+            vec![CollectionCandidate {
+                key: log.commit_immutable_key(&predicted_ref),
+                bytes: predicted_ref.len,
+            }],
+        )
+        .await?;
+        let mut prepared = log.prepare(
+            fenced.cursor(),
+            transaction_id,
+            Bytes::from_static(b"operation"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        prepared.storage_id = storage_id;
+        let token = prepared.recovery_token()?;
+
+        assert!(matches!(
+            log.commit(prepared).await,
+            Err(Error::CollectionFence)
+        ));
+        assert!(matches!(
+            log.resume(&token).await,
+            Err(Error::CollectionFence)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_plan_fences_an_exact_checkpoint_retry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let log = test_log("checkpoint-retry-fence", Options::default()).await?;
+        let source = log.load().await?;
+        let prepared = log.prepare(
+            source.cursor(),
+            TransactionId::new(),
+            Bytes::from_static(b"commit"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
+            return Err("commit failed".into());
+        };
+        let through = committed.tail()[0].clone();
+        let checkpoint = format::Checkpoint {
+            log_id: log.store.log_id().clone(),
+            incarnation: log.incarnation,
+            through_sequence: through.sequence,
+            through_commit: through.digest,
+            snapshot: Bytes::from_static(b"checkpoint"),
+            objects: Vec::new(),
+        };
+        let bytes = format::encode_checkpoint(&checkpoint)?;
+        let object = ObjectRef {
+            kind: ObjectKind::Checkpoint,
+            storage_id: StorageId::from_uuid(uuid::Uuid::from_u128(47)),
+            digest: Digest::of(&bytes),
+            len: u64::try_from(bytes.len())?,
+        };
+        log.store.create(log.object_key(&object), bytes).await?;
+        let fenced = install_plan(
+            &log,
+            &committed,
+            vec![CollectionCandidate {
+                key: log.object_immutable_key(&object),
+                bytes: object.len,
+            }],
+        )
+        .await?;
+        let pending = PendingCheckpoint {
+            view: fenced,
+            through: through.clone(),
+            checkpoint: CheckpointRef {
+                through_sequence: through.sequence,
+                through_commit: through.digest,
+                object,
+            },
+        };
+
+        assert!(matches!(
+            log.resolve_checkpoint(pending).await,
+            Err(Error::CollectionFence)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_allocation_skips_a_planned_physical_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("checkpoint-key-fence", Options::default()).await?;
+        let bytes = format::encode_checkpoint(&format::Checkpoint {
+            log_id: log.store.log_id().clone(),
+            incarnation: log.incarnation,
+            through_sequence: 0,
+            through_commit: Digest::of(b"commit"),
+            snapshot: Bytes::new(),
+            objects: Vec::new(),
+        })?;
+        let blocked_id = StorageId::from_uuid(uuid::Uuid::from_u128(51));
+        let replacement_id = StorageId::from_uuid(uuid::Uuid::from_u128(52));
+        let blocked = [CollectionCandidate {
+            key: ImmutableKey {
+                incarnation: log.incarnation,
+                kind: ImmutableKind::Checkpoint,
+                storage_id: blocked_id,
+                digest: Digest::of(&bytes),
+            },
+            bytes: u64::try_from(bytes.len())?,
+        }];
+        let mut ids = [blocked_id, replacement_id].into_iter();
+
+        let object = log
+            .create_fresh_object_with(ObjectKind::Checkpoint, bytes, Some(&blocked), || {
+                ids.next().unwrap_or(replacement_id)
+            })
+            .await?;
+
+        assert_eq!(object.storage_id, replacement_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn old_incarnation_candidate_cannot_delete_current_data()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("old-incarnation-delete", Options::default()).await?;
+        let source = log.load().await?;
+        let bytes = Bytes::from_static(b"same content");
+        let current = log.put_object(bytes.clone()).await?;
+        let old_key = ImmutableKey {
+            incarnation: uuid::Uuid::from_u128(61),
+            kind: ImmutableKind::Blob,
+            storage_id: StorageId::from_uuid(uuid::Uuid::from_u128(62)),
+            digest: Digest::of(&bytes),
+        };
+        log.store
+            .create(StoreKey::Immutable(old_key), bytes.clone())
+            .await?;
+        let fenced = install_plan(
+            &log,
+            &source,
+            vec![CollectionCandidate {
+                key: old_key,
+                bytes: u64::try_from(bytes.len())?,
+            }],
+        )
+        .await?;
+        let CollectionFinish::Complete(cleared, _) = log.resume_collection(&fenced).await? else {
+            return Err("collection did not clear".into());
+        };
+
+        assert!(
+            log.store
+                .read(StoreKey::Immutable(old_key), bytes.len())
+                .await?
+                .is_none()
+        );
+        assert_eq!(log.read_object(&cleared, &current).await?, bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_different_current_plan_before_delete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("different-plan-tests"))
+                .await?;
+        let log = Log::open(
+            backend.scope(&LogId::new("different-plan")?),
+            Options::default(),
+        )
+        .await?;
+        let source = log.load().await?;
+        let first = install_plan(
+            &log,
+            &source,
+            vec![CollectionCandidate {
+                key: ImmutableKey::new(log.incarnation, ImmutableKind::Blob, Digest::of(b"first")),
+                bytes: 1,
+            }],
+        )
+        .await?;
+        let second_plan = CollectionPlan {
+            log_id: log.store.log_id().clone(),
+            collection_epoch: 2,
+            candidates: vec![CollectionCandidate {
+                key: ImmutableKey::new(log.incarnation, ImmutableKind::Blob, Digest::of(b"second")),
+                bytes: 1,
+            }],
+        };
+        let second_ref = log.create_collection_plan(&second_plan).await?;
+        let mut head = first.cursor.head.clone();
+        head.generation = head
+            .generation
+            .checked_add(1)
+            .ok_or("generation overflow")?;
+        head.collection_epoch = 2;
+        head.active_plan = Some(second_ref);
+        let encoded = format::encode_head(&head)?;
+        log.store
+            .update(StoreKey::Head, encoded, first.cursor.version.clone())
+            .await?;
+        faults.reset();
+
+        assert!(matches!(
+            log.resume_collection(&first).await?,
+            CollectionFinish::Conflict(_, _)
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oversized_live_reference_fails_before_collection_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let options = Options {
+            max_object_bytes: 1,
+            ..Options::default()
+        };
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("oversized-live-tests"))
+                .await?;
+        let log = Log::open(backend.scope(&LogId::new("oversized-live")?), options).await?;
+        let view = install_commit(
+            &log,
+            format::Commit {
+                log_id: log.store.log_id().clone(),
+                incarnation: log.incarnation,
+                transaction_id: TransactionId::new(),
+                expected_tip: None,
+                operation: Bytes::new(),
+                result: Bytes::new(),
+                objects: vec![ObjectRef {
+                    kind: ObjectKind::Blob,
+                    storage_id: StorageId::new(),
+                    digest: Digest::of(b"oversized"),
+                    len: 2,
+                }],
+            },
+        )
+        .await?;
+        faults.reset();
+
+        assert!(matches!(
+            log.start_collection(&view).await,
+            Err(Error::LimitExceeded("object bytes"))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::List).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        Ok(())
+    }
+
     async fn test_log(id: &str, options: Options) -> Result<Log, Error> {
         let backend =
             ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("log-tests")).await?;
         let store = backend.scope(&LogId::new(id)?);
         Log::open(store, options).await
+    }
+
+    async fn install_plan(
+        log: &Log,
+        source: &View,
+        mut candidates: Vec<CollectionCandidate>,
+    ) -> Result<View, Error> {
+        candidates.sort_unstable_by_key(|candidate| candidate.key);
+        let epoch = source
+            .collection_epoch()
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("collection epoch"))?;
+        let plan = CollectionPlan {
+            log_id: log.store.log_id().clone(),
+            collection_epoch: epoch,
+            candidates,
+        };
+        let plan_ref = log.create_collection_plan(&plan).await?;
+        let mut head = source.cursor.head.clone();
+        head.generation = head
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
+        head.collection_epoch = epoch;
+        head.active_plan = Some(plan_ref);
+        let bytes = format::encode_head(&head)?;
+        let UpdateResult::Updated { version } = log
+            .store
+            .update(StoreKey::Head, bytes, source.cursor.version.clone())
+            .await?
+        else {
+            return Err(Error::InvalidFormat("test plan lost its CAS".into()));
+        };
+        Ok(View {
+            cursor: Cursor { head, version },
+        })
     }
 
     async fn install_commit(log: &Log, commit: format::Commit) -> Result<View, Error> {

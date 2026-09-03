@@ -261,8 +261,8 @@ async fn checkpoint_declares_live_objects_for_lazy_restore() -> TestResult {
         .ok_or("checkpoint is missing")?;
     assert_eq!(checkpoint.objects(), std::slice::from_ref(&object));
     assert!(matches!(
-        log.read_object(&object).await,
-        Err(object_log::Error::InvalidFormat(_))
+        log.read_object(&compacted, &object).await,
+        Err(object_log::Error::CorruptObject)
     ));
     Ok(())
 }
@@ -303,7 +303,7 @@ async fn checkpoint_can_root_a_traversable_object_tree() -> TestResult {
         .await?
         .ok_or("checkpoint is missing")?;
     assert_eq!(checkpoint.objects(), std::slice::from_ref(&node));
-    let restored = log.read_node(&node).await?;
+    let restored = log.read_node(&compacted, &node).await?;
     assert_eq!(restored.payload(), b"page map".as_slice());
     assert_eq!(restored.children(), &[page]);
     Ok(())
@@ -432,7 +432,7 @@ async fn checkpoint_read_rejects_missing_and_corrupt_roots() -> TestResult {
     backend.delete(&location).await?;
     assert!(matches!(
         log.read_checkpoint(&compacted).await,
-        Err(object_log::Error::InvalidFormat(_))
+        Err(object_log::Error::CorruptObject)
     ));
 
     let checkpoint_len = usize::try_from(reference.object().len())?;
@@ -759,7 +759,7 @@ async fn checkpoint_rejects_missing_source_history_before_publication() -> TestR
             Vec::new(),
         )
         .await,
-        Err(object_log::Error::InvalidFormat(_))
+        Err(object_log::Error::CorruptObject)
     ));
     let current = log.load().await?;
     assert!(current.checkpoint().is_none());
