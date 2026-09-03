@@ -52,9 +52,10 @@ failure. This is acceptable because only object-log publication confirms
 durability. A cold open always rebuilds from object-log.
 
 The private cache state has only `Clean`, `Dirty`, `PendingCommit`, and
-`PendingCheckpoint`. Set `Dirty` after local SQLite commit and before the first
-object-store await. Set `PendingCommit` before the head-CAS await. Only exact
-resume is valid from that state.
+`PendingCheckpoint`. Set `Dirty` before the write callback. Restore `Clean`
+only after an explicit successful rollback or an unchanged transaction. Set
+`PendingCommit` before the head-CAS await. Only exact resume is valid from that
+state.
 
 ## First gate: WAL access
 
@@ -83,11 +84,11 @@ limits. Keep the proof cases as adapter tests. See
 
 ```rust
 pub struct Database { /* private */ }
-pub struct StagedWrite { /* private */ }
+pub struct StagedWrite<'a> { /* private */ }
 
-pub enum StageStatus {
+pub enum StageStatus<'a> {
     ReadOnly(Bytes),
-    Staged(StagedWrite),
+    Staged(StagedWrite<'a>),
 }
 
 pub enum SqliteCheckpointStatus {
@@ -109,18 +110,17 @@ impl Database {
         transaction_id: TransactionId,
         callback: impl FnOnce(&rusqlite::Transaction<'_>)
             -> rusqlite::Result<Bytes>,
-    ) -> Result<StageStatus, SqliteError>;
-    pub async fn publish(&mut self, staged: StagedWrite)
-        -> Result<CommitStatus, SqliteError>;
+    ) -> Result<StageStatus<'_>, SqliteError>;
     pub async fn resume(&mut self, recovery_token: &[u8])
         -> Result<Resolution, SqliteError>;
     pub async fn checkpoint(&mut self)
         -> Result<SqliteCheckpointStatus, SqliteError>;
 }
 
-impl StagedWrite {
+impl StagedWrite<'_> {
     pub fn result(&self) -> &Bytes;
     pub fn recovery_token(&self) -> &Bytes;
+    pub async fn publish(self) -> Result<CommitStatus, SqliteError>;
 }
 ```
 
@@ -195,13 +195,14 @@ Result bytes stay in the core commit result field.
 | Transactions | Callback error; savepoint rollback; schema and data writes; result bytes; over 64 KiB; multiple chunks; every limit |
 | Publication | Commit; conflict; lost success; all resume results; cancellation at every object-store await; callback runs once |
 | Reads and races | Unchanged refresh; changed rebuild; refresh failure before callback; two cache paths race one log; same-path rejection |
-| Recovery and GC | Removed cache; snapshot plus 10 and 1,000 tail records; corrupt or missing data; exact recovered `mxFrame`; retained rebuild versus collection; acceptance integrity check |
+| Recovery and GC | Removed cache; snapshot plus 10 and 1,000 tail records; corrupt or missing data; exact recovered `mxFrame`; rebuild during collection; acceptance integrity check |
 | Checkpoint | Consistent backup; publish before truncate; conflict; pending; cancellation; busy or partial truncate; new epoch; 1 MiB and 100 MiB |
-| Policy and backends | Dangerous SQL and TEMP writes rejected; ordinary main DDL, DML, triggers, and savepoints work; memory and filesystem suites; one opt-in MinIO flow |
+| Policy and backends | Dangerous SQL and TEMP writes rejected; ordinary main DDL, DML, triggers, and savepoints work; memory suite; one opt-in MinIO flow |
 
-A rebuild retains its exact object-log view until all snapshot, tail, and blob
-reads finish. Missing or corrupt durable data fails closed. MinIO proves only
-local compatibility and cleanup.
+A rebuild retries the current view if collection expires an older view during
+snapshot, tail, or blob reads. It verifies that history did not change before
+it accepts the rebuilt cache. Missing or corrupt current data fails closed.
+MinIO proves only local compatibility and cleanup.
 
 ## Benchmarks
 
@@ -210,14 +211,16 @@ Keep setup outside timing. Compare direct SQLite with the adapter for a small
 inline write, a 1 MiB external write, a multi-chunk transaction, an unchanged
 refreshed read, conflict rebuild, cold recovery with 10 and 1,000 tail records,
 and 1 MiB and 100 MiB checkpoints. Record latency, logical and transferred
-bytes, object requests, and stored WAL or snapshot bytes. Report memory and
-filesystem results separately. Do not claim remote latency from MinIO.
+bytes, object requests, and stored WAL or snapshot bytes. Record memory results
+as the local baseline. Do not claim remote latency from MinIO.
 
 ## Limits and stop gates
 
 - Core product change: at most 10 lines.
-- SQLite product code: at most 700 lines, including at most 50 approved unsafe
-  lines. Tests and support: 1,100. Benchmarks: 200.
+- SQLite product code target: 700 lines, including at most 50 approved unsafe
+  lines. Tests and support target: 1,100. Benchmarks target: 200. The first
+  complete implementation exceeded the product target, so an independent
+  correctness and deletion review is required before integration.
 - Implementation documentation and workspace changes: 160 lines. This budget
   excludes this task record. The key-value move has near-zero net growth.
 
@@ -235,7 +238,7 @@ code exceeds 700 lines or any unsafe code remains.
 4. Add the SQLite crate, bundled checks, connection, and cache states.
 5. Add v1 codec validation and hybrid payload chunking.
 6. Add the authorizer and trusted callbacks.
-7. Add retained cold rebuild and standard WAL replay.
+7. Add expiry-safe cold rebuild and standard WAL replay.
 8. Add refresh and first-change snapshot staging.
 9. Add WAL staging, publication, and exact resume.
 10. Add conflict recovery without callback replay.

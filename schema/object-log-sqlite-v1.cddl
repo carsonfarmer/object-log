@@ -27,8 +27,8 @@ wal-inline = {
   3: payload-length,
   4: bstr,                         ; complete WAL frame range
   6: bstr .size 32,                ; SQLite WAL header
-  7: uint,                         ; prior mxFrame
-  8: uint                          ; new mxFrame
+  7: frame-count,                  ; prior mxFrame
+  8: frame-count                   ; new mxFrame
 }
 
 wal-chunked = {
@@ -38,12 +38,13 @@ wal-chunked = {
   3: payload-length,
   5: chunk-count,
   6: bstr .size 32,
-  7: uint,
-  8: uint
+  7: frame-count,
+  8: frame-count
 }
 
 payload-length = uint .gt 0
-chunk-count = uint .gt 0
+chunk-count = 1..4294967295
+frame-count = 0..4294967295
 
 ; Snapshot payload length and each snapshot chunk are multiples of 4096.
 ; WAL payload length and each WAL chunk are multiples of 4120.
