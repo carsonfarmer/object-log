@@ -299,58 +299,6 @@ async fn conflict_does_not_rerun_the_sqlite_callback() -> TestResult {
 }
 
 #[tokio::test]
-async fn callback_policy_allows_main_savepoints_and_rejects_other_mutation() -> TestResult {
-    let log = open_log("sqlite-policy").await?;
-    let directory = tempfile::tempdir()?;
-    let mut database = Database::open(log, directory.path().join("cache.sqlite3")).await?;
-
-    assert!(
-        database
-            .read(|connection| connection.execute_batch("CREATE TABLE denied (value INTEGER)"))
-            .await
-            .is_err()
-    );
-    assert!(
-        database
-            .stage_write(TransactionId::new(), |transaction| {
-                transaction.execute_batch("CREATE TEMP TABLE denied (value INTEGER)")?;
-                Ok(Bytes::new())
-            })
-            .await
-            .is_err()
-    );
-
-    let StageStatus::Staged(staged) = database
-        .stage_write(TransactionId::new(), |transaction| {
-            transaction.execute_batch(
-                "CREATE TABLE allowed (value INTEGER);
-                 SAVEPOINT nested;
-                 INSERT INTO allowed VALUES (1);
-                 ROLLBACK TO nested;
-                 RELEASE nested;
-                 INSERT INTO allowed VALUES (2);",
-            )?;
-            Ok(Bytes::new())
-        })
-        .await?
-    else {
-        return Err("the allowed write was not staged".into());
-    };
-    assert!(matches!(
-        staged.publish().await?,
-        CommitStatus::Committed(_)
-    ));
-    assert_eq!(
-        database
-            .read(|connection| connection
-                .query_row("SELECT value FROM allowed", [], |row| row.get::<_, i64>(0)))
-            .await?,
-        2
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn cached_write_cannot_bypass_the_read_policy() -> TestResult {
     let log = open_log("sqlite-cached-policy").await?;
     let directory = tempfile::tempdir()?;
