@@ -1164,6 +1164,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "object-log-git"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "criterion",
+ "minicbor",
+ "object-log",
+ "object_store",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "object-log-kv"
 version = "0.1.0"
 dependencies = [
@@ -1815,6 +1829,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2002,6 +2026,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

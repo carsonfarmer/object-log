@@ -7,7 +7,11 @@ description = "A linearizable log over conditional object storage"
 license = "Apache-2.0"
 
 [workspace]
-members = ["crates/object-log-kv", "crates/object-log-sqlite"]
+members = [
+    "crates/object-log-git",
+    "crates/object-log-kv",
+    "crates/object-log-sqlite",
+]
 resolver = "3"
 
 [dependencies]

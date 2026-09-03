@@ -1,0 +1,32 @@
+[package]
+name = "object-log-git"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Git repository demonstration for object-log"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+bytes = "1.10"
+minicbor = { version = "2.3", features = ["derive", "std"] }
+object-log = { path = "../.." }
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["fs", "io-util", "process"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["async_tokio"] }
+object-log = { path = "../..", features = ["test-util"] }
+object_store = "0.14"
+tempfile = "3.20"
+tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
