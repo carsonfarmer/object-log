@@ -10,15 +10,18 @@ Run tests in this order:
 4. Deterministic fault and concurrency tests.
 5. Materializer and key-value tests.
 6. Local MinIO compatibility test.
-7. Benchmarks.
+7. Large local garbage-collection acceptance test.
+8. Benchmarks.
 
 No cloud backend is part of this stage.
 
-At revision `5419e9aa793bf94fad77e22da75fb96c346ccb28`, the local
-all-feature gate passes 135 tests. The focused garbage-collection suite has 27
-tests. The memory and temporary-filesystem tests prove repeatable immutable
-deletion. The opt-in MinIO flow proves 1,001 candidates across the 1,000-key
-bulk-delete boundary.
+At revision `576093b7b94177e7f12bab7bf5e16e13c6d9213f`, the local
+all-feature gate passes 136 regular tests. It also compiles three ignored,
+opt-in tests. The focused garbage-collection suite has 27 tests. The memory and
+temporary-filesystem tests prove repeatable immutable deletion. The opt-in
+MinIO flow proves 1,001 candidates across the 1,000-key bulk-delete boundary.
+The large acceptance target proves timely and exact cleanup of 100,000
+memory-backed candidates and 10,001 local MinIO candidates.
 
 Format tests include one stable hexadecimal encoding assertion for an empty
 head. A complete set of checked-in golden values for commits, checkpoints, and
@@ -134,6 +137,8 @@ creation before/after failures remains qualification work.
 - Older-view expiry and current or retained-view corruption.
 - Unknown entry scan accounting without deletion.
 - Resolution of a compacted commit after its immutable body is collected.
+- Large cleanup within a 30-second deadline, exact live-graph survival, and an
+  empty second collection on memory and local MinIO.
 
 A valid content-addressed cycle cannot be constructed because each node digest
 binds its child references. An attempted cycle with false bytes fails digest or
@@ -218,6 +223,8 @@ is in
 [`docs/evidence/local-baseline-2026-09-02.md`](evidence/local-baseline-2026-09-02.md).
 The garbage-collection measurements are in
 [`docs/evidence/gc-local-2026-09-03.md`](evidence/gc-local-2026-09-03.md).
+The large acceptance results are in
+[`docs/evidence/gc-acceptance-2026-09-03.md`](evidence/gc-acceptance-2026-09-03.md).
 Add refresh, checkpoint, filesystem, and remote-service performance cases
 before making claims about those paths.
 

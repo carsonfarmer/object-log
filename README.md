@@ -40,11 +40,22 @@ Run the opt-in single-flow `MinIO` compatibility test with:
 make minio-test
 ```
 
-This command starts a pinned `MinIO` container on a loopback port. It creates an
-empty test bucket and removes the container when the test ends. It does not use
-a cloud account. The flow includes a 1,001-object collection boundary. See the
+Run the opt-in large garbage-collection acceptance test with:
+
+```sh
+make gc-acceptance
+```
+
+Both `MinIO` test targets start a pinned container on a loopback port. They
+create an empty test bucket and remove the container when the test ends. They
+do not use a cloud account. The single-flow test includes a 1,001-object
+collection boundary. The large acceptance target collects 100,000
+memory-backed objects and 10,001 objects from local `MinIO`. Each collection
+must complete its timed phase within 30 seconds. See the
 [initial baseline](docs/evidence/local-baseline-2026-09-02.md) and the
 [GC evidence](docs/evidence/gc-local-2026-09-03.md) for measured local results
-and their limits. See the
+and their limits. The
+[large GC acceptance record](docs/evidence/gc-acceptance-2026-09-03.md)
+contains the exact revision, results, and limitations. See the
 [`SQLite` WAL prototype evidence](docs/evidence/sqlite-wal-prototype-2026-09-03.md)
 for the accepted low-level WAL access boundary.

@@ -128,6 +128,7 @@ lease, mutable deletion bitmap, Bloom filter, or provider-specific branch.
 - [x] Add fenced publication, repeatable deletion, and plan clearing.
 - [x] Add deterministic race, fault, cancellation, and model tests.
 - [x] Add collection benchmarks and update local evidence.
+- [x] Add large end-to-end collection acceptance and a completion deadline.
 - [x] Update the README and protocol documentation with measured behavior.
 - [x] Complete independent correctness and strict line reviews.
 
@@ -152,3 +153,10 @@ total is 13,908 lines without `Cargo.lock`.
 The local MinIO flow passed one test in 2.22 seconds. It deleted 1,001
 candidates and left only `index.cbor` in the GC log. The benchmark evidence is
 in [the GC local record](docs/evidence/gc-local-2026-09-03.md).
+
+Revision `576093b7b94177e7f12bab7bf5e16e13c6d9213f` adds the opt-in
+large acceptance target. Its timed collection phase removed 100,000
+memory-backed candidates in 1.717 seconds and 10,001 local MinIO candidates in
+1.609 seconds. Both cases kept the exact live graph, removed the plan, and
+reported no work on a second collection. See
+[the large GC acceptance record](docs/evidence/gc-acceptance-2026-09-03.md).
