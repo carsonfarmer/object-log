@@ -65,6 +65,7 @@ mod tests {
     use std::error::Error as StdError;
     use std::ffi::OsString;
     use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
 
     use rusqlite::TransactionBehavior;
@@ -79,18 +80,36 @@ mod tests {
         let path = directory.path().join("capture.sqlite3");
         let mut conn = connection::open(&path)?;
         conn.execute_batch("CREATE TABLE values_table (value INTEGER NOT NULL);")?;
-        let first = wal::committed(&conn, PAGE_SIZE as usize)?;
-        assert!(first.frames > 0);
-        assert_eq!(first.bytes, fs::read(wal_path(&path))?);
+        let first = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        let header = capture_header(&first)?;
+        let physical = fs::read(wal_path(&path))?;
+        assert!(first.position.frames > 0);
+        assert_eq!(
+            header.as_slice(),
+            slice(&physical, 0, wal::WAL_HEADER_BYTES)?
+        );
+        assert_eq!(
+            first.bytes.as_ref(),
+            slice(
+                &physical,
+                wal::WAL_HEADER_BYTES,
+                wal::WAL_HEADER_BYTES + first.bytes.len(),
+            )?
+        );
+        assert_eq!(
+            wal::validate_complete(&header, &first.bytes)?,
+            first.position
+        );
 
-        let before_rollback = first.clone();
         {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for value in 0..1_000 {
                 tx.execute("INSERT INTO values_table VALUES (?1)", [value])?;
             }
         }
-        assert_eq!(wal::committed(&conn, PAGE_SIZE as usize)?, before_rollback);
+        let rollback = wal::committed(&conn, PAGE_SIZE as usize, &first.position)?;
+        assert!(rollback.bytes.is_empty());
+        assert_eq!(rollback.position, first.position);
 
         {
             let mut tx = conn.transaction()?;
@@ -107,9 +126,22 @@ mod tests {
             })?,
             "1"
         );
-        let saved = wal::committed(&conn, PAGE_SIZE as usize)?;
-        assert!(saved.frames > first.frames);
-        assert_eq!(saved.bytes, fs::read(wal_path(&path))?);
+        let saved = wal::committed(&conn, PAGE_SIZE as usize, &first.position)?;
+        assert!(saved.position.frames > first.position.frames);
+        let physical = fs::read(wal_path(&path))?;
+        let frame_size = PAGE_SIZE as usize + wal::WAL_FRAME_HEADER_BYTES;
+        let start = wal::WAL_HEADER_BYTES + usize::try_from(first.position.frames)? * frame_size;
+        assert_eq!(
+            saved.bytes.as_ref(),
+            slice(&physical, start, start + saved.bytes.len())?
+        );
+        assert_eq!(
+            wal::validate_record(&header, &saved.bytes, first.position)?,
+            saved.position
+        );
+        let mut complete = first.bytes.to_vec();
+        complete.extend_from_slice(&saved.bytes);
+        assert_eq!(wal::validate_complete(&header, &complete)?, saved.position);
         Ok(())
     }
 
@@ -122,8 +154,9 @@ mod tests {
             "CREATE TABLE values_table (value BLOB NOT NULL);
              INSERT INTO values_table VALUES (zeroblob(819200));",
         )?;
-        let long = wal::committed(&conn, PAGE_SIZE as usize)?;
-        let old_salts = &long.bytes[16..24];
+        let long = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        let long_header = capture_header(&long)?;
+        let old_salts = slice(&long_header, 16, 24)?.to_owned();
         let checkpoint: (i64, i64, i64) =
             conn.query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -131,27 +164,156 @@ mod tests {
         assert_eq!(checkpoint.0, 0);
         conn.execute("INSERT INTO values_table VALUES (x'01')", [])?;
 
-        let reset = wal::committed(&conn, PAGE_SIZE as usize)?;
+        assert!(wal::committed(&conn, PAGE_SIZE as usize, &long.position).is_err());
+        let reset = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        let reset_header = capture_header(&reset)?;
         let physical = fs::read(wal_path(&path))?;
-        assert_eq!(reset.frames, 1);
-        assert_ne!(&reset.bytes[16..24], old_salts);
-        assert_eq!(reset.bytes.as_ref(), &physical[..reset.bytes.len()]);
-        assert!(physical.len() > reset.bytes.len());
+        assert_eq!(reset.position.frames, 1);
+        assert_ne!(slice(&reset_header, 16, 24)?, old_salts);
+        assert_eq!(
+            reset_header.as_slice(),
+            slice(&physical, 0, wal::WAL_HEADER_BYTES)?
+        );
+        assert_eq!(
+            reset.bytes.as_ref(),
+            slice(
+                &physical,
+                wal::WAL_HEADER_BYTES,
+                wal::WAL_HEADER_BYTES + reset.bytes.len(),
+            )?
+        );
+        assert!(physical.len() > wal::WAL_HEADER_BYTES + reset.bytes.len());
 
         let truncate: (i64, i64, i64) =
             conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
         assert_eq!(truncate.0, 0);
-        assert_eq!(
-            wal::committed(&conn, PAGE_SIZE as usize)?,
-            wal::WalImage {
-                frames: 0,
-                bytes: bytes::Bytes::new(),
-            }
-        );
+        assert!(wal::committed(&conn, PAGE_SIZE as usize, &reset.position).is_err());
+        let empty = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        assert_eq!(empty.position, wal::WalPosition::default());
+        assert!(empty.bytes.is_empty());
         assert_eq!(fs::metadata(wal_path(&path))?.len(), 0);
         Ok(())
+    }
+
+    #[test]
+    fn complete_wal_validation_rejects_corruption() -> TestResult {
+        #[derive(Clone, Copy, Debug)]
+        enum Corruption {
+            Magic,
+            Format,
+            PageSize,
+            HeaderData,
+            HeaderChecksum,
+            FrameData,
+            FrameChecksum,
+            Salt,
+            PageNumber,
+            OutOfRangePageNumber,
+            CommitMarker,
+            Alignment,
+        }
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("corrupt.sqlite3");
+        let conn = connection::open(&path)?;
+        conn.execute_batch(
+            "CREATE TABLE values_table (value BLOB NOT NULL);
+             INSERT INTO values_table VALUES (zeroblob(8192));",
+        )?;
+        let capture = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        let valid_header = capture_header(&capture)?;
+        wal::validate_complete(&valid_header, &capture.bytes)?;
+        let frame_size = PAGE_SIZE as usize + wal::WAL_FRAME_HEADER_BYTES;
+        let last = capture
+            .bytes
+            .len()
+            .checked_sub(frame_size)
+            .ok_or_else(|| io::Error::other("test WAL has no frame"))?;
+
+        for corruption in [
+            Corruption::Magic,
+            Corruption::Format,
+            Corruption::PageSize,
+            Corruption::HeaderData,
+            Corruption::HeaderChecksum,
+            Corruption::FrameData,
+            Corruption::FrameChecksum,
+            Corruption::Salt,
+            Corruption::PageNumber,
+            Corruption::OutOfRangePageNumber,
+            Corruption::CommitMarker,
+            Corruption::Alignment,
+        ] {
+            let mut header = valid_header;
+            let mut frames = capture.bytes.to_vec();
+            match corruption {
+                Corruption::Magic => frames_or_header(&mut header, 0, &[0, 0, 0, 0])?,
+                Corruption::Format => frames_or_header(&mut header, 4, &[0, 0, 0, 0])?,
+                Corruption::PageSize => frames_or_header(&mut header, 8, &[0, 0, 4, 0])?,
+                Corruption::HeaderData => header[12] ^= 1,
+                Corruption::HeaderChecksum => header[24] ^= 1,
+                Corruption::FrameData => frames[wal::WAL_FRAME_HEADER_BYTES] ^= 1,
+                Corruption::FrameChecksum => frames[16] ^= 1,
+                Corruption::Salt => frames[8] ^= 1,
+                Corruption::PageNumber => frames[..4].fill(0),
+                Corruption::OutOfRangePageNumber => frames[..4].fill(0xff),
+                Corruption::CommitMarker => frames[last + 4..last + 8].fill(0),
+                Corruption::Alignment => {
+                    frames.pop();
+                }
+            }
+            assert!(
+                wal::validate_complete(&header, &frames).is_err(),
+                "accepted {corruption:?} corruption"
+            );
+        }
+
+        conn.execute("INSERT INTO values_table VALUES (zeroblob(32768))", [])?;
+        let transaction = wal::committed(&conn, PAGE_SIZE as usize, &capture.position)?;
+        assert_eq!(
+            wal::validate_record(&valid_header, &transaction.bytes, capture.position)?,
+            transaction.position
+        );
+        if transaction.bytes.len() < frame_size * 2 {
+            return Err(io::Error::other("test transaction has fewer than two frames").into());
+        }
+        let mut early_commit = transaction.bytes.to_vec();
+        slice_mut(&mut early_commit, 4, 8)?.copy_from_slice(&1_u32.to_be_bytes());
+        assert!(wal::validate_record(&valid_header, &early_commit, capture.position).is_err());
+        Ok(())
+    }
+
+    fn capture_header(capture: &wal::WalCapture) -> Result<[u8; 32], io::Error> {
+        capture
+            .position
+            .header
+            .ok_or_else(|| io::Error::other("capture has no WAL header"))
+    }
+
+    fn frames_or_header<const N: usize>(
+        target: &mut [u8],
+        start: usize,
+        replacement: &[u8; N],
+    ) -> Result<(), io::Error> {
+        let end = start
+            .checked_add(N)
+            .ok_or_else(|| io::Error::other("test range overflow"))?;
+        slice_mut(target, start, end)?.copy_from_slice(replacement);
+        Ok(())
+    }
+
+    fn slice(bytes: &[u8], start: usize, end: usize) -> Result<&[u8], io::Error> {
+        bytes
+            .get(start..end)
+            .ok_or_else(|| io::Error::other("test range is out of bounds"))
+    }
+
+    fn slice_mut(bytes: &mut [u8], start: usize, end: usize) -> Result<&mut [u8], io::Error> {
+        bytes
+            .get_mut(start..end)
+            .ok_or_else(|| io::Error::other("test range is out of bounds"))
     }
 
     fn wal_path(database: &Path) -> PathBuf {
