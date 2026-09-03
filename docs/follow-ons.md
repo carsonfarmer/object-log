@@ -50,9 +50,14 @@ External publication currently reads each staged object back to prove its
 hash and presence. The review recommends an opaque, process-local staged-object
 capability bound to one log and collection epoch. New objects could then skip
 the read-back. Serialized recovery tokens would keep the current full
-verification path. This preserves the durable v1 format. It changes the public
-core API, so implementation requires owner review. The Git example can use the
-current API before this change.
+verification path. This preserves the durable v1 format. The owner approved
+the public API change. [Issue #1](https://github.com/carsonfarmer/object-log/issues/1)
+tracks its implementation and evidence. The Git example follows this change.
+
+[Issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes all
+current limitations and follow-on work. The linked issues define separate
+acceptance criteria for SQLite hardening, Spin factors, Git, WASI filesystem,
+verification, performance, and live AWS qualification.
 
 ## 1. Minimal serverless Git
 

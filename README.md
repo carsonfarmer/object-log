@@ -36,6 +36,10 @@ filesystem, and live AWS qualification goals. The
 [Git example plan](GIT_PLAN.md) defines a minimal serverless repository over
 immutable packs and atomic ref transactions.
 
+[GitHub issue #11](https://github.com/carsonfarmer/object-log/issues/11) is the
+current index of active limitations and follow-on work. Each linked issue has
+its own scope, acceptance criteria, dependencies, and evidence.
+
 ## Local checks
 
 ```sh
