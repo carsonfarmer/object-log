@@ -483,6 +483,56 @@ async fn recovery_token_rejects_missing_and_corrupt_blobs_before_head_update() -
 }
 
 #[tokio::test]
+async fn decoded_published_commit_rejects_missing_and_corrupt_descendants() -> TestResult {
+    for (seed, corrupt) in [(128, false), (129, true)] {
+        let (store, log, log_id) = open_model_log(seed).await?;
+        let view = log.load().await?;
+        let child = log
+            .put_object(view.cursor(), Bytes::from_static(b"child"))
+            .await?;
+        let blob_path = segment_path(&store, "blobs")?;
+        let node = log
+            .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+            .await?;
+        let prepared = log.prepare(
+            view.cursor(),
+            transaction_id(seed, 1),
+            Bytes::new(),
+            Bytes::new(),
+            vec![node],
+        )?;
+        let token = prepared.recovery_token()?;
+        store.reset();
+        schedule_head_fault(&store, FailurePhase::After);
+        assert!(matches!(
+            log.commit(prepared).await?,
+            CommitStatus::Pending(_)
+        ));
+        if corrupt {
+            store
+                .put(&blob_path, Bytes::from_static(b"bad!!").into())
+                .await?;
+        } else {
+            store.delete(&blob_path).await?;
+        }
+        drop(log);
+
+        let reopened = reopen_model_log(&store, &log_id).await?;
+        store.reset();
+        match (corrupt, reopened.resume(&token).await) {
+            (false, Err(object_log::Error::InvalidFormat(_)))
+            | (true, Err(object_log::Error::CorruptObject)) => {}
+            _ => return Err(test_error("invalid descendant recovery did not fail closed").into()),
+        }
+        assert_eq!(segment_gets(&store, "commits"), 1);
+        assert_eq!(segment_gets(&store, "nodes"), 1);
+        assert_eq!(segment_gets(&store, "blobs"), 1);
+        assert_eq!(head_puts(&store), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn batched_existing_staging_deduplicates_the_object_graph() -> TestResult {
     let (store, log, _) = open_model_log(122).await?;
     let view = log.load().await?;

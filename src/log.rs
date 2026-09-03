@@ -1339,7 +1339,7 @@ impl Log {
 
     async fn verify_checkpoint(&self, reference: &CheckpointRef) -> Result<(), Error> {
         let checkpoint = self.load_checkpoint(reference).await?;
-        self.verify_objects(&checkpoint.objects).await
+        self.verify_object_graph(&checkpoint.objects).await
     }
 
     async fn verify_checkpoint_publication(
@@ -1754,15 +1754,7 @@ impl Log {
 
     async fn verify_published_commit(&self, reference: &CommitRef) -> Result<(), Error> {
         let record = self.read_commit(reference).await?;
-        self.verify_objects(&record.objects).await
-    }
-
-    async fn verify_objects(&self, objects: &[ObjectRef]) -> Result<(), Error> {
-        stream::iter(objects.iter().map(Ok::<_, Error>))
-            .try_for_each_concurrent(MAX_CONCURRENT_READS, |object| async move {
-                self.verify_object_durable(object).await
-            })
-            .await
+        self.verify_object_graph(&record.objects).await
     }
 
     async fn verify_publication(
@@ -1792,14 +1784,18 @@ impl Log {
         objects: &[ObjectRef],
     ) -> Result<Option<Vec<CollectionCandidate>>, Error> {
         let Some(blocked) = self.active_collection_candidates(head).await? else {
-            let mut visited = HashMap::with_capacity(objects.len());
-            self.mark_object_graph(objects, &mut visited, None).await?;
+            self.verify_object_graph(objects).await?;
             return Ok(None);
         };
         let mut visited = HashMap::with_capacity(objects.len());
         self.mark_object_graph(objects, &mut visited, Some(&blocked))
             .await?;
         Ok(Some(blocked))
+    }
+
+    async fn verify_object_graph(&self, objects: &[ObjectRef]) -> Result<(), Error> {
+        let mut visited = HashMap::with_capacity(objects.len());
+        self.mark_object_graph(objects, &mut visited, None).await
     }
 
     async fn active_collection_candidates(

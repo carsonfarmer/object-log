@@ -520,71 +520,72 @@ async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
 
 #[tokio::test]
 #[cfg(feature = "test-util")]
-async fn reopened_checkpoint_resolution_rejects_a_lost_root() -> TestResult {
-    let backend = Arc::new(InMemory::new());
-    let faults = FaultStore::new(backend.clone());
-    let log = open(
-        Arc::new(faults.clone()),
-        "checkpoint-pending-lost-root",
-        Options::default(),
-    )
-    .await?;
-    let initial = log.load().await?;
-    let object = log
-        .put_object(initial.cursor(), Bytes::from_static(b"page"))
-        .await?;
-    let one = append(&log, &initial, b"one").await?;
-    let through = one.tail()[0].clone();
-    faults.reset();
-    faults.schedule(Failure {
-        operation: Operation::Put,
-        occurrence: 2,
-        phase: FailurePhase::After,
-    });
-    let pending = match log
-        .publish_checkpoint(
-            &one,
-            &through,
-            Bytes::from_static(b"page map"),
-            vec![object.clone()],
-        )
-        .await?
-    {
-        CheckpointStatus::Pending(pending) => pending,
-        CheckpointStatus::Published(_) | CheckpointStatus::Conflict(_) => {
-            return Err("lost checkpoint response did not remain pending".into());
-        }
-    };
-    faults.reset();
-    assert!(matches!(
-        log.resolve_checkpoint(pending.clone()).await?,
-        CheckpointResolution::Published(_)
-    ));
-    assert_eq!(segment_gets(&faults, "blobs"), 0);
-    assert_eq!(segment_gets(&faults, "checkpoints"), 0);
-    backend
-        .delete(
-            &immutable_location(
-                &backend,
-                "checkpoint-pending-lost-root",
-                "blobs",
-                object.reference().digest(),
+async fn reopened_checkpoint_resolution_rejects_invalid_descendants() -> TestResult {
+    for (suffix, corrupt) in [("missing", false), ("corrupt", true)] {
+        let id = format!("checkpoint-pending-{suffix}-descendant");
+        let backend = Arc::new(InMemory::new());
+        let faults = FaultStore::new(backend.clone());
+        let log = open(Arc::new(faults.clone()), &id, Options::default()).await?;
+        let initial = log.load().await?;
+        let child = log
+            .put_object(initial.cursor(), Bytes::from_static(b"page"))
+            .await?;
+        let node = log
+            .put_node(
+                initial.cursor(),
+                Bytes::from_static(b"page map"),
+                vec![child.clone()],
             )
-            .await?,
-        )
-        .await?;
+            .await?;
+        let one = append(&log, &initial, b"one").await?;
+        let through = one.tail()[0].clone();
+        faults.reset();
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::After,
+        });
+        let pending = match log
+            .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), vec![node])
+            .await?
+        {
+            CheckpointStatus::Pending(pending) => pending,
+            CheckpointStatus::Published(_) | CheckpointStatus::Conflict(_) => {
+                return Err("lost checkpoint response did not remain pending".into());
+            }
+        };
+        faults.reset();
+        assert!(matches!(
+            log.resolve_checkpoint(pending.clone()).await?,
+            CheckpointResolution::Published(_)
+        ));
+        assert_eq!(segment_gets(&faults, "blobs"), 0);
+        assert_eq!(segment_gets(&faults, "nodes"), 0);
+        assert_eq!(segment_gets(&faults, "checkpoints"), 0);
 
-    faults.reset();
-    let reopened = open(
-        Arc::new(faults),
-        "checkpoint-pending-lost-root",
-        Options::default(),
-    )
-    .await?;
-    assert!(matches!(
-        reopened.resolve_checkpoint(pending).await,
-        Err(object_log::Error::InvalidFormat(_))
-    ));
+        let blob_path =
+            immutable_location(&backend, &id, "blobs", child.reference().digest()).await?;
+        if corrupt {
+            backend
+                .put(&blob_path, Bytes::from_static(b"bad!").into())
+                .await?;
+        } else {
+            backend.delete(&blob_path).await?;
+        }
+        drop(log);
+        let reopened = open(Arc::new(faults.clone()), &id, Options::default()).await?;
+
+        faults.reset();
+        match (corrupt, reopened.resolve_checkpoint(pending).await) {
+            (false, Err(object_log::Error::InvalidFormat(_)))
+            | (true, Err(object_log::Error::CorruptObject)) => {}
+            _ => return Err("invalid checkpoint descendant did not fail closed".into()),
+        }
+        assert_eq!(segment_gets(&faults, "checkpoints"), 1);
+        assert_eq!(segment_gets(&faults, "nodes"), 1);
+        assert_eq!(segment_gets(&faults, "blobs"), 1);
+        assert_eq!(head_puts(&faults), 0);
+    }
     Ok(())
 }
 
@@ -907,5 +908,15 @@ fn segment_gets(store: &FaultStore, segment: &str) -> usize {
         .events
         .iter()
         .filter(|event| event.operation == Operation::Get && event.path.contains(&marker))
+        .count()
+}
+
+#[cfg(feature = "test-util")]
+fn head_puts(store: &FaultStore) -> usize {
+    store
+        .metrics()
+        .events
+        .iter()
+        .filter(|event| event.operation == Operation::Put && event.path.ends_with("/head"))
         .count()
 }
