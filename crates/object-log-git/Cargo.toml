@@ -12,7 +12,7 @@ bytes = "1.10"
 minicbor = { version = "2.3", features = ["derive", "std"] }
 object-log = { path = "../.." }
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["fs", "io-util", "process"] }
+tokio = { version = "1.47", features = ["fs", "io-util"] }
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["async_tokio"] }

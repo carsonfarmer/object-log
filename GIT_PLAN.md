@@ -12,20 +12,20 @@ in issue #13 follows this goal.
 
 ## Git boundary
 
-Use the installed upstream Git implementation as the Git engine. Do not
-implement pack validation, object connectivity, ancestry, ref transactions, or
-smart HTTP framing in this crate. Do not add `gix` or `git2` for the first
-version. `gix` has no complete repository verification or receive-pack server.
-`git2` adds a C FFI boundary and also has no receive-pack server.
+The product and example must not require an installed Git executable or a C
+library. Use maintained Rust libraries for pack, object, reference, and
+protocol behavior. Keep custom Git implementation code small and test it with
+unmodified Git clients.
 
-The local HTTP example runs `git http-backend` once for each request. A fetch
-uses a fresh recovered bare repository. A push also uses a fresh repository,
-but the handler holds Git's response until object-log confirms the index CAS.
-A conflict or unresolved result cannot return Git's success response.
+The smart HTTP adapter is separate from the durable repository crate. A fetch
+uses a fresh recovered repository. A push holds its protocol response until
+object-log confirms the index CAS. A conflict or unresolved result cannot
+return a success response.
 
-The executable Git dependency is explicit. A cloud image must contain the
-tested Git version and disposable local storage. This is not a direct WASI
-component.
+The first deployment target is a native serverless function with disposable
+local storage. Keep the storage and record layers compatible with WASI. Record
+any library that prevents the complete HTTP example from compiling for
+`wasm32-wasip2`; do not hide that limit behind a host command.
 
 ## Storage model
 
@@ -40,10 +40,9 @@ component.
 - Local Git configuration, indexes, hooks, reflogs, and temporary files are not
   durable state.
 
-Configure receive-pack to retain non-empty pushes as packs, check received
-objects, reject non-fast-forward branch updates, permit deletes, disable hooks,
-disable automatic maintenance, and avoid reflogs. Git repairs thin network
-packs before the adapter reads the stored pack.
+Normalize each thin network pack into a self-contained pack. Check received
+objects and connectivity. Reject non-fast-forward branch updates. Keep hooks,
+automatic maintenance, and reflogs outside the durable adapter.
 
 The pack store must keep the exact bytes at each immutable physical key until
 object-log collection deletes that key. External expiry, deletion, or
@@ -93,8 +92,8 @@ remove unreachable bytes from a pack that also contains live objects.
 - Empty creation and cold recovery need no retained local files.
 - An unmodified client can clone, fetch, create a branch and tag, push a
   fast-forward update, and delete refs through loopback smart HTTP.
-- Git rejects invalid packs, missing objects, invalid refs, and non-fast-forward
-  branch updates before object-log publication.
+- The adapter rejects invalid packs, missing objects, invalid refs, and
+  non-fast-forward branch updates before object-log publication.
 - Two pushes from one view produce one winner. The loser changes no durable
   refs and publishes no pack reference.
 - A lost publication response resolves the original transaction without
