@@ -33,12 +33,18 @@ The first release has one authority protocol:
 - One validated backend/root handle creates many tenant scopes without another
   capability probe.
 
+The current format version is v1. Before the first release, its layout can
+change when that improves or simplifies the design. The project does not keep
+compatibility readers for earlier development layouts.
+
 This protocol favors predictable reads, checkpoint installation, and conflict
 resolution over a one-write numbered-slot protocol.
 
 ## Public contract
 
-The exact Rust names can change during implementation. The behavior cannot.
+This is the current contract. Before the first release, the Rust API and wire
+layout can change when that improves the design. One current API and one current
+v1 layout replace earlier development forms.
 
 Required value types:
 
@@ -46,6 +52,8 @@ Required value types:
 - `Cursor`: an opaque observed head position and storage version.
 - `TransactionId`: a caller-supplied stable operation identity.
 - `ObjectRef`: digest, byte length, and object kind.
+- `StagedObject`: process-local proof that one object graph is ready for
+  publication by this log handle at this collection epoch.
 - `ReferenceNode`: opaque payload and explicit child references.
 - `CommitRef`: public sequence, transaction ID, and digest. The durable value
   also carries an encoded byte length for internal integrity checks.
@@ -67,17 +75,19 @@ scope(validated_backend, log_id) -> ScopedStore
 open(scoped_store, options) -> Log
 load() -> View
 refresh(cursor) -> Refresh
-put_object(bytes) -> ObjectRef
-put_node(payload, children) -> ObjectRef
+put_object(cursor, bytes) -> StagedObject
+put_node(cursor, payload, children: Vec<StagedObject>) -> StagedObject
+stage_objects(cursor, references: Vec<ObjectRef>) -> Vec<StagedObject>
+staged.reference() -> &ObjectRef
 read_object(view, reference) -> bytes
 read_node(view, reference) -> ReferenceNode
-prepare(cursor, transaction_id, operation, result, objects) -> PreparedCommit
+prepare(cursor, transaction_id, operation, result, objects: Vec<StagedObject>) -> PreparedCommit
 commit(prepared) -> CommitStatus
 resolve(pending) -> Resolution
 resume(recovery_token) -> Resolution
 read_tail(view) -> ordered commit records
 read_checkpoint(view) -> CheckpointRecord
-publish_checkpoint(view, through, snapshot, roots) -> CheckpointStatus
+publish_checkpoint(view, through, snapshot, roots: Vec<StagedObject>) -> CheckpointStatus
 resolve_checkpoint(pending) -> CheckpointResolution
 retain(view, retention_id) -> RetentionStatus
 release_retention(view, retention_id) -> RetentionStatus
@@ -133,6 +143,12 @@ operation after expiry.
     progress record.
 19. A missing read from a prior collection epoch returns view expiry. A
     missing read from the current epoch is corruption.
+20. After immutable creation succeeds, the backend returns the exact bytes from
+    that physical key until object-log collection deletes it. External
+    lifecycle expiry, deletion, or overwrite violates the storage contract.
+21. A staged proof is valid only for its source `Log` handle or a clone and its
+    collection epoch. Serialization and a separately opened handle discard the
+    proof and require full graph verification.
 
 ## Work streams
 
@@ -180,6 +196,10 @@ Exit evidence:
 - Every returned conflict is proven not to have published its candidate.
 - Lost success responses resolve to the original commit.
 - A commit never becomes visible before all referenced objects exist.
+- New writes return opaque staged proofs. Existing references require
+  `stage_objects` and full graph verification.
+- Same-handle publication can use a current proof. Recovery and separately
+  opened handles verify the full durable graph.
 
 ### 4. Verification system (verification agent)
 
@@ -317,7 +337,8 @@ locally complete. Its current gate requires:
 
 The remaining qualification gaps do not change this local product result.
 They include broader generated-model coverage, more durable-format golden
-values, filesystem benchmarks, full MinIO conformance, and live AWS tests.
+tests for the current canonical encoding, filesystem benchmarks, full MinIO
+conformance, and live AWS tests.
 
 ## Later high-throughput stage
 

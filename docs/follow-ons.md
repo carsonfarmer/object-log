@@ -15,8 +15,8 @@ expiry, and best-effort plan-object cleanup. Current qualification is local.
 
 The selected demonstration contract and implementation gates are in
 [`SQLITE_PLAN.md`](../SQLITE_PLAN.md). The adapter uses a disposable SQLite
-cache, a canonical v1 record, committed WAL ranges, per-record payload bounds,
-and ordered object transfers.
+cache, the current canonical record, committed WAL ranges, per-record payload
+bounds, and ordered object transfers.
 
 ### Implemented contract
 
@@ -46,13 +46,20 @@ memory-safety sanitizer, live AWS, and Spin integration remain.
 
 ## Core performance decision
 
-External publication currently reads each staged object back to prove its
-hash and presence. The review recommends an opaque, process-local staged-object
-capability bound to one log and collection epoch. New objects could then skip
-the read-back. Serialized recovery tokens discard the local proof and use full
-verification. The owner approved the public API change.
+The core now returns an opaque, process-local `StagedObject` proof from new
+object writes. The proof belongs to one `Log` handle or its clones and one
+collection epoch. Same-handle publication uses it without reading the new
+object graph back. `stage_objects` fully verifies existing durable references
+before it creates proofs. Recovery tokens omit the proof, and recovered or
+separately opened work uses full graph verification.
+
+This fast path requires exact immutable bytes to remain at their physical key
+until object-log garbage collection deletes them. External lifecycle expiry,
+deletion, or overwrite violates the storage contract.
+
+The API is implemented locally.
 [Issue #1](https://github.com/carsonfarmer/object-log/issues/1) tracks its
-implementation and evidence. The Git example follows this change.
+remaining evidence and closure. The Git example uses this API.
 
 [Issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes all
 current limitations and follow-on work. The linked issues define separate

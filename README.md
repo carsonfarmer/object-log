@@ -16,6 +16,22 @@ The durable model is small:
 - Local memory and disk are optional caches.
 - One validated backend handle serves many isolated tenant logs.
 
+Successful immutable creation has one required storage property: the exact
+bytes remain at the same physical key until object-log garbage collection
+deletes them. External lifecycle expiry, deletion, or overwrite violates this
+contract.
+
+`put_object` and `put_node` return process-local `StagedObject` proofs.
+`prepare` and `publish_checkpoint` accept those proofs, so the same `Log`
+handle or one of its clones can publish without reading the object graph back.
+`stage_objects` fully verifies existing durable references before it creates
+proofs. Recovery tokens do not contain a proof. `resume` and publication from
+a separately opened handle fully verify the referenced graph.
+
+The current durable format is v1. Before the first release, its byte layout can
+change when a different layout makes the design smaller or better. The project
+does not provide compatibility readers for earlier development layouts.
+
 The project is independent from Spin. The
 [`object-log-kv`](crates/object-log-kv) and
 [`object-log-sqlite`](crates/object-log-sqlite) crates use only the public core

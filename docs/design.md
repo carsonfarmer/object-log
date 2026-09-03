@@ -18,22 +18,29 @@ Exact commit recovery reuses only the physical ID in its recovery evidence.
 This prevents an old delete from addressing a later write with the same content
 digest.
 
+After a create-only write succeeds, the object store must return the exact
+bytes from that physical key until object-log collection deletes it. External
+lifecycle expiry, deletion, overwrite, or any tool that changes these objects
+violates the storage contract. The fast publication path depends on this
+property.
+
 This structure uses Cursor's mutable metadata and immutable object model, with
 Micelio's split between one index, ordered entry pointers, content-addressed
 WAL entries, payload objects, and bases. The Rust type `Head` is the decoded
 index. The Rust type `Commit` is one WAL entry.
 
 The durable encoding is CBOR, not Protobuf. Each structure is a CBOR map with
-stable positive integer keys. The exact schema is in
+positive integer keys. The current schema is in
 `schema/object-log-v1.cddl`. Encoders write keys in ascending order. Decoders
 reject non-canonical bytes, unknown fields, and unsupported versions. Before
-the first tagged release, the schema can change while its version remains 1.
+the first tagged release, the schema and byte layout can change while the
+version remains 1. A smaller or better layout replaces the prior development
+layout. The project does not add a compatibility reader for it.
 The first release will not support mixed-version writers. This rule replaces
 Micelio's unknown-field preservation rule because the selected CBOR codec does
 not retain unknown fields during an index rewrite. The current `0.1.0` format
-is pre-release. It rejects older development data and has no compatibility
-guarantee. After the first tagged durable-format release, every incompatible
-schema change must use a new format version.
+is pre-release. After the first tagged durable-format release, every
+incompatible schema change must use a new format version.
 
 ## Head
 
@@ -122,16 +129,36 @@ these operations to restore the complete state.
 changed index returns its new view. The caller then reads the base and active
 tail that the view names.
 
+## Object staging
+
+`put_object` and `put_node` create immutable data and return opaque
+`StagedObject` proofs. A proof is valid only for its source `Log` handle or a
+clone and for its collection epoch. It lets publication rely on the completed
+create-only write without reading the object graph back. It is not serialized.
+
+`stage_objects` accepts durable `ObjectRef` values, verifies each complete
+transitive graph, checks the active collection fence, and returns staged
+proofs. An adapter uses it when it reuses objects from an earlier view or
+another process.
+
+A separately opened handle cannot use another handle's proof. A recovery token
+does not contain one. Both paths fully verify the referenced graph before they
+can publish.
+
 ## Commit
 
 The caller prepares one candidate against one cursor.
 
-1. Validate all sizes, references, log identities, and the expected cursor.
-2. Verify the complete transitive object graph. This also proves that each
-   referenced blob or node is durable and valid.
+1. Validate all sizes, staged proofs, log identities, collection epochs, and
+   the expected cursor.
+2. Check the active collection fence.
 3. Create the immutable commit object.
 4. Build a new head that appends the commit reference.
 5. Conditionally replace the observed head version.
+
+The same-handle path does not read a newly staged object graph back. A missing
+process-local proof makes publication verify the complete transitive graph
+before step 3.
 
 The result is:
 
@@ -164,10 +191,11 @@ operation failed. An application must not submit a non-idempotent operation as
 new work after this result.
 
 `PreparedCommit::recovery_token` encodes the exact source cursor, operation,
-result, object references, and transaction ID. The caller must persist this
-token before publication if process-loss recovery is required. `Log::resume`
-can stage the missing WAL object and retry only the original conditional head
-update.
+result, object references, and transaction ID. It excludes the process-local
+staging proof. The caller must persist this token before publication if
+process-loss recovery is required. `Log::resume` fully verifies the referenced
+graph, can stage the missing WAL object, and retries only the original
+conditional head update.
 
 ## Checkpoint
 
@@ -177,10 +205,11 @@ a reference node. A reference node contains opaque adapter bytes and explicit
 children. This forms a content-addressed tree with bounded fan-out and no
 fixed depth.
 
-Publication validates every WAL entry in the supplied view and every declared
-checkpoint root. It also validates that the covered commit is in that view. The new index
-replaces the base checkpoint, removes the covered tail prefix, preserves the
-suffix, preserves the resolution window, and increments the generation.
+Publication validates every WAL entry in the supplied view and every staged
+checkpoint root. It also validates that the covered commit is in that view. A
+same-handle proof avoids another root-graph read. The new index replaces the
+base checkpoint, removes the covered tail prefix, preserves the suffix,
+preserves the resolution window, and increments the generation.
 
 A definite CAS failure returns `Conflict`. An uncertain update returns a
 `PendingCheckpoint`. `resolve_checkpoint` retries only the exact original
@@ -210,8 +239,9 @@ Every head update preserves an active plan. Commit and checkpoint publication
 read that plan. They reject a direct or transitive reference to a planned key.
 They also reject a planned commit key. A checkpoint staging call selects
 another physical ID if its first new key is in the plan. Full graph validation
-also runs without a fence. This prevents publication of an old node whose
-child was deleted by an earlier collection.
+also runs when existing references are staged or work resumes without a local
+proof. This prevents publication of an old node whose child was deleted by an
+earlier collection.
 
 `resume_collection` first loads the current head and confirms the exact plan.
 It submits the complete positive set in batches of at most 1,000 keys. A

@@ -23,12 +23,13 @@ MinIO flow proves 1,001 candidates across the 1,000-key bulk-delete boundary.
 The large acceptance target proves timely and exact cleanup of 100,000
 memory-backed candidates and 10,001 local MinIO candidates.
 
-Format tests include one stable hexadecimal encoding assertion for an empty
-head. A complete set of checked-in golden values for commits, checkpoints, and
-recovery tokens remains qualification work. The CDDL file defines the
-published schema. Tests reject trailing data, wrong digests, unsupported
-versions, and unknown fields. Protocol tests reject objects above configured
-limits.
+Format tests include one hexadecimal encoding assertion for an empty head.
+Golden values test the current canonical encoding. They do not promise
+pre-release compatibility and can change with a smaller or better v1 layout. A
+complete set for commits, checkpoints, and recovery tokens remains
+qualification work. The CDDL file defines the current schema. Tests reject
+trailing data, wrong digests, unsupported versions, and unknown fields.
+Protocol tests reject objects above configured limits.
 
 ## Backend conformance cases
 
@@ -60,7 +61,13 @@ not yet prove every listed case. Current gaps appear below the matrix.
 
 - One writer appends one commit.
 - A batch is visible atomically as one commit.
-- Large payload references exist before the commit is visible.
+- New object writes return a staged proof before the commit is visible.
+- Same-handle publication does not read the newly staged object graph back.
+- A separately opened handle cannot use another handle's proof.
+- A collection-epoch change invalidates an earlier staged proof.
+- `stage_objects` fully verifies and deduplicates an existing transitive graph.
+- Recovery tokens omit process-local proofs and require full graph
+  verification.
 - Two writers from one cursor produce one winner and one conflict.
 - A loser refreshes and can prepare a new candidate.
 - A stale cursor cannot publish after any head update.
@@ -147,7 +154,8 @@ format verification.
 ### Current matrix gaps
 
 - Complete the blob-create and commit-create fault points listed above.
-- Add checked-in golden values for commits, checkpoints, and recovery tokens.
+- Add golden tests for the current canonical commit, checkpoint, and recovery
+  token encodings. Update them when the v1 layout changes.
 - Extend the generated model with independent checkpoint and collection
   oracles.
 - Run the complete conformance and protocol suites against MinIO.

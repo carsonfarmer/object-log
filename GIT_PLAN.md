@@ -15,9 +15,9 @@ WASI filesystem adapter.
 - One object log owns one Git repository.
 - Git objects stay in standard immutable pack files. Do not invent another
   object encoding.
-- Each changed push stages zero or more packs and publishes one ordered ref
-  transaction. The transaction contains each ref name, expected old object ID,
-  and new object ID.
+- Each changed push stores zero or more packs as `StagedObject` values and
+  publishes one ordered ref transaction. The transaction contains each ref
+  name, expected old object ID, and new object ID.
 - The object-log head is the only mutable authority. Do not create mutable Git
   ref objects, a second manifest, a lease service, or a background coordinator.
 - A checkpoint contains the complete direct-ref map and references the pack set
@@ -29,6 +29,12 @@ WASI filesystem adapter.
   view references them.
 - A local bare repository, pack index, and object cache are disposable. A cold
   invocation can recover from the checkpoint and ordered tail.
+
+The pack store must preserve the exact bytes at each immutable physical key
+until object-log garbage collection deletes them. External lifecycle expiry,
+deletion, or overwrite violates this contract. When a cold invocation reuses
+pack references, it calls `stage_objects` to verify their graphs before
+publication.
 
 This example uses Cursor's immutable WAL plus CAS publication model. It omits
 Cursor's warm-owner routing, replication, batching, and physical pack
@@ -49,9 +55,9 @@ Repository::checkpoint() -> GitCheckpointStatus
 
 `stage_push` validates the pack, object IDs, ref names, expected old values,
 object availability, and configured fast-forward policy before it stages any
-publication. `publish` never reruns validation after a conflict. The caller can
-refresh, check the commands against the new ref state, and stage a new logical
-attempt.
+publication. New pack writes return process-local proofs for publication.
+`publish` never reruns validation after a conflict. The caller can refresh,
+check the commands against the new ref state, and stage a new logical attempt.
 
 The first crate supports direct refs under `refs/heads/` and `refs/tags/`. It
 keeps `HEAD` as one configured symbolic ref. It rejects other symbolic refs,
