@@ -20,8 +20,7 @@ struct Fixture {
     log: Log,
     store: FaultStore,
     raw: Arc<dyn ObjectStore>,
-    root: Path,
-    id: LogId,
+    scope: Path,
 }
 
 impl Fixture {
@@ -32,21 +31,17 @@ impl Fixture {
         let id = LogId::new(id)?;
         let backend = ValidatedBackend::new(Arc::new(store.clone()), root.clone()).await?;
         let log = Log::open(backend.scope(&id), options).await?;
+        let scope = root.join("v1").join("logs").join(id.as_str());
         Ok(Self {
             log,
             store,
             raw,
-            root,
-            id,
+            scope,
         })
     }
 
     fn scope(&self) -> Path {
-        self.root
-            .clone()
-            .join("v1")
-            .join("logs")
-            .join(self.id.as_str())
+        self.scope.clone()
     }
 
     async fn object_path(&self, digest: object_log::Digest) -> Result<Path, Box<dyn StdError>> {
@@ -96,6 +91,20 @@ async fn install_collection(log: &Log, view: &View) -> Result<View, Error> {
     }
 }
 
+fn assert_no_collection_mutation(fixture: &Fixture) {
+    let metrics = fixture.store.metrics();
+    assert_eq!(metrics.operation(Operation::Delete).requests, 0);
+    assert_eq!(metrics.operation(Operation::Put).requests, 0);
+}
+
+fn assert_collection_not_started(fixture: &Fixture) {
+    assert_eq!(
+        fixture.store.metrics().operation(Operation::List).requests,
+        0
+    );
+    assert_no_collection_mutation(fixture);
+}
+
 #[tokio::test]
 async fn collection_deletes_only_unreachable_data_and_classifies_missing_reads() -> TestResult {
     let fixture = Fixture::new("exact", Options::default()).await?;
@@ -131,6 +140,11 @@ async fn collection_deletes_only_unreachable_data_and_classifies_missing_reads()
         fixture.log.read_object(&current, &orphan).await,
         Err(Error::CorruptObject)
     ));
+    assert!(matches!(
+        fixture.log.start_collection(&current).await?,
+        CollectionStart::Empty(_)
+    ));
+    assert_eq!(fixture.log.load().await?.collection_epoch(), 1);
     Ok(())
 }
 
@@ -576,10 +590,54 @@ async fn collection_recovers_lost_fence_and_clear_responses() -> TestResult {
         return Err("lost clear response was not pending".into());
     };
     assert_eq!(report.delete_attempts(), 1);
-    let cleared = fixture.log.load().await?;
+    assert!(fixture.log.load().await?.cursor().generation() > fenced.cursor().generation());
+    let CollectionFinish::Complete(cleared, report) =
+        fixture.log.resume_collection(&fenced).await?
+    else {
+        return Err("the old fence did not resolve the lost clear".into());
+    };
+    assert_eq!(report.candidate_count(), 0);
     assert!(matches!(
-        fixture.log.resume_collection(&cleared).await?,
-        CollectionFinish::Complete(_, report) if report.candidate_count() == 0
+        fixture.log.start_collection(&cleared).await?,
+        CollectionStart::Empty(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_plan_cleanup_is_collected_by_the_next_run() -> TestResult {
+    let fixture = Fixture::new("plan-cleanup-failure", Options::default()).await?;
+    let source = fixture.log.load().await?;
+    fixture
+        .log
+        .put_object(Bytes::from_static(b"orphan"))
+        .await?;
+    let fenced = install_collection(&fixture.log, &source).await?;
+    fixture.store.reset();
+    fixture.store.schedule(Failure {
+        operation: Operation::Delete,
+        occurrence: 2,
+        phase: FailurePhase::Before,
+    });
+
+    let CollectionFinish::Complete(cleared, report) =
+        fixture.log.resume_collection(&fenced).await?
+    else {
+        return Err("plan cleanup changed the completed collection status".into());
+    };
+    assert_eq!(report.delete_attempts(), 1);
+    let CollectionStart::Installed(fenced, report) = fixture.log.start_collection(&cleared).await?
+    else {
+        return Err("the failed cleanup did not leave one collectible plan".into());
+    };
+    assert_eq!(report.candidate_count(), 1);
+    let CollectionFinish::Complete(cleared, _) = fixture.log.resume_collection(&fenced).await?
+    else {
+        return Err("the cleanup collection did not complete".into());
+    };
+    assert!(matches!(
+        fixture.log.start_collection(&cleared).await?,
+        CollectionStart::Empty(_)
     ));
     Ok(())
 }
@@ -609,22 +667,7 @@ async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() ->
         missing.log.start_collection(&live_view).await,
         Err(Error::InvalidFormat(_))
     ));
-    assert_eq!(
-        missing.store.metrics().operation(Operation::List).requests,
-        0
-    );
-    assert_eq!(
-        missing
-            .store
-            .metrics()
-            .operation(Operation::Delete)
-            .requests,
-        0
-    );
-    assert_eq!(
-        missing.store.metrics().operation(Operation::Put).requests,
-        0
-    );
+    assert_collection_not_started(&missing);
 
     let bounded = Fixture::new(
         "bounded-live",
@@ -654,14 +697,7 @@ async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() ->
         bounded.log.start_collection(&view).await,
         Err(Error::LimitExceeded("collection live objects"))
     ));
-    assert_eq!(
-        bounded.store.metrics().operation(Operation::List).requests,
-        0
-    );
-    assert_eq!(
-        bounded.store.metrics().operation(Operation::Put).requests,
-        0
-    );
+    assert_collection_not_started(&bounded);
     Ok(())
 }
 
@@ -695,22 +731,7 @@ async fn corrupt_live_blob_fails_before_collection_io() -> TestResult {
         corrupt.log.start_collection(&live_view).await,
         Err(Error::CorruptObject)
     ));
-    assert_eq!(
-        corrupt.store.metrics().operation(Operation::List).requests,
-        0
-    );
-    assert_eq!(
-        corrupt
-            .store
-            .metrics()
-            .operation(Operation::Delete)
-            .requests,
-        0
-    );
-    assert_eq!(
-        corrupt.store.metrics().operation(Operation::Put).requests,
-        0
-    );
+    assert_collection_not_started(&corrupt);
     Ok(())
 }
 
@@ -748,30 +769,7 @@ async fn corrupt_live_node_fails_before_collection_io() -> TestResult {
         corrupt_node.log.start_collection(&live_view).await,
         Err(Error::CorruptObject)
     ));
-    assert_eq!(
-        corrupt_node
-            .store
-            .metrics()
-            .operation(Operation::List)
-            .requests,
-        0
-    );
-    assert_eq!(
-        corrupt_node
-            .store
-            .metrics()
-            .operation(Operation::Delete)
-            .requests,
-        0
-    );
-    assert_eq!(
-        corrupt_node
-            .store
-            .metrics()
-            .operation(Operation::Put)
-            .requests,
-        0
-    );
+    assert_collection_not_started(&corrupt_node);
     Ok(())
 }
 
@@ -795,18 +793,7 @@ async fn invalid_collection_plans_fail_before_delete_or_clear() -> TestResult {
         corrupt.log.resume_collection(&fenced).await,
         Err(Error::CorruptObject)
     ));
-    assert_eq!(
-        corrupt
-            .store
-            .metrics()
-            .operation(Operation::Delete)
-            .requests,
-        0
-    );
-    assert_eq!(
-        corrupt.store.metrics().operation(Operation::Put).requests,
-        0
-    );
+    assert_no_collection_mutation(&corrupt);
 
     let oversized = Fixture::new("oversized-plan", Options::default()).await?;
     let source = oversized.log.load().await?;
@@ -833,18 +820,7 @@ async fn invalid_collection_plans_fail_before_delete_or_clear() -> TestResult {
         oversized.log.resume_collection(&fenced).await,
         Err(Error::LimitExceeded("read bytes"))
     ));
-    assert_eq!(
-        oversized
-            .store
-            .metrics()
-            .operation(Operation::Delete)
-            .requests,
-        0
-    );
-    assert_eq!(
-        oversized.store.metrics().operation(Operation::Put).requests,
-        0
-    );
+    assert_no_collection_mutation(&oversized);
     Ok(())
 }
 
@@ -869,18 +845,7 @@ async fn resume_propagates_a_read_failure_before_any_delete() -> TestResult {
         .err()
         .ok_or("head read failure returned a collection status")?;
     assert!(matches!(&error, Error::Store(error) if FaultStore::is_injected(error)));
-    assert_eq!(
-        fixture
-            .store
-            .metrics()
-            .operation(Operation::Delete)
-            .requests,
-        0
-    );
-    assert_eq!(
-        fixture.store.metrics().operation(Operation::Put).requests,
-        0
-    );
+    assert_no_collection_mutation(&fixture);
     Ok(())
 }
 
@@ -910,18 +875,7 @@ async fn unknown_entries_count_toward_the_scan_bound_and_survive() -> TestResult
         fixture.store.metrics().operation(Operation::List).requests,
         1
     );
-    assert_eq!(
-        fixture
-            .store
-            .metrics()
-            .operation(Operation::Delete)
-            .requests,
-        0
-    );
-    assert_eq!(
-        fixture.store.metrics().operation(Operation::Put).requests,
-        0
-    );
+    assert_no_collection_mutation(&fixture);
     assert_eq!(
         fixture.raw.get(&unknown).await?.bytes().await?,
         b"keep".as_slice()
@@ -972,7 +926,7 @@ async fn partial_delete_failures_leave_the_plan_and_repeat_the_complete_set() ->
                 .metrics()
                 .operation(Operation::Delete)
                 .requests,
-            2
+            3
         );
     }
     Ok(())

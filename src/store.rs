@@ -108,7 +108,7 @@ pub(crate) enum StoreKey {
 }
 
 /// The role of one immutable physical object.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ImmutableKind {
     Commit,
     Blob,
@@ -141,7 +141,7 @@ impl ImmutableKind {
 }
 
 /// One immutable physical key that cannot address the mutable head.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ImmutableKey {
     pub(crate) incarnation: Uuid,
     pub(crate) kind: ImmutableKind,
@@ -398,48 +398,33 @@ impl ScopedStore {
     /// The method drains every backend result. A missing key is a successful
     /// delete. Any other error makes the complete batch result uncertain, and
     /// this method does not retry it.
-    pub(crate) async fn delete_immutable_batch(&self, keys: &[ImmutableKey]) -> Result<(), Error> {
-        if keys.len() > MAX_DELETE_BATCH {
+    pub(crate) async fn delete_immutable_batch(
+        &self,
+        keys: impl ExactSizeIterator<Item = ImmutableKey>,
+    ) -> Result<(), Error> {
+        let expected_count = keys.len();
+        if expected_count > MAX_DELETE_BATCH {
             return Err(Error::LimitExceeded("immutable delete batch"));
         }
-        if keys.iter().collect::<BTreeSet<_>>().len() != keys.len() {
-            return Err(Error::InvalidFormat(
-                "an immutable delete batch contains duplicate keys".to_owned(),
-            ));
-        }
-        if keys.is_empty() {
+        if expected_count == 0 {
             return Ok(());
         }
 
-        let expected = keys
-            .iter()
-            .map(|key| self.immutable_location(*key))
+        let locations = keys
+            .map(|key| Ok(self.immutable_location(key)))
             .collect::<Vec<_>>();
-        let input = stream::iter(expected.clone().into_iter().map(Ok)).boxed();
-        let results = self.store.delete_stream(input).collect::<Vec<_>>().await;
-        let result_count = results.len();
-
+        let mut results = self.store.delete_stream(stream::iter(locations).boxed());
         let mut first_error = None;
-        for (expected, result) in expected.iter().zip(results) {
-            match result {
-                Ok(actual) if actual == *expected => {}
-                Ok(_) => {
-                    return Err(Error::InvalidFormat(
-                        "the backend returned a different deleted path".to_owned(),
-                    ));
-                }
-                Err(object_store::Error::NotFound { .. }) => {}
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
+        while let Some(result) = results.next().await {
+            if let Err(error) = result
+                && !matches!(&error, object_store::Error::NotFound { .. })
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
         }
         if let Some(error) = first_error {
             return Err(error.into());
-        }
-        if result_count != expected.len() {
-            return Err(Error::InvalidFormat(
-                "the backend returned the wrong delete result count".to_owned(),
-            ));
         }
         Ok(())
     }
@@ -841,17 +826,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_batch_rejects_duplicates_and_excess_before_io() -> TestResult {
+    async fn delete_batch_rejects_excess_before_io() -> TestResult {
         let faults = FaultStore::new(InMemory::new());
         let scoped = test_scope(Arc::new(faults.clone()), "limits")?;
         let incarnation = Uuid::new_v4();
         let digest = Digest::of(b"delete limits");
-        let duplicate = ImmutableKey::new(incarnation, ImmutableKind::Blob, digest);
-
-        assert!(matches!(
-            scoped.delete_immutable_batch(&[duplicate, duplicate]).await,
-            Err(Error::InvalidFormat(_))
-        ));
         let excessive = (0_u128..1_001)
             .map(|storage_id| {
                 ImmutableKey::from_parts(
@@ -863,7 +842,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(matches!(
-            scoped.delete_immutable_batch(&excessive).await,
+            scoped.delete_immutable_batch(excessive.into_iter()).await,
             Err(Error::LimitExceeded("immutable delete batch"))
         ));
         assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
@@ -887,7 +866,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        scoped.delete_immutable_batch(&keys).await?;
+        scoped.delete_immutable_batch(keys.into_iter()).await?;
         assert_eq!(
             faults.metrics().operation(Operation::Delete).requests,
             1_000
@@ -932,7 +911,7 @@ mod tests {
             });
 
             let error = scoped
-                .delete_immutable_batch(&keys)
+                .delete_immutable_batch(keys.iter().copied())
                 .await
                 .err()
                 .ok_or("a partial delete returned success")?;
@@ -948,7 +927,7 @@ mod tests {
             );
             assert!(is_missing(&store, &scoped.immutable_location(keys[2])).await);
 
-            scoped.delete_immutable_batch(&keys).await?;
+            scoped.delete_immutable_batch(keys.iter().copied()).await?;
             for key in keys {
                 assert!(is_missing(&store, &scoped.immutable_location(key)).await);
             }
@@ -992,9 +971,9 @@ mod tests {
         let location = scoped.immutable_location(key);
         put_raw(&store, location.clone(), 4).await?;
 
-        scoped.delete_immutable_batch(&[key]).await?;
+        scoped.delete_immutable_batch(std::iter::once(key)).await?;
         assert!(is_missing(&store, &location).await);
-        scoped.delete_immutable_batch(&[key]).await?;
+        scoped.delete_immutable_batch(std::iter::once(key)).await?;
         assert!(is_missing(&store, &location).await);
         Ok(())
     }

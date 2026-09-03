@@ -2,7 +2,8 @@
 
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::format::{self, CollectionCandidate, CollectionPlan, CollectionPlanRef, Head};
 use crate::store::{
@@ -204,7 +205,7 @@ impl CollectionReport {
         self.candidate_bytes
     }
 
-    /// Returns the number of immutable delete requests issued.
+    /// Returns the number of planned candidate deletions submitted.
     #[must_use]
     pub const fn delete_attempts(&self) -> usize {
         self.delete_attempts
@@ -439,10 +440,7 @@ impl Log {
 
         let mut candidate = view.cursor.head.clone();
         candidate.retention_ids.insert(id);
-        candidate.generation = candidate
-            .generation
-            .checked_add(1)
-            .ok_or(Error::LimitExceeded("head generation"))?;
+        candidate.advance_generation()?;
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
         match self
@@ -501,10 +499,7 @@ impl Log {
 
         let mut candidate = view.cursor.head.clone();
         candidate.retention_ids.remove(&id);
-        candidate.generation = candidate
-            .generation
-            .checked_add(1)
-            .ok_or(Error::LimitExceeded("head generation"))?;
+        candidate.advance_generation()?;
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
         match self
@@ -558,12 +553,10 @@ impl Log {
         let mut scanned = 0_usize;
         let mut listed = self.store.list_scoped();
         while let Some(item) = listed.next().await {
-            scanned = scanned
-                .checked_add(1)
-                .ok_or(Error::LimitExceeded("collection scan objects"))?;
-            if scanned > self.options.max_collection_objects {
+            if scanned == self.options.max_collection_objects {
                 return Err(Error::LimitExceeded("collection scan objects"));
             }
+            scanned += 1;
             let item = item?;
             if let Some(key) = item.immutable_key
                 && !live.contains_key(&key)
@@ -595,11 +588,9 @@ impl Log {
             candidates,
         };
         let plan_ref = self.create_collection_plan(&plan).await?;
+        let plan_key = Self::collection_plan_key(self.incarnation, &plan_ref);
         let mut candidate = view.cursor.head.clone();
-        candidate.generation = candidate
-            .generation
-            .checked_add(1)
-            .ok_or(Error::LimitExceeded("head generation"))?;
+        candidate.advance_generation()?;
         candidate.collection_epoch = epoch;
         candidate.active_plan = Some(plan_ref);
         let bytes = format::encode_head(&candidate)?;
@@ -618,11 +609,14 @@ impl Log {
                 },
                 report,
             )),
-            Ok(UpdateResult::PreconditionFailed) => match self.load().await {
-                Ok(current) => Ok(CollectionStart::Conflict(current)),
-                Err(Error::Store(_)) => Ok(CollectionStart::Pending),
-                Err(error) => Err(error),
-            },
+            Ok(UpdateResult::PreconditionFailed) => {
+                self.cleanup_collection_plan(plan_key).await?;
+                match self.load().await {
+                    Ok(current) => Ok(CollectionStart::Conflict(current)),
+                    Err(Error::Store(_)) => Ok(CollectionStart::Pending),
+                    Err(error) => Err(error),
+                }
+            }
             Err(Error::Store(_)) => Ok(CollectionStart::Pending),
             Err(error) => Err(error),
         }
@@ -632,6 +626,8 @@ impl Log {
     ///
     /// Every retry submits the complete positive deletion set again. Missing
     /// objects count as successful deletes.
+    /// If deletion of the plan object fails after fence clearing, a later
+    /// collection can remove it. This does not change candidate completion.
     ///
     /// # Errors
     ///
@@ -641,38 +637,34 @@ impl Log {
         let requested_plan = view.cursor.head.active_plan.as_ref();
         let current = self.load().await?;
         let Some(plan_ref) = current.cursor.head.active_plan.as_ref() else {
+            if let Some(requested_plan) = requested_plan {
+                let key = Self::collection_plan_key(view.cursor.head.incarnation, requested_plan);
+                self.cleanup_collection_plan(key).await?;
+            }
             return Ok(CollectionFinish::Complete(
                 current,
                 CollectionReport::new(0, 0, 0),
             ));
         };
-        if requested_plan.is_some_and(|requested| requested != plan_ref) {
+        if requested_plan != Some(plan_ref) {
             return Ok(CollectionFinish::Conflict(
                 current,
                 CollectionReport::new(0, 0, 0),
             ));
         }
-        if requested_plan.is_none() {
-            return Ok(CollectionFinish::Conflict(
-                current,
-                CollectionReport::new(0, 0, 0),
-            ));
-        }
+        let plan_key = Self::collection_plan_key(current.cursor.head.incarnation, plan_ref);
         let plan = self
             .read_collection_plan(&current.cursor.head, plan_ref)
             .await?;
         let candidate_bytes = plan.candidate_bytes()?;
         let mut report = CollectionReport::new(plan.candidates.len(), candidate_bytes, 0);
         for batch in plan.candidates.chunks(MAX_DELETE_BATCH) {
-            report.delete_attempts = report
-                .delete_attempts
-                .checked_add(batch.len())
-                .ok_or(Error::LimitExceeded("collection delete attempts"))?;
-            let keys = batch
-                .iter()
-                .map(|candidate| candidate.key)
-                .collect::<Vec<_>>();
-            match self.store.delete_immutable_batch(&keys).await {
+            report.delete_attempts += batch.len();
+            match self
+                .store
+                .delete_immutable_batch(batch.iter().map(|candidate| candidate.key))
+                .await
+            {
                 Ok(()) => {}
                 Err(Error::Store(_)) => return Ok(CollectionFinish::Pending(report)),
                 Err(error) => return Err(error),
@@ -681,10 +673,7 @@ impl Log {
 
         let mut candidate = current.cursor.head.clone();
         candidate.active_plan = None;
-        candidate.generation = candidate
-            .generation
-            .checked_add(1)
-            .ok_or(Error::LimitExceeded("head generation"))?;
+        candidate.advance_generation()?;
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
         match self
@@ -692,15 +681,18 @@ impl Log {
             .update(StoreKey::Head, bytes, current.cursor.version.clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(CollectionFinish::Complete(
-                View {
-                    cursor: Cursor {
-                        head: candidate,
-                        version,
+            Ok(UpdateResult::Updated { version }) => {
+                self.cleanup_collection_plan(plan_key).await?;
+                Ok(CollectionFinish::Complete(
+                    View {
+                        cursor: Cursor {
+                            head: candidate,
+                            version,
+                        },
                     },
-                },
-                report,
-            )),
+                    report,
+                ))
+            }
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
@@ -708,6 +700,7 @@ impl Log {
                     Err(error) => return Err(error),
                 };
                 if current.cursor.head.active_plan.is_none() {
+                    self.cleanup_collection_plan(plan_key).await?;
                     Ok(CollectionFinish::Complete(current, report))
                 } else {
                     Ok(CollectionFinish::Conflict(current, report))
@@ -1070,9 +1063,9 @@ impl Log {
     /// missing commit in the current epoch is corruption.
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
         self.validate_cursor(view.cursor())?;
-        let log = self.clone();
+        let log = Arc::new(self.clone());
         let records = stream::iter(view.tail().to_vec().into_iter().map(move |reference| {
-            let log = log.clone();
+            let log = Arc::clone(&log);
             async move { log.read_commit_optional(&reference).await }
         }))
         .buffered(MAX_CONCURRENT_READS)
@@ -1506,10 +1499,7 @@ impl Log {
 
     fn candidate_head(prepared: &PreparedCommit, commit_ref: &CommitRef) -> Result<Head, Error> {
         let mut head = prepared.cursor.head.clone();
-        head.generation = head
-            .generation
-            .checked_add(1)
-            .ok_or(Error::LimitExceeded("head generation"))?;
+        head.advance_generation()?;
         head.next_sequence = head
             .next_sequence
             .checked_add(1)
@@ -1539,10 +1529,7 @@ impl Log {
             through_commit: through.digest,
             object,
         });
-        head.generation = head
-            .generation
-            .checked_add(1)
-            .ok_or(Error::LimitExceeded("head generation"))?;
+        head.advance_generation()?;
         Ok(head)
     }
 
@@ -1720,31 +1707,32 @@ impl Log {
         objects: &[ObjectRef],
     ) -> Result<Option<Vec<CollectionCandidate>>, Error> {
         let Some(plan_ref) = head.active_plan.as_ref() else {
-            let mut visited = BTreeMap::new();
+            let mut visited = HashMap::with_capacity(objects.len());
             self.mark_object_graph(objects, &mut visited, None).await?;
             return Ok(None);
         };
         let plan = self.read_collection_plan(head, plan_ref).await?;
-        let mut visited = BTreeMap::new();
+        let mut visited = HashMap::with_capacity(objects.len());
         self.mark_object_graph(objects, &mut visited, Some(&plan.candidates))
             .await?;
         Ok(Some(plan.candidates))
     }
 
-    async fn mark_live(&self, view: &View) -> Result<BTreeMap<ImmutableKey, u64>, Error> {
-        let mut live = BTreeMap::new();
+    async fn mark_live(&self, view: &View) -> Result<HashMap<ImmutableKey, u64>, Error> {
+        let mut live = HashMap::new();
         let tail = self.read_tail(view).await?;
-        for record in &tail {
+        let mut roots = Vec::new();
+        for record in tail {
             self.insert_live(
                 &mut live,
                 self.commit_immutable_key(&record.reference),
                 record.reference.len,
             )?;
+            if record.objects.len() > self.options.max_collection_objects - roots.len() {
+                return Err(Error::LimitExceeded("collection live objects"));
+            }
+            roots.extend(record.objects);
         }
-        let mut roots = tail
-            .into_iter()
-            .flat_map(|record| record.objects)
-            .collect::<Vec<_>>();
         if let Some(reference) = view.checkpoint() {
             self.insert_live(
                 &mut live,
@@ -1752,6 +1740,9 @@ impl Log {
                 reference.object.len,
             )?;
             let checkpoint = self.load_checkpoint(reference).await?;
+            if checkpoint.objects.len() > self.options.max_collection_objects - roots.len() {
+                return Err(Error::LimitExceeded("collection live objects"));
+            }
             roots.extend(checkpoint.objects);
         }
         self.mark_object_graph(&roots, &mut live, None).await?;
@@ -1761,7 +1752,7 @@ impl Log {
     async fn mark_object_graph(
         &self,
         roots: &[ObjectRef],
-        visited: &mut BTreeMap<ImmutableKey, u64>,
+        visited: &mut HashMap<ImmutableKey, u64>,
         blocked: Option<&[CollectionCandidate]>,
     ) -> Result<(), Error> {
         let mut pending = VecDeque::new();
@@ -1769,12 +1760,13 @@ impl Log {
             self.enqueue_object(object, visited, blocked, &mut pending)?;
         }
 
+        let log = Arc::new(self.clone());
         while !pending.is_empty() {
             let count = pending.len().min(MAX_CONCURRENT_READS);
             let batch = pending.drain(..count).collect::<Vec<_>>();
-            let log = self.clone();
+            let log = Arc::clone(&log);
             let children = stream::iter(batch.into_iter().map(move |object| {
-                let log = log.clone();
+                let log = Arc::clone(&log);
                 async move { log.read_graph_children(&object).await }
             }))
             .buffer_unordered(MAX_CONCURRENT_READS)
@@ -1792,7 +1784,7 @@ impl Log {
     fn enqueue_object(
         &self,
         object: &ObjectRef,
-        visited: &mut BTreeMap<ImmutableKey, u64>,
+        visited: &mut HashMap<ImmutableKey, u64>,
         blocked: Option<&[CollectionCandidate]>,
         pending: &mut VecDeque<ObjectRef>,
     ) -> Result<(), Error> {
@@ -1821,7 +1813,7 @@ impl Log {
 
     fn insert_live(
         &self,
-        live: &mut BTreeMap<ImmutableKey, u64>,
+        live: &mut HashMap<ImmutableKey, u64>,
         key: ImmutableKey,
         len: u64,
     ) -> Result<(), Error> {
@@ -1916,12 +1908,18 @@ impl Log {
                 "the collection plan does not match its head fence".into(),
             ));
         }
-        if plan.candidates.iter().any(|candidate| candidate.key == key) {
-            return Err(Error::InvalidFormat(
-                "the active collection plan contains its own physical key".into(),
-            ));
-        }
         Ok(plan)
+    }
+
+    async fn cleanup_collection_plan(&self, key: ImmutableKey) -> Result<(), Error> {
+        match self
+            .store
+            .delete_immutable_batch(std::iter::once(key))
+            .await
+        {
+            Ok(()) | Err(Error::Store(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn verify_object_durable(&self, object: &ObjectRef) -> Result<(), Error> {
@@ -2100,25 +2098,6 @@ mod tests {
     use object_store::path::Path;
 
     use super::*;
-
-    #[test]
-    fn collection_report_exposes_only_bounded_counts() {
-        let report = CollectionReport {
-            candidate_count: 3,
-            candidate_bytes: 30,
-            delete_attempts: 2,
-        };
-        assert_eq!(report.candidate_count(), 3);
-        assert_eq!(report.candidate_bytes(), 30);
-        assert_eq!(report.delete_attempts(), 2);
-    }
-
-    #[tokio::test]
-    async fn initial_view_has_collection_epoch_zero() -> Result<(), Box<dyn std::error::Error>> {
-        let log = test_log("initial-collection-epoch", Options::default()).await?;
-        assert_eq!(log.load().await?.collection_epoch(), 0);
-        Ok(())
-    }
 
     #[tokio::test]
     async fn fresh_staging_reallocates_a_colliding_physical_id()

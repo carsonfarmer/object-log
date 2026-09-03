@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 pub(crate) const FORMAT_VERSION: u32 = 1;
 const DIGEST_LEN: usize = 32;
-const TRANSACTION_ID_LEN: usize = 16;
+const UUID_LEN: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Head {
@@ -54,6 +54,14 @@ impl Head {
             .last()
             .map(|commit| commit.digest)
             .or_else(|| self.checkpoint.as_ref().map(|base| base.through_commit))
+    }
+
+    pub(crate) fn advance_generation(&mut self) -> Result<(), Error> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
+        Ok(())
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -841,7 +849,7 @@ fn retention_ids(values: Vec<ByteVec>) -> Result<BTreeSet<RetentionId>, Error> {
 }
 
 fn uuid(value: &[u8], name: &str) -> Result<Uuid, Error> {
-    if value.len() != TRANSACTION_ID_LEN {
+    if value.len() != UUID_LEN {
         return Err(Error::InvalidFormat(format!(
             "{name} has an invalid length"
         )));

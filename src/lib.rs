@@ -433,8 +433,8 @@ pub enum Error {
     /// Content does not match its declared digest, length, or immutable value.
     #[error("object data failed integrity verification")]
     CorruptObject,
-    /// A read used an unretained view from before a completed collection.
-    #[error("the supplied view expired after garbage collection")]
+    /// A read used a view from before the durable collection epoch advanced.
+    #[error("the supplied view predates the current collection epoch")]
     ViewExpired,
     /// An active collection plan contains data required by a publication.
     #[error("an active collection plan fences required immutable data")]
