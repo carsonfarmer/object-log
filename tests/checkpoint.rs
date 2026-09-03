@@ -917,6 +917,6 @@ fn head_puts(store: &FaultStore) -> usize {
         .metrics()
         .events
         .iter()
-        .filter(|event| event.operation == Operation::Put && event.path.ends_with("/head"))
+        .filter(|event| event.operation == Operation::Put && event.path.ends_with("/index.cbor"))
         .count()
 }
