@@ -25,15 +25,16 @@ impl Policy {
         Ok(policy)
     }
 
-    pub(crate) fn read(&self) -> Guard<'_> {
-        self.enter(READ)
+    pub(crate) fn read(&self, conn: &Connection) -> Guard<'_> {
+        self.enter(conn, READ)
     }
 
-    pub(crate) fn write(&self) -> Guard<'_> {
-        self.enter(WRITE)
+    pub(crate) fn write(&self, conn: &Connection) -> Guard<'_> {
+        self.enter(conn, WRITE)
     }
 
-    fn enter(&self, mode: u8) -> Guard<'_> {
+    fn enter(&self, conn: &Connection, mode: u8) -> Guard<'_> {
+        conn.flush_prepared_statement_cache();
         self.0.store(mode, Ordering::Relaxed);
         Guard(self)
     }

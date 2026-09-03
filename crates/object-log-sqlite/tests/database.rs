@@ -11,6 +11,7 @@ use object_log::{CommitStatus, Log, LogId, ObjectKind, Options, TransactionId, V
 use object_log_sqlite::{Database, SqliteCheckpointStatus, SqliteError, StageStatus};
 use object_store::memory::InMemory;
 use object_store::path::Path;
+use rusqlite::ErrorCode;
 
 type TestResult = Result<(), Box<dyn StdError>>;
 
@@ -343,6 +344,58 @@ async fn callback_policy_allows_main_savepoints_and_rejects_other_mutation() -> 
         database
             .read(|connection| connection
                 .query_row("SELECT value FROM allowed", [], |row| row.get::<_, i64>(0)))
+            .await?,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cached_write_cannot_bypass_the_read_policy() -> TestResult {
+    let log = open_log("sqlite-cached-policy").await?;
+    let directory = tempfile::tempdir()?;
+    let mut database = Database::open(log, directory.path().join("cache.sqlite3")).await?;
+    commit_sql(
+        &mut database,
+        "CREATE TABLE values_table (value INTEGER); INSERT INTO values_table VALUES (1);",
+    )
+    .await?;
+
+    let StageStatus::Staged(staged) = database
+        .stage_write(TransactionId::new(), |transaction| {
+            transaction
+                .prepare_cached("UPDATE values_table SET value = value + 1")?
+                .execute([])?;
+            Ok(Bytes::new())
+        })
+        .await?
+    else {
+        return Err("the cached write was not staged".into());
+    };
+    assert!(matches!(
+        staged.publish().await?,
+        CommitStatus::Committed(_)
+    ));
+
+    let attempted = database
+        .read(|connection| {
+            connection
+                .prepare_cached("UPDATE values_table SET value = value + 1")?
+                .execute([])
+        })
+        .await;
+    assert!(matches!(
+        attempted,
+        Err(SqliteError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
+            if error.code == ErrorCode::AuthorizationForStatementDenied
+    ));
+    assert_eq!(
+        database
+            .read(|connection| {
+                connection.query_row("SELECT value FROM values_table", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
             .await?,
         2
     );

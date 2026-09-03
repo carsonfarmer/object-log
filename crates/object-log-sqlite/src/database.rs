@@ -149,7 +149,7 @@ impl Database {
         callback: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, SqliteError> {
         self.ensure_current().await?;
-        let _guard = self.policy.read();
+        let _guard = self.policy.read(self.conn()?);
         Ok(callback(self.conn()?)?)
     }
 
@@ -184,7 +184,7 @@ impl Database {
             .transaction()?;
         self.state = CacheState::Dirty;
         let callback_result = {
-            let _guard = policy.write();
+            let _guard = policy.write(&transaction);
             callback(&transaction)
         };
         let result = match callback_result {
