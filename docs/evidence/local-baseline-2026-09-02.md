@@ -15,8 +15,7 @@ MinIO, S3, network latency, or multi-process coordination.
 
 ## Append results
 
-Each value is Criterion's reported 95% confidence interval. The middle value is
-the point estimate.
+Each value is Criterion's reported 95% confidence interval.
 
 | Workload | Time per durable commit | Reported logical throughput |
 |---|---:|---:|
@@ -76,7 +75,7 @@ recovery validation. These measurements retain the cost instead of hiding it.
 - Image: `minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`
 - Endpoint: ephemeral loopback port
 - Bucket: new empty `object-log-test` bucket in an ephemeral container
-- Result: one integration test passed in 0.09 seconds
+- Result: one integration test passed in 0.07 seconds
 - Covered behavior: capability probe, conditional create and update,
   conditional read, lost successful update response, pending resolution,
   checkpoint publication, process reopen, base recovery, and container cleanup

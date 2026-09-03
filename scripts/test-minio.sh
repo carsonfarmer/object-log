@@ -6,11 +6,37 @@ container="object-log-minio-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 access_key="objectlog"
 secret_key="objectlog-local-test-secret"
 bucket="object-log-test"
+container_started=0
 
 cleanup() {
-  docker rm --force "${container}" >/dev/null 2>&1 || true
+  local status=$?
+  local cleanup_failed=0
+  trap - EXIT INT TERM
+
+  if [[ "${container_started}" == "1" ]]; then
+    if docker container inspect "${container}" >/dev/null 2>&1; then
+      if ! docker rm --force "${container}" >/dev/null; then
+        echo "failed to remove MinIO test container ${container}" >&2
+        cleanup_failed=1
+      fi
+    fi
+    if docker container inspect "${container}" >/dev/null 2>&1; then
+      echo "MinIO test container ${container} remains after cleanup" >&2
+      cleanup_failed=1
+    elif ! docker info >/dev/null 2>&1; then
+      echo "cannot verify MinIO test container cleanup" >&2
+      cleanup_failed=1
+    fi
+  fi
+
+  if [[ "${status}" == "0" && "${cleanup_failed}" == "1" ]]; then
+    status=1
+  fi
+  exit "${status}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 docker info >/dev/null
 docker run --detach --rm \
@@ -19,13 +45,15 @@ docker run --detach --rm \
   --env "MINIO_ROOT_USER=${access_key}" \
   --env "MINIO_ROOT_PASSWORD=${secret_key}" \
   "${image}" server /data >/dev/null
+container_started=1
 
 published="$(docker port "${container}" 9000/tcp)"
 endpoint="http://${published}"
 
 ready=0
 for _ in $(seq 1 60); do
-  if curl --fail --silent "${endpoint}/minio/health/ready" >/dev/null; then
+  if curl --connect-timeout 1 --max-time 2 --fail --silent \
+    "${endpoint}/minio/health/ready" >/dev/null; then
     ready=1
     break
   fi
