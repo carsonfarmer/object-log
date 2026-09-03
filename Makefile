@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test
+.PHONY: check test bench minio-test gc-acceptance
 
 check:
 	cargo fmt --all --check
@@ -13,3 +13,7 @@ bench:
 
 minio-test:
 	./scripts/test-minio.sh
+
+gc-acceptance:
+	cargo test --features test-util --test gc_acceptance memory_gc_removes_100k_objects -- --ignored --nocapture
+	./scripts/test-minio.sh gc_acceptance minio_gc_removes_10001_objects
