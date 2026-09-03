@@ -487,6 +487,46 @@ async fn collection_fence_rejects_stale_and_planned_dependencies() -> TestResult
 }
 
 #[tokio::test]
+async fn collection_fence_finds_a_planned_descendant_of_a_new_node() -> TestResult {
+    let fixture = Fixture::new("nested-publication-fence", Options::default()).await?;
+    let source = fixture.log.load().await?;
+    let child = fixture
+        .log
+        .put_object(source.cursor(), Bytes::from_static(b"planned child"))
+        .await?;
+    fixture.store.reset();
+    let mut pause = fixture.store.pause_put_at(2, FailurePhase::Before);
+    let collector = tokio::spawn({
+        let log = fixture.log.clone();
+        let source = source.clone();
+        async move { log.start_collection(&source).await }
+    });
+    assert!(pause.wait_until_entered().await);
+
+    let node = fixture
+        .log
+        .put_node(
+            source.cursor(),
+            Bytes::from_static(b"new root"),
+            vec![child],
+        )
+        .await?;
+    assert!(pause.release());
+    let CollectionStart::Installed(fenced, report) = collector.await?? else {
+        return Err("collection fence was not installed".into());
+    };
+    assert_eq!(report.candidate_count(), 1);
+    assert!(matches!(
+        fixture
+            .log
+            .stage_objects(fenced.cursor(), vec![node.reference().clone()])
+            .await,
+        Err(Error::CollectionFence)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn retention_and_collection_have_one_winner_and_release_is_idempotent() -> TestResult {
     let first = Fixture::new("retain-first", Options::default()).await?;
     let source = first.log.load().await?;
