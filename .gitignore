@@ -1,0 +1,5 @@
+/target/
+/criterion/
+/.minio-data/
+/.env
+*.profraw

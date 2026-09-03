@@ -1,0 +1,43 @@
+[package]
+name = "object-log"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "A linearizable log over conditional object storage"
+license = "Apache-2.0"
+
+[dependencies]
+blake3 = "1.8"
+bytes = { version = "1.10", features = ["serde"] }
+futures = "0.3"
+hex = "0.4"
+object_store = "0.14"
+prost = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["serde", "v4"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["async_tokio"] }
+proptest = "1.7"
+tempfile = "3.20"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[features]
+default = []
+aws = ["object_store/aws"]
+test-util = []
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[[bench]]
+name = "protocol"
+harness = false
