@@ -42,3 +42,4 @@ panic = "deny"
 [[bench]]
 name = "protocol"
 harness = false
+required-features = ["test-util"]
