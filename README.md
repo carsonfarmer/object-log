@@ -25,8 +25,10 @@ is complete. Its WAL-access gate passed on local macOS and Linux, and adapter
 implementation is next. See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
 [docs/design.md](docs/design.md) for the current core contract.
 
-See [docs/follow-ons.md](docs/follow-ons.md) for the ordered `SQLite`, WASI
-filesystem, and live AWS qualification goals.
+See [docs/follow-ons.md](docs/follow-ons.md) for the ordered `SQLite`, Git,
+WASI filesystem, and live AWS qualification goals. The
+[Git example plan](GIT_PLAN.md) defines a minimal serverless repository over
+immutable packs and atomic ref transactions.
 
 ## Local checks
 

@@ -37,7 +37,20 @@ The plan selects a raw SQLite WAL and snapshot design. Its first gate accepted
 SQLite's public journal-pointer control after the same local proof passed on
 macOS and Linux. Adapter implementation is next.
 
-## 2. WASI filesystem storage
+## 2. Minimal serverless Git
+
+Build `object-log-git` as a separate demonstration crate after SQLite. One log
+owns one Git repository. Immutable Git packs contain objects. One object-log
+commit atomically records a validated ref transaction and its new pack
+references. A checkpoint records the current refs and the packs needed to read
+them. See [`GIT_PLAN.md`](../GIT_PLAN.md).
+
+The first example uses a disposable bare repository or temporary directory per
+serverless invocation. It keeps transport and authentication outside the
+storage crate. A push conflict returns the current repository view and requires
+the caller to validate the ref preconditions again.
+
+## 3. WASI filesystem storage
 
 ### Required contract
 
@@ -60,7 +73,7 @@ macOS and Linux. Adapter implementation is next.
 - Benchmarks report metadata latency, sequential and random I/O, cold restore,
   write amplification, and object-store requests.
 
-## 3. Live AWS qualification
+## 4. Live AWS qualification
 
 This is a separate qualification goal. It does not block local product
 completion.

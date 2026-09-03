@@ -360,14 +360,21 @@ log. Define page or changeset objects, transaction boundaries, checkpoint
 rules, and recovery limits. Measure write amplification, recovery time, and
 contention before adding a Spin factor adapter.
 
-### 2. WASI filesystem storage
+### 2. Serverless Git example
+
+Build `object-log-git` as a small public-API consumer. Store immutable Git
+packs as log objects. Publish each validated push as one atomic ref
+transaction. Recover from one pack-set checkpoint plus its ordered tail. Keep
+the serverless transport outside the storage model. See `GIT_PLAN.md`.
+
+### 3. WASI filesystem storage
 
 Implement filesystem metadata and file content over the same log and object
 model. Define inode identity, directory operations, rename atomicity, open-file
 behavior, sparse files, and capability boundaries. Then expose the proven
 model through `wasi:filesystem` for Spin.
 
-### 3. Live AWS qualification
+### 4. Live AWS qualification
 
 Run the backend conformance, fault, recovery, and performance suites against an
 isolated AWS S3 prefix. Record the AWS region, bucket settings, request limits,
