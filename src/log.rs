@@ -369,8 +369,8 @@ impl Log {
     /// # Errors
     ///
     /// Returns an error when the candidate is invalid, a referenced object is
-    /// not durable and valid, immutable staging fails, or a conflict head
-    /// cannot be read.
+    /// not durable and valid, immutable staging fails, or a winning head is
+    /// invalid.
     pub async fn commit(&self, prepared: PreparedCommit) -> Result<CommitStatus, Error> {
         self.validate_prepared(&prepared).await?;
         let (commit_ref, commit_bytes) = self.encode_prepared(&prepared)?;

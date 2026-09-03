@@ -2,7 +2,7 @@
 
 ## Revision and environment
 
-- Revision: `8b9307b9529ff84195fedfa2dc512a88f64fed29`
+- Revision: `d67548929a3b75e4d011efdfe682e36813a4100f`
 - Date: 2026-09-02, America/Vancouver
 - Host: Apple `Mac16,8`, 14 logical CPUs, 48 GiB memory
 - Operating system: macOS 27.0, build 26A5421a
@@ -20,14 +20,14 @@ the point estimate.
 
 | Workload | Time per durable commit | Reported logical throughput |
 |---|---:|---:|
-| Batch 1 × 32 B | 3.939–4.003 µs | 249.84–253.90 Kops/s |
-| Batch 4 × 32 B | 4.086–4.188 µs | 955.07–978.95 Kops/s |
-| Batch 16 × 32 B | 4.662–4.694 µs | 3.409–3.432 Mops/s |
-| Batch 64 × 32 B | 7.417–7.490 µs | 8.544–8.629 Mops/s |
-| Batch 256 × 32 B | 11.950–11.999 µs | 21.334–21.423 Mops/s |
-| One 32 B operation | 3.774–3.784 µs | 264.31–264.97 K commits/s |
-| One 256 B operation | 4.162–4.202 µs | 237.97–240.26 K commits/s |
-| One 4 KiB operation | 7.931–7.984 µs | 125.25–126.09 K commits/s |
+| Batch 1 × 32 B | 4.223–4.264 µs | 234.54–236.80 Kops/s |
+| Batch 4 × 32 B | 4.447–4.553 µs | 878.61–899.47 Kops/s |
+| Batch 16 × 32 B | 4.993–5.040 µs | 3.175–3.204 Mops/s |
+| Batch 64 × 32 B | 7.727–7.908 µs | 8.093–8.283 Mops/s |
+| Batch 256 × 32 B | 12.276–12.438 µs | 20.583–20.853 Mops/s |
+| One 32 B operation | 4.156–4.209 µs | 237.59–240.60 K commits/s |
+| One 256 B operation | 4.611–4.657 µs | 214.74–216.86 K commits/s |
+| One 4 KiB operation | 8.266–8.367 µs | 119.52–120.97 K commits/s |
 
 The batch cases encode one opaque byte array with `batch_size × 32` bytes. The
 reported logical throughput shows protocol overhead amortization. It does not
@@ -43,11 +43,11 @@ Recovery loads the index and verifies all active WAL entries in parallel.
 
 | Active tail | Recovery time | Verified entries per second |
 |---:|---:|---:|
-| 0 | 1.131–1.139 µs | not applicable |
-| 16 | 32.569–33.123 µs | 483.05–491.27 K/s |
-| 64 | 132.44–132.84 µs | 481.77–483.22 K/s |
-| 256 | 522.90–525.10 µs | 487.53–489.58 K/s |
-| 1,024 | 2.140–2.156 ms | 474.98–478.53 K/s |
+| 0 | 1.591–1.625 µs | not applicable |
+| 16 | 37.891–38.282 µs | 417.95–422.26 K/s |
+| 64 | 145.70–147.71 µs | 433.29–439.26 K/s |
+| 256 | 574.30–579.57 µs | 441.71–445.76 K/s |
+| 1,024 | 2.350–2.374 ms | 431.32–435.76 K/s |
 
 ## Contention results
 
@@ -56,20 +56,27 @@ candidate returns a definite conflict.
 
 | Concurrent candidates | Total classification time | Candidates per second |
 |---:|---:|---:|
-| 1 | 2.797–2.815 µs | 355.29–357.53 K/s |
-| 2 | 6.693–6.820 µs | 293.26–298.82 K/s |
-| 8 | 29.155–29.348 µs | 272.59–274.40 K/s |
-| 32 | 125.91–127.23 µs | 251.51–254.14 K/s |
+| 1 | 3.150–3.170 µs | 315.50–317.42 K/s |
+| 2 | 8.030–8.177 µs | 244.58–249.06 K/s |
+| 8 | 35.985–36.362 µs | 220.01–222.31 K/s |
+| 32 | 156.67–157.97 µs | 202.56–204.25 K/s |
 
 This workload measures one winner and many rejected candidates. It does not
 retry the rejected logical operations.
+
+Compared with the first implementation baseline at revision `8b9307b`, append
+point estimates are about 3–11% slower, non-empty recovery is about 10–16%
+slower, and contention classification is about 13–24% slower. Empty recovery
+adds about 0.47 µs. The final revision adds canonical durable formats, durable
+limits, incarnation binding, checkpoint outcome evidence, bounded reads, and
+recovery validation. These measurements retain the cost instead of hiding it.
 
 ## Local MinIO evidence
 
 - Image: `minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`
 - Endpoint: ephemeral loopback port
 - Bucket: new empty `object-log-test` bucket in an ephemeral container
-- Result: one integration test passed in 0.08 seconds
+- Result: one integration test passed in 0.09 seconds
 - Covered behavior: capability probe, conditional create and update,
   conditional read, lost successful update response, pending resolution,
   checkpoint publication, process reopen, base recovery, and container cleanup
