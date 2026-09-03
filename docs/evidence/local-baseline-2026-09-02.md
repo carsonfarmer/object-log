@@ -10,6 +10,11 @@
 - Criterion: 0.7.0, optimized benchmark profile
 - Backend: `object_store::memory::InMemory` wrapped by request accounting
 
+The raw Criterion slope estimates for all 19 cases are retained in
+[`criterion-slope-2026-09-02.tsv`](criterion-slope-2026-09-02.tsv). Times are
+in nanoseconds. The table below presents those same 95% confidence intervals
+with readable units and derived throughput.
+
 This baseline measures process-local protocol cost. It does not measure disk,
 MinIO, S3, network latency, or multi-process coordination.
 

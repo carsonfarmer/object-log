@@ -227,8 +227,8 @@ baseline, retain a machine-readable comparison and fail only on large,
 repeatable regressions.
 
 Current status: partial. The in-memory Criterion suite covers batch payload
-size, inline size, contention, and tail recovery. It does not yet cover the
-full matrix above.
+size, inline size, staged payloads, contention, and tail recovery. It does not
+yet cover the full matrix above.
 
 ### 8. MinIO local qualification — backend agent and root agent
 
