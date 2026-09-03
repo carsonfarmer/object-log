@@ -70,6 +70,9 @@ fn write_action(context: AuthContext<'_>) -> bool {
     if matches!(context.action, AuthAction::Savepoint { .. }) {
         return true;
     }
+    if let AuthAction::AlterTable { database_name, .. } = context.action {
+        return database_name == "main";
+    }
     if context.database_name != Some("main") {
         return false;
     }
@@ -86,7 +89,6 @@ fn write_action(context: AuthContext<'_>) -> bool {
             | AuthAction::DropView { .. }
             | AuthAction::Insert { .. }
             | AuthAction::Update { .. }
-            | AuthAction::AlterTable { .. }
             | AuthAction::Reindex { .. }
             | AuthAction::Analyze { .. }
     )
