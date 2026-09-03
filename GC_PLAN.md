@@ -3,7 +3,8 @@
 ## Outcome
 
 Bounded and restart-safe deletion is complete for one log namespace. The
-mutable head remains the only authority. SQLite is the next product goal.
+mutable head remains the only authority. The later SQLite demonstration is
+also complete locally.
 
 ## Safety contract
 

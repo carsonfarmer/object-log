@@ -20,8 +20,8 @@ this file object and closes it when the WAL closes.
 
 `SQLITE_CHECKPOINT_NOOP` checkpoints no frames. Its `pnLog` output is the
 number of valid frames. A successful truncate checkpoint sets it to zero.
-The VFS contract defines `xFileSize` and `xRead`. The implementation will treat
-any non-`SQLITE_OK` exact-prefix read, including a short read, as failure.
+The VFS contract defines `xFileSize` and `xRead`. The implementation treats any
+non-`SQLITE_OK` exact-prefix read, including a short read, as failure.
 
 Primary sources:
 
@@ -71,16 +71,16 @@ header. The physical file still contained the earlier 203-frame allocation.
 ## Safety boundary
 
 The probe used five small unsafe blocks and 21 lines inside those blocks. The
-implementation must keep the pointer private and must not store it. It must
-not call SQLite concurrently or call another SQLite interface while it uses
-the file object. It must query `mxFrame` before it obtains the pointer. It must
-check the physical size, split reads at the C `int` limit, and accept only
-exact `SQLITE_OK` reads.
+implementation keeps the pointer private and does not store it. It does not
+call SQLite concurrently or call another SQLite interface while it uses the
+file object. It queries `mxFrame` before it obtains the pointer. It checks the
+physical size, splits reads at the C `int` limit, and accepts only exact
+`SQLITE_OK` reads.
 
 This proof covers SQLite's default Unix filesystem VFS on macOS and Linux. It
-does not prove a custom VFS or Windows. The adapter must retain these cases on
-each supported system. Miri cannot execute this SQLite C boundary, so native
-tests and a memory-safety sanitizer must cover the retained module.
+does not prove a custom VFS or Windows. Run the retained cases on each supported
+system. Miri cannot execute this SQLite C boundary, so native tests and a
+memory-safety sanitizer must cover the retained module.
 
-The probe source was temporary and is not product code. The adapter will keep
-the minimum reviewed boundary and deterministic tests.
+The probe source was temporary and is not product code. The adapter keeps the
+minimum reviewed boundary and deterministic tests.

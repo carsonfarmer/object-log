@@ -18,7 +18,7 @@ The selected demonstration contract and implementation gates are in
 cache, a canonical v1 record, committed WAL ranges, per-record payload bounds,
 and ordered object transfers.
 
-### Required contract
+### Implemented contract
 
 - One log owns one SQLite database history.
 - One SQLite transaction maps to one atomic log publication.
@@ -40,9 +40,9 @@ and ordered object transfers.
 The same WAL-access proof passed on macOS and Linux with SQLite's public
 journal-pointer control. Before multi-tenant use, add aggregate recovery and
 transfer-byte limits, bound recovery retries, and isolate synchronous SQLite
-work on a capped owner executor. Streaming recovery can follow those
-guardrails. Windows, other VFS implementations, a native memory-safety
-sanitizer, live AWS, and Spin integration remain.
+work on a capped owner executor. Recovery can stream validated WAL ranges after
+those limits are in place. Windows, other VFS implementations, a native
+memory-safety sanitizer, live AWS, and Spin integration remain.
 
 ## Core performance decision
 
@@ -52,7 +52,7 @@ capability bound to one log and collection epoch. New objects could then skip
 the read-back. Serialized recovery tokens would keep the current full
 verification path. This preserves the durable v1 format. It changes the public
 core API, so implementation requires owner review. The Git example can use the
-current API if this decision remains open.
+current API before this change.
 
 ## 1. Minimal serverless Git
 

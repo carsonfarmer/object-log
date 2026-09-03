@@ -58,21 +58,17 @@ rebuild. A staged or uncertain commit leaves the cache dirty. Only exact
 resume can classify its recovery token. `PendingCheckpoint` retains the
 in-process checkpoint evidence needed by a repeated `checkpoint` call.
 
-## First gate: WAL access
+## WAL access gate
 
-Prototype only `SQLITE_FCNTL_JOURNAL_POINTER` for `main` plus the returned
-`sqlite3_file.xRead` and `xFileSize` functions. Verify exact bytes through the
-NOOP `mxFrame` boundary for commit, rollback, savepoint rollback, an old
-physical suffix, reset, salt change, and zero frames on each supported system.
-This selected recommendation requires explicit owner approval before the
-prototype. Keep all FFI in one private
-module with at most 50 audited unsafe lines, small unsafe blocks, and one safety
-comment for each block. Stop if the method is not correct.
+The gate allowed only `SQLITE_FCNTL_JOURNAL_POINTER` for `main` and the
+returned `sqlite3_file.xRead` and `xFileSize` functions. The owner approved up
+to 50 audited unsafe lines if the method proved correct. All FFI stays in one
+private module with small unsafe blocks and one safety comment for each block.
 
-Direct live `-wal` capture is rejected. It bypasses the active VFS and cannot
-establish a portable SQLite contract. Do not add a custom VFS in v1. Restore
-may write a validated standard WAL before SQLite opens the cache under the
-selected built-in filesystem VFS.
+Direct live `-wal` capture remains rejected. It bypasses the active VFS and
+cannot establish a portable SQLite contract. A custom VFS is outside v1.
+Restore can write a validated standard WAL before SQLite opens the cache under
+the selected built-in filesystem VFS.
 
 This gate passed on macOS and Linux with bundled SQLite 3.53.2. The prototype
 read the exact committed prefix after commit, rollback, savepoint rollback,
@@ -149,17 +145,16 @@ not replay the callback. A pending checkpoint keeps in-process evidence; a
 repeated `checkpoint` resolves it first. After process loss, discard the cache
 and open again.
 
-Callbacks are trusted Rust extension points. The write callback receives a
-borrowed `rusqlite::Transaction`. Keep one authorizer installed through prepare
-and step. Deny `ATTACH`, `DETACH`, outer transaction control, all pragmas,
-extension loading, and mutations outside `main`, including `TEMP`. Denying
-pragmas keeps `writable_schema` off, so SQLite rejects direct schema-table
-writes. The read callback also denies mutations. Allow savepoints.
-Enable defensive mode and disable trusted schema. Because `Transaction` can
-access its connection, callbacks remain trusted Rust extension points. Flush
-SQLite's prepared-statement cache before each callback so a cached statement
-cannot cross a read or write policy transition. A Spin guest will not receive
-this callback or SQLite handle.
+The write callback receives a borrowed `rusqlite::Transaction`, which can
+access its connection. Treat callbacks as trusted Rust extension points. Keep
+one authorizer installed through prepare and step. Deny `ATTACH`, `DETACH`,
+outer transaction control, all pragmas, extension loading, and mutations
+outside `main`, including `TEMP`. Denying pragmas keeps `writable_schema` off,
+so SQLite rejects direct schema-table writes. The read callback also denies
+mutations. Allow savepoints. Enable defensive mode and disable trusted schema.
+Flush SQLite's prepared-statement cache before each callback so a cached
+statement cannot cross a read or write policy transition. A Spin guest will
+not receive this callback or SQLite handle.
 
 ## Durable SQLite record v1
 
@@ -225,7 +220,7 @@ unchanged adapter read, conflict publish and rebuild, cold recovery with 10
 and 1,000 tail records, and checkpoints at 1 MiB and 100 MiB. Setup stays
 outside the timed sections.
 
-The retained local runs cover all 11 IDs. They use the in-memory object-store
+The local evidence covers all 11 IDs. The runs use the in-memory object-store
 backend on one macOS host. Criterion records latency and declared throughput.
 A separate untimed audit records object requests, transferred bytes, and
 durable growth without adding counters to the timed path. See the

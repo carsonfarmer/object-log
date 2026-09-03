@@ -7,8 +7,8 @@ serverless request can open a repository, fetch or push Git data, publish one
 atomic update, and discard all local state. The crate must use only the public
 `object-log` API.
 
-This goal follows SQLite and precedes the WASI filesystem adapter. It does not
-block local SQLite completion.
+This goal follows the completed local SQLite demonstration and precedes the
+WASI filesystem adapter.
 
 ## Storage model
 

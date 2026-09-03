@@ -7,9 +7,9 @@ object-store interface. The library must support concurrent writers, immutable
 payload objects, disposable local caches, explicit uncertain outcomes, and
 bounded recovery through checkpoints and bounded garbage collection.
 
-The first proof is a key-value state machine. Spin, SQLite, filesystem, Git,
-and actor integrations are later consumers. They are not part of the first
-release.
+The first proof is a key-value state machine. SQLite is the second public-API
+consumer. Spin, filesystem, Git, and actor integrations are not part of the
+first release.
 
 ## Accepted architecture
 
@@ -353,28 +353,29 @@ The v1 protocol now has bounded graph marking, reader retention, a durable
 positive plan and publication fence, complete-set retry, view expiry, and
 immutable deletion. The current evidence is local.
 
-### 1. SQLite storage
+### Completed locally: SQLite storage
 
-Implement a SQLite state machine over the log. Start with one database per
-log. Define page or changeset objects, transaction boundaries, checkpoint
-rules, and recovery limits. Measure write amplification, recovery time, and
-contention before adding a Spin factor adapter.
+`object-log-sqlite` stores a complete first snapshot and later committed WAL
+ranges. One log owns one database history, and the local SQLite file is a
+disposable cache. The local evidence records transactions, recovery,
+checkpoints, garbage collection, MinIO compatibility, object requests, byte
+amplification, and latency. Live AWS and Spin integration remain separate.
 
-### 2. Serverless Git example
+### 1. Serverless Git example
 
 Build `object-log-git` as a small public-API consumer. Store immutable Git
 packs as log objects. Publish each validated push as one atomic ref
 transaction. Recover from one pack-set checkpoint plus its ordered tail. Keep
 the serverless transport outside the storage model. See `GIT_PLAN.md`.
 
-### 3. WASI filesystem storage
+### 2. WASI filesystem storage
 
 Implement filesystem metadata and file content over the same log and object
 model. Define inode identity, directory operations, rename atomicity, open-file
 behavior, sparse files, and capability boundaries. Then expose the proven
 model through `wasi:filesystem` for Spin.
 
-### 4. Live AWS qualification
+### 3. Live AWS qualification
 
 Run the backend conformance, fault, recovery, and performance suites against an
 isolated AWS S3 prefix. Record the AWS region, bucket settings, request limits,

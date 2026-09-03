@@ -1,4 +1,4 @@
-//! `SQLite` state-machine demonstration for `object-log`.
+//! `SQLite` adapter that stores snapshots and committed WAL ranges in `object-log`.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
