@@ -148,6 +148,25 @@ impl KvMachine {
             result,
         })
     }
+
+    /// Decodes and validates a result stored in a committed log entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the result uses an unsupported version, is not
+    /// canonical, or contains fields that do not match its result kind.
+    pub fn decode_result(&self, bytes: &[u8]) -> Result<KvResult, KvError> {
+        let result: ResultWire = decode(bytes)?;
+        require_version(result.version)?;
+        match (result.kind, result.value, result.integer, result.swapped) {
+            (1, value, None, None) => Ok(KvResult::Previous(value.map(Bytes::from))),
+            (2, None, Some(value), None) => Ok(KvResult::Integer(value)),
+            (3, None, None, Some(value)) => Ok(KvResult::Swapped(value)),
+            _ => Err(KvError::InvalidEncoding(
+                "result fields do not match its kind".to_owned(),
+            )),
+        }
+    }
 }
 
 impl Materializer for KvMachine {
@@ -162,7 +181,17 @@ impl Materializer for KvMachine {
         let snapshot: SnapshotWire = decode(checkpoint)?;
         require_version(snapshot.version)?;
         let mut entries = BTreeMap::new();
+        let mut prior_key: Option<Vec<u8>> = None;
         for entry in snapshot.entries {
+            if prior_key
+                .as_deref()
+                .is_some_and(|prior| prior >= entry.key.as_slice())
+            {
+                return Err(KvError::InvalidEncoding(
+                    "snapshot keys are not in strict byte order".to_owned(),
+                ));
+            }
+            prior_key = Some(entry.key.clone());
             if entries.insert(entry.key, entry.value).is_some() {
                 return Err(KvError::InvalidEncoding(
                     "snapshot contains a duplicate key".to_owned(),
@@ -180,6 +209,11 @@ impl Materializer for KvMachine {
     ) -> Result<(), Self::Error> {
         let mutation: MutationWire = decode(operation)?;
         require_version(mutation.version)?;
+        if !mutation.check_expected && mutation.expected.is_some() {
+            return Err(KvError::InvalidEncoding(
+                "an unconditional mutation contains an expected value".to_owned(),
+            ));
+        }
         if mutation.check_expected && state.get(&mutation.key) != mutation.expected.as_deref() {
             return Err(KvError::StateDiverged);
         }

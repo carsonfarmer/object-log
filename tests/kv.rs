@@ -176,6 +176,39 @@ fn replay_rejects_a_mutation_applied_to_the_wrong_state() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn stored_results_round_trip_through_the_public_decoder() -> TestResult {
+    let machine = KvMachine;
+    let cases = [
+        KvCommand::Set {
+            key: Bytes::from_static(b"name"),
+            value: Bytes::from_static(b"value"),
+        },
+        KvCommand::Increment {
+            key: Bytes::from_static(b"counter"),
+            delta: 3,
+        },
+        KvCommand::CompareAndSwap {
+            key: Bytes::from_static(b"name"),
+            expected: None,
+            value: Some(Bytes::from_static(b"value")),
+        },
+    ];
+
+    for command in cases {
+        let KvDecision::Commit {
+            result_bytes,
+            result,
+            ..
+        } = machine.evaluate(&KvState::default(), &command)?
+        else {
+            return Err("test command did not require a commit".into());
+        };
+        assert_eq!(machine.decode_result(&result_bytes)?, result);
+    }
+    Ok(())
+}
+
 async fn open(id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
     let scoped = ScopedStore::new(Arc::new(InMemory::new()), Path::from("kv-tests"), &log_id);

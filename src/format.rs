@@ -44,34 +44,70 @@ impl Head {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        let expected_start = self.checkpoint.as_ref().map_or(0, |checkpoint| {
-            checkpoint.through_sequence.saturating_add(1)
-        });
+        let expected_start = match self.checkpoint.as_ref() {
+            Some(checkpoint) => {
+                if checkpoint.object.kind != ObjectKind::Checkpoint {
+                    return Err(Error::InvalidFormat(
+                        "head base names a non-checkpoint object".into(),
+                    ));
+                }
+                checkpoint.through_sequence.checked_add(1).ok_or_else(|| {
+                    Error::InvalidFormat("head base sequence cannot advance".into())
+                })?
+            }
+            None => 0,
+        };
 
+        let mut transaction_ids =
+            HashSet::with_capacity(self.tail.len() + self.recent_outcomes.len());
         for (offset, commit) in self.tail.iter().enumerate() {
             let offset = u64::try_from(offset)
                 .map_err(|_| Error::InvalidFormat("tail offset exceeds u64".into()))?;
-            if commit.sequence != expected_start.saturating_add(offset) {
+            let expected_sequence = expected_start
+                .checked_add(offset)
+                .ok_or_else(|| Error::InvalidFormat("head tail sequence cannot advance".into()))?;
+            if commit.sequence != expected_sequence {
                 return Err(Error::InvalidFormat(
                     "head tail does not contain contiguous sequences".into(),
+                ));
+            }
+            if !transaction_ids.insert(commit.transaction_id) {
+                return Err(Error::InvalidFormat(
+                    "head contains a duplicate transaction".into(),
                 ));
             }
         }
 
         let tail_len = u64::try_from(self.tail.len())
             .map_err(|_| Error::InvalidFormat("tail length exceeds u64".into()))?;
-        if self.next_sequence != expected_start.saturating_add(tail_len) {
+        let expected_next = expected_start
+            .checked_add(tail_len)
+            .ok_or_else(|| Error::InvalidFormat("head next sequence cannot advance".into()))?;
+        if self.next_sequence != expected_next {
             return Err(Error::InvalidFormat(
                 "head next sequence does not follow its base and tail".into(),
             ));
         }
 
-        let mut transaction_ids = HashSet::with_capacity(self.recent_outcomes.len());
+        if self.checkpoint.is_none() && !self.recent_outcomes.is_empty() {
+            return Err(Error::InvalidFormat(
+                "head outcomes exist without a base checkpoint".into(),
+            ));
+        }
         let mut prior_sequence = None;
         for outcome in &self.recent_outcomes {
             if outcome.sequence >= self.next_sequence {
                 return Err(Error::InvalidFormat(
                     "head outcome refers to an uncommitted sequence".into(),
+                ));
+            }
+            if self
+                .checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| outcome.sequence > checkpoint.through_sequence)
+            {
+                return Err(Error::InvalidFormat(
+                    "head outcome overlaps the active tail".into(),
                 ));
             }
             if prior_sequence.is_some_and(|prior| outcome.sequence <= prior) {
@@ -81,7 +117,7 @@ impl Head {
             }
             if !transaction_ids.insert(outcome.transaction_id) {
                 return Err(Error::InvalidFormat(
-                    "head contains a duplicate transaction outcome".into(),
+                    "head contains a duplicate transaction".into(),
                 ));
             }
             prior_sequence = Some(outcome.sequence);
@@ -510,6 +546,8 @@ mod tests {
         };
         let first = commit_ref(4, b"first");
         let second = commit_ref(5, b"second");
+        let compacted_first = commit_ref(2, b"compacted-first");
+        let compacted_second = commit_ref(3, b"compacted-second");
         let head = Head {
             log_id: log_id(),
             generation: 9,
@@ -520,7 +558,7 @@ mod tests {
                 object: checkpoint_object,
             }),
             tail: vec![first.clone(), second.clone()],
-            recent_outcomes: vec![first, second],
+            recent_outcomes: vec![compacted_first, compacted_second],
         };
 
         let encoded = encode_head(&head).unwrap_or_else(|error| panic!("encode failed: {error}"));
@@ -598,6 +636,69 @@ mod tests {
             tail: vec![commit_ref(1, b"gap")],
             recent_outcomes: Vec::new(),
         };
+        assert!(matches!(encode_head(&head), Err(Error::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn head_rejects_checkpoint_sequence_overflow() {
+        let head = Head {
+            log_id: log_id(),
+            generation: 1,
+            next_sequence: u64::MAX,
+            checkpoint: Some(CheckpointRef {
+                through_sequence: u64::MAX,
+                through_commit: Digest::of(b"commit"),
+                object: ObjectRef {
+                    kind: ObjectKind::Checkpoint,
+                    digest: Digest::of(b"checkpoint"),
+                    len: 10,
+                },
+            }),
+            tail: Vec::new(),
+            recent_outcomes: Vec::new(),
+        };
+
+        assert!(matches!(encode_head(&head), Err(Error::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn head_rejects_duplicate_transaction_across_base_and_tail() {
+        let compacted = commit_ref(0, b"compacted");
+        let mut active = commit_ref(1, b"active");
+        active.transaction_id = compacted.transaction_id;
+        let head = Head {
+            log_id: log_id(),
+            generation: 2,
+            next_sequence: 2,
+            checkpoint: Some(CheckpointRef {
+                through_sequence: 0,
+                through_commit: compacted.digest,
+                object: ObjectRef {
+                    kind: ObjectKind::Checkpoint,
+                    digest: Digest::of(b"checkpoint"),
+                    len: 10,
+                },
+            }),
+            tail: vec![active],
+            recent_outcomes: vec![compacted],
+        };
+
+        assert!(matches!(encode_head(&head), Err(Error::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn head_rejects_outcomes_without_a_checkpoint() {
+        let active = commit_ref(0, b"active");
+        let outcome = commit_ref(0, b"outcome");
+        let head = Head {
+            log_id: log_id(),
+            generation: 1,
+            next_sequence: 1,
+            checkpoint: None,
+            tail: vec![active],
+            recent_outcomes: vec![outcome],
+        };
+
         assert!(matches!(encode_head(&head), Err(Error::InvalidFormat(_))));
     }
 
