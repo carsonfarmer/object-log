@@ -5,10 +5,11 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::TryStreamExt;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 use object_log::{
-    CheckpointStatus, CommitStatus, Log, LogId, Options, Resolution, TransactionId,
-    ValidatedBackend,
+    CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus, Log, LogId, Options,
+    Resolution, TransactionId, ValidatedBackend,
 };
 use object_store::ObjectStore;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
@@ -19,13 +20,13 @@ type TestResult = Result<(), Box<dyn StdError>>;
 
 #[tokio::test]
 #[ignore = "requires the pinned local MinIO server started by make minio-test"]
-async fn minio_passes_protocol_recovery_and_checkpoint_flow() -> TestResult {
+async fn minio_passes_recovery_checkpoint_and_gc_flow() -> TestResult {
     let backend = build_minio()?;
     let faults = FaultStore::new(backend);
     let store: Arc<dyn ObjectStore> = Arc::new(faults.clone());
     let log_id = LogId::new(format!("minio-{}", Uuid::new_v4().simple()))?;
     let root = Path::from("object-log-local-tests");
-    let backend = ValidatedBackend::new(store, root).await?;
+    let backend = ValidatedBackend::new(store, root.clone()).await?;
     let scoped = backend.scope(&log_id);
     let log = Log::open(scoped, Options::default()).await?;
     let empty = log.load().await?;
@@ -87,6 +88,36 @@ async fn minio_passes_protocol_recovery_and_checkpoint_flow() -> TestResult {
         b"minio snapshot".as_slice()
     );
     assert!(reopened.read_tail(&recovered).await?.is_empty());
+
+    let direct: Arc<dyn ObjectStore> = Arc::new(build_minio()?);
+    let gc_id = LogId::new(format!("minio-gc-{}", Uuid::new_v4().simple()))?;
+    let gc_backend = ValidatedBackend::new(Arc::clone(&direct), root.clone()).await?;
+    let gc_log = Log::open(gc_backend.scope(&gc_id), Options::default()).await?;
+    let source = gc_log.load().await?;
+    for _ in 0..1_001 {
+        gc_log.put_object(Bytes::from_static(b"x")).await?;
+    }
+    let CollectionStart::Installed(fenced, start) = gc_log.start_collection(&source).await? else {
+        return Err("MinIO collection did not install".into());
+    };
+    assert_eq!(
+        (start.candidate_count(), start.candidate_bytes()),
+        (1_001, 1_001)
+    );
+    assert_eq!(start.delete_attempts(), 0);
+    let CollectionFinish::Complete(_, finish) = gc_log.resume_collection(&fenced).await? else {
+        return Err("MinIO collection did not finish".into());
+    };
+    assert_eq!(
+        (finish.candidate_count(), finish.candidate_bytes()),
+        (1_001, 1_001)
+    );
+    assert_eq!(finish.delete_attempts(), 1_001);
+
+    let scope = root.join("v1").join("logs").join(gc_id.as_str());
+    let remaining = direct.list(Some(&scope)).try_collect::<Vec<_>>().await?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].location, scope.join("index.cbor"));
     Ok(())
 }
 
@@ -99,6 +130,7 @@ fn build_minio() -> Result<AmazonS3, Box<dyn StdError>> {
         .with_region("us-east-1")
         .with_allow_http(true)
         .with_virtual_hosted_style_request(false)
+        .with_disable_bulk_delete(false)
         .build()?)
 }
 

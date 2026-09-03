@@ -1,8 +1,11 @@
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::future::join_all;
-use object_log::sim::FaultStore;
-use object_log::{CommitStatus, Log, LogId, Options, TransactionId, ValidatedBackend, View};
+use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
+use object_log::{
+    CollectionFinish, CollectionStart, CommitStatus, Error, Log, LogId, ObjectRef, Options,
+    TransactionId, ValidatedBackend, View,
+};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use std::hint::black_box;
@@ -12,7 +15,7 @@ use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 
 const BATCH_SIZES: [usize; 5] = [1, 4, 16, 64, 256];
-const INLINE_BYTES: [usize; 3] = [32, 256, 4 * 1_024];
+const INLINE_BYTES: [usize; 2] = [256, 4 * 1_024];
 const STAGED_BYTES: [usize; 2] = [64 * 1_024, 1_024 * 1_024];
 const TAIL_LENGTHS: [usize; 5] = [0, 16, 64, 256, 1_024];
 const WRITER_COUNTS: [usize; 4] = [1, 2, 8, 32];
@@ -27,11 +30,17 @@ struct BenchLog {
     view: View,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CollectionShape {
+    FlatLive,
+    DeepLive,
+    HalfLiveWide,
+    Dead,
+}
+
 fn benchmark_batch_size(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("memory/append_batch");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(2));
     for batch_size in BATCH_SIZES {
         group.throughput(Throughput::Elements(usize_to_u64(batch_size)));
         group.bench_with_input(
@@ -69,8 +78,6 @@ fn benchmark_batch_size(criterion: &mut Criterion) {
 fn benchmark_inline_bytes(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("memory/append_inline_bytes");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(2));
     group.throughput(Throughput::Elements(1));
     for inline_bytes in INLINE_BYTES {
         group.bench_with_input(
@@ -108,8 +115,6 @@ fn benchmark_inline_bytes(criterion: &mut Criterion) {
 fn benchmark_tail_recovery(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("memory/recover_tail");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(2));
     for tail_length in TAIL_LENGTHS {
         let state = runtime.block_on(log_with_tail(tail_length));
         group.throughput(Throughput::Elements(usize_to_u64(tail_length)));
@@ -133,8 +138,6 @@ fn benchmark_tail_recovery(criterion: &mut Criterion) {
 fn benchmark_staged_bytes(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("memory/append_staged_bytes");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(2));
     for staged_bytes in STAGED_BYTES {
         group.throughput(Throughput::Bytes(usize_to_u64(staged_bytes)));
         group.bench_with_input(
@@ -173,8 +176,6 @@ fn benchmark_staged_bytes(criterion: &mut Criterion) {
 fn benchmark_writer_contention(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("memory/writer_contention");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(2));
     for writer_count in WRITER_COUNTS {
         group.throughput(Throughput::Elements(usize_to_u64(writer_count)));
         group.bench_with_input(
@@ -230,6 +231,167 @@ fn benchmark_writer_contention(criterion: &mut Criterion) {
         );
     }
     group.finish();
+}
+
+fn benchmark_collection(criterion: &mut Criterion) {
+    let runtime = runtime();
+    let mut group = criterion.benchmark_group("memory/gc");
+    for (name, shape, objects) in [
+        ("flat_live_1k", CollectionShape::FlatLive, 1_000),
+        ("deep_live_1k", CollectionShape::DeepLive, 1_000),
+        ("half_live_wide_10k", CollectionShape::HalfLiveWide, 10_000),
+        ("dead_100k", CollectionShape::Dead, 100_000),
+    ] {
+        group.throughput(Throughput::Elements(objects));
+        group.bench_function(format!("start/{name}"), |bencher| {
+            bencher.iter_batched(
+                || runtime.block_on(collection_state(shape)),
+                |state| {
+                    black_box(require(
+                        runtime.block_on(state.log.start_collection(&state.view)),
+                    ));
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+
+    let (state, blocked) = runtime.block_on(fenced_dead_state(100_000));
+    let prepared = require(state.log.prepare(
+        state.view.cursor(),
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![blocked],
+    ));
+    group.throughput(Throughput::Elements(100_000));
+    group.bench_function("fence_lookup/planned_ref_100k", |bencher| {
+        bencher.iter(|| {
+            if !matches!(
+                runtime.block_on(state.log.commit(prepared.clone())),
+                Err(Error::CollectionFence)
+            ) {
+                std::process::abort();
+            }
+        });
+    });
+
+    for (name, partial) in [("clean_1k", false), ("partial_1001", true)] {
+        group.throughput(Throughput::Elements(if partial { 1_001 } else { 1_000 }));
+        group.bench_function(format!("resume/{name}"), |bencher| {
+            bencher.iter_batched(
+                || {
+                    runtime.block_on(collection_ready(
+                        if partial { 1_001 } else { 1_000 },
+                        partial,
+                    ))
+                },
+                |state| {
+                    let result =
+                        require(runtime.block_on(state.log.resume_collection(&state.view)));
+                    if !matches!(result, CollectionFinish::Complete(_, _)) {
+                        std::process::abort();
+                    }
+                    black_box(result);
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+async fn collection_state(shape: CollectionShape) -> BenchLog {
+    let mut state = fresh_log(Options {
+        max_collection_objects: 100_010,
+        ..Options::default()
+    })
+    .await;
+    match shape {
+        CollectionShape::FlatLive => {
+            let objects = put_blobs(&state.log, 998).await;
+            append_objects(&mut state, objects).await;
+        }
+        CollectionShape::DeepLive => {
+            let mut root = require(state.log.put_object(Bytes::from_static(b"x")).await);
+            for _ in 1..998 {
+                root = require(state.log.put_node(Bytes::new(), vec![root]).await);
+            }
+            append_objects(&mut state, vec![root]).await;
+        }
+        CollectionShape::HalfLiveWide => {
+            let leaves = put_blobs(&state.log, 4_993).await;
+            let mut roots = Vec::with_capacity(5);
+            for children in leaves.chunks(1_000) {
+                roots.push(require(
+                    state.log.put_node(Bytes::new(), children.to_vec()).await,
+                ));
+            }
+            append_objects(&mut state, roots).await;
+            put_blobs(&state.log, 5_000).await;
+        }
+        CollectionShape::Dead => drop(put_blobs(&state.log, 99_999).await),
+    }
+    state
+}
+
+async fn fenced_dead_state(count: usize) -> (BenchLog, ObjectRef) {
+    let mut state = fresh_log(Options {
+        max_collection_objects: count.saturating_add(10),
+        ..Options::default()
+    })
+    .await;
+    let mut objects = put_blobs(&state.log, count).await;
+    let blocked = objects.swap_remove(0);
+    let CollectionStart::Installed(view, report) =
+        require(state.log.start_collection(&state.view).await)
+    else {
+        std::process::abort();
+    };
+    if report.candidate_count() != count {
+        std::process::abort();
+    }
+    state.view = view;
+    (state, blocked)
+}
+
+async fn collection_ready(count: usize, partial: bool) -> BenchLog {
+    let (state, _) = fenced_dead_state(count).await;
+    if partial {
+        state.store.reset();
+        state.store.record_events(false);
+        state.store.schedule(Failure {
+            operation: Operation::Delete,
+            occurrence: 1_001,
+            phase: FailurePhase::Before,
+        });
+        if !matches!(
+            require(state.log.resume_collection(&state.view).await),
+            CollectionFinish::Pending(_)
+        ) {
+            std::process::abort();
+        }
+    }
+    state
+}
+
+async fn put_blobs(log: &Log, count: usize) -> Vec<ObjectRef> {
+    let mut objects = Vec::with_capacity(count);
+    for _ in 0..count {
+        objects.push(require(log.put_object(Bytes::from_static(b"x")).await));
+    }
+    objects
+}
+
+async fn append_objects(state: &mut BenchLog, objects: Vec<ObjectRef>) {
+    let prepared = require(state.log.prepare(
+        state.view.cursor(),
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        objects,
+    ));
+    state.view = require_committed(state.log.commit(prepared).await);
 }
 
 async fn fresh_log(options: Options) -> BenchLog {
@@ -290,12 +452,13 @@ fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-criterion_group!(
-    benches,
-    benchmark_batch_size,
-    benchmark_inline_bytes,
-    benchmark_staged_bytes,
-    benchmark_tail_recovery,
-    benchmark_writer_contention
-);
+criterion_group! {
+    name = benches;
+    config = Criterion::default()
+        .sample_size(10)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(2));
+    targets = benchmark_batch_size, benchmark_inline_bytes, benchmark_staged_bytes,
+        benchmark_tail_recovery, benchmark_writer_contention, benchmark_collection
+}
 criterion_main!(benches);
