@@ -94,6 +94,7 @@ pub enum SqliteCheckpointStatus {
     Published(View),
     Conflict(View),
     Pending,
+    Expired(View),
 }
 
 impl Database {
@@ -156,16 +157,19 @@ Operation bytes and checkpoint descriptors use one canonical CBOR map:
 | 1 | `kind` | `0` snapshot; `1` WAL range |
 | 2 | `page_size` | `4096` |
 | 3 | `payload_len` | Exact reconstructed length |
-| 4 | `inline_payload` | Bytes, or null for blobs |
-| 5 | `chunk_count` | Zero inline; otherwise exact object count |
-| 6 | `wal_header` | Full 32-byte header for nonempty WAL; else null |
-| 7 | `prior_mx_frame` | Prior WAL boundary; null for snapshot |
-| 8 | `mx_frame` | New WAL boundary; null for snapshot |
+| 4 | `inline_payload` | Complete bytes for an inline payload; omitted for chunks |
+| 5 | `chunk_count` | Exact positive object count; omitted for inline payloads |
+| 6 | `wal_header` | Full 32-byte header for WAL; omitted for snapshots |
+| 7 | `prior_mx_frame` | Prior WAL boundary; omitted for snapshots |
+| 8 | `mx_frame` | New WAL boundary; omitted for snapshots |
 
-External chunks are the ordered `Blob` references in the enclosing commit or
-checkpoint. Exactly one payload form is valid. Snapshot chunks contain whole
-4096-byte pages. WAL chunks contain whole 4120-byte frames. Reject options that
-cannot hold one frame and data that exceeds byte or reference limits.
+Keys 4 and 5 are mutually exclusive. Snapshot records omit keys 6 through 8.
+WAL records require all three keys. External chunks are the ordered `Blob`
+references in the enclosing commit or checkpoint. Snapshot chunks contain
+whole 4096-byte pages. WAL chunks contain whole 4120-byte frames. Reject
+options that cannot hold one frame and data that exceeds byte or reference
+limits. [`schema/object-log-sqlite-v1.cddl`](schema/object-log-sqlite-v1.cddl)
+defines the four exact map forms.
 
 A WAL payload contains frames `prior_mx_frame + 1` through `mx_frame`. Its
 length is `(mx_frame - prior_mx_frame) * 4120`. Equal boundaries have no

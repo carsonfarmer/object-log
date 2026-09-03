@@ -1,0 +1,53 @@
+; object-log-sqlite durable record version 1
+; Store each record as canonical CBOR. CDDL does not express the alignment and
+; cross-field length checks listed after these four exact map forms.
+
+sqlite-record = snapshot-inline / snapshot-chunked / wal-inline / wal-chunked
+
+snapshot-inline = {
+  0: 1,                            ; format version
+  1: 0,                            ; snapshot
+  2: 4096,                         ; SQLite page size
+  3: payload-length,
+  4: bstr                          ; complete snapshot
+}
+
+snapshot-chunked = {
+  0: 1,
+  1: 0,
+  2: 4096,
+  3: payload-length,
+  5: chunk-count
+}
+
+wal-inline = {
+  0: 1,
+  1: 1,                            ; WAL range
+  2: 4096,
+  3: payload-length,
+  4: bstr,                         ; complete WAL frame range
+  6: bstr .size 32,                ; SQLite WAL header
+  7: uint,                         ; prior mxFrame
+  8: uint                          ; new mxFrame
+}
+
+wal-chunked = {
+  0: 1,
+  1: 1,
+  2: 4096,
+  3: payload-length,
+  5: chunk-count,
+  6: bstr .size 32,
+  7: uint,
+  8: uint
+}
+
+payload-length = uint .gt 0
+chunk-count = uint .gt 0
+
+; Snapshot payload length and each snapshot chunk are multiples of 4096.
+; WAL payload length and each WAL chunk are multiples of 4120.
+; An inline byte string has payload-length bytes and no object references.
+; A chunked record has chunk-count ordered object references.
+; For WAL, mxFrame is greater than prior mxFrame and payload-length equals
+; (mxFrame - prior mxFrame) * 4120.
