@@ -446,6 +446,43 @@ async fn recovery_token_discards_staging_proof_and_verifies_the_blob() -> TestRe
 }
 
 #[tokio::test]
+async fn recovery_token_rejects_missing_and_corrupt_blobs_before_head_update() -> TestResult {
+    for (seed, corrupt) in [(126, false), (127, true)] {
+        let (store, log, _) = open_model_log(seed).await?;
+        let view = log.load().await?;
+        let object = log
+            .put_object(view.cursor(), Bytes::from_static(b"original"))
+            .await?;
+        let blob_path = segment_path(&store, "blobs")?;
+        let prepared = log.prepare(
+            view.cursor(),
+            transaction_id(seed, 1),
+            Bytes::new(),
+            Bytes::new(),
+            vec![object],
+        )?;
+        let token = prepared.recovery_token()?;
+        if corrupt {
+            store
+                .put(&blob_path, Bytes::from_static(b"changed!").into())
+                .await?;
+        } else {
+            store.delete(&blob_path).await?;
+        }
+
+        store.reset();
+        match (corrupt, log.resume(&token).await) {
+            (false, Err(object_log::Error::InvalidFormat(_)))
+            | (true, Err(object_log::Error::CorruptObject)) => {}
+            _ => return Err(test_error("invalid blob recovery did not fail closed").into()),
+        }
+        assert_eq!(segment_gets(&store, "blobs"), 1);
+        assert_eq!(head_puts(&store), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn batched_existing_staging_deduplicates_the_object_graph() -> TestResult {
     let (store, log, _) = open_model_log(122).await?;
     let view = log.load().await?;
@@ -545,12 +582,18 @@ async fn separately_opened_handle_verifies_prepared_and_pending_work() -> TestRe
 async fn same_handle_pending_resolution_keeps_staging_proof() -> TestResult {
     let (store, log, _) = open_model_log(125).await?;
     let view = log.load().await?;
+    let child = log
+        .put_object(view.cursor(), Bytes::from_static(b"child"))
+        .await?;
+    let node = log
+        .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+        .await?;
     let prepared = log.prepare(
         view.cursor(),
         transaction_id(125, 1),
         Bytes::new(),
         Bytes::new(),
-        Vec::new(),
+        vec![node],
     )?;
     store.reset();
     schedule_head_fault(&store, FailurePhase::Before);
@@ -563,6 +606,8 @@ async fn same_handle_pending_resolution_keeps_staging_proof() -> TestResult {
         log.resolve(pending).await?,
         Resolution::Committed(_)
     ));
+    assert_eq!(segment_gets(&store, "blobs"), 0);
+    assert_eq!(segment_gets(&store, "nodes"), 0);
     assert_eq!(segment_gets(&store, "commits"), 0);
     Ok(())
 }
@@ -935,6 +980,26 @@ fn segment_gets(store: &FaultStore, segment: &str) -> usize {
         .iter()
         .filter(|event| event.operation == Operation::Get && event.path.contains(&marker))
         .count()
+}
+
+fn head_puts(store: &FaultStore) -> usize {
+    store
+        .metrics()
+        .events
+        .iter()
+        .filter(|event| event.operation == Operation::Put && event.path.ends_with("/head"))
+        .count()
+}
+
+fn segment_path(store: &FaultStore, segment: &str) -> Result<Path, Box<dyn StdError>> {
+    let marker = format!("/{segment}/");
+    store
+        .metrics()
+        .events
+        .iter()
+        .find(|event| event.operation == Operation::Put && event.path.contains(&marker))
+        .map(|event| Path::from(event.path.clone()))
+        .ok_or_else(|| test_error("immutable test object is missing").into())
 }
 
 fn transaction_id(seed: u64, number: u64) -> TransactionId {
