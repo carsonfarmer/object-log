@@ -72,7 +72,7 @@ mod tests {
         let path = directory.path().join("capture.sqlite3");
         let mut conn = connection::open(&path)?;
         conn.execute_batch("CREATE TABLE values_table (value INTEGER NOT NULL);")?;
-        let first = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        let first = committed(&conn, &wal::WalPosition::default())?;
         let header = first.position.header.ok_or("capture has no WAL header")?;
         let physical = fs::read(wal_path(&path))?;
         assert!(first.position.frames > 0);
@@ -92,7 +92,7 @@ mod tests {
                 tx.execute("INSERT INTO values_table VALUES (?1)", [value])?;
             }
         }
-        let rollback = wal::committed(&conn, PAGE_SIZE as usize, &first.position)?;
+        let rollback = committed(&conn, &first.position)?;
         assert!(rollback.bytes.is_empty());
         assert_eq!(rollback.position, first.position);
 
@@ -111,7 +111,7 @@ mod tests {
             })?,
             "1"
         );
-        let saved = wal::committed(&conn, PAGE_SIZE as usize, &first.position)?;
+        let saved = committed(&conn, &first.position)?;
         assert!(saved.position.frames > first.position.frames);
         let physical = fs::read(wal_path(&path))?;
         let frame_size = PAGE_SIZE as usize + wal::WAL_FRAME_HEADER_BYTES;
@@ -139,7 +139,7 @@ mod tests {
             "CREATE TABLE values_table (value BLOB NOT NULL);
              INSERT INTO values_table VALUES (zeroblob(819200));",
         )?;
-        let long = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        let long = committed(&conn, &wal::WalPosition::default())?;
         let long_header = long.position.header.ok_or("capture has no WAL header")?;
         let old_salts = long_header[16..24].to_owned();
         let checkpoint: (i64, i64, i64) =
@@ -149,8 +149,8 @@ mod tests {
         assert_eq!(checkpoint.0, 0);
         conn.execute("INSERT INTO values_table VALUES (x'01')", [])?;
 
-        assert!(wal::committed(&conn, PAGE_SIZE as usize, &long.position).is_err());
-        let reset = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        assert!(committed(&conn, &long.position).is_err());
+        let reset = committed(&conn, &wal::WalPosition::default())?;
         let reset_header = reset.position.header.ok_or("capture has no WAL header")?;
         let physical = fs::read(wal_path(&path))?;
         assert_eq!(reset.position.frames, 1);
@@ -167,8 +167,8 @@ mod tests {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
         assert_eq!(truncate.0, 0);
-        assert!(wal::committed(&conn, PAGE_SIZE as usize, &reset.position).is_err());
-        let empty = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        assert!(committed(&conn, &reset.position).is_err());
+        let empty = committed(&conn, &wal::WalPosition::default())?;
         assert_eq!(empty.position, wal::WalPosition::default());
         assert!(empty.bytes.is_empty());
         assert_eq!(fs::metadata(wal_path(&path))?.len(), 0);
@@ -200,7 +200,7 @@ mod tests {
             "CREATE TABLE values_table (value BLOB NOT NULL);
              INSERT INTO values_table VALUES (zeroblob(8192));",
         )?;
-        let capture = wal::committed(&conn, PAGE_SIZE as usize, &wal::WalPosition::default())?;
+        let capture = committed(&conn, &wal::WalPosition::default())?;
         let valid_header = capture.position.header.ok_or("capture has no WAL header")?;
         wal::validate_complete(&valid_header, &capture.bytes)?;
         let frame_size = PAGE_SIZE as usize + wal::WAL_FRAME_HEADER_BYTES;
@@ -257,7 +257,7 @@ mod tests {
         }
 
         conn.execute("INSERT INTO values_table VALUES (zeroblob(32768))", [])?;
-        let transaction = wal::committed(&conn, PAGE_SIZE as usize, &capture.position)?;
+        let transaction = committed(&conn, &capture.position)?;
         assert_eq!(
             wal::validate_record(&valid_header, &transaction.bytes, capture.position)?,
             transaction.position
@@ -282,6 +282,13 @@ mod tests {
             Err(SqliteError::InvalidWal(message)) if message == expected => Ok(()),
             other => Err(format!("expected {expected:?}, got {other:?}").into()),
         }
+    }
+
+    fn committed(
+        connection: &rusqlite::Connection,
+        prior: &wal::WalPosition,
+    ) -> Result<wal::WalCapture, SqliteError> {
+        wal::committed(connection, prior, usize::MAX)
     }
 
     fn wal_path(database: &Path) -> PathBuf {

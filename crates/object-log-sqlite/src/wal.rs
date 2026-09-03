@@ -26,30 +26,29 @@ pub(crate) struct WalCapture {
     pub(crate) bytes: Bytes,
 }
 
-pub(crate) fn committed(
-    conn: &Connection,
-    page_size: usize,
-    prior: &WalPosition,
-) -> Result<WalCapture, SqliteError> {
-    if page_size != 4_096 {
-        return Err(invalid("WAL page size is not 4096 bytes"));
-    }
+pub(crate) fn committed_frames(conn: &Connection) -> Result<u32, SqliteError> {
     let mut frames: c_int = 0;
-    let mut checkpointed: c_int = 0;
     // SAFETY: `conn` stays alive and no other SQLite call runs in this scope.
     let db = unsafe { conn.handle() };
-    // SAFETY: The database name is static. SQLite writes two integer outputs.
+    // SAFETY: The database name is static. SQLite writes the frame count.
     check(unsafe {
         ffi::sqlite3_wal_checkpoint_v2(
             db,
             c"main".as_ptr(),
             ffi::SQLITE_CHECKPOINT_NOOP,
             &raw mut frames,
-            &raw mut checkpointed,
+            ptr::null_mut(),
         )
     })?;
-    let frames =
-        u32::try_from(frames).map_err(|_| invalid("SQLite returned a negative frame count"))?;
+    u32::try_from(frames).map_err(|_| invalid("SQLite returned a negative frame count"))
+}
+
+pub(crate) fn committed(
+    conn: &Connection,
+    prior: &WalPosition,
+    max_bytes: usize,
+) -> Result<WalCapture, SqliteError> {
+    let frames = committed_frames(conn)?;
     if frames == 0 {
         if prior.frames != 0 {
             return Err(invalid("WAL reset without a durable checkpoint"));
@@ -59,8 +58,19 @@ pub(crate) fn committed(
             bytes: Bytes::new(),
         });
     }
+    if prior.frames > frames {
+        return Err(invalid("WAL reset without a durable checkpoint"));
+    }
+    let len = usize::try_from(frames - prior.frames)?
+        .checked_mul(WAL_FRAME_BYTES)
+        .ok_or(SqliteError::PayloadLimit)?;
+    if len > max_bytes {
+        return Err(SqliteError::PayloadLimit);
+    }
 
     let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
+    // SAFETY: `conn` stays alive and no other SQLite call runs in this scope.
+    let db = unsafe { conn.handle() };
     // SAFETY: SQLite writes one borrowed file pointer. It is not retained.
     check(unsafe {
         ffi::sqlite3_file_control(
@@ -91,16 +101,13 @@ pub(crate) fn committed(
         .try_into()
         .map_err(|_| invalid("the WAL header is truncated"))?;
     validate_header(&header)?;
-    if prior.frames > frames || (prior.frames != 0 && prior.header != Some(header)) {
+    if prior.frames != 0 && prior.header != Some(header) {
         return Err(invalid("WAL reset without a durable checkpoint"));
     }
     let offset = usize::try_from(prior.frames)?
         .checked_mul(WAL_FRAME_BYTES)
         .and_then(|value| value.checked_add(WAL_HEADER_BYTES))
         .ok_or_else(|| invalid("WAL read offset overflow"))?;
-    let len = usize::try_from(frames - prior.frames)?
-        .checked_mul(WAL_FRAME_BYTES)
-        .ok_or_else(|| invalid("WAL read length overflow"))?;
     let end = offset
         .checked_add(len)
         .ok_or_else(|| invalid("WAL read length overflow"))?;
@@ -237,7 +244,11 @@ fn read_exact(
     mut offset: i64,
     len: usize,
 ) -> Result<Bytes, SqliteError> {
-    let mut bytes = vec![0_u8; len];
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| SqliteError::PayloadLimit)?;
+    bytes.resize(len, 0);
     for chunk in bytes.chunks_mut(c_int::MAX as usize) {
         let amount = c_int::try_from(chunk.len())?;
         // SAFETY: The chunk is writable. SQLite owns the live file and method
