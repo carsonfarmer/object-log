@@ -72,6 +72,13 @@ establish a portable SQLite contract. Do not add a custom VFS in v1. Restore
 may write a validated standard WAL before SQLite opens the cache under the
 selected built-in filesystem VFS.
 
+This gate passed on macOS and Linux with bundled SQLite 3.53.2. The prototype
+read the exact committed prefix after commit, rollback, savepoint rollback,
+WAL reset, salt change, stale physical suffix, and truncation. Proceed with
+the journal-pointer design under its single-owner and built-in-filesystem-VFS
+limits. Keep the proof cases as adapter tests. See
+[`docs/evidence/sqlite-wal-prototype-2026-09-03.md`](docs/evidence/sqlite-wal-prototype-2026-09-03.md).
+
 ## Public API
 
 ```rust

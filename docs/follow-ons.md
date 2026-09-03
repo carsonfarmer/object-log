@@ -33,8 +33,9 @@ The selected demonstration contract and implementation gates are in
 - Benchmarks report commit latency, write amplification, cold recovery, warm
   queries, and object-store requests.
 
-The plan selects a raw SQLite WAL and snapshot design. Its first gate compares
-two ways to read the committed WAL range before implementation starts.
+The plan selects a raw SQLite WAL and snapshot design. Its first gate accepted
+SQLite's public journal-pointer control after the same local proof passed on
+macOS and Linux. Adapter implementation is next.
 
 ## 2. WASI filesystem storage
 

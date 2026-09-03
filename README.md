@@ -19,8 +19,9 @@ The durable model is small:
 The project is independent from Spin. The first consumer is a small key-value
 state machine. The log, checkpoints, object graph, Cursor-style bounded garbage
 collection, local benchmarks, and `MinIO` compatibility flow are complete for
-local use. The [`SQLite` demonstration plan](SQLITE_PLAN.md) is complete and
-implementation is next. See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
+local use. The [`SQLite` demonstration plan](SQLITE_PLAN.md) is complete. Its
+WAL-access gate passed on local macOS and Linux, and adapter implementation is
+next. See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
 [docs/design.md](docs/design.md) for the current core contract.
 
 See [docs/follow-ons.md](docs/follow-ons.md) for the ordered `SQLite`, WASI
@@ -43,4 +44,6 @@ empty test bucket and removes the container when the test ends. It does not use
 a cloud account. The flow includes a 1,001-object collection boundary. See the
 [initial baseline](docs/evidence/local-baseline-2026-09-02.md) and the
 [GC evidence](docs/evidence/gc-local-2026-09-03.md) for measured local results
-and their limits.
+and their limits. See the
+[`SQLite` WAL prototype evidence](docs/evidence/sqlite-wal-prototype-2026-09-03.md)
+for the accepted low-level WAL access boundary.
