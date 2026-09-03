@@ -6,6 +6,10 @@ rust-version = "1.97"
 description = "A linearizable log over conditional object storage"
 license = "Apache-2.0"
 
+[workspace]
+members = ["crates/object-log-kv"]
+resolver = "3"
+
 [dependencies]
 async-trait = "0.1"
 blake3 = "1.8"

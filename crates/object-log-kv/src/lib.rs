@@ -1,11 +1,13 @@
 //! Small key-value state machine used to prove the generic log contract.
 
+#![deny(missing_docs)]
+
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use minicbor::{Decode, Encode};
 
-use crate::materialize::Materializer;
+use object_log::{Materializer, ObjectRef};
 
 const KV_FORMAT_VERSION: u32 = 1;
 
@@ -203,7 +205,7 @@ impl Materializer for KvMachine {
     fn restore(
         &self,
         checkpoint: &[u8],
-        _objects: &[crate::ObjectRef],
+        _objects: &[ObjectRef],
     ) -> Result<Self::State, Self::Error> {
         let snapshot: SnapshotWire = decode(checkpoint)?;
         require_version(snapshot.version)?;
@@ -233,7 +235,7 @@ impl Materializer for KvMachine {
         state: &mut Self::State,
         _sequence: u64,
         operation: &[u8],
-        _objects: &[crate::ObjectRef],
+        _objects: &[ObjectRef],
     ) -> Result<(), Self::Error> {
         let mutation: MutationWire = decode(operation)?;
         require_version(mutation.version)?;

@@ -3,7 +3,6 @@
 #![deny(missing_docs)]
 
 mod format;
-pub mod kv;
 mod log;
 mod materialize;
 mod store;

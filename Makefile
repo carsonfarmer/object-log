@@ -2,14 +2,14 @@
 
 check:
 	cargo fmt --all --check
-	cargo clippy --all-targets --all-features -- -D warnings
-	cargo test --all-features
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	cargo test --workspace --all-features
 
 test:
-	cargo test --all-features
+	cargo test --workspace --all-features
 
 bench:
-	cargo bench --all-features
+	cargo bench --workspace --all-features
 
 minio-test:
 	./scripts/test-minio.sh

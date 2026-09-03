@@ -1114,6 +1114,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "object-log-kv"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "minicbor",
+ "object-log",
+ "object_store",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "object_store"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

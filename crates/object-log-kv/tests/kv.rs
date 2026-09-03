@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::future::join_all;
-use object_log::kv::{KvCommand, KvDecision, KvError, KvMachine, KvResult, KvState};
 use object_log::{
     CheckpointStatus, CommitStatus, Log, LogId, Materializer, Options, Resolution, TransactionId,
     ValidatedBackend, materialize,
 };
+use object_log_kv::{KvCommand, KvDecision, KvError, KvMachine, KvResult, KvState};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 

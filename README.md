@@ -16,12 +16,13 @@ The durable model is small:
 - Local memory and disk are optional caches.
 - One validated backend handle serves many isolated tenant logs.
 
-The project is independent from Spin. The first consumer is a small key-value
-state machine. The log, checkpoints, object graph, Cursor-style bounded garbage
-collection, local benchmarks, and `MinIO` compatibility flow are complete for
-local use. The [`SQLite` demonstration plan](SQLITE_PLAN.md) is complete. Its
-WAL-access gate passed on local macOS and Linux, and adapter implementation is
-next. See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
+The project is independent from Spin. The
+[`object-log-kv`](crates/object-log-kv) crate is its first consumer and uses
+only the public core API. The log, checkpoints, object graph, Cursor-style
+bounded garbage collection, local benchmarks, and `MinIO` compatibility flow
+are complete for local use. The [`SQLite` demonstration plan](SQLITE_PLAN.md)
+is complete. Its WAL-access gate passed on local macOS and Linux, and adapter
+implementation is next. See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
 [docs/design.md](docs/design.md) for the current core contract.
 
 See [docs/follow-ons.md](docs/follow-ons.md) for the ordered `SQLite`, WASI
