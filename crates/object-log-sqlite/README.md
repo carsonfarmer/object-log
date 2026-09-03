@@ -6,7 +6,8 @@ can rebuild from a snapshot and later WAL ranges.
 
 The crate is a local demonstration. It uses bundled SQLite, a 4096-byte page
 size, and SQLite's built-in filesystem VFS. The regular tests use an in-memory
-object store. MinIO, benchmarks, and a Spin factor remain follow-on work.
+object store. The crate also has Criterion benchmarks and an opt-in loopback
+MinIO test. A Spin factor remains follow-on work.
 
 ## Workflow
 
@@ -19,21 +20,53 @@ If publication has an uncertain result, pass that token to `resume`. Do not run
 the write callback again. Call `checkpoint` to publish a complete snapshot and
 start a new WAL epoch.
 
+Large snapshots and WAL ranges use ordered object chunks. Upload and recovery
+keep at most 32 object operations in flight. The adapter checks configured
+payload limits before it loads a snapshot or WAL range into memory.
+
 ## Safety boundary
 
 The write callback receives a trusted `rusqlite::Transaction`. An authorizer
-rejects attachment, pragmas, outer transaction control, and writes outside the
-main database. This policy is a guard for trusted Rust code. It is not a guest
-sandbox, and a Spin guest does not receive the callback or SQLite handle.
+allows DDL and DML on the main database, including `ALTER TABLE`. It rejects
+attachment, pragmas, outer transaction control, and writes outside the main
+database. The adapter flushes SQLite's prepared-statement cache before each
+user callback so a statement prepared under write policy cannot run under read
+policy. This policy protects trusted Rust extensions. A Spin guest does not
+receive the callback or SQLite handle.
 
 Each live `Database` owns its connection and holds an operating-system lock for
 its cache path. The crate rejects a second instance for that path in the same
 process or another process. Independent hosts must use separate cache paths.
+
+## Checks
+
+From the repository root, run the local suite with:
+
+```sh
+cargo test --package object-log-sqlite --all-features
+```
+
+Run the Criterion matrix with:
+
+```sh
+cargo bench --package object-log-sqlite --bench sqlite --all-features
+```
+
+Run the loopback MinIO flow with:
+
+```sh
+make sqlite-minio-test
+```
+
+The MinIO script pins its container image, creates an empty bucket, and checks
+container removal. See the
+[local evidence](../../docs/evidence/sqlite-local-2026-09-03.md) for the
+measured results and limits.
 
 ## Current limits
 
 Object-log publication defines durability. SQLite uses `synchronous=NORMAL`, so
 an operating-system or power failure can remove unpublished local changes.
 Cold open rebuilds from the object log. The current crate has no Windows or
-custom-VFS proof, production object-store qualification, Spin integration, or
-remote performance data.
+custom-VFS proof, live AWS qualification, Spin integration, sanitizer result,
+Miri result, or remote performance data.

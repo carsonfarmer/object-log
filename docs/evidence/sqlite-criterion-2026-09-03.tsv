@@ -1,0 +1,11 @@
+benchmark	confidence_level	lower_bound_ns	point_estimate_ns	upper_bound_ns
+sqlite/checkpoint/database/100_mib	0.95	213866144.25	230326349.9	261498812.3
+sqlite/checkpoint/database/1_mib	0.95	2317908.5217	2381614.1546	2473168.8380
+sqlite/cold_recovery/tail/10	0.95	382043.4889	385306.7595	389305.4295
+sqlite/cold_recovery/tail/1000	0.95	12256376.7799	12395557.6924	12561300.8030
+sqlite/conflict/adapter/publish_and_rebuild	0.95	292622.1956	299346.8715	309846.8192
+sqlite/read/adapter/unchanged_refresh	0.95	3242.0458	3262.9720	3287.0882
+sqlite/transaction/1_mib/adapter	0.95	3956307.6765	4003060.6466	4069194.8012
+sqlite/transaction/1_mib/direct	0.95	3709514.7977	3761475.3371	3808180.4113
+sqlite/transaction/small/adapter	0.95	66589.0561	67109.3984	67909.3186
+sqlite/transaction/small/direct	0.95	59288.0397	100739.1055	158069.4750

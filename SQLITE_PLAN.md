@@ -2,13 +2,13 @@
 
 ## Outcome
 
-Build `object-log-sqlite` as a demonstration of the generic object-log WAL.
-One log is the durable history for one SQLite database. The local database is
-a disposable cache. This tranche does not include a Spin factor.
+`object-log-sqlite` now demonstrates the generic object-log WAL. One log is
+the durable history for one SQLite database. The local database is a
+disposable cache. This tranche does not include a Spin factor.
 
-Move the key-value example to `object-log-kv`. Both adapter crates use only the
-public `object-log` API. The only proposed core addition is a read-only getter
-that prevents a duplicate limit configuration.
+The key-value example lives in `object-log-kv`. Both adapter crates use only
+the public `object-log` API. The core exposes the fixed options through this
+read-only getter:
 
 ```rust
 impl Log {
@@ -51,11 +51,12 @@ impl Log {
 failure. This is acceptable because only object-log publication confirms
 durability. A cold open always rebuilds from object-log.
 
-The private cache state has only `Clean`, `Dirty`, `PendingCommit`, and
-`PendingCheckpoint`. Set `Dirty` before the write callback. Restore `Clean`
-only after an explicit successful rollback or an unchanged transaction. Set
-`PendingCommit` before the head-CAS await. Only exact resume is valid from that
-state.
+The private cache state has `Clean`, `Dirty`, and `PendingCheckpoint`. Set
+`Dirty` before the write callback. Restore `Clean` only after an explicit
+successful rollback, an unchanged transaction, a confirmed publication, or a
+rebuild. A staged or uncertain commit leaves the cache dirty. Only exact
+resume can classify its recovery token. `PendingCheckpoint` retains the
+in-process checkpoint evidence needed by a repeated `checkpoint` call.
 
 ## First gate: WAL access
 
@@ -79,6 +80,9 @@ WAL reset, salt change, stale physical suffix, and truncation. Proceed with
 the journal-pointer design under its single-owner and built-in-filesystem-VFS
 limits. Keep the proof cases as adapter tests. See
 [`docs/evidence/sqlite-wal-prototype-2026-09-03.md`](docs/evidence/sqlite-wal-prototype-2026-09-03.md).
+The implemented private module has 22 lines inside its unsafe blocks. The
+approved limit is 50. Each block has a local safety statement, and the module
+does not retain the borrowed SQLite file pointer.
 
 ## Public API
 
@@ -124,12 +128,19 @@ impl StagedWrite<'_> {
 }
 ```
 
-`stage_write` refreshes, rebuilds if needed, runs and commits the local
-transaction, and reads the new logical WAL boundary. Equal old and new
-boundaries return `StageStatus::ReadOnly(result)`. This result has no durable
-publication claim. A changed first transaction stages a snapshot. A later one
-stages its exact WAL range and computes the core recovery token without a head
-update.
+`stage_write` refreshes and rebuilds if needed. It checks deterministic tail
+and transaction-ID preconditions before it calls application code. It then
+runs and commits the local transaction. A zero committed-frame count returns
+`StageStatus::ReadOnly(result)`. This result has no durable publication claim.
+A changed first transaction stages a snapshot without reading its WAL. A later
+transaction stages its exact WAL range and computes the core recovery token
+without a head update.
+
+Snapshot and WAL sizes derive from `Log::options()`. The adapter rejects an
+oversized WAL before its VFS read and rejects an oversized backup before it
+loads the file into memory. Large payloads use zero-copy `Bytes` slices for
+uploads. Upload and recovery preserve chunk order with at most 32 object
+operations in flight.
 
 The caller must persist `StagedWrite::result()` and
 `StagedWrite::recovery_token()` together before `publish`. A lost caller record
@@ -144,8 +155,10 @@ and step. Deny `ATTACH`, `DETACH`, outer transaction control, all pragmas,
 extension loading, direct schema-table writes, and mutations outside `main`,
 including `TEMP`. The read callback also denies mutations. Allow savepoints.
 Enable defensive mode and disable trusted schema. Because `Transaction` can
-access its connection, callbacks remain trusted Rust extension points. A Spin
-guest will not receive this callback or SQLite handle.
+access its connection, callbacks remain trusted Rust extension points. Flush
+SQLite's prepared-statement cache before each callback so a cached statement
+cannot cross a read or write policy transition. A Spin guest will not receive
+this callback or SQLite handle.
 
 ## Durable SQLite record v1
 
@@ -185,19 +198,17 @@ opens SQLite. Exact final `mxFrame` verification is the production recovery
 test. `PRAGMA integrity_check` is acceptance and corruption-test evidence only.
 Result bytes stay in the core commit result field.
 
-## Required evidence
+## Evidence status
 
-| Area | Required deterministic cases |
-|---|---|
-| Prototype | Journal pointer reads and file size; commit; rollback; savepoint rollback; old suffix; reset; salts; zero frames; each supported OS |
-| Format | Stable golden bytes; reject unknown, noncanonical, mixed payload, page, count, length, order, header, salt, checksum, commit-marker, and chunk errors |
-| Bootstrap | Empty open; read-only first call; first changed snapshot; conflict; pending; confirmed truncate; later WAL replay |
-| Transactions | Callback error; savepoint rollback; schema and data writes; result bytes; over 64 KiB; multiple chunks; every limit |
-| Publication | Commit; conflict; lost success; all resume results; cancellation at every object-store await; callback runs once |
-| Reads and races | Unchanged refresh; changed rebuild; refresh failure before callback; two cache paths race one log; same-path rejection |
-| Recovery and GC | Removed cache; snapshot plus 10 and 1,000 tail records; corrupt or missing data; exact recovered `mxFrame`; rebuild during collection; acceptance integrity check |
-| Checkpoint | Consistent backup; publish before truncate; conflict; pending; cancellation; busy or partial truncate; new epoch; 1 MiB and 100 MiB |
-| Policy and backends | Dangerous SQL and TEMP writes rejected; ordinary main DDL, DML, triggers, and savepoints work; memory suite; one opt-in MinIO flow |
+| Area | Implemented local evidence | Remaining qualification |
+|---|---|---|
+| WAL access | Exact committed prefixes, rollback, savepoint rollback, old suffix, reset, salts, and truncation on macOS and Linux | Windows and each additional VFS |
+| Format and bounds | Canonical v1 golden bytes, corrupt records and WALs, chunk order, declared sizes, allocation bounds, and first-snapshot capacity | Release compatibility policy after the first release |
+| Transactions | Changed and read-only work, callback rollback, savepoints, main DDL and DML, policy rejection, inline and chunked payloads | Spin guest boundary |
+| Publication | Commit, conflict, lost success, exact resume results, cancellation, callback-once behavior, and checkpoint resolution | Live provider fault campaign |
+| Recovery and GC | Deleted-cache recovery, exact WAL verification, integrity checks, 10- and 1,000-record benchmark states, collection cleanup, and collection-race recovery | Larger retained recovery matrix |
+| Checkpoints | Backup, publish-before-truncate, conflict, pending, cancellation before and after CAS, expiry, new epochs, and 1 MiB and 100 MiB benchmarks | Remote latency and request accounting |
+| Backends | In-memory tests and one pinned loopback MinIO flow | Live AWS qualification |
 
 A rebuild retries the current view if collection expires an older view during
 snapshot, tail, or blob reads. It verifies that history did not change before
@@ -206,46 +217,54 @@ MinIO proves only local compatibility and cleanup.
 
 ## Benchmarks
 
-Use Criterion with 10 samples, a 1-second warm-up, and a 2-second measurement.
-Keep setup outside timing. Compare direct SQLite with the adapter for a small
-inline write, a 1 MiB external write, a multi-chunk transaction, an unchanged
-refreshed read, conflict rebuild, cold recovery with 10 and 1,000 tail records,
-and 1 MiB and 100 MiB checkpoints. Record latency, logical and transferred
-bytes, object requests, and stored WAL or snapshot bytes. Record memory results
-as the local baseline. Do not claim remote latency from MinIO.
+The Criterion suite uses 10 samples, a 1-second warm-up, and a 2-second
+measurement. Its six groups contain 10 benchmark IDs: direct and adapter
+transactions at 64 bytes and 1 MiB, unchanged adapter read, conflict publish
+and rebuild, cold recovery with 10 and 1,000 tail records, and checkpoints at
+1 MiB and 100 MiB. Setup stays outside the timed sections.
+
+The retained local run covers all 10 IDs. It uses the in-memory object-store
+backend on one macOS host. It records latency and declared throughput. Request
+counts and write amplification are not instrumented yet. See the
+[SQLite local evidence](docs/evidence/sqlite-local-2026-09-03.md) and
+[raw intervals](docs/evidence/sqlite-criterion-2026-09-03.tsv). MinIO results
+do not measure remote latency.
 
 ## Limits and stop gates
 
-- Core product change: at most 10 lines.
-- SQLite product code target: 700 lines, including at most 50 approved unsafe
-  lines. Tests and support target: 1,100. Benchmarks target: 200. The first
-  complete implementation exceeded the product target, so an independent
-  correctness and deletion review is required before integration.
-- Implementation documentation and workspace changes: 160 lines. This budget
-  excludes this task record. The key-value move has near-zero net growth.
+The original 700 product-line, 1,100 test-line, and 200 benchmark-line targets
+triggered independent correctness and deletion reviews. The Rust-skills pass
+removed 44 net product lines. The WAL boundary uses 22 of the 50 approved
+unsafe lines. See the local evidence for the current repository counts and the
+count command.
 
-Stop before implementation if the journal-pointer prototype fails. Stop for
-owner approval before the prototype, another core API, a custom VFS, another
-authority, untrusted Rust callbacks, closure replay, or multiple local
-connections. Run an independent correctness and line-deletion review if product
-code exceeds 700 lines or any unsafe code remains.
+Stop for owner approval before another core API, a custom VFS, another durable
+authority, untrusted Rust callbacks, callback replay, or multiple local
+connections. Run the WAL-access proof on each newly supported system or VFS.
 
 ## Implementation tasks
 
-1. Obtain owner approval, then prove and review journal-pointer WAL capture.
-2. Create the workspace and move key-value code to its public-only crate.
-3. Add and test `Log::options()`.
-4. Add the SQLite crate, bundled checks, connection, and cache states.
-5. Add v1 codec validation and hybrid payload chunking.
-6. Add the authorizer and trusted callbacks.
-7. Add expiry-safe cold rebuild and standard WAL replay.
-8. Add refresh and first-change snapshot staging.
-9. Add WAL staging, publication, and exact resume.
-10. Add conflict recovery without callback replay.
-11. Add backup, checkpoint publication, and confirmed truncation.
-12. Add deterministic, fault, race, and backend tests.
-13. Add Criterion cases and the opt-in MinIO flow.
-14. Run correctness, unsafe, line, and simplification reviews.
+1. [x] Obtain owner approval, then prove and review journal-pointer WAL capture.
+2. [x] Create the workspace and move key-value code to its public-only crate.
+3. [x] Add and test `Log::options()`.
+4. [x] Add the SQLite crate, bundled checks, connection, and cache states.
+5. [x] Add v1 codec validation and hybrid payload chunking.
+6. [x] Add the authorizer and trusted callbacks.
+7. [x] Add expiry-safe cold rebuild and standard WAL replay.
+8. [x] Add refresh and first-change snapshot staging.
+9. [x] Add WAL staging, publication, and exact resume.
+10. [x] Add conflict recovery without callback replay.
+11. [x] Add backup, checkpoint publication, and confirmed truncation.
+12. [x] Add deterministic, fault, race, GC, and backend tests.
+13. [x] Add Criterion cases and the opt-in MinIO flow.
+14. [x] Run correctness, unsafe, line, and simplification reviews.
+
+## Remaining qualification
+
+1. Run the native memory-safety sanitizer for the WAL FFI boundary.
+2. Prove Windows or another VFS before adding it to the support statement.
+3. Run the reviewed live AWS campaign.
+4. Design the Spin factor around this public adapter API.
 
 ## Primary references
 

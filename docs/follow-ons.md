@@ -1,8 +1,8 @@
 # Ordered follow-on goals
 
-The local log, checkpoint, key-value proof, bounded garbage collection,
-benchmarks, and MinIO compatibility flow are complete. Each next goal keeps
-object storage as the durable authority.
+The local log, checkpoint, key-value proof, bounded garbage collection, and
+SQLite demonstration are implemented. Each next goal keeps object storage as
+the durable authority.
 
 ## Completed: garbage collection
 
@@ -11,10 +11,12 @@ The implementation contract and completion record are in
 reader retention, a positive durable plan and fence, complete-set retry, view
 expiry, and best-effort plan-object cleanup. Current qualification is local.
 
-## 1. SQLite storage
+## Completed locally: SQLite storage
 
 The selected demonstration contract and implementation gates are in
-[`SQLITE_PLAN.md`](../SQLITE_PLAN.md). Implementation is the current goal.
+[`SQLITE_PLAN.md`](../SQLITE_PLAN.md). The adapter uses a disposable SQLite
+cache, a canonical v1 record, committed WAL ranges, bounded payloads, and
+32-way ordered object transfers.
 
 ### Required contract
 
@@ -25,19 +27,21 @@ The selected demonstration contract and implementation gates are in
 - The adapter defines its page size, journal mode, lock behavior, and maximum
   recovery work.
 
-### Required evidence
+### Local evidence
 
-- Transaction, rollback, crash, and concurrent-writer tests pass.
-- Recovery is byte-stable or logically equivalent after each committed state.
-- Tests cover large transactions and checkpoint races.
-- Benchmarks report commit latency, write amplification, cold recovery, warm
-  queries, and object-store requests.
+- The memory suite covers transactions, rollback, uncertain results,
+  cancellation, conflicting writers, checkpoints, allocation limits,
+  collection, and deleted-cache recovery.
+- The loopback MinIO flow covers chunked writes, uncertain publication,
+  checkpointing, collection, and cold recovery.
+- The Criterion suite covers 10 local latency cases. It does not count object
+  requests or measure a remote service.
 
-The plan selects a raw SQLite WAL and snapshot design. Its first gate accepted
-SQLite's public journal-pointer control after the same local proof passed on
-macOS and Linux. Adapter implementation is next.
+The same WAL-access proof passed on macOS and Linux with SQLite's public
+journal-pointer control. Windows, other VFS implementations, a native
+memory-safety sanitizer, live AWS, and Spin integration remain.
 
-## 2. Minimal serverless Git
+## 1. Minimal serverless Git
 
 Build `object-log-git` as a separate demonstration crate after SQLite. One log
 owns one Git repository. Immutable Git packs contain objects. One object-log
@@ -50,7 +54,7 @@ serverless invocation. It keeps transport and authentication outside the
 storage crate. A push conflict returns the current repository view and requires
 the caller to validate the ref preconditions again.
 
-## 3. WASI filesystem storage
+## 2. WASI filesystem storage
 
 ### Required contract
 
@@ -73,7 +77,7 @@ the caller to validate the ref preconditions again.
 - Benchmarks report metadata latency, sequential and random I/O, cold restore,
   write amplification, and object-store requests.
 
-## 4. Live AWS qualification
+## 3. Live AWS qualification
 
 Live AWS qualification is separate from local product completion.
 
