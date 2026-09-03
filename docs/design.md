@@ -3,18 +3,30 @@
 ## Storage layout
 
 ```text
-<prefix>/v1/logs/<log-id>/head
-<prefix>/v1/logs/<log-id>/commits/<digest>
-<prefix>/v1/logs/<log-id>/blobs/<digest>
-<prefix>/v1/logs/<log-id>/checkpoints/<digest>
+<prefix>/v1/logs/<log-id>/index.cbor
+<prefix>/v1/logs/<log-id>/wal/<digest>.cbor
+<prefix>/v1/logs/<log-id>/objects/<digest>
+<prefix>/v1/logs/<log-id>/bases/<digest>.cbor
 ```
 
 The library derives every key. A caller cannot supply a raw object path after
 opening a log.
 
-Only `head` is mutable. Its update version is an opaque token supplied by the
+Only `index.cbor` is mutable. Its update version is an opaque token supplied by the
 object store. Every other object uses create-only publication at a digest-based
 key.
+
+This structure follows Cursor's mutable metadata plus immutable object model.
+It also follows Micelio's concrete split between one index, ordered entry
+pointers, content-addressed WAL entries, payload objects, and bases. The Rust
+type `Head` is the decoded index. The Rust type `Commit` is one WAL entry.
+
+The durable encoding is CBOR, not Protobuf. Each structure is a CBOR map with
+stable positive integer keys. The exact schema is in
+`schema/object-log-v1.cddl`. Encoders write keys in ascending order. Decoders
+ignore unknown map fields, but a writer rejects a future format version before
+it can replace the index. The first release does not support mixed
+major-version writers.
 
 ## Head
 
@@ -31,8 +43,10 @@ integrity_digest
 ```
 
 `generation` increases for every head update, including maintenance updates.
-`tail` is ordered. Each element contains a sequence, transaction ID, commit
-digest, and state digest when a materializer supplies one.
+`tail` is ordered. Each element contains a sequence, transaction ID, entry
+digest, and encoded entry length. As in Micelio, the immutable entry has no
+assigned sequence. The mutable index pointer assigns its position. This keeps
+the entry content-addressable before publication.
 
 `recent_outcomes` is a bounded resolution window. It records enough data to
 identify the result of a recent transaction after checkpointing removes its

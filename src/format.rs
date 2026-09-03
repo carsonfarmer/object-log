@@ -6,7 +6,7 @@
 
 use crate::{CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, TransactionId};
 use bytes::Bytes;
-use prost::Message;
+use minicbor::{Decode, Encode};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -110,98 +110,107 @@ pub(crate) struct Checkpoint {
     pub snapshot: Bytes,
 }
 
-#[derive(Clone, PartialEq, Message)]
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
 struct EnvelopeWire {
-    #[prost(bytes = "vec", tag = "1")]
+    #[cbor(n(1), with = "minicbor::bytes")]
     payload: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
+    #[cbor(n(2), with = "minicbor::bytes")]
     digest: Vec<u8>,
 }
 
-#[derive(Clone, PartialEq, Message)]
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
 struct HeadWire {
-    #[prost(uint32, tag = "1")]
+    #[n(1)]
     format_version: u32,
-    #[prost(string, tag = "2")]
+    #[n(2)]
     log_id: String,
-    #[prost(uint64, tag = "3")]
+    #[n(3)]
     generation: u64,
-    #[prost(uint64, tag = "4")]
+    #[n(4)]
     next_sequence: u64,
-    #[prost(message, optional, tag = "5")]
+    #[n(5)]
     checkpoint: Option<CheckpointRefWire>,
-    #[prost(message, repeated, tag = "6")]
+    #[n(6)]
     tail: Vec<CommitRefWire>,
-    #[prost(message, repeated, tag = "7")]
+    #[n(7)]
     recent_outcomes: Vec<CommitRefWire>,
 }
 
-#[derive(Clone, PartialEq, Message)]
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
 struct CommitWire {
-    #[prost(uint32, tag = "1")]
+    #[n(1)]
     format_version: u32,
-    #[prost(string, tag = "2")]
+    #[n(2)]
     log_id: String,
-    #[prost(bytes = "vec", tag = "3")]
+    #[cbor(n(3), with = "minicbor::bytes")]
     transaction_id: Vec<u8>,
-    #[prost(uint64, tag = "4")]
+    #[n(4)]
     expected_generation: u64,
-    #[prost(bytes = "vec", optional, tag = "5")]
+    #[cbor(n(5), with = "minicbor::bytes")]
     expected_tip: Option<Vec<u8>>,
-    #[prost(bytes = "vec", tag = "6")]
+    #[cbor(n(6), with = "minicbor::bytes")]
     operation: Vec<u8>,
-    #[prost(bytes = "vec", tag = "7")]
+    #[cbor(n(7), with = "minicbor::bytes")]
     result: Vec<u8>,
-    #[prost(message, repeated, tag = "8")]
+    #[n(8)]
     objects: Vec<ObjectRefWire>,
 }
 
-#[derive(Clone, PartialEq, Message)]
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
 struct CheckpointWire {
-    #[prost(uint32, tag = "1")]
+    #[n(1)]
     format_version: u32,
-    #[prost(string, tag = "2")]
+    #[n(2)]
     log_id: String,
-    #[prost(uint64, tag = "3")]
+    #[n(3)]
     through_sequence: u64,
-    #[prost(bytes = "vec", tag = "4")]
+    #[cbor(n(4), with = "minicbor::bytes")]
     through_commit: Vec<u8>,
-    #[prost(bytes = "vec", tag = "5")]
+    #[cbor(n(5), with = "minicbor::bytes")]
     snapshot: Vec<u8>,
 }
 
-#[derive(Clone, PartialEq, Message)]
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
 struct CommitRefWire {
-    #[prost(uint64, tag = "1")]
+    #[n(1)]
     sequence: u64,
-    #[prost(bytes = "vec", tag = "2")]
+    #[cbor(n(2), with = "minicbor::bytes")]
     transaction_id: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
+    #[cbor(n(3), with = "minicbor::bytes")]
     digest: Vec<u8>,
-}
-
-#[derive(Clone, PartialEq, Message)]
-struct CheckpointRefWire {
-    #[prost(uint64, tag = "1")]
-    through_sequence: u64,
-    #[prost(bytes = "vec", tag = "2")]
-    through_commit: Vec<u8>,
-    #[prost(message, optional, tag = "3")]
-    object: Option<ObjectRefWire>,
-}
-
-#[derive(Clone, PartialEq, Message)]
-struct ObjectRefWire {
-    #[prost(enumeration = "ObjectKindWire", tag = "1")]
-    kind: i32,
-    #[prost(bytes = "vec", tag = "2")]
-    digest: Vec<u8>,
-    #[prost(uint64, tag = "3")]
+    #[n(4)]
     len: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
+struct CheckpointRefWire {
+    #[n(1)]
+    through_sequence: u64,
+    #[cbor(n(2), with = "minicbor::bytes")]
+    through_commit: Vec<u8>,
+    #[n(3)]
+    object: Option<ObjectRefWire>,
+}
+
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
+struct ObjectRefWire {
+    #[n(1)]
+    kind: u8,
+    #[cbor(n(2), with = "minicbor::bytes")]
+    digest: Vec<u8>,
+    #[n(3)]
+    len: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum ObjectKindWire {
     Unspecified = 0,
     Blob = 1,
@@ -210,7 +219,7 @@ enum ObjectKindWire {
 
 pub(crate) fn encode_head(head: &Head) -> Result<Bytes, Error> {
     head.validate()?;
-    Ok(encode_envelope(&HeadWire {
+    encode_envelope(&HeadWire {
         format_version: FORMAT_VERSION,
         log_id: head.log_id.to_string(),
         generation: head.generation,
@@ -222,7 +231,7 @@ pub(crate) fn encode_head(head: &Head) -> Result<Bytes, Error> {
             .iter()
             .map(CommitRefWire::from)
             .collect(),
-    }))
+    })
 }
 
 pub(crate) fn decode_head(bytes: &[u8]) -> Result<Head, Error> {
@@ -248,7 +257,7 @@ pub(crate) fn decode_head(bytes: &[u8]) -> Result<Head, Error> {
     Ok(head)
 }
 
-pub(crate) fn encode_commit(commit: &Commit) -> Bytes {
+pub(crate) fn encode_commit(commit: &Commit) -> Result<Bytes, Error> {
     encode_envelope(&CommitWire {
         format_version: FORMAT_VERSION,
         log_id: commit.log_id.to_string(),
@@ -279,7 +288,7 @@ pub(crate) fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
     })
 }
 
-pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Bytes {
+pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Bytes, Error> {
     encode_envelope(&CheckpointWire {
         format_version: FORMAT_VERSION,
         log_id: checkpoint.log_id.to_string(),
@@ -300,25 +309,44 @@ pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, Error> {
     })
 }
 
-fn encode_envelope(message: &impl Message) -> Bytes {
-    let payload = message.encode_to_vec();
+fn encode_envelope(message: &impl Encode<()>) -> Result<Bytes, Error> {
+    let payload = minicbor::to_vec(message)
+        .map_err(|error| Error::InvalidFormat(format!("CBOR encoding failed: {error}")))?;
     let digest = Digest::of(&payload);
-    Bytes::from(
-        EnvelopeWire {
+    Ok(Bytes::from(
+        minicbor::to_vec(EnvelopeWire {
             payload,
             digest: digest.as_bytes().to_vec(),
-        }
-        .encode_to_vec(),
-    )
+        })
+        .map_err(|error| Error::InvalidFormat(format!("CBOR encoding failed: {error}")))?,
+    ))
 }
 
-fn decode_envelope<M: Message + Default>(bytes: &[u8]) -> Result<M, Error> {
-    let envelope =
-        EnvelopeWire::decode(bytes).map_err(|error| Error::InvalidFormat(error.to_string()))?;
+fn decode_envelope<M>(bytes: &[u8]) -> Result<M, Error>
+where
+    M: for<'bytes> Decode<'bytes, ()>,
+{
+    let envelope: EnvelopeWire = decode_exact(bytes)?;
     if digest(&envelope.digest)? != Digest::of(&envelope.payload) {
         return Err(Error::CorruptObject);
     }
-    M::decode(envelope.payload.as_slice()).map_err(|error| Error::InvalidFormat(error.to_string()))
+    decode_exact(&envelope.payload)
+}
+
+fn decode_exact<M>(bytes: &[u8]) -> Result<M, Error>
+where
+    M: for<'bytes> Decode<'bytes, ()>,
+{
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let value = decoder
+        .decode()
+        .map_err(|error| Error::InvalidFormat(error.to_string()))?;
+    if decoder.position() != bytes.len() {
+        return Err(Error::InvalidFormat(
+            "encoded object contains trailing bytes".into(),
+        ));
+    }
+    Ok(value)
 }
 
 fn require_version(version: u32) -> Result<(), Error> {
@@ -354,6 +382,7 @@ impl From<&CommitRef> for CommitRefWire {
             sequence: value.sequence,
             transaction_id: value.transaction_id.as_uuid().as_bytes().to_vec(),
             digest: value.digest.as_bytes().to_vec(),
+            len: value.len,
         }
     }
 }
@@ -366,6 +395,7 @@ impl TryFrom<CommitRefWire> for CommitRef {
             sequence: value.sequence,
             transaction_id: transaction_id(&value.transaction_id)?,
             digest: digest(&value.digest)?,
+            len: value.len,
         })
     }
 }
@@ -405,8 +435,8 @@ impl From<&ObjectRef> for ObjectRefWire {
     fn from(value: &ObjectRef) -> Self {
         Self {
             kind: match value.kind {
-                ObjectKind::Blob => ObjectKindWire::Blob as i32,
-                ObjectKind::Checkpoint => ObjectKindWire::Checkpoint as i32,
+                ObjectKind::Blob => ObjectKindWire::Blob as u8,
+                ObjectKind::Checkpoint => ObjectKindWire::Checkpoint as u8,
             },
             digest: value.digest.as_bytes().to_vec(),
             len: value.len,
@@ -418,10 +448,10 @@ impl TryFrom<ObjectRefWire> for ObjectRef {
     type Error = Error;
 
     fn try_from(value: ObjectRefWire) -> Result<Self, Self::Error> {
-        let kind = match ObjectKindWire::try_from(value.kind) {
-            Ok(ObjectKindWire::Blob) => ObjectKind::Blob,
-            Ok(ObjectKindWire::Checkpoint) => ObjectKind::Checkpoint,
-            Ok(ObjectKindWire::Unspecified) | Err(_) => {
+        let kind = match value.kind {
+            value if value == ObjectKindWire::Blob as u8 => ObjectKind::Blob,
+            value if value == ObjectKindWire::Checkpoint as u8 => ObjectKind::Checkpoint,
+            _ => {
                 return Err(Error::InvalidFormat("invalid object kind".into()));
             }
         };
@@ -452,6 +482,7 @@ mod tests {
             sequence,
             transaction_id: crate::TransactionId::new(),
             digest: Digest::of(data),
+            len: u64::try_from(data.len()).unwrap_or_else(|_| panic!("test data is too large")),
         }
     }
 
@@ -501,8 +532,10 @@ mod tests {
             }],
         };
 
-        let decoded = decode_commit(&encode_commit(&commit))
-            .unwrap_or_else(|error| panic!("decode failed: {error}"));
+        let encoded =
+            encode_commit(&commit).unwrap_or_else(|error| panic!("encode failed: {error}"));
+        let decoded =
+            decode_commit(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(decoded, commit);
     }
 
@@ -515,8 +548,10 @@ mod tests {
             snapshot: Bytes::from_static(b"opaque snapshot"),
         };
 
-        let decoded = decode_checkpoint(&encode_checkpoint(&checkpoint))
-            .unwrap_or_else(|error| panic!("decode failed: {error}"));
+        let encoded =
+            encode_checkpoint(&checkpoint).unwrap_or_else(|error| panic!("encode failed: {error}"));
+        let decoded =
+            decode_checkpoint(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(decoded, checkpoint);
     }
 
@@ -531,6 +566,7 @@ mod tests {
             result: Bytes::new(),
             objects: Vec::new(),
         })
+        .unwrap_or_else(|error| panic!("encode failed: {error}"))
         .to_vec();
         let index = encoded.len().saturating_sub(1);
         encoded[index] ^= 1;

@@ -14,6 +14,10 @@ Run tests in this order:
 
 No cloud backend is part of this stage.
 
+Format tests also compare encoded bytes with checked-in CBOR fixtures and the
+CDDL schema. They reject trailing data, wrong digests, unsupported versions,
+duplicate required fields, and values above configured decode limits.
+
 ## Backend conformance cases
 
 Every backend must prove:

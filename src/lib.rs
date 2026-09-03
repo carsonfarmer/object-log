@@ -143,6 +143,7 @@ pub struct CommitRef {
     pub sequence: u64,
     pub transaction_id: TransactionId,
     pub digest: Digest,
+    pub len: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

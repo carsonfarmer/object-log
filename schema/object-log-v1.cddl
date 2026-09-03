@@ -1,0 +1,68 @@
+; object-log durable format version 1
+; All top-level values are stored as an envelope. The envelope payload is the
+; canonical CBOR encoding of exactly one index, entry, or base.
+
+envelope = {
+  1: bstr,                         ; encoded payload
+  2: digest                        ; BLAKE3 of encoded payload
+}
+
+index = {
+  1: 1,                            ; format version
+  2: log-id,
+  3: uint,                         ; generation
+  4: uint,                         ; next sequence
+  ? 5: checkpoint-ref,
+  6: [* entry-pointer],            ; active ordered tail
+  7: [* entry-pointer],            ; bounded outcome window
+  * uint => any                    ; future optional fields
+}
+
+; An entry has no assigned sequence. The index entry-pointer assigns it.
+entry = {
+  1: 1,                            ; format version
+  2: log-id,
+  3: transaction-id,
+  4: uint,                         ; expected generation
+  ? 5: digest,                     ; expected prior tip
+  6: bstr,                         ; opaque operation
+  7: bstr,                         ; opaque recorded result
+  8: [* object-ref],
+  * uint => any                    ; future optional fields
+}
+
+base = {
+  1: 1,                            ; format version
+  2: log-id,
+  3: uint,                         ; covered sequence
+  4: digest,                       ; covered entry digest
+  5: bstr,                         ; opaque snapshot
+  * uint => any                    ; future optional fields
+}
+
+entry-pointer = {
+  1: uint,                         ; assigned sequence
+  2: transaction-id,
+  3: digest,
+  4: uint,                         ; encoded envelope length
+  * uint => any
+}
+
+checkpoint-ref = {
+  1: uint,                         ; covered sequence
+  2: digest,                       ; covered entry digest
+  3: object-ref,
+  * uint => any
+}
+
+object-ref = {
+  1: object-kind,
+  2: digest,
+  3: uint,                         ; byte length
+  * uint => any
+}
+
+object-kind = 1 / 2                ; payload / base
+digest = bstr .size 32
+transaction-id = bstr .size 16
+log-id = tstr .size (1..128)

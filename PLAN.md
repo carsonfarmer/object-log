@@ -16,14 +16,16 @@ release.
 The first release has one authority protocol:
 
 - Each logical resource has its own log.
-- Each log has one small mutable `head` object.
-- A conditional update of `head` publishes a commit.
+- Each log has one small mutable `index.cbor` object.
+- A conditional update of the index publishes an entry.
 - Commit, blob, and checkpoint objects are immutable and content-addressed.
 - The head contains a checkpoint reference and a bounded ordered tail of
   commit references.
 - A transport error during head publication produces a `PendingCommit`.
 - The core does not automatically merge or rebase application operations.
 - Apache Arrow's `object_store` crate provides the storage interface.
+- A versioned CBOR map is the durable wire format. Numeric field keys follow
+  `schema/object-log-v1.cddl`.
 - The first release does not delete durable objects.
 
 This protocol favors predictable reads, checkpoint installation, and conflict
@@ -39,7 +41,7 @@ Required value types:
 - `Cursor`: an opaque observed head position and storage version.
 - `TransactionId`: a caller-supplied stable operation identity.
 - `ObjectRef`: digest, byte length, and object kind.
-- `CommitRef`: sequence, transaction ID, and commit object reference.
+- `CommitRef`: sequence, transaction ID, digest, and encoded byte length.
 - `PreparedCommit`: expected cursor, transaction ID, operation bytes, result
   bytes, and staged object references.
 - `PendingCommit`: enough evidence to resolve or retry one exact publication.
@@ -92,8 +94,8 @@ new evidence.
 ### 1. Repository and contract — root agent
 
 Create the workspace, design record, test plan, CI-equivalent local commands,
-and stable module ownership. Select a versioned durable encoding after a small
-encode/decode benchmark and compatibility review.
+and stable module ownership. Use the one versioned CBOR contract in
+`schema/object-log-v1.cddl`.
 
 Exit evidence:
 
@@ -115,7 +117,9 @@ Backends in this stream:
 
 Exit evidence:
 
-- Both local backends pass the same contract tests.
+- The in-memory backend passes the writable contract.
+- A filesystem backend either passes the same writable contract or fails
+  closed before a writable log opens.
 - Unsupported conditional behavior fails before a log is opened for writes.
 - Tests use temporary directories and leave no files or processes behind.
 
@@ -234,7 +238,8 @@ The first implementation is complete only when:
 
 - Formatting and strict lint pass.
 - Unit, conformance, protocol, model, and documentation tests pass.
-- Filesystem tests pass from a new temporary directory.
+- Filesystem capability tests pass from a new temporary directory. A backend
+  without conditional update support must fail closed.
 - MinIO tests pass through automatic local setup and teardown.
 - Criterion benchmarks run and save a baseline.
 - The key-value example recovers after removal of its local cache.
@@ -264,3 +269,38 @@ That higher target would require one of these later changes:
 
 Each option changes the authority or atomicity boundary. None is part of the
 first protocol.
+
+## Ordered follow-on milestones
+
+The local first release is the dependency for these milestones. Complete them
+in this order unless a correctness defect changes the order.
+
+### 1. Garbage collection
+
+Add durable reachability records, a grace period, and safe deletion of
+unreachable entries, objects, bases, and old index history. A reader that
+started before collection must either complete or receive an explicit expired
+result. Crash recovery must resume an interrupted collection without deleting
+reachable data.
+
+### 2. SQLite storage
+
+Implement a SQLite state machine over the log. Start with one database per
+log. Define page or changeset objects, transaction boundaries, checkpoint
+rules, and recovery limits. Measure write amplification, recovery time, and
+contention before adding a Spin factor adapter.
+
+### 3. WASI filesystem storage
+
+Implement filesystem metadata and file content over the same log and object
+model. Define inode identity, directory operations, rename atomicity, open-file
+behavior, sparse files, and capability boundaries. Then expose the proven
+model through `wasi:filesystem` for Spin.
+
+### 4. Live AWS qualification
+
+Run the backend conformance, fault, recovery, and performance suites against an
+isolated AWS S3 prefix. Record the AWS region, bucket settings, request limits,
+expected cost, time limit, health checks, failure recovery, and mandatory
+teardown. This goal requires separate owner review. It is not part of local
+product completion.
