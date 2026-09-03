@@ -14,9 +14,10 @@ Run tests in this order:
 
 No cloud backend is part of this stage.
 
-Format tests also compare encoded bytes with checked-in CBOR fixtures and the
-CDDL schema. They reject trailing data, wrong digests, unsupported versions,
-duplicate required fields, and values above configured decode limits.
+Format tests also compare encoded bytes with checked-in CBOR fixtures. The CDDL
+file defines the published schema. Tests reject trailing data, wrong digests,
+unsupported versions, and unknown fields. Protocol tests reject objects above
+configured limits.
 
 ## Backend conformance cases
 

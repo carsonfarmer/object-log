@@ -254,6 +254,7 @@ pub(crate) fn decode_head(bytes: &[u8]) -> Result<Head, Error> {
             .collect::<Result<_, _>>()?,
     };
     head.validate()?;
+    require_canonical(bytes, &encode_head(&head)?)?;
     Ok(head)
 }
 
@@ -273,7 +274,7 @@ pub(crate) fn encode_commit(commit: &Commit) -> Result<Bytes, Error> {
 pub(crate) fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
     let wire: CommitWire = decode_envelope(bytes)?;
     require_version(wire.format_version)?;
-    Ok(Commit {
+    let commit = Commit {
         log_id: LogId::new(wire.log_id)?,
         transaction_id: transaction_id(&wire.transaction_id)?,
         expected_generation: wire.expected_generation,
@@ -285,7 +286,9 @@ pub(crate) fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
             .into_iter()
             .map(ObjectRef::try_from)
             .collect::<Result<_, _>>()?,
-    })
+    };
+    require_canonical(bytes, &encode_commit(&commit)?)?;
+    Ok(commit)
 }
 
 pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Bytes, Error> {
@@ -301,12 +304,14 @@ pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Bytes, Error>
 pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, Error> {
     let wire: CheckpointWire = decode_envelope(bytes)?;
     require_version(wire.format_version)?;
-    Ok(Checkpoint {
+    let checkpoint = Checkpoint {
         log_id: LogId::new(wire.log_id)?,
         through_sequence: wire.through_sequence,
         through_commit: digest(&wire.through_commit)?,
         snapshot: Bytes::from(wire.snapshot),
-    })
+    };
+    require_canonical(bytes, &encode_checkpoint(&checkpoint)?)?;
+    Ok(checkpoint)
 }
 
 fn encode_envelope(message: &impl Encode<()>) -> Result<Bytes, Error> {
@@ -354,6 +359,15 @@ fn require_version(version: u32) -> Result<(), Error> {
         return Err(Error::InvalidFormat(format!(
             "unsupported format version {version}"
         )));
+    }
+    Ok(())
+}
+
+fn require_canonical(input: &[u8], canonical: &[u8]) -> Result<(), Error> {
+    if input != canonical {
+        return Err(Error::InvalidFormat(
+            "encoded object is not canonical format version 1".into(),
+        ));
     }
     Ok(())
 }
@@ -467,8 +481,8 @@ impl TryFrom<ObjectRefWire> for ObjectRef {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        Checkpoint, Commit, Head, decode_checkpoint, decode_commit, decode_head, encode_checkpoint,
-        encode_commit, encode_head,
+        Checkpoint, Commit, EnvelopeWire, FORMAT_VERSION, Head, HeadWire, decode_checkpoint,
+        decode_commit, decode_head, encode_checkpoint, encode_commit, encode_envelope, encode_head,
     };
     use crate::{CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef};
     use bytes::Bytes;
@@ -585,5 +599,78 @@ mod tests {
             recent_outcomes: Vec::new(),
         };
         assert!(matches!(encode_head(&head), Err(Error::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn empty_head_encoding_is_stable() {
+        let encoded = encode_head(&Head::empty(log_id()))
+            .unwrap_or_else(|error| panic!("encode failed: {error}"));
+        assert_eq!(
+            hex::encode(encoded),
+            "a201581ca60101026f74656e616e742e7265736f75726365030004000680078002582075899f1804d3955ca93623496a592a0a871fb17849f323f6be4cb2de49dedccf"
+        );
+    }
+
+    #[test]
+    fn future_format_version_fails_closed() {
+        let encoded = encode_envelope(&HeadWire {
+            format_version: FORMAT_VERSION + 1,
+            log_id: log_id().to_string(),
+            generation: 0,
+            next_sequence: 0,
+            checkpoint: None,
+            tail: Vec::new(),
+            recent_outcomes: Vec::new(),
+        })
+        .unwrap_or_else(|error| panic!("encode failed: {error}"));
+
+        assert!(matches!(
+            decode_head(&encoded),
+            Err(Error::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_field_is_not_canonical() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut payload = Vec::new();
+        let mut writer = minicbor::Encoder::new(&mut payload);
+        writer
+            .map(7)?
+            .u8(1)?
+            .u32(FORMAT_VERSION)?
+            .u8(2)?
+            .str(log_id().as_str())?
+            .u8(3)?
+            .u64(0)?
+            .u8(4)?
+            .u64(0)?
+            .u8(6)?
+            .array(0)?
+            .u8(7)?
+            .array(0)?
+            .u8(99)?
+            .null()?;
+        let envelope_bytes = minicbor::to_vec(EnvelopeWire {
+            digest: Digest::of(&payload).as_bytes().to_vec(),
+            payload,
+        })?;
+
+        assert!(matches!(
+            decode_head(&envelope_bytes),
+            Err(Error::InvalidFormat(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut encoded = encode_head(&Head::empty(log_id()))
+            .unwrap_or_else(|error| panic!("encode failed: {error}"))
+            .to_vec();
+        encoded.push(0);
+        assert!(matches!(
+            decode_head(&encoded),
+            Err(Error::InvalidFormat(_))
+        ));
     }
 }

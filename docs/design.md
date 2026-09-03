@@ -24,9 +24,11 @@ type `Head` is the decoded index. The Rust type `Commit` is one WAL entry.
 The durable encoding is CBOR, not Protobuf. Each structure is a CBOR map with
 stable positive integer keys. The exact schema is in
 `schema/object-log-v1.cddl`. Encoders write keys in ascending order. Decoders
-ignore unknown map fields, but a writer rejects a future format version before
-it can replace the index. The first release does not support mixed
-major-version writers.
+reject non-canonical bytes, unknown fields, and unsupported versions. Any
+schema change requires a new format version. The first release does not support
+mixed-version writers. This strict rule replaces Micelio's unknown-field
+preservation rule because the selected CBOR codec does not retain unknown
+fields during an index rewrite.
 
 ## Head
 
