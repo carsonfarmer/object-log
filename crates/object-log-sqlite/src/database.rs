@@ -1,14 +1,11 @@
-use std::collections::HashSet;
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
 
 use bytes::{Bytes, BytesMut};
 use object_log::{
-    CheckpointResolution, CheckpointStatus, CommitStatus, Log, ObjectKind, ObjectRef,
-    PendingCheckpoint, PreparedCommit, Resolution, RetentionId, RetentionStatus, TransactionId,
-    View,
+    CheckpointResolution, CheckpointStatus, CommitStatus, Error as LogError, Log, ObjectKind,
+    ObjectRef, PendingCheckpoint, PreparedCommit, Resolution, TransactionId, View,
 };
 use rusqlite::{Connection, MAIN_DB};
 use uuid::Uuid;
@@ -23,11 +20,9 @@ use crate::{PAGE_SIZE, SqliteError};
 enum CacheState {
     Clean,
     Dirty,
+    PendingCommit,
     PendingCheckpoint(Box<PendingCheckpoint>),
 }
-
-static OPEN_CACHES: LazyLock<Mutex<HashSet<PathBuf>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// One live `SQLite` cache backed by an object log.
 pub struct Database {
@@ -42,7 +37,9 @@ pub struct Database {
 }
 
 /// One locally committed write ready for object-log publication.
-pub struct StagedWrite {
+pub struct StagedWrite<'a> {
+    database: &'a mut Database,
+    source: Box<View>,
     prepared: Box<PreparedCommit>,
     recovery_token: Bytes,
     wal: WalPosition,
@@ -50,11 +47,11 @@ pub struct StagedWrite {
 }
 
 /// Result of one `SQLite` write callback.
-pub enum StageStatus {
+pub enum StageStatus<'a> {
     /// The callback changed no durable database page.
     ReadOnly(Bytes),
     /// The local transaction committed and needs object-log publication.
-    Staged(StagedWrite),
+    Staged(StagedWrite<'a>),
 }
 
 /// Result of one database checkpoint attempt.
@@ -69,7 +66,7 @@ pub enum SqliteCheckpointStatus {
     Expired(View),
 }
 
-impl StagedWrite {
+impl StagedWrite<'_> {
     /// Returns the result bytes recorded with this transaction.
     #[must_use]
     pub fn result(&self) -> &Bytes {
@@ -81,18 +78,47 @@ impl StagedWrite {
     pub const fn recovery_token(&self) -> &Bytes {
         &self.recovery_token
     }
+
+    /// Publishes this write through its originating database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when immutable staging, validation, publication, or
+    /// recovery fails.
+    pub async fn publish(self) -> Result<CommitStatus, SqliteError> {
+        let Self {
+            database,
+            source,
+            prepared,
+            recovery_token: _,
+            wal,
+            snapshot,
+        } = self;
+        let transaction_id = prepared.transaction_id();
+        database.state = CacheState::PendingCommit;
+        let status = database.log.commit(*prepared).await?;
+        if let CommitStatus::Committed(view) = &status {
+            if exact_commit(&source, view, transaction_id) {
+                database.accept_local(view.clone(), (!snapshot).then_some(wal))?;
+            } else {
+                database.rebuild(view.clone()).await?;
+            }
+        }
+        Ok(status)
+    }
 }
 
 impl Database {
     /// Opens a disposable local cache at `path` and rebuilds the durable view.
+    /// The cache and its advisory lock must be on a local filesystem.
     ///
     /// # Errors
     ///
     /// Returns an error for invalid durable data, an unusable cache path, an
     /// unsupported `SQLite` configuration, or an object-store failure.
     pub async fn open(log: Log, path: impl AsRef<Path>) -> Result<Self, SqliteError> {
-        let path = path.as_ref().to_path_buf();
-        let lease = CacheLease::acquire(&path)?;
+        validate_options(&log)?;
+        let (path, lease) = CacheLease::acquire(path.as_ref())?;
         let view = log.load().await?;
         let (materialized, view) = materialize(&log, view).await?;
         write_cache(&path, &materialized)?;
@@ -139,18 +165,30 @@ impl Database {
         &mut self,
         transaction_id: TransactionId,
         callback: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<Bytes>,
-    ) -> Result<StageStatus, SqliteError> {
+    ) -> Result<StageStatus<'_>, SqliteError> {
         self.ensure_current().await?;
         let first = self.view.checkpoint().is_none() && self.view.tail().is_empty();
-        let prior = self.wal.clone();
+        let prior = self.wal;
         let policy = self.policy.clone();
-        let transaction = self.conn_mut()?.transaction()?;
-        let result = {
+        let transaction = self
+            .connection
+            .as_mut()
+            .ok_or(SqliteError::DirtyCache)?
+            .transaction()?;
+        self.state = CacheState::Dirty;
+        let callback_result = {
             let _guard = policy.write();
-            callback(&transaction)?
+            callback(&transaction)
+        };
+        let result = match callback_result {
+            Ok(result) => result,
+            Err(callback_error) => {
+                transaction.rollback()?;
+                self.state = CacheState::Clean;
+                return Err(callback_error.into());
+            }
         };
         transaction.commit()?;
-        self.state = CacheState::Dirty;
         let current = wal::committed(self.conn()?, PAGE_SIZE as usize, &prior)?;
         if current.bytes.is_empty() {
             self.state = CacheState::Clean;
@@ -168,12 +206,7 @@ impl Database {
                 .header
                 .ok_or_else(|| SqliteError::InvalidWal("committed WAL has no header".into()))?;
             let (record, objects) = self
-                .stage_wal(
-                    current.bytes.clone(),
-                    header,
-                    prior.frames,
-                    current.position.frames,
-                )
+                .stage_wal(current.bytes.clone(), header, prior, current.position)
                 .await?;
             (record, objects, false)
         };
@@ -181,37 +214,15 @@ impl Database {
             self.log
                 .prepare(self.view.cursor(), transaction_id, record, result, objects)?;
         let recovery_token = prepared.recovery_token()?;
+        let source = Box::new(self.view.clone());
         Ok(StageStatus::Staged(StagedWrite {
+            database: self,
+            source,
             prepared: Box::new(prepared),
             recovery_token,
             wal: current.position,
             snapshot,
         }))
-    }
-
-    /// Publishes one staged transaction through the object-log head.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when immutable staging, validation, or publication
-    /// fails before an uncertain result is possible.
-    pub async fn publish(&mut self, staged: StagedWrite) -> Result<CommitStatus, SqliteError> {
-        let next_wal = staged.wal;
-        let snapshot = staged.snapshot;
-        let status = self.log.commit(*staged.prepared).await?;
-        if let CommitStatus::Committed(view) = &status {
-            self.view = view.clone();
-            if snapshot {
-                truncate(self.conn()?)?;
-                self.wal =
-                    wal::committed(self.conn()?, PAGE_SIZE as usize, &WalPosition::default())?
-                        .position;
-            } else {
-                self.wal = next_wal;
-            }
-            self.state = CacheState::Clean;
-        }
-        Ok(status)
     }
 
     /// Resolves one exact publication token without rerunning its callback.
@@ -221,6 +232,7 @@ impl Database {
     /// Returns an error for an invalid token, object-store failure, or failed
     /// cache recovery after a definite result.
     pub async fn resume(&mut self, token: &[u8]) -> Result<Resolution, SqliteError> {
+        self.state = CacheState::PendingCommit;
         let resolution = self.log.resume(token).await?;
         let view = match &resolution {
             Resolution::Committed(view)
@@ -245,13 +257,8 @@ impl Database {
     /// Returns an error for backup, object staging, publication, resolution,
     /// or confirmed local truncation failure.
     pub async fn checkpoint(&mut self) -> Result<SqliteCheckpointStatus, SqliteError> {
-        if let CacheState::PendingCheckpoint(_) = self.state {
-            let CacheState::PendingCheckpoint(pending) =
-                std::mem::replace(&mut self.state, CacheState::Dirty)
-            else {
-                return Err(SqliteError::DirtyCache);
-            };
-            let resolution = self.log.resolve_checkpoint(*pending).await?;
+        if let CacheState::PendingCheckpoint(pending) = &self.state {
+            let resolution = self.log.resolve_checkpoint(*pending.clone()).await?;
             return self.finish_checkpoint_resolution(resolution).await;
         }
 
@@ -263,13 +270,18 @@ impl Database {
         validate_snapshot(&payload)?;
         let (snapshot, objects) = self.stage_snapshot(payload).await?;
         self.state = CacheState::Dirty;
+        let source = self.view.clone();
         match self
             .log
             .publish_checkpoint(&self.view, &through, snapshot, objects)
             .await?
         {
             CheckpointStatus::Published(view) => {
-                self.finish_checkpoint(view.clone())?;
+                if exact_checkpoint(&source, &view, &through) {
+                    self.accept_local(view.clone(), None)?;
+                } else {
+                    self.rebuild(view.clone()).await?;
+                }
                 Ok(SqliteCheckpointStatus::Published(view))
             }
             CheckpointStatus::Conflict(view) => Ok(SqliteCheckpointStatus::Conflict(view)),
@@ -296,7 +308,7 @@ impl Database {
     ) -> Result<SqliteCheckpointStatus, SqliteError> {
         match resolution {
             CheckpointResolution::Published(view) => {
-                self.finish_checkpoint(view.clone())?;
+                self.rebuild(view.clone()).await?;
                 Ok(SqliteCheckpointStatus::Published(view))
             }
             CheckpointResolution::NotPublished(view) => {
@@ -314,11 +326,19 @@ impl Database {
         }
     }
 
-    fn finish_checkpoint(&mut self, view: View) -> Result<(), SqliteError> {
+    fn accept_local(
+        &mut self,
+        view: View,
+        wal_position: Option<WalPosition>,
+    ) -> Result<(), SqliteError> {
+        if let Some(wal_position) = wal_position {
+            self.wal = wal_position;
+        } else {
+            truncate(self.conn()?)?;
+            self.wal =
+                wal::committed(self.conn()?, PAGE_SIZE as usize, &WalPosition::default())?.position;
+        }
         self.view = view;
-        truncate(self.conn()?)?;
-        self.wal =
-            wal::committed(self.conn()?, PAGE_SIZE as usize, &WalPosition::default())?.position;
         self.state = CacheState::Clean;
         Ok(())
     }
@@ -348,12 +368,20 @@ impl Database {
         &self,
         payload: Bytes,
         header: [u8; WAL_HEADER_BYTES],
-        prior: u32,
-        current: u32,
+        prior: WalPosition,
+        current: WalPosition,
     ) -> Result<(Bytes, Vec<ObjectRef>), SqliteError> {
-        wal::validate_record(&header, &payload)?;
-        self.stage_payload(payload, RecordKind::Wal, Some((header, prior, current)))
-            .await
+        if wal::validate_record(&header, &payload, prior)? != current {
+            return Err(SqliteError::InvalidWal(
+                "captured WAL does not match its validated boundary".into(),
+            ));
+        }
+        self.stage_payload(
+            payload,
+            RecordKind::Wal,
+            Some((header, prior.frames, current.frames)),
+        )
+        .await
     }
 
     async fn stage_payload(
@@ -389,10 +417,6 @@ impl Database {
 
     fn conn(&self) -> Result<&Connection, SqliteError> {
         self.connection.as_ref().ok_or(SqliteError::DirtyCache)
-    }
-
-    fn conn_mut(&mut self) -> Result<&mut Connection, SqliteError> {
-        self.connection.as_mut().ok_or(SqliteError::DirtyCache)
     }
 }
 
@@ -437,20 +461,20 @@ impl Materialized {
 }
 
 async fn materialize(log: &Log, mut view: View) -> Result<(Materialized, View), SqliteError> {
-    if view.checkpoint().is_none() && view.tail().is_empty() {
-        let materialized = read_materialized(log, &view).await?;
-        return Ok((materialized, view));
-    }
     loop {
-        let retention = RetentionId::new();
-        let retained = acquire(log, view, retention).await?;
-        let result = read_materialized(log, &retained).await;
-        let released = release(log, retained.clone(), retention).await?;
-        let materialized = result?;
-        if same_history(&retained, &released) {
-            return Ok((materialized, released));
+        let materialized = match read_materialized(log, &view).await {
+            Ok(materialized) => materialized,
+            Err(SqliteError::Log(LogError::ViewExpired)) => {
+                view = log.load().await?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let current = log.load().await?;
+        if same_history(&view, &current) {
+            return Ok((materialized, current));
         }
-        view = released;
+        view = current;
     }
 }
 
@@ -459,8 +483,7 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
     let tail = log.read_tail(view).await?;
     let mut snapshot = None;
     let mut wal = BytesMut::new();
-    let mut header = None;
-    let mut frames = 0;
+    let mut position = WalPosition::default();
 
     if let Some(checkpoint) = checkpoint {
         let descriptor = Record::decode(checkpoint.snapshot(), checkpoint.objects().len())?;
@@ -477,7 +500,7 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
         let descriptor = Record::decode(commit.operation(), commit.objects().len())?;
         let payload = load_payload(log, view, &descriptor, commit.objects()).await?;
         match descriptor.kind {
-            RecordKind::Snapshot if snapshot.is_none() && frames == 0 => {
+            RecordKind::Snapshot if snapshot.is_none() && position.frames == 0 => {
                 validate_snapshot(&payload)?;
                 snapshot = Some(payload);
             }
@@ -485,22 +508,21 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
                 let record_header = descriptor
                     .wal_header
                     .ok_or_else(|| SqliteError::InvalidRecord("WAL record has no header".into()))?;
-                if descriptor.prior_mx_frame != Some(frames)
-                    || header.is_some_and(|existing| existing != record_header)
-                {
+                if descriptor.prior_mx_frame != Some(position.frames) {
                     return Err(SqliteError::InvalidRecord(
                         "WAL records do not form one continuous epoch".into(),
                     ));
                 }
-                wal::validate_record(&record_header, &payload)?;
+                position = wal::validate_record(&record_header, &payload, position)?;
+                if descriptor.mx_frame != Some(position.frames) {
+                    return Err(SqliteError::InvalidRecord(
+                        "WAL record does not match its current boundary".into(),
+                    ));
+                }
                 if wal.is_empty() {
                     wal.extend_from_slice(&record_header);
-                    header = Some(record_header);
                 }
                 wal.extend_from_slice(&payload);
-                frames = descriptor.mx_frame.ok_or_else(|| {
-                    SqliteError::InvalidRecord("WAL record has no current boundary".into())
-                })?;
             }
             _ => {
                 return Err(SqliteError::InvalidRecord(
@@ -519,34 +541,8 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
     Ok(Materialized {
         snapshot,
         wal: wal.freeze(),
-        frames,
+        frames: position.frames,
     })
-}
-
-async fn acquire(log: &Log, mut view: View, retention: RetentionId) -> Result<View, SqliteError> {
-    loop {
-        match log.retain(&view, retention).await? {
-            RetentionStatus::Applied(retained) => return Ok(retained),
-            RetentionStatus::Conflict(current) => view = current,
-            RetentionStatus::Pending => view = log.load().await?,
-            RetentionStatus::ActiveCollection(_) => return Err(SqliteError::CollectionActive),
-        }
-    }
-}
-
-async fn release(log: &Log, mut view: View, retention: RetentionId) -> Result<View, SqliteError> {
-    loop {
-        match log.release_retention(&view, retention).await? {
-            RetentionStatus::Applied(released) => return Ok(released),
-            RetentionStatus::Conflict(current) => view = current,
-            RetentionStatus::Pending => view = log.load().await?,
-            RetentionStatus::ActiveCollection(_) => {
-                return Err(SqliteError::InvalidRecord(
-                    "collection blocked a retention release".into(),
-                ));
-            }
-        }
-    }
 }
 
 fn same_history(left: &View, right: &View) -> bool {
@@ -566,27 +562,49 @@ async fn load_payload(
         RecordKind::Snapshot => PAGE_SIZE as usize,
         RecordKind::Wal => PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES,
     };
-    let mut payload = BytesMut::with_capacity(record.payload_len);
+    let options = log.options();
+    if objects.len() > options.max_object_refs {
+        return Err(SqliteError::PayloadLimit);
+    }
+    let mut declared_len = 0_usize;
     for object in objects {
         if object.kind() != ObjectKind::Blob {
             return Err(SqliteError::InvalidRecord(
                 "record chunk is not a blob".into(),
             ));
         }
-        let chunk = log.read_object(view, object).await?;
-        if chunk.is_empty() || !chunk.len().is_multiple_of(unit) {
+        let object_len = usize::try_from(object.len())?;
+        if object_len == 0
+            || object_len > options.max_object_bytes
+            || !object_len.is_multiple_of(unit)
+        {
             return Err(SqliteError::InvalidRecord(
-                "record chunk splits a page or WAL frame".into(),
+                "record has an invalid declared chunk length".into(),
             ));
         }
-        payload.extend_from_slice(&chunk);
+        declared_len = declared_len
+            .checked_add(object_len)
+            .ok_or(SqliteError::PayloadLimit)?;
     }
-    if payload.len() != record.payload_len {
+    if declared_len != record.payload_len {
         return Err(SqliteError::InvalidRecord(
             "record chunks do not match the declared length".into(),
         ));
     }
-    Ok(payload.freeze())
+    let mut payload = Vec::new();
+    payload
+        .try_reserve_exact(record.payload_len)
+        .map_err(|_| SqliteError::PayloadLimit)?;
+    for object in objects {
+        let chunk = log.read_object(view, object).await?;
+        if chunk.len() != usize::try_from(object.len())? {
+            return Err(SqliteError::InvalidRecord(
+                "record chunk does not match its declared length".into(),
+            ));
+        }
+        payload.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(payload))
 }
 
 fn write_cache(path: &Path, materialized: &Materialized) -> Result<(), SqliteError> {
@@ -605,6 +623,7 @@ fn remove_cache(path: &Path) -> Result<(), SqliteError> {
         path.to_path_buf(),
         sidecar(path, "-wal"),
         sidecar(path, "-shm"),
+        sidecar(path, "-journal"),
     ] {
         match fs::remove_file(target) {
             Ok(()) => {}
@@ -661,26 +680,82 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-struct CacheLease(PathBuf);
+struct CacheLease {
+    _file: File,
+}
 
 impl CacheLease {
-    fn acquire(path: &Path) -> Result<Self, SqliteError> {
-        let path = std::path::absolute(path)?;
-        if !OPEN_CACHES
-            .lock()
-            .map_err(|_| SqliteError::CacheRegistry)?
-            .insert(path.clone())
-        {
-            return Err(SqliteError::CacheInUse);
-        }
-        Ok(Self(path))
+    fn acquire(path: &Path) -> Result<(PathBuf, Self), SqliteError> {
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cache path has no file name",
+            )
+        })?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let path = fs::canonicalize(parent)?.join(name);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(sidecar(&path, "-lock"))?;
+        file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => SqliteError::CacheInUse,
+            TryLockError::Error(error) => SqliteError::Io(error),
+        })?;
+        Ok((path, Self { _file: file }))
     }
 }
 
-impl Drop for CacheLease {
-    fn drop(&mut self) {
-        if let Ok(mut paths) = OPEN_CACHES.lock() {
-            paths.remove(&self.0);
-        }
+fn exact_commit(source: &View, current: &View, transaction_id: TransactionId) -> bool {
+    source
+        .cursor()
+        .generation()
+        .checked_add(1)
+        .is_some_and(|generation| current.cursor().generation() == generation)
+        && source.collection_epoch() == current.collection_epoch()
+        && source.checkpoint() == current.checkpoint()
+        && current
+            .tail()
+            .strip_prefix(source.tail())
+            .is_some_and(|tail| tail.len() == 1 && tail[0].transaction_id() == transaction_id)
+}
+
+fn exact_checkpoint(source: &View, current: &View, through: &object_log::CommitRef) -> bool {
+    source
+        .cursor()
+        .generation()
+        .checked_add(1)
+        .is_some_and(|generation| current.cursor().generation() == generation)
+        && source.collection_epoch() == current.collection_epoch()
+        && current.tail().is_empty()
+        && current.checkpoint().is_some_and(|checkpoint| {
+            checkpoint.through_sequence() == through.sequence()
+                && checkpoint.through_commit() == through.digest()
+        })
+}
+
+fn validate_options(log: &Log) -> Result<(), SqliteError> {
+    let options = log.options();
+    let frame_bytes = PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES;
+    let descriptors = [
+        Record::snapshot(PAGE_SIZE as usize, None, 1).encode()?,
+        Record::wal(frame_bytes, None, 1, [0; WAL_HEADER_BYTES], 0, 1).encode()?,
+    ];
+    if options.max_object_refs == 0
+        || options.max_object_bytes < frame_bytes
+        || descriptors.iter().any(|descriptor| {
+            descriptor.len() > options.max_inline_operation_bytes
+                || descriptor.len() > options.max_commit_bytes
+                || descriptor.len() > options.max_checkpoint_bytes
+        })
+    {
+        return Err(SqliteError::PayloadLimit);
     }
+    Ok(())
 }
