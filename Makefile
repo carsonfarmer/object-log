@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance gc-acceptance
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance
 
 check:
 	cargo fmt --all --check
@@ -19,6 +19,9 @@ sqlite-minio-test:
 
 sqlite-recovery-acceptance:
 	cargo test -p object-log-sqlite --all-features --test recovery thousand_wal_transactions_recover_without_the_cache -- --ignored --exact --nocapture
+
+staged-performance-acceptance:
+	cargo test -p object-log-sqlite --all-features --test performance_acceptance staged_object_request_accounting -- --ignored --exact --nocapture
 
 gc-acceptance:
 	cargo test --features test-util --test gc_acceptance memory_gc_removes_100k_objects -- --ignored --nocapture
