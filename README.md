@@ -1,5 +1,7 @@
 # object-log
 
+[![Rust CI](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml/badge.svg)](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml)
+
 `object-log` is an experimental Rust library for a linearizable log over
 conditional object storage.
 
