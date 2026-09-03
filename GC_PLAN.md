@@ -11,8 +11,10 @@ tranche.
 1. BLAKE3 stays the deterministic content identity. Each deletable object also
    gets a private random physical storage ID. The physical key includes the log
    incarnation, object kind, storage ID, and content digest.
-2. A new staging call gets a new physical storage ID. An exact retry uses the
-   same ID. No public API can recreate an old physical key from bytes alone.
+2. A new payload or node staging call gets a new physical storage ID. It has no
+   caller-visible retry token. Internal recovery within that one awaited call
+   can reuse the ID. A random-ID collision causes allocation of another ID;
+   existing bytes are not accepted as a new staging result.
 3. The head contains a monotonic collection epoch, zero or one active plan,
    and a bounded sorted set of retention IDs.
 4. A retention ID conservatively protects the complete log namespace. Any
@@ -33,15 +35,21 @@ tranche.
    are successful deletes.
 9. A delete error or cancellation leaves the plan active. A later call repeats
    the complete positive set. The collector stores no mutable progress map.
-10. After every delete has a definite success or missing result, the collector
-    clears the exact plan with a head CAS. A concurrent append can cause a
-    retry, but its data remains in the next head.
+10. After all deletes issued by that invocation have a definite success or
+    missing result, the collector clears the exact plan with a head CAS. A
+    concurrent append can cause a conflict, but its data remains in the next
+    head. A prior duplicate delete can finish later; physical-ID non-reuse
+    makes it harmless.
 11. A delayed delete cannot affect new data because a new staging call cannot
     reuse the deleted physical storage ID. A plan from an old incarnation
     cannot address a replacement log's data.
-12. Object and node reads take a `View`. A missing object from an older
-    collection epoch returns explicit view expiry. Missing data from the current
-    epoch remains corruption.
+12. Object and node reads take a `View`. When a read is missing, the supplied
+    view and current head determine expiry. An unretained view from an older
+    collection epoch returns explicit expiry. A retained view or current-epoch
+    view reports missing data as corruption.
+13. Exact commit and checkpoint recovery can recreate its physical key only as
+    part of the original non-rebased source-head CAS. A new logical attempt
+    allocates a new physical ID and restages any collected payload references.
 
 ## Public API boundary
 
@@ -50,7 +58,6 @@ The implementation must keep these operations small and explicit:
 ```text
 RetentionId::new() -> RetentionId
 View::collection_epoch() -> u64
-View::has_retention(id) -> bool
 Log::retain(view, id) -> RetentionStatus
 Log::release_retention(view, id) -> RetentionStatus
 Log::start_collection(view) -> CollectionStart
@@ -59,10 +66,19 @@ Log::read_object(view, reference) -> bytes
 Log::read_node(view, reference) -> ReferenceNode
 ```
 
-`CollectionStart` distinguishes an empty plan, an installed fence, a head
-conflict, and an active retention. `CollectionFinish` distinguishes completion
-from a head conflict. A collection report contains candidate count, candidate
-bytes, and delete attempts. Fields stay private and have getters.
+`RetentionStatus` distinguishes an applied state, an active-collection block,
+a head conflict, and an uncertain update. `CollectionStart` distinguishes an
+empty plan, an active fence, a head conflict, an active retention, and an
+uncertain fence update. `CollectionFinish` distinguishes completion, a head
+conflict, and an uncertain clear or delete. A collection report contains
+candidate count, candidate bytes, and delete attempts. Fields stay private and
+have getters.
+
+An installed plan reference is durable recovery evidence in the head. After a
+`Pending` start, the caller loads the head: an active plan is resumed, while an
+unchanged source can start again. After a `Pending` finish, the caller loads the
+head: the same plan is resumed, while no plan proves completion. No public
+pending-operation or plan-ID type is required.
 
 No API accepts a raw object path. No deletion type can represent the mutable
 head. The core does not add a collector trait, background task, distributed
@@ -80,6 +96,8 @@ lease, mutable deletion bitmap, Bloom filter, or provider-specific branch.
 - Two collectors can repeat deletes, but only one clears the exact plan.
 - A delayed delete after fence clearing cannot remove newly staged identical
   content.
+- A forced random-ID collision allocates a different physical key rather
+  than accepting an existing object.
 - An old-incarnation delete cannot affect a replacement incarnation.
 - Retention versus fence installation has one winner. A lost retention update
   resolves from the stable retention ID.
