@@ -90,6 +90,58 @@ async fn read_only_transactions_do_not_publish() -> TestResult {
 }
 
 #[tokio::test]
+async fn refresh_avoids_unchanged_head_bytes_and_rebuilds_stale_caches() -> TestResult {
+    let (store, log) = open_fault_log("sqlite-conditional-refresh").await?;
+    let directory = tempfile::tempdir()?;
+    let mut database = Database::open(log.clone(), directory.path().join("first.sqlite3")).await?;
+    commit_sql(
+        &mut database,
+        "CREATE TABLE values_table (value INTEGER); INSERT INTO values_table VALUES (1);",
+    )
+    .await?;
+
+    store.reset();
+    log.load().await?;
+    let unconditional = store.metrics();
+    assert_eq!(unconditional.operation(Operation::Get).requests, 1);
+    assert!(unconditional.downloaded_bytes() > 0);
+
+    store.reset();
+    assert_eq!(sum(&mut database).await?, 1);
+    let unchanged = store.metrics();
+    assert_eq!(unchanged.total_requests(), 1);
+    assert_eq!(unchanged.operation(Operation::Get).requests, 1);
+    assert_eq!(unchanged.downloaded_bytes(), 0);
+    assert!(unchanged.events[0].path.ends_with("/index.cbor"));
+
+    let StageStatus::Staged(abandoned) = database
+        .stage_write(TransactionId::new(), |transaction| {
+            transaction.execute("INSERT INTO values_table VALUES (100)", [])?;
+            Ok(Bytes::new())
+        })
+        .await?
+    else {
+        return Err("the dirty-cache write was not staged".into());
+    };
+    drop(abandoned);
+
+    store.reset();
+    assert_eq!(sum(&mut database).await?, 1);
+    let dirty = store.metrics();
+    assert!(dirty.operation(Operation::Get).requests > 1);
+    assert!(dirty.downloaded_bytes() > 0);
+
+    let mut second = Database::open(log, directory.path().join("second.sqlite3")).await?;
+    commit_sql(&mut second, "INSERT INTO values_table VALUES (2);").await?;
+    store.reset();
+    assert_eq!(sum(&mut database).await?, 3);
+    let changed = store.metrics();
+    assert!(changed.operation(Operation::Get).requests > 1);
+    assert!(changed.events[0].downloaded_bytes > 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn callback_error_rolls_back_and_keeps_the_cache_usable() -> TestResult {
     let log = open_log("sqlite-callback-rollback").await?;
     let directory = tempfile::tempdir()?;
@@ -597,6 +649,14 @@ async fn commit_sql(database: &mut Database, sql: &str) -> TestResult {
         return Err("SQL write did not commit".into());
     }
     Ok(())
+}
+
+async fn sum(database: &mut Database) -> Result<i64, SqliteError> {
+    database
+        .read(|connection| {
+            connection.query_row("SELECT sum(value) FROM values_table", [], |row| row.get(0))
+        })
+        .await
 }
 
 fn malicious_snapshot_record(payload_len: u64) -> Result<Bytes, Box<dyn StdError>> {

@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
 use object_log::{
     CheckpointResolution, CheckpointStatus, CommitStatus, Error as LogError, Log, ObjectKind,
-    ObjectRef, PendingCheckpoint, PreparedCommit, Resolution, TransactionId, View,
+    ObjectRef, PendingCheckpoint, PreparedCommit, Refresh, Resolution, TransactionId, View,
 };
 use rusqlite::{Connection, MAIN_DB};
 use uuid::Uuid;
@@ -310,11 +310,10 @@ impl Database {
     }
 
     async fn ensure_current(&mut self) -> Result<(), SqliteError> {
-        let current = self.log.load().await?;
-        if !matches!(self.state, CacheState::Clean)
-            || current.cursor().generation() != self.view.cursor().generation()
-        {
-            self.rebuild(current).await?;
+        match self.log.refresh(self.view.cursor()).await? {
+            Refresh::NotModified if matches!(self.state, CacheState::Clean) => {}
+            Refresh::NotModified => self.rebuild(self.view.clone()).await?,
+            Refresh::Updated(current) => self.rebuild(*current).await?,
         }
         Ok(())
     }
