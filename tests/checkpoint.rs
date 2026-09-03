@@ -693,7 +693,7 @@ async fn checkpoint_reports_expired_when_the_durable_window_is_zero() -> TestRes
 }
 
 #[tokio::test]
-async fn duplicate_commit_does_not_report_conflict_after_evidence_expires() -> TestResult {
+async fn exact_recovery_does_not_report_conflict_after_evidence_expires() -> TestResult {
     let options = Options {
         resolution_window: 0,
         ..Options::default()
@@ -707,7 +707,8 @@ async fn duplicate_commit_does_not_report_conflict_after_evidence_expires() -> T
         Bytes::new(),
         Vec::new(),
     )?;
-    let CommitStatus::Committed(committed) = log.commit(prepared.clone()).await? else {
+    let recovery_token = prepared.recovery_token()?;
+    let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
         return Err("first candidate did not publish".into());
     };
     let through = committed.tail()[0].clone();
@@ -723,11 +724,8 @@ async fn duplicate_commit_does_not_report_conflict_after_evidence_expires() -> T
         return Err("checkpoint did not publish".into());
     };
 
-    let CommitStatus::Pending(pending) = log.commit(prepared).await? else {
-        return Err("expired duplicate was given a definite outcome".into());
-    };
     assert!(matches!(
-        log.resolve(pending).await?,
+        log.resume(&recovery_token).await?,
         Resolution::Expired(_)
     ));
     Ok(())

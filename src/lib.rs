@@ -430,6 +430,9 @@ pub enum Error {
     /// Content does not match its declared digest, length, or immutable value.
     #[error("object data failed integrity verification")]
     CorruptObject,
+    /// A new immutable commit identity already exists and cannot be accepted.
+    #[error("fresh commit physical identity already exists")]
+    PhysicalIdentityCollision,
     /// The backend does not provide a required storage behavior.
     #[error("backend lacks required capability: {0}")]
     UnsupportedBackend(&'static str),

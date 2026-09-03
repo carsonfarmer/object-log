@@ -401,8 +401,8 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error when the byte length cannot be represented, the
-    /// backend fails, or different bytes already exist at the digest key.
+    /// Returns an error when the byte length cannot be represented or the
+    /// backend fails. A physical identity collision is retried with a new ID.
     pub async fn put_object(&self, bytes: Bytes) -> Result<ObjectRef, Error> {
         if bytes.len() > self.options.max_object_bytes {
             return Err(Error::LimitExceeded("object bytes"));
@@ -547,7 +547,7 @@ impl Log {
     pub async fn commit(&self, prepared: PreparedCommit) -> Result<CommitStatus, Error> {
         self.validate_prepared(&prepared).await?;
         let (commit_ref, commit_bytes) = self.encode_prepared(&prepared)?;
-        self.create_immutable(self.commit_key(&commit_ref), commit_bytes)
+        self.create_new_commit(self.commit_key(&commit_ref), commit_bytes)
             .await?;
         let candidate = Self::candidate_head(&prepared, &commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
@@ -636,7 +636,7 @@ impl Log {
         }
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
         match self
-            .create_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
+            .ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
             .await
         {
             Ok(()) => {}
@@ -1286,7 +1286,14 @@ impl Log {
         Ok(())
     }
 
-    async fn create_immutable(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
+    async fn create_new_commit(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
+        match self.store.create(key, bytes).await? {
+            CreateResult::Created { .. } => Ok(()),
+            CreateResult::AlreadyExists => Err(Error::PhysicalIdentityCollision),
+        }
+    }
+
+    async fn ensure_immutable(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
         match self.store.create(key, bytes.clone()).await {
             Ok(CreateResult::Created { .. }) => Ok(()),
             Ok(CreateResult::AlreadyExists) => self.verify_immutable(key, &bytes).await,
@@ -1502,6 +1509,34 @@ mod tests {
             .ok_or("ambiguous fresh create returned its colliding ID")?;
 
         assert!(matches!(&error, Error::Store(error) if FaultStore::is_injected(error)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_commit_rejects_a_collision_but_exact_recovery_can_reuse_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("commit-storage-id-collision", Options::default()).await?;
+        let view = log.load().await?;
+        let mut prepared = log.prepare(
+            view.cursor(),
+            TransactionId::new(),
+            Bytes::from_static(b"operation"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        prepared.storage_id = StorageId::from_uuid(uuid::Uuid::from_u128(7));
+        let token = prepared.recovery_token()?;
+        let (reference, bytes) = log.encode_prepared(&prepared)?;
+        log.store.create(log.commit_key(&reference), bytes).await?;
+
+        assert!(matches!(
+            log.commit(prepared).await,
+            Err(Error::PhysicalIdentityCollision)
+        ));
+        assert!(matches!(
+            log.resume(&token).await?,
+            Resolution::Committed(_)
+        ));
         Ok(())
     }
 

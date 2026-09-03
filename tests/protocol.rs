@@ -207,8 +207,8 @@ async fn two_writers_publish_one_order_and_require_explicit_reprepare()
 }
 
 #[tokio::test]
-async fn duplicate_exact_candidates_both_report_committed() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn repeated_first_attempt_requires_the_recovery_path()
+-> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let log = open(backend, "duplicate-candidate").await?;
     let view = log.load().await?;
@@ -220,9 +220,14 @@ async fn duplicate_exact_candidates_both_report_committed() -> Result<(), Box<dy
         Vec::new(),
     )?;
 
-    let (first, second) = tokio::join!(log.commit(prepared.clone()), log.commit(prepared));
-    assert!(matches!(first?, CommitStatus::Committed(_)));
-    assert!(matches!(second?, CommitStatus::Committed(_)));
+    assert!(matches!(
+        log.commit(prepared.clone()).await?,
+        CommitStatus::Committed(_)
+    ));
+    assert!(matches!(
+        log.commit(prepared).await,
+        Err(object_log::Error::PhysicalIdentityCollision)
+    ));
     assert_eq!(log.read_tail(&log.load().await?).await?.len(), 1);
     Ok(())
 }

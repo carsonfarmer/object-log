@@ -4,18 +4,19 @@
 
 ```text
 <prefix>/v1/logs/<log-id>/index.cbor
-<prefix>/v1/logs/<log-id>/wal/<digest>.cbor
-<prefix>/v1/logs/<log-id>/objects/<digest>
-<prefix>/v1/logs/<log-id>/nodes/<digest>.cbor
-<prefix>/v1/logs/<log-id>/bases/<digest>.cbor
+<prefix>/v1/logs/<log-id>/data/<incarnation>/<kind>/<storage-id>/<digest>
 ```
 
 The library derives every key. A caller cannot supply a raw object path after
 opening a log.
 
 Only `index.cbor` is mutable. Its update version is an opaque token supplied by the
-object store. Every other object uses create-only publication at a digest-based
-key.
+object store. Every other object uses create-only publication. Its key contains
+a random physical storage ID and a deterministic BLAKE3 content digest. A new
+blob, reference node, or checkpoint staging call always allocates a new physical
+ID. Exact commit recovery reuses only the physical ID recorded in its recovery
+evidence. This prevents an old delete from addressing a later write with the
+same content digest.
 
 This structure follows Cursor's mutable metadata plus immutable object model.
 It also follows Micelio's concrete split between one index, ordered entry
