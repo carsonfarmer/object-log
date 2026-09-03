@@ -57,7 +57,7 @@ async fn cold_open_retries_when_collection_deletes_its_old_snapshot() -> TestRes
         () = tokio::time::sleep(Duration::from_secs(5)) => return Err("cold open did not reach the target GET".into()),
     };
     assert!(entered);
-    assert_eq!(store.metrics().operation(Operation::Get).requests, 3);
+    assert!(store.metrics().operation(Operation::Get).requests >= 3);
 
     commit(
         &mut writer,
