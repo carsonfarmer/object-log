@@ -6,6 +6,7 @@
 <prefix>/v1/logs/<log-id>/index.cbor
 <prefix>/v1/logs/<log-id>/wal/<digest>.cbor
 <prefix>/v1/logs/<log-id>/objects/<digest>
+<prefix>/v1/logs/<log-id>/nodes/<digest>.cbor
 <prefix>/v1/logs/<log-id>/bases/<digest>.cbor
 ```
 
@@ -93,18 +94,20 @@ Object-store ETags are concurrency tokens and are not content-integrity hashes.
 
 ## Open and refresh
 
-`open` validates the backend contract and namespace. It creates the initial
-index when needed. It does not load all log data.
+`ValidatedBackend::new` validates one backend and root once. It returns a typed
+handle that derives tenant scopes without storage requests. `Log::open` creates
+the initial index when needed. It does not probe the backend or load all log
+data. This keeps tenant open and close cheap.
 
-The current capability probe writes and deletes one private object on every
-open. Backend credentials therefore need delete permission for the probe even
-though the log protocol does not delete durable log data. Moving this probe to
-an explicit provisioning result is an operability follow-on.
+The capability probe writes and deletes one private object when the backend
+handle is created. Provisioning credentials need delete permission. Normal log
+open and use do not need delete permission in this release.
 
 `load` reads and validates only the index. `read_checkpoint` reads its base.
 `read_tail` fetches active WAL entries concurrently because the index contains
-their complete ordered references. The materializer uses these operations to
-restore the complete state.
+their complete ordered references. It does not fetch referenced payloads or
+nodes. An adapter reads only the objects that it needs. The materializer uses
+these operations to restore the complete state.
 
 `refresh` uses a conditional read. An unchanged index returns `NotModified`. A
 changed index returns its new view. The caller then reads the base and active
@@ -115,7 +118,7 @@ tail that the view names.
 The caller prepares one candidate against one cursor.
 
 1. Validate all sizes, references, log identities, and the expected cursor.
-2. Verify that every referenced blob is already durable and valid.
+2. Verify that every referenced blob or node is already durable and valid.
 3. Create the immutable commit object.
 4. Build a new head that appends the commit reference.
 5. Conditionally replace the observed head version.
@@ -158,11 +161,14 @@ update.
 
 ## Checkpoint
 
-A checkpoint contains opaque snapshot bytes and the exact covered tail
-position. Its digest binds both.
+A checkpoint contains opaque snapshot bytes, explicit object roots, and the
+exact covered tail position. Its digest binds all three. A root can be a blob or
+a reference node. A reference node contains opaque adapter bytes and explicit
+children. This forms a content-addressed tree with bounded fan-out and no
+fixed depth.
 
-Publication validates every WAL entry and referenced blob in the supplied view.
-It also validates that the covered commit is in that view. The new index
+Publication validates every WAL entry in the supplied view and every declared
+checkpoint root. It also validates that the covered commit is in that view. The new index
 replaces the base checkpoint, removes the covered tail prefix, preserves the
 suffix, preserves the resolution window, and increments the generation.
 
@@ -171,16 +177,23 @@ A definite CAS failure returns `Conflict`. An uncertain update returns a
 checkpoint against its exact source view. Later head movement can make the
 outcome `Expired`.
 
-The core treats snapshot bytes as opaque. It proves which log prefix the bytes
-claim to cover. The materializer must prove that the snapshot is the correct
-state for that prefix. This is the checkpoint trust boundary.
+The core treats snapshot and node payload bytes as opaque. The adapter must put
+every durable dependency in the checkpoint roots or a reference-node edge.
+Opaque bytes must not hide another durable reachability graph. The materializer
+must also prove that the snapshot is the correct state for the covered prefix.
+These are the checkpoint trust boundaries.
 
-The first release retains prior objects. A later garbage collector will need a
-durable reachability and grace-period protocol.
+The first release retains all prior objects. Deletion is not safe yet. The GC
+follow-on must install a deletion fence through the same head CAS that orders
+publication. While the fence is active, commit and checkpoint publication must
+reject any candidate that transitively reaches an object in its positive
+deletion set. A grace period alone is not sufficient.
 
 ## Materializer
 
-The optional helper has a narrow role:
+The optional helper has a narrow role. It receives the explicit object
+references with each opaque snapshot or operation. It can keep those references
+for lazy adapter reads.
 
 ```rust
 trait Materializer {
@@ -188,12 +201,17 @@ trait Materializer {
     type Error;
 
     fn empty(&self) -> Self::State;
-    fn restore(&self, checkpoint: &[u8]) -> Result<Self::State, Self::Error>;
+    fn restore(
+        &self,
+        checkpoint: &[u8],
+        objects: &[ObjectRef],
+    ) -> Result<Self::State, Self::Error>;
     fn apply(
         &self,
         state: &mut Self::State,
         sequence: u64,
         operation: &[u8],
+        objects: &[ObjectRef],
     ) -> Result<(), Self::Error>;
     fn checkpoint(&self, state: &Self::State) -> Result<Vec<u8>, Self::Error>;
 }
@@ -215,9 +233,11 @@ The owner keeps:
 - A short batch timer and a maximum batch size.
 
 It applies queued operations in order to a tentative state. Compatible
-operations become one commit record. After the commit publishes, the owner
-replies to all operations with their recorded results. A conflict discards the
-tentative state, refreshes, and validates the operations again.
+operations become one commit record. Admission starts publication in a
+detached task so cancellation by one caller cannot stop an admitted batch.
+After the commit publishes, the owner replies through one-shot channels. A
+conflict discards the tentative state, refreshes, and validates the operations
+again. Queue limits apply to request count and bytes.
 
 If ownership changes, the new owner loads the current head. An old owner can
 still attempt a write, but it cannot overwrite a newer head. It loses the CAS,

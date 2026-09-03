@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation, RequestOutcome};
 use object_log::{
-    CommitRef, CommitStatus, Log, LogId, Options, PendingCommit, Refresh, Resolution, ScopedStore,
-    TransactionId, View,
+    CommitRef, CommitStatus, Log, LogId, Options, PendingCommit, Refresh, Resolution,
+    TransactionId, ValidatedBackend, View,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -15,6 +15,24 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn StdError>>;
+
+#[tokio::test]
+async fn validated_backend_opens_tenants_without_more_probes() -> TestResult {
+    let store = FaultStore::new(InMemory::new());
+    let backend =
+        ValidatedBackend::new(Arc::new(store.clone()), Path::from("cheap-open-tests")).await?;
+    store.reset();
+
+    for id in ["tenant-a", "tenant-b"] {
+        Log::open(backend.scope(&LogId::new(id)?), Options::default()).await?;
+    }
+
+    let metrics = store.metrics();
+    assert_eq!(metrics.operation(Operation::Put).requests, 2);
+    assert_eq!(metrics.operation(Operation::Get).requests, 0);
+    assert_eq!(metrics.operation(Operation::Delete).requests, 0);
+    Ok(())
+}
 
 #[tokio::test]
 async fn failure_before_put_makes_no_change() -> TestResult {
@@ -712,7 +730,8 @@ async fn open_model_log(seed: u64) -> Result<(FaultStore, Log, LogId), Box<dyn S
 }
 
 async fn reopen_model_log(store: &FaultStore, log_id: &LogId) -> Result<Log, object_log::Error> {
-    let scoped = ScopedStore::new(Arc::new(store.clone()), Path::from("model-tests"), log_id);
+    let backend = ValidatedBackend::new(Arc::new(store.clone()), Path::from("model-tests")).await?;
+    let scoped = backend.scope(log_id);
     Log::open(scoped, Options::default()).await
 }
 

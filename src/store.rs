@@ -30,6 +30,46 @@ pub struct BackendCapabilities {
     supported: BTreeSet<BackendCapability>,
 }
 
+/// One object-store root whose protocol capabilities were verified once.
+#[derive(Clone, Debug)]
+pub struct ValidatedBackend {
+    store: Arc<dyn ObjectStore>,
+    root: Path,
+    capabilities: BackendCapabilities,
+}
+
+impl ValidatedBackend {
+    /// Probes and validates one object-store root for many logical logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedBackend`] for a missing required behavior,
+    /// or a storage error when the probe cannot complete.
+    pub async fn new(store: Arc<dyn ObjectStore>, root: Path) -> Result<Self, Error> {
+        let probe_id = LogId::new(format!("probe-{}", Uuid::new_v4().simple()))?;
+        let probe = ScopedStore::unvalidated(Arc::clone(&store), root.clone(), &probe_id);
+        let capabilities = probe.probe_capabilities().await?;
+        capabilities.require_protocol()?;
+        Ok(Self {
+            store,
+            root,
+            capabilities,
+        })
+    }
+
+    /// Returns the observed backend capabilities.
+    #[must_use]
+    pub const fn capabilities(&self) -> &BackendCapabilities {
+        &self.capabilities
+    }
+
+    /// Derives an isolated logical-log scope without further storage requests.
+    #[must_use]
+    pub fn scope(&self, log_id: &LogId) -> ScopedStore {
+        ScopedStore::unvalidated(Arc::clone(&self.store), self.root.clone(), log_id)
+    }
+}
+
 impl BackendCapabilities {
     /// Reports whether the probe observed `capability`.
     #[must_use]
@@ -37,12 +77,7 @@ impl BackendCapabilities {
         self.supported.contains(&capability)
     }
 
-    /// Verifies every behavior required by the object-log protocol.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UnsupportedBackend`] for the first missing behavior.
-    pub fn require_protocol(&self) -> Result<(), Error> {
+    fn require_protocol(&self) -> Result<(), Error> {
         const REQUIRED: [(BackendCapability, &str); 4] = [
             (BackendCapability::ConditionalCreate, "conditional create"),
             (BackendCapability::ConditionalUpdate, "conditional update"),
@@ -68,6 +103,7 @@ pub(crate) enum StoreKey {
     Head,
     Commit(Digest),
     Blob(Digest),
+    Node(Digest),
     Checkpoint(Digest),
 }
 
@@ -112,9 +148,7 @@ pub struct ScopedStore {
 }
 
 impl ScopedStore {
-    /// Opens an isolated namespace without accessing the backend.
-    #[must_use]
-    pub fn new(store: Arc<dyn ObjectStore>, root: Path, log_id: &LogId) -> Self {
+    fn unvalidated(store: Arc<dyn ObjectStore>, root: Path, log_id: &LogId) -> Self {
         let scope = root
             .join("v1")
             .join("logs")
@@ -275,7 +309,7 @@ impl ScopedStore {
     ///
     /// Returns a storage error for a failure that is not a supported negative
     /// capability response.
-    pub async fn probe_capabilities(&self) -> Result<BackendCapabilities, Error> {
+    async fn probe_capabilities(&self) -> Result<BackendCapabilities, Error> {
         let location = self
             .scope
             .clone()
@@ -290,18 +324,6 @@ impl ScopedStore {
         }
     }
 
-    /// Probes and rejects a backend that cannot safely host a writable log.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UnsupportedBackend`] for a missing required behavior,
-    /// or a storage error when the probe cannot complete.
-    pub async fn validate_backend(&self) -> Result<BackendCapabilities, Error> {
-        let capabilities = self.probe_capabilities().await?;
-        capabilities.require_protocol()?;
-        Ok(capabilities)
-    }
-
     fn location(&self, key: StoreKey) -> Path {
         match key {
             StoreKey::Head => self.scope.clone().join("index.cbor"),
@@ -311,6 +333,11 @@ impl ScopedStore {
                 .join("wal")
                 .join(format!("{digest}.cbor")),
             StoreKey::Blob(digest) => self.scope.clone().join("objects").join(digest.to_string()),
+            StoreKey::Node(digest) => self
+                .scope
+                .clone()
+                .join("nodes")
+                .join(format!("{digest}.cbor")),
             StoreKey::Checkpoint(digest) => self
                 .scope
                 .clone()

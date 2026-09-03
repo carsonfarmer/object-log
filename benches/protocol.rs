@@ -2,7 +2,7 @@ use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::future::join_all;
 use object_log::sim::FaultStore;
-use object_log::{CommitStatus, Log, LogId, Options, ScopedStore, TransactionId, View};
+use object_log::{CommitStatus, Log, LogId, Options, TransactionId, ValidatedBackend, View};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use std::hint::black_box;
@@ -13,6 +13,7 @@ use tokio::runtime::{Builder, Runtime};
 
 const BATCH_SIZES: [usize; 5] = [1, 4, 16, 64, 256];
 const INLINE_BYTES: [usize; 3] = [32, 256, 4 * 1_024];
+const STAGED_BYTES: [usize; 2] = [64 * 1_024, 1_024 * 1_024];
 const TAIL_LENGTHS: [usize; 5] = [0, 16, 64, 256, 1_024];
 const WRITER_COUNTS: [usize; 4] = [1, 2, 8, 32];
 const LOGICAL_OPERATION_BYTES: usize = 32;
@@ -129,6 +130,46 @@ fn benchmark_tail_recovery(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_staged_bytes(criterion: &mut Criterion) {
+    let runtime = runtime();
+    let mut group = criterion.benchmark_group("memory/append_staged_bytes");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(2));
+    for staged_bytes in STAGED_BYTES {
+        group.throughput(Throughput::Bytes(usize_to_u64(staged_bytes)));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(staged_bytes),
+            &staged_bytes,
+            |bencher, &staged_bytes| {
+                bencher.iter_batched(
+                    || {
+                        (
+                            runtime.block_on(fresh_log(Options::default())),
+                            Bytes::from(vec![0x3c; staged_bytes]),
+                        )
+                    },
+                    |(mut state, payload)| {
+                        runtime.block_on(async move {
+                            let object = require(state.log.put_object(payload).await);
+                            let prepared = require(state.log.prepare(
+                                state.view.cursor(),
+                                TransactionId::new(),
+                                Bytes::from_static(b"staged payload"),
+                                Bytes::new(),
+                                vec![object],
+                            ));
+                            state.view = require_committed(state.log.commit(prepared).await);
+                            black_box(state);
+                        });
+                    },
+                    BatchSize::PerIteration,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
 fn benchmark_writer_contention(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("memory/writer_contention");
@@ -196,7 +237,9 @@ async fn fresh_log(options: Options) -> BenchLog {
     store.record_events(false);
     let number = NEXT_LOG.fetch_add(1, Ordering::Relaxed);
     let log_id = require(LogId::new(format!("criterion-{number:016x}")));
-    let scoped = ScopedStore::new(Arc::new(store.clone()), Path::from("criterion"), &log_id);
+    let backend =
+        require(ValidatedBackend::new(Arc::new(store.clone()), Path::from("criterion")).await);
+    let scoped = backend.scope(&log_id);
     let log = require(Log::open(scoped, options).await);
     let view = require(log.load().await);
     store.reset();
@@ -251,6 +294,7 @@ criterion_group!(
     benches,
     benchmark_batch_size,
     benchmark_inline_bytes,
+    benchmark_staged_bytes,
     benchmark_tail_recovery,
     benchmark_writer_contention
 );

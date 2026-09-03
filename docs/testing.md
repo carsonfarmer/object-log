@@ -42,6 +42,8 @@ not yet prove every listed case. Current gaps appear below the matrix.
 
 - Two writers opening an absent log create one valid initial head.
 - Opening an existing log does not rewrite it.
+- One validated backend handle opens many logs without another capability
+  probe.
 - Unsupported format versions fail closed.
 - A malformed namespace is rejected before storage access.
 
@@ -66,14 +68,16 @@ The target fault matrix injects a failure:
 - Before head mutation.
 - After head mutation but before its response.
 - During the first resolution read.
+- During the head CAS after its mutation is visible.
 
 For each point, assert the exact classification. A response lost after the head
 mutation must resolve as committed. A failure before the head mutation must not
 be misreported as committed.
 
-Current tests cover head mutation before/after failures, resolution reads, raw
-object-store puts, and referenced-object verification. Full log-level coverage
-of blob and commit creation before/after failures remains qualification work.
+Current tests cover head mutation before/after failures, resolution reads,
+cancellation after a visible head mutation, raw object-store puts, and
+referenced-object verification. Full log-level coverage of blob and commit
+creation before/after failures remains qualification work.
 
 ### Recovery
 
@@ -81,8 +85,10 @@ of blob and commit creation before/after failures remains qualification work.
 - Start from a current checkpoint and replay its tail.
 - Start from an old cached cursor after the base has advanced.
 - Fetch tail commits in arbitrary completion order and apply them in sequence.
-- Detect a missing referenced object.
-- Detect changed bytes at a digest key.
+- Keep payload and node reads lazy during metadata recovery.
+- Detect a missing or changed object when the adapter reads it.
+- Traverse checkpoint roots and reference-node children without parsing opaque
+  payload bytes.
 - Reject a commit that names another log identity.
 
 ### Checkpoint races
@@ -93,6 +99,8 @@ of blob and commit creation before/after failures remains qualification work.
 - Two checkpoints cover the same prefix.
 - A stale checkpoint covers a prefix that is no longer in the active history.
 - Checkpoint removes active tail references but preserves resolution evidence.
+- Missing or corrupt checkpoint roots fail before publication.
+- Missing or corrupt checkpoint objects fail during recovery.
 
 ### Tenant separation
 
@@ -103,9 +111,9 @@ of blob and commit creation before/after failures remains qualification work.
 
 ### Current matrix gaps
 
-- Prove ordered replay when commit reads complete out of order.
 - Complete the blob-create and commit-create fault points listed above.
 - Add checked-in golden values for commits, checkpoints, and recovery tokens.
+- Add a bounded full-graph scrub after the GC graph walker exists.
 
 ## Current deterministic scenario
 
@@ -119,7 +127,7 @@ on failure. It currently checks:
 - Every conflict candidate occurs zero times.
 - Every pending result remains consistent with at least one allowed store
   history until it resolves.
-- Every referenced object passes integrity verification.
+- Every referenced object passes integrity verification before publication.
 
 This is not yet an independent model. It derives prior history from the
 implementation output. The remaining qualification work must add an
@@ -159,7 +167,7 @@ must record image version, container resources, filesystem, endpoint, and
 whether the client and server share one host.
 
 The current process-local suite covers batch payload size, inline operation
-size, contending candidates, and active-tail recovery. The first measured
+size, contending candidates, and metadata-only active-tail recovery. The first measured
 baseline is in
 [`docs/evidence/local-baseline-2026-09-02.md`](evidence/local-baseline-2026-09-02.md).
 It states the cases that remain unmeasured. Add staged-payload, refresh,

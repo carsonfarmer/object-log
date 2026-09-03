@@ -200,7 +200,11 @@ impl Materializer for KvMachine {
         KvState::default()
     }
 
-    fn restore(&self, checkpoint: &[u8]) -> Result<Self::State, Self::Error> {
+    fn restore(
+        &self,
+        checkpoint: &[u8],
+        _objects: &[crate::ObjectRef],
+    ) -> Result<Self::State, Self::Error> {
         let snapshot: SnapshotWire = decode(checkpoint)?;
         require_version(snapshot.version)?;
         let mut entries = BTreeMap::new();
@@ -229,6 +233,7 @@ impl Materializer for KvMachine {
         state: &mut Self::State,
         _sequence: u64,
         operation: &[u8],
+        _objects: &[crate::ObjectRef],
     ) -> Result<(), Self::Error> {
         let mutation: MutationWire = decode(operation)?;
         require_version(mutation.version)?;

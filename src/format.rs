@@ -177,6 +177,13 @@ pub(crate) struct Checkpoint {
     pub through_sequence: u64,
     pub through_commit: Digest,
     pub snapshot: Bytes,
+    pub objects: Vec<ObjectRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Node {
+    pub payload: Bytes,
+    pub children: Vec<ObjectRef>,
 }
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
@@ -223,7 +230,7 @@ struct OptionsWire {
     #[n(4)]
     max_inline_result_bytes: u64,
     #[n(5)]
-    max_object_refs_per_commit: u64,
+    max_object_refs: u64,
     #[n(6)]
     max_commit_bytes: u64,
     #[n(7)]
@@ -270,6 +277,19 @@ struct CheckpointWire {
     snapshot: Vec<u8>,
     #[cbor(n(6), with = "minicbor::bytes")]
     incarnation: Vec<u8>,
+    #[n(7)]
+    objects: Vec<ObjectRefWire>,
+}
+
+#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[cbor(map)]
+struct NodeWire {
+    #[n(1)]
+    format_version: u32,
+    #[cbor(n(2), with = "minicbor::bytes")]
+    payload: Vec<u8>,
+    #[n(3)]
+    children: Vec<ObjectRefWire>,
 }
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
@@ -333,6 +353,7 @@ struct ObjectRefWire {
 enum ObjectKindWire {
     Blob = 1,
     Checkpoint = 2,
+    Node = 3,
 }
 
 pub(crate) fn encode_head(head: &Head) -> Result<Bytes, Error> {
@@ -421,6 +442,7 @@ pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Bytes, Error>
         through_commit: checkpoint.through_commit.as_bytes().to_vec(),
         snapshot: checkpoint.snapshot.to_vec(),
         incarnation: checkpoint.incarnation.as_bytes().to_vec(),
+        objects: checkpoint.objects.iter().map(ObjectRefWire::from).collect(),
     })
 }
 
@@ -433,9 +455,37 @@ pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, Error> {
         through_sequence: wire.through_sequence,
         through_commit: digest(&wire.through_commit)?,
         snapshot: Bytes::from(wire.snapshot),
+        objects: wire
+            .objects
+            .into_iter()
+            .map(ObjectRef::try_from)
+            .collect::<Result<_, _>>()?,
     };
     require_canonical(bytes, &encode_checkpoint(&checkpoint)?)?;
     Ok(checkpoint)
+}
+
+pub(crate) fn encode_node(node: &Node) -> Result<Bytes, Error> {
+    encode_envelope(&NodeWire {
+        format_version: FORMAT_VERSION,
+        payload: node.payload.to_vec(),
+        children: node.children.iter().map(ObjectRefWire::from).collect(),
+    })
+}
+
+pub(crate) fn decode_node(bytes: &[u8]) -> Result<Node, Error> {
+    let wire: NodeWire = decode_envelope(bytes)?;
+    require_version(wire.format_version)?;
+    let node = Node {
+        payload: Bytes::from(wire.payload),
+        children: wire
+            .children
+            .into_iter()
+            .map(ObjectRef::try_from)
+            .collect::<Result<_, _>>()?,
+    };
+    require_canonical(bytes, &encode_node(&node)?)?;
+    Ok(node)
 }
 
 pub(crate) fn encode_recovery_token(prepared: &PreparedCommit) -> Result<Bytes, Error> {
@@ -615,6 +665,7 @@ impl From<&ObjectRef> for ObjectRefWire {
         Self {
             kind: match value.kind {
                 ObjectKind::Blob => ObjectKindWire::Blob as u8,
+                ObjectKind::Node => ObjectKindWire::Node as u8,
                 ObjectKind::Checkpoint => ObjectKindWire::Checkpoint as u8,
             },
             digest: value.digest.as_bytes().to_vec(),
@@ -630,6 +681,7 @@ impl TryFrom<ObjectRefWire> for ObjectRef {
         let kind = match value.kind {
             value if value == ObjectKindWire::Blob as u8 => ObjectKind::Blob,
             value if value == ObjectKindWire::Checkpoint as u8 => ObjectKind::Checkpoint,
+            value if value == ObjectKindWire::Node as u8 => ObjectKind::Node,
             _ => {
                 return Err(Error::InvalidFormat("invalid object kind".into()));
             }
@@ -651,7 +703,7 @@ impl TryFrom<Options> for OptionsWire {
             resolution_window: option_to_u64(value.resolution_window)?,
             max_inline_operation_bytes: option_to_u64(value.max_inline_operation_bytes)?,
             max_inline_result_bytes: option_to_u64(value.max_inline_result_bytes)?,
-            max_object_refs_per_commit: option_to_u64(value.max_object_refs_per_commit)?,
+            max_object_refs: option_to_u64(value.max_object_refs)?,
             max_object_bytes: option_to_u64(value.max_object_bytes)?,
             max_commit_bytes: option_to_u64(value.max_commit_bytes)?,
             max_head_bytes: option_to_u64(value.max_head_bytes)?,
@@ -669,7 +721,7 @@ impl TryFrom<OptionsWire> for Options {
             resolution_window: option_to_usize(value.resolution_window)?,
             max_inline_operation_bytes: option_to_usize(value.max_inline_operation_bytes)?,
             max_inline_result_bytes: option_to_usize(value.max_inline_result_bytes)?,
-            max_object_refs_per_commit: option_to_usize(value.max_object_refs_per_commit)?,
+            max_object_refs: option_to_usize(value.max_object_refs)?,
             max_object_bytes: option_to_usize(value.max_object_bytes)?,
             max_commit_bytes: option_to_usize(value.max_commit_bytes)?,
             max_head_bytes: option_to_usize(value.max_head_bytes)?,
@@ -690,9 +742,10 @@ fn option_to_usize(value: u64) -> Result<usize, Error> {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        Checkpoint, Commit, EnvelopeWire, FORMAT_VERSION, Head, HeadWire, OptionsWire,
-        decode_checkpoint, decode_commit, decode_head, decode_recovery_token, encode_checkpoint,
-        encode_commit, encode_envelope, encode_head, encode_recovery_token,
+        Checkpoint, Commit, EnvelopeWire, FORMAT_VERSION, Head, HeadWire, Node, OptionsWire,
+        decode_checkpoint, decode_commit, decode_head, decode_node, decode_recovery_token,
+        encode_checkpoint, encode_commit, encode_envelope, encode_head, encode_node,
+        encode_recovery_token,
     };
     use crate::{CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, Options};
     use bytes::Bytes;
@@ -781,6 +834,11 @@ mod tests {
             through_sequence: 3,
             through_commit: Digest::of(b"commit"),
             snapshot: Bytes::from_static(b"opaque snapshot"),
+            objects: vec![ObjectRef {
+                kind: ObjectKind::Blob,
+                digest: Digest::of(b"blob"),
+                len: 4,
+            }],
         };
 
         let encoded =
@@ -788,6 +846,23 @@ mod tests {
         let decoded =
             decode_checkpoint(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(decoded, checkpoint);
+    }
+
+    #[test]
+    fn reference_node_round_trip_preserves_children() {
+        let node = Node {
+            payload: Bytes::from_static(b"page map"),
+            children: vec![ObjectRef {
+                kind: ObjectKind::Blob,
+                digest: Digest::of(b"page"),
+                len: 4,
+            }],
+        };
+
+        let encoded = encode_node(&node).unwrap_or_else(|error| panic!("encode failed: {error}"));
+        let decoded =
+            decode_node(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
+        assert_eq!(decoded, node);
     }
 
     #[test]
@@ -830,12 +905,13 @@ mod tests {
         use object_store::path::Path;
 
         let id = log_id();
-        let log = crate::Log::open(
-            crate::ScopedStore::new(Arc::new(InMemory::new()), Path::from("format-tests"), &id),
-            Options::default(),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("open failed: {error}"));
+        let backend =
+            crate::ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("format-tests"))
+                .await
+                .unwrap_or_else(|error| panic!("backend validation failed: {error}"));
+        let log = crate::Log::open(backend.scope(&id), Options::default())
+            .await
+            .unwrap_or_else(|error| panic!("open failed: {error}"));
         let view = log
             .load()
             .await

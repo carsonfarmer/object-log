@@ -7,8 +7,8 @@ use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 #[cfg(feature = "test-util")]
 use object_log::{CheckpointResolution, PendingCommit};
 use object_log::{
-    CheckpointStatus, CommitStatus, Log, LogId, Options, Resolution, ScopedStore, TransactionId,
-    View,
+    CheckpointStatus, CommitStatus, Log, LogId, Options, Resolution, TransactionId,
+    ValidatedBackend, View,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -31,7 +31,12 @@ async fn checkpoint_replaces_one_prefix_and_preserves_its_suffix() -> TestResult
     let through = third.tail()[0].clone();
 
     let CheckpointStatus::Published(compacted) = log
-        .publish_checkpoint(&third, &through, Bytes::from_static(b"state after first"))
+        .publish_checkpoint(
+            &third,
+            &through,
+            Bytes::from_static(b"state after first"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("checkpoint publication returned a conflict".into());
@@ -45,10 +50,12 @@ async fn checkpoint_replaces_one_prefix_and_preserves_its_suffix() -> TestResult
     assert_eq!(compacted.tail().len(), 2);
     assert_eq!(compacted.tail()[0].sequence(), 1);
     assert_eq!(compacted.tail()[1].sequence(), 2);
-    assert_eq!(
-        log.read_checkpoint(&compacted).await?,
-        Some(Bytes::from_static(b"state after first"))
-    );
+    let checkpoint = log
+        .read_checkpoint(&compacted)
+        .await?
+        .ok_or("published checkpoint is missing")?;
+    assert_eq!(checkpoint.snapshot(), b"state after first".as_slice());
+    assert!(checkpoint.objects().is_empty());
     let tail = log.read_tail(&compacted).await?;
     assert_eq!(tail[0].expected_tip(), Some(through.digest()));
     assert_eq!(tail[0].operation(), &Bytes::from_static(b"second"));
@@ -81,7 +88,7 @@ async fn append_before_checkpoint_preserves_both_entries() -> TestResult {
         return Err("append did not publish".into());
     };
     let CheckpointStatus::Conflict(current) = first
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"))
+        .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
         .await?
     else {
         return Err("stale checkpoint did not conflict".into());
@@ -112,7 +119,7 @@ async fn checkpoint_before_append_preserves_the_base() -> TestResult {
     )?;
 
     let CheckpointStatus::Published(checkpointed) = first
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"))
+        .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
         .await?
     else {
         return Err("checkpoint did not publish".into());
@@ -138,13 +145,23 @@ async fn stale_checkpoint_returns_the_current_view() -> TestResult {
     let through = one.tail()[0].clone();
 
     let CheckpointStatus::Published(published) = log
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"first base"))
+        .publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"first base"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("first checkpoint did not publish".into());
     };
     let CheckpointStatus::Conflict(current) = log
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"stale base"))
+        .publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"stale base"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("stale checkpoint did not conflict".into());
@@ -173,13 +190,251 @@ async fn checkpoint_limit_fails_before_index_publication() -> TestResult {
     let through = one.tail()[0].clone();
 
     assert!(matches!(
-        log.publish_checkpoint(&one, &through, Bytes::from_static(b"too large"))
+        log.publish_checkpoint(&one, &through, Bytes::from_static(b"too large"), Vec::new(),)
             .await,
         Err(object_log::Error::LimitExceeded("encoded checkpoint bytes"))
     ));
     let current = log.load().await?;
     assert!(current.checkpoint().is_none());
     assert_eq!(current.tail(), one.tail());
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_root_limit_fails_before_index_publication() -> TestResult {
+    let log = open(
+        Arc::new(InMemory::new()),
+        "checkpoint-root-limit",
+        Options {
+            max_object_refs: 0,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let object = log.put_object(Bytes::from_static(b"page")).await?;
+    let one = append(&log, &log.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+
+    assert!(matches!(
+        log.publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"page map"),
+            vec![object],
+        )
+        .await,
+        Err(object_log::Error::LimitExceeded("object references"))
+    ));
+    assert!(log.load().await?.checkpoint().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_declares_live_objects_for_lazy_restore() -> TestResult {
+    let backend = Arc::new(InMemory::new());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let log = open(store, "checkpoint-objects", Options::default()).await?;
+    let object = log.put_object(Bytes::from_static(b"page")).await?;
+    let one = append(&log, &log.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    let CheckpointStatus::Published(compacted) = log
+        .publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"page map"),
+            vec![object.clone()],
+        )
+        .await?
+    else {
+        return Err("checkpoint did not publish".into());
+    };
+
+    backend
+        .delete(&Path::from(format!(
+            "checkpoint-tests/v1/logs/checkpoint-objects/objects/{}",
+            object.digest()
+        )))
+        .await?;
+    let checkpoint = log
+        .read_checkpoint(&compacted)
+        .await?
+        .ok_or("checkpoint is missing")?;
+    assert_eq!(checkpoint.objects(), std::slice::from_ref(&object));
+    assert!(matches!(
+        log.read_object(&object).await,
+        Err(object_log::Error::InvalidFormat(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_can_root_a_traversable_object_tree() -> TestResult {
+    let log = open(
+        Arc::new(InMemory::new()),
+        "checkpoint-tree",
+        Options::default(),
+    )
+    .await?;
+    let page = log.put_object(Bytes::from_static(b"page")).await?;
+    let node = log
+        .put_node(Bytes::from_static(b"page map"), vec![page.clone()])
+        .await?;
+    let same = log
+        .put_node(Bytes::from_static(b"page map"), vec![page.clone()])
+        .await?;
+    assert_eq!(same, node);
+    let one = append(&log, &log.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    let CheckpointStatus::Published(compacted) = log
+        .publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"root"),
+            vec![node.clone()],
+        )
+        .await?
+    else {
+        return Err("checkpoint did not publish".into());
+    };
+
+    let checkpoint = log
+        .read_checkpoint(&compacted)
+        .await?
+        .ok_or("checkpoint is missing")?;
+    assert_eq!(checkpoint.objects(), std::slice::from_ref(&node));
+    let restored = log.read_node(&node).await?;
+    assert_eq!(restored.payload(), b"page map".as_slice());
+    assert_eq!(restored.children(), &[page]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reference_node_rejects_missing_and_corrupt_children() -> TestResult {
+    let backend = Arc::new(InMemory::new());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let log = open(store, "invalid-node-child", Options::default()).await?;
+    let missing = log.put_object(Bytes::from_static(b"missing")).await?;
+    backend
+        .delete(&Path::from(format!(
+            "checkpoint-tests/v1/logs/invalid-node-child/objects/{}",
+            missing.digest()
+        )))
+        .await?;
+    assert!(matches!(
+        log.put_node(Bytes::new(), vec![missing]).await,
+        Err(object_log::Error::InvalidFormat(_))
+    ));
+
+    let corrupt = log.put_object(Bytes::from_static(b"correct")).await?;
+    backend
+        .put(
+            &Path::from(format!(
+                "checkpoint-tests/v1/logs/invalid-node-child/objects/{}",
+                corrupt.digest()
+            )),
+            Bytes::from_static(b"changed").into(),
+        )
+        .await?;
+    assert!(matches!(
+        log.put_node(Bytes::new(), vec![corrupt]).await,
+        Err(object_log::Error::CorruptObject)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_rejects_missing_declared_object_before_publication() -> TestResult {
+    let backend = Arc::new(InMemory::new());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let log = open(store, "checkpoint-missing-object", Options::default()).await?;
+    let object = log.put_object(Bytes::from_static(b"page")).await?;
+    let one = append(&log, &log.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    backend
+        .delete(&Path::from(format!(
+            "checkpoint-tests/v1/logs/checkpoint-missing-object/objects/{}",
+            object.digest()
+        )))
+        .await?;
+
+    assert!(matches!(
+        log.publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"page map"),
+            vec![object],
+        )
+        .await,
+        Err(object_log::Error::InvalidFormat(_))
+    ));
+    assert!(log.load().await?.checkpoint().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_rejects_corrupt_declared_object_before_publication() -> TestResult {
+    let backend = Arc::new(InMemory::new());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let log = open(store, "checkpoint-corrupt-object", Options::default()).await?;
+    let object = log.put_object(Bytes::from_static(b"page")).await?;
+    let one = append(&log, &log.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    backend
+        .put(
+            &Path::from(format!(
+                "checkpoint-tests/v1/logs/checkpoint-corrupt-object/objects/{}",
+                object.digest()
+            )),
+            Bytes::from_static(b"bad!").into(),
+        )
+        .await?;
+
+    assert!(matches!(
+        log.publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"page map"),
+            vec![object],
+        )
+        .await,
+        Err(object_log::Error::CorruptObject)
+    ));
+    assert!(log.load().await?.checkpoint().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_read_rejects_missing_and_corrupt_roots() -> TestResult {
+    let backend = Arc::new(InMemory::new());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let log = open(store, "missing-checkpoint", Options::default()).await?;
+    let one = append(&log, &log.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    let CheckpointStatus::Published(compacted) = log
+        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), Vec::new())
+        .await?
+    else {
+        return Err("checkpoint did not publish".into());
+    };
+    let reference = compacted.checkpoint().ok_or("checkpoint is missing")?;
+    let location = Path::from(format!(
+        "checkpoint-tests/v1/logs/missing-checkpoint/bases/{}.cbor",
+        reference.object().digest()
+    ));
+    backend.delete(&location).await?;
+    assert!(matches!(
+        log.read_checkpoint(&compacted).await,
+        Err(object_log::Error::InvalidFormat(_))
+    ));
+
+    let checkpoint_len = usize::try_from(reference.object().len())?;
+    backend
+        .put(&location, Bytes::from(vec![0_u8; checkpoint_len]).into())
+        .await?;
+    assert!(matches!(
+        log.read_checkpoint(&compacted).await,
+        Err(object_log::Error::CorruptObject)
+    ));
     Ok(())
 }
 
@@ -203,7 +458,7 @@ async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
     });
 
     let pending = match log
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"))
+        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), Vec::new())
         .await?
     {
         CheckpointStatus::Pending(pending) => pending,
@@ -214,6 +469,54 @@ async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
     assert!(matches!(
         log.resolve_checkpoint(pending).await?,
         CheckpointResolution::Published(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "test-util")]
+async fn pending_checkpoint_rejects_a_lost_root() -> TestResult {
+    let backend = Arc::new(InMemory::new());
+    let faults = FaultStore::new(backend.clone());
+    let log = open(
+        Arc::new(faults.clone()),
+        "checkpoint-pending-lost-root",
+        Options::default(),
+    )
+    .await?;
+    let object = log.put_object(Bytes::from_static(b"page")).await?;
+    let one = append(&log, &log.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    faults.reset();
+    faults.schedule(Failure {
+        operation: Operation::Put,
+        occurrence: 2,
+        phase: FailurePhase::After,
+    });
+    let pending = match log
+        .publish_checkpoint(
+            &one,
+            &through,
+            Bytes::from_static(b"page map"),
+            vec![object.clone()],
+        )
+        .await?
+    {
+        CheckpointStatus::Pending(pending) => pending,
+        CheckpointStatus::Published(_) | CheckpointStatus::Conflict(_) => {
+            return Err("lost checkpoint response did not remain pending".into());
+        }
+    };
+    backend
+        .delete(&Path::from(format!(
+            "checkpoint-tests/v1/logs/checkpoint-pending-lost-root/objects/{}",
+            object.digest()
+        )))
+        .await?;
+
+    assert!(matches!(
+        log.resolve_checkpoint(pending).await,
+        Err(object_log::Error::InvalidFormat(_))
     ));
     Ok(())
 }
@@ -238,7 +541,7 @@ async fn failed_checkpoint_update_retries_the_exact_prefix() -> TestResult {
     });
 
     let pending = match log
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"))
+        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), Vec::new())
         .await?
     {
         CheckpointStatus::Pending(pending) => pending,
@@ -272,7 +575,12 @@ async fn superseded_pending_checkpoint_reports_expired_not_conflict() -> TestRes
         phase: FailurePhase::After,
     });
     let pending = match log
-        .publish_checkpoint(&one, &through_one, Bytes::from_static(b"state one"))
+        .publish_checkpoint(
+            &one,
+            &through_one,
+            Bytes::from_static(b"state one"),
+            Vec::new(),
+        )
         .await?
     {
         CheckpointStatus::Pending(pending) => pending,
@@ -285,7 +593,12 @@ async fn superseded_pending_checkpoint_reports_expired_not_conflict() -> TestRes
     let two = append(&log, &checkpointed_one, b"two").await?;
     let through_two = two.tail()[0].clone();
     let CheckpointStatus::Published(_) = log
-        .publish_checkpoint(&two, &through_two, Bytes::from_static(b"state two"))
+        .publish_checkpoint(
+            &two,
+            &through_two,
+            Bytes::from_static(b"state two"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("replacement checkpoint did not publish".into());
@@ -312,7 +625,12 @@ async fn checkpoint_retains_a_pending_commit_outcome() -> TestResult {
     let committed = log.load().await?;
     let through = committed.tail()[0].clone();
     let CheckpointStatus::Published(_) = log
-        .publish_checkpoint(&committed, &through, Bytes::from_static(b"snapshot"))
+        .publish_checkpoint(
+            &committed,
+            &through,
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("checkpoint did not publish".into());
@@ -343,7 +661,12 @@ async fn checkpoint_reports_expired_when_the_durable_window_is_zero() -> TestRes
     let committed = log.load().await?;
     let through = committed.tail()[0].clone();
     let CheckpointStatus::Published(_) = log
-        .publish_checkpoint(&committed, &through, Bytes::from_static(b"snapshot"))
+        .publish_checkpoint(
+            &committed,
+            &through,
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("checkpoint did not publish".into());
@@ -376,7 +699,12 @@ async fn duplicate_commit_does_not_report_conflict_after_evidence_expires() -> T
     };
     let through = committed.tail()[0].clone();
     let CheckpointStatus::Published(_) = log
-        .publish_checkpoint(&committed, &through, Bytes::from_static(b"snapshot"))
+        .publish_checkpoint(
+            &committed,
+            &through,
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("checkpoint did not publish".into());
@@ -410,8 +738,13 @@ async fn checkpoint_rejects_missing_source_history_before_publication() -> TestR
     backend.delete(&location).await?;
 
     assert!(matches!(
-        log.publish_checkpoint(&committed, &through, Bytes::from_static(b"snapshot"))
-            .await,
+        log.publish_checkpoint(
+            &committed,
+            &through,
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
+        .await,
         Err(object_log::Error::InvalidFormat(_))
     ));
     let current = log.load().await?;
@@ -426,7 +759,8 @@ async fn open(
     options: Options,
 ) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
-    let scoped = ScopedStore::new(store, Path::from("checkpoint-tests"), &log_id);
+    let backend = ValidatedBackend::new(store, Path::from("checkpoint-tests")).await?;
+    let scoped = backend.scope(&log_id);
     Log::open(scoped, options).await
 }
 

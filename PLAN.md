@@ -18,7 +18,8 @@ The first release has one authority protocol:
 - Each logical resource has its own log.
 - Each log has one small mutable `index.cbor` object.
 - A conditional update of the index publishes an entry.
-- Commit, blob, and checkpoint objects are immutable and content-addressed.
+- Commit, blob, reference-node, and checkpoint objects are immutable and
+  content-addressed.
 - The head contains a checkpoint reference and a bounded ordered tail of
   commit references.
 - A transport error during head publication produces a `PendingCommit`.
@@ -27,6 +28,8 @@ The first release has one authority protocol:
 - A versioned CBOR map is the durable wire format. Numeric field keys follow
   `schema/object-log-v1.cddl`.
 - The first release does not delete durable objects.
+- One validated backend/root handle creates many tenant scopes without another
+  capability probe.
 
 This protocol favors predictable reads, checkpoint installation, and conflict
 resolution over a one-write numbered-slot protocol.
@@ -41,6 +44,7 @@ Required value types:
 - `Cursor`: an opaque observed head position and storage version.
 - `TransactionId`: a caller-supplied stable operation identity.
 - `ObjectRef`: digest, byte length, and object kind.
+- `ReferenceNode`: opaque payload and explicit child references.
 - `CommitRef`: public sequence, transaction ID, and digest. The durable value
   also carries an encoded byte length for internal integrity checks.
 - `PreparedCommit`: expected cursor, transaction ID, operation bytes, result
@@ -53,16 +57,22 @@ Required value types:
 Required operations:
 
 ```rust
-open(store, prefix, log_id, options) -> Log
+validate_backend(store, prefix) -> ValidatedBackend
+scope(validated_backend, log_id) -> ScopedStore
+open(scoped_store, options) -> Log
 load() -> View
 refresh(cursor) -> Refresh
 put_object(bytes) -> ObjectRef
+put_node(payload, children) -> ObjectRef
+read_object(reference) -> bytes
+read_node(reference) -> ReferenceNode
 prepare(cursor, transaction_id, operation, result, objects) -> PreparedCommit
 commit(prepared) -> CommitStatus
 resolve(pending) -> Resolution
 resume(recovery_token) -> Resolution
 read_tail(view) -> ordered commit records
-publish_checkpoint(view, checkpoint) -> CheckpointStatus
+read_checkpoint(view) -> CheckpointRecord
+publish_checkpoint(view, through, snapshot, roots) -> CheckpointStatus
 resolve_checkpoint(pending) -> CheckpointResolution
 ```
 
@@ -102,6 +112,9 @@ operation after expiry.
     ETag ABA when an object store derives ETags from content.
 13. A durable random incarnation binds every cursor, WAL entry, and checkpoint
     to one log lifetime. Content digests remain deterministic within it.
+14. Checkpoint roots and reference-node edges enumerate every durable object
+    needed by a snapshot.
+15. Normal replay verifies ordered metadata and loads payloads only on demand.
 
 ## Work streams
 

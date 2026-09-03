@@ -12,11 +12,11 @@ mod store;
 pub mod sim;
 
 pub use log::{
-    CheckpointResolution, CheckpointStatus, CommitRecord, CommitStatus, Log, Options, Refresh,
-    Resolution, View,
+    CheckpointRecord, CheckpointResolution, CheckpointStatus, CommitRecord, CommitStatus, Log,
+    Options, ReferenceNode, Refresh, Resolution, View,
 };
 pub use materialize::{MaterializeError, Materialized, Materializer, materialize};
-pub use store::{BackendCapabilities, BackendCapability, ScopedStore};
+pub use store::{BackendCapabilities, BackendCapability, ScopedStore, ValidatedBackend};
 
 /// Current durable object-log format version.
 pub const FORMAT_VERSION: u32 = format::FORMAT_VERSION;
@@ -142,6 +142,8 @@ impl fmt::Display for TransactionId {
 pub enum ObjectKind {
     /// Caller-owned payload data.
     Blob,
+    /// A canonical node with opaque payload and traversable child references.
+    Node,
     /// An opaque state snapshot.
     Checkpoint,
 }

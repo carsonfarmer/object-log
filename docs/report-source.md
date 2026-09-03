@@ -72,14 +72,29 @@ into immutable Parquet fragments, publishes fragments through a CAS manifest,
 uses immutable manifest snapshots as a tree, supports cursor-aware garbage
 collection, and schedules critical writes so task cancellation cannot stop
 progress. Its design explicitly prefers one in-process writer while retaining
-correct multi-writer failure behavior. [wal3 design](https://github.com/chroma-core/chroma/blob/main/rust/wal3/README.md).
+correct multi-writer failure behavior. [wal3 design](https://github.com/chroma-core/chroma/blob/f60fe42cdad202a92acad55a1f0fbf8ce757c8b1/rust/wal3/README.md).
+
+The detailed comparison changed four local decisions. Checkpoints now declare
+content roots. Canonical reference nodes make large object graphs traversable.
+Normal replay reads WAL metadata but leaves payload reads lazy. One validated
+backend handle opens many tenant logs without repeating the capability probe.
+These changes copy WAL3 invariants without copying its fixed metadata tree.
+
+WAL3 also confirms that safe deletion needs a positive durable deletion plan.
+For generic object graphs, the plan must be installed as a head-CAS fence.
+Publication while that fence is active must reject any transitive reference to
+its candidate set. A grace period alone permits an old verified object to be
+deleted before a later CAS makes it live. [wal3 garbage-collection
+protocol](https://github.com/chroma-core/chroma/blob/f60fe42cdad202a92acad55a1f0fbf8ce757c8b1/rust/wal3/README.md#garbage-collection).
 
 It is not a clean reusable dependency. The crate is part of the Chroma
 workspace and depends on Chroma types, configuration, storage, telemetry,
 Parquet, Arrow, gRPC, and Google Cloud Spanner packages.
 [wal3 Cargo manifest](https://raw.githubusercontent.com/chroma-core/chroma/main/rust/wal3/Cargo.toml).
 Its fragment tree and garbage-collection protocol are important sources for
-the fast follow-on work.
+the fast follow-on work. Direct reuse remains a poor fit. At the reviewed
+revision, the crate depends on Arrow, Parquet, Chroma packages, telemetry,
+tonic, and Google Cloud Spanner.
 
 ### Micelio
 
@@ -187,8 +202,10 @@ A preferred in-memory owner is an optimization, not a new authority:
 - It accepts work into a bounded queue.
 - It validates and applies operations in queue order to tentative state.
 - It writes one WAL entry for a bounded batch and performs one index CAS.
-- It replies to each caller only after the CAS succeeds, using results stored
-  in the entry.
+- Admission starts publication in a detached task. Caller cancellation cannot
+  stop an admitted batch.
+- It replies to each caller through a one-shot channel only after the CAS
+  succeeds, using results stored in the entry.
 - On conflict, it discards tentative state, refreshes, and validates again.
 - Another process can take over by loading the durable checkpoint and tail.
 - A stale owner remains safe because it cannot pass the object-store CAS.
@@ -202,10 +219,17 @@ WAL and checkpoint store in that design.
 
 ## Implemented decision
 
-The current library keeps one mutable `index.cbor`. WAL entries, payloads, and
-checkpoints are immutable and content-addressed. The random durable incarnation
-prevents a cursor from one log lifetime from authorizing another lifetime.
-BLAKE3 provides deterministic content identities within that namespace.
+The current library keeps one mutable `index.cbor`. WAL entries, payloads,
+reference nodes, and checkpoints are immutable and content-addressed. The
+random durable incarnation prevents a cursor from one log lifetime from
+authorizing another lifetime. BLAKE3 provides deterministic content identities
+within that namespace.
+
+Checkpoints expose their declared roots. Reference nodes have opaque payloads
+and explicit children. This permits adapter-specific trees without hiding GC
+reachability. Replay verifies the WAL chain and loads payloads on demand. A
+validated backend/root handle performs one capability probe and then derives
+tenant scopes without more probe requests.
 
 The public result model distinguishes committed, definite conflict, pending,
 and expired evidence. A recovery token preserves the exact candidate before
@@ -213,7 +237,7 @@ publication. The local key-value module proves atomic commands and recorded
 results. Garbage collection remains the first follow-on. SQLite, then
 `wasi:filesystem`, follow it. Live AWS qualification is separate.
 
-The final all-feature local gate passes 67 tests plus one pinned MinIO flow.
+The final all-feature local gate passes 79 tests plus one pinned MinIO flow.
 The Criterion matrix measures in-memory append, recovery, and contention. These
 results do not prove S3 latency, multi-process behavior, or the full fault
 matrix. See [local evidence](evidence/local-baseline-2026-09-02.md) and [test
@@ -226,7 +250,9 @@ gaps](testing.md#current-matrix-gaps).
 - WalTier is small and reusable, but its whole-image rewrite and at-least-once
   ambiguity are not the chosen contract.
 - `wal3` has the best surveyed high-throughput and garbage-collection design,
-  but its workspace coupling makes direct reuse expensive.
+  but its workspace coupling makes direct reuse expensive. Its recovery can
+  adopt an unreferenced next-sequence fragment. `object-log` deliberately
+  requires exact transaction evidence instead.
 - Graft, Micelio, Turbolite, and `s3-wasi-fs` describe themselves as alpha,
   experimental, or semantically limited. They are evidence, not production
   qualification for this project.

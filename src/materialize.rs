@@ -2,7 +2,7 @@
 
 use std::error::Error as StdError;
 
-use crate::{Error, Log, View};
+use crate::{Error, Log, ObjectRef, View};
 
 /// Applies opaque log data to one application state type.
 pub trait Materializer {
@@ -19,7 +19,8 @@ pub trait Materializer {
     /// # Errors
     ///
     /// Returns a domain error when the snapshot is invalid.
-    fn restore(&self, checkpoint: &[u8]) -> Result<Self::State, Self::Error>;
+    fn restore(&self, checkpoint: &[u8], objects: &[ObjectRef])
+    -> Result<Self::State, Self::Error>;
 
     /// Applies one committed operation in sequence order.
     ///
@@ -31,6 +32,7 @@ pub trait Materializer {
         state: &mut Self::State,
         sequence: u64,
         operation: &[u8],
+        objects: &[ObjectRef],
     ) -> Result<(), Self::Error>;
 
     /// Encodes one application snapshot.
@@ -94,8 +96,8 @@ where
 {
     let view = log.load().await?;
     let mut state = match log.read_checkpoint(&view).await? {
-        Some(snapshot) => materializer
-            .restore(&snapshot)
+        Some(checkpoint) => materializer
+            .restore(checkpoint.snapshot(), checkpoint.objects())
             .map_err(MaterializeError::State)?,
         None => materializer.empty(),
     };
@@ -105,6 +107,7 @@ where
                 &mut state,
                 record.reference().sequence(),
                 record.operation(),
+                record.objects(),
             )
             .map_err(MaterializeError::State)?;
     }

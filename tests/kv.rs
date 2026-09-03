@@ -5,8 +5,8 @@ use bytes::Bytes;
 use futures::future::join_all;
 use object_log::kv::{KvCommand, KvDecision, KvError, KvMachine, KvResult, KvState};
 use object_log::{
-    CheckpointStatus, CommitStatus, Log, LogId, Materializer, Options, Resolution, ScopedStore,
-    TransactionId, materialize,
+    CheckpointStatus, CommitStatus, Log, LogId, Materializer, Options, Resolution, TransactionId,
+    ValidatedBackend, materialize,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -143,7 +143,7 @@ async fn checkpoint_restore_matches_full_replay() -> TestResult {
         .ok_or("materialized view has no tail")?;
     let snapshot = machine.checkpoint(replayed.state())?;
     let CheckpointStatus::Published(compacted) = log
-        .publish_checkpoint(replayed.view(), &through, Bytes::from(snapshot))
+        .publish_checkpoint(replayed.view(), &through, Bytes::from(snapshot), Vec::new())
         .await?
     else {
         return Err("key-value checkpoint returned a conflict".into());
@@ -168,9 +168,9 @@ fn replay_rejects_a_mutation_applied_to_the_wrong_state() -> TestResult {
         return Err("increment did not require a commit".into());
     };
     let mut state = KvState::default();
-    machine.apply(&mut state, 0, &operation)?;
+    machine.apply(&mut state, 0, &operation, &[])?;
     assert!(matches!(
-        machine.apply(&mut state, 1, &operation),
+        machine.apply(&mut state, 1, &operation, &[]),
         Err(KvError::StateDiverged)
     ));
     Ok(())
@@ -211,7 +211,8 @@ fn stored_results_round_trip_through_the_public_decoder() -> TestResult {
 
 async fn open(id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
-    let scoped = ScopedStore::new(Arc::new(InMemory::new()), Path::from("kv-tests"), &log_id);
+    let backend = ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("kv-tests")).await?;
+    let scoped = backend.scope(&log_id);
     Log::open(scoped, Options::default()).await
 }
 

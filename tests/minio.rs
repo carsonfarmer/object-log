@@ -7,7 +7,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 use object_log::{
-    CheckpointStatus, CommitStatus, Log, LogId, Options, Resolution, ScopedStore, TransactionId,
+    CheckpointStatus, CommitStatus, Log, LogId, Options, Resolution, TransactionId,
+    ValidatedBackend,
 };
 use object_store::ObjectStore;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
@@ -24,7 +25,8 @@ async fn minio_passes_protocol_recovery_and_checkpoint_flow() -> TestResult {
     let store: Arc<dyn ObjectStore> = Arc::new(faults.clone());
     let log_id = LogId::new(format!("minio-{}", Uuid::new_v4().simple()))?;
     let root = Path::from("object-log-local-tests");
-    let scoped = ScopedStore::new(Arc::clone(&store), root.clone(), &log_id);
+    let backend = ValidatedBackend::new(store, root).await?;
+    let scoped = backend.scope(&log_id);
     let log = Log::open(scoped, Options::default()).await?;
     let empty = log.load().await?;
 
@@ -61,7 +63,12 @@ async fn minio_passes_protocol_recovery_and_checkpoint_flow() -> TestResult {
 
     let through = committed.tail()[0].clone();
     let CheckpointStatus::Published(compacted) = log
-        .publish_checkpoint(&committed, &through, Bytes::from_static(b"minio snapshot"))
+        .publish_checkpoint(
+            &committed,
+            &through,
+            Bytes::from_static(b"minio snapshot"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("MinIO checkpoint returned a conflict".into());
@@ -69,11 +76,15 @@ async fn minio_passes_protocol_recovery_and_checkpoint_flow() -> TestResult {
     assert!(compacted.tail().is_empty());
 
     drop(log);
-    let reopened = Log::open(ScopedStore::new(store, root, &log_id), Options::default()).await?;
+    let reopened = Log::open(backend.scope(&log_id), Options::default()).await?;
     let recovered = reopened.load().await?;
     assert_eq!(
-        reopened.read_checkpoint(&recovered).await?,
-        Some(Bytes::from_static(b"minio snapshot"))
+        reopened
+            .read_checkpoint(&recovered)
+            .await?
+            .ok_or("MinIO checkpoint is missing")?
+            .snapshot(),
+        b"minio snapshot".as_slice()
     );
     assert!(reopened.read_tail(&recovered).await?.is_empty());
     Ok(())

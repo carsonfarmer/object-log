@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use object_log::{
-    CommitStatus, Log, LogId, Options, Refresh, Resolution, ScopedStore, TransactionId,
+    CommitStatus, Log, LogId, Options, Refresh, Resolution, TransactionId, ValidatedBackend,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -14,6 +14,7 @@ use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
+use tokio::sync::Notify;
 
 const FAIL_NONE: u8 = 0;
 const FAIL_BEFORE_UPDATE: u8 = 1;
@@ -33,9 +34,9 @@ async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it(
 -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let log_id = LogId::new("concurrent-open")?;
-    let first_store = ScopedStore::new(Arc::clone(&backend), Path::from("protocol-tests"), &log_id);
-    let second_store =
-        ScopedStore::new(Arc::clone(&backend), Path::from("protocol-tests"), &log_id);
+    let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
+    let first_store = backend.scope(&log_id);
+    let second_store = backend.scope(&log_id);
     let (first, second) = tokio::join!(
         Log::open(first_store, Options::default()),
         Log::open(second_store, Options::default())
@@ -50,7 +51,7 @@ async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it(
         Refresh::NotModified
     ));
 
-    let third_store = ScopedStore::new(backend, Path::from("protocol-tests"), &log_id);
+    let third_store = backend.scope(&log_id);
     let third = Log::open(third_store, Options::default()).await?;
     assert_eq!(third.load().await?.cursor().generation(), 0);
     assert!(matches!(
@@ -99,13 +100,10 @@ async fn capability_probe_rejects_false_not_modified_responses()
     let backend = Arc::new(InstrumentedStore::new());
     backend.lie_about_conditional_reads();
     let store: Arc<dyn ObjectStore> = backend;
-    let scoped = ScopedStore::new(
-        store,
-        Path::from("protocol-tests"),
-        &LogId::new("lying-conditional-read")?,
-    );
-    let capabilities = scoped.probe_capabilities().await?;
-    assert!(!capabilities.supports(object_log::BackendCapability::ConditionalRead));
+    assert!(matches!(
+        ValidatedBackend::new(store, Path::from("protocol-tests")).await,
+        Err(object_log::Error::UnsupportedBackend("conditional read"))
+    ));
     Ok(())
 }
 
@@ -113,7 +111,8 @@ async fn capability_probe_rejects_false_not_modified_responses()
 async fn encoded_commit_limit_fails_before_publication() -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let log_id = LogId::new("commit-limit")?;
-    let scoped = ScopedStore::new(backend, Path::from("protocol-tests"), &log_id);
+    let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
+    let scoped = backend.scope(&log_id);
     let options = Options {
         max_commit_bytes: 1,
         ..Options::default()
@@ -255,7 +254,8 @@ async fn open_rejects_options_that_differ_from_the_durable_contract()
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let first = open(Arc::clone(&backend), "durable-options").await?;
     let log_id = LogId::new("durable-options")?;
-    let scoped = ScopedStore::new(backend, Path::from("protocol-tests"), &log_id);
+    let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
+    let scoped = backend.scope(&log_id);
     let changed = Options {
         resolution_window: 0,
         ..Options::default()
@@ -334,7 +334,7 @@ async fn referenced_objects_are_durable_before_head_publication()
 }
 
 #[tokio::test]
-async fn recovery_rejects_a_missing_referenced_object() -> Result<(), Box<dyn std::error::Error>> {
+async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std::error::Error>> {
     let backend = Arc::new(InMemory::new());
     let erased: Arc<dyn ObjectStore> = backend.clone();
     let log = open(erased, "missing-object").await?;
@@ -357,15 +357,18 @@ async fn recovery_rejects_a_missing_referenced_object() -> Result<(), Box<dyn st
         )))
         .await?;
 
+    let tail = log.read_tail(&committed).await?;
+    assert_eq!(tail[0].objects(), std::slice::from_ref(&object));
     assert!(matches!(
-        log.read_tail(&committed).await,
+        log.read_object(&object).await,
         Err(object_log::Error::InvalidFormat(_))
     ));
     Ok(())
 }
 
 #[tokio::test]
-async fn recovery_rejects_a_changed_referenced_object() -> Result<(), Box<dyn std::error::Error>> {
+async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn std::error::Error>>
+{
     let backend = Arc::new(InMemory::new());
     let erased: Arc<dyn ObjectStore> = backend.clone();
     let log = open(erased, "changed-object").await?;
@@ -391,8 +394,12 @@ async fn recovery_rejects_a_changed_referenced_object() -> Result<(), Box<dyn st
         )
         .await?;
 
+    assert_eq!(
+        log.read_tail(&committed).await?[0].objects(),
+        std::slice::from_ref(&object)
+    );
     assert!(matches!(
-        log.read_tail(&committed).await,
+        log.read_object(&object).await,
         Err(object_log::Error::CorruptObject)
     ));
     Ok(())
@@ -425,6 +432,77 @@ async fn lost_success_response_resolves_to_the_original_commit()
     let tail = log.read_tail(&resolved).await?;
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].result(), &Bytes::from_static(b"accepted"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_head_update_resumes_after_reopen() -> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new());
+    let store: Arc<dyn ObjectStore> = observed.clone();
+    let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
+    let log_id = LogId::new("cancelled-update")?;
+    let log = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let prepared = log.prepare(
+        log.load().await?.cursor(),
+        TransactionId::new(),
+        Bytes::from_static(b"cancelled request"),
+        Bytes::from_static(b"recorded result"),
+        Vec::new(),
+    )?;
+    let token = prepared.recovery_token()?;
+    observed.pause_next_update_after_success();
+    let publish = tokio::spawn({
+        let log = log.clone();
+        async move { log.commit(prepared).await }
+    });
+    observed.wait_for_visible_update().await;
+    publish.abort();
+    let cancelled = publish
+        .await
+        .err()
+        .ok_or("aborted publication returned normally")?;
+    assert!(cancelled.is_cancelled());
+
+    drop(log);
+    let reopened = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let Resolution::Committed(view) = reopened.resume(&token).await? else {
+        return Err("cancelled publication did not resolve as committed".into());
+    };
+    assert_eq!(reopened.read_tail(&view).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tail_order_survives_out_of_order_read_completion() -> Result<(), Box<dyn std::error::Error>>
+{
+    let observed = Arc::new(InstrumentedStore::new());
+    let store: Arc<dyn ObjectStore> = observed.clone();
+    let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
+    let log = Log::open(
+        backend.scope(&LogId::new("out-of-order-reads")?),
+        Options::default(),
+    )
+    .await?;
+    let mut view = log.load().await?;
+    for operation in [b"first".as_slice(), b"second".as_slice()] {
+        let prepared = log.prepare(
+            view.cursor(),
+            TransactionId::new(),
+            Bytes::copy_from_slice(operation),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(next) = log.commit(prepared).await? else {
+            return Err("test commit did not publish".into());
+        };
+        view = next;
+    }
+
+    observed.complete_second_wal_read_first();
+    let tail =
+        tokio::time::timeout(std::time::Duration::from_secs(1), log.read_tail(&view)).await??;
+    assert_eq!(tail[0].operation(), b"first".as_slice());
+    assert_eq!(tail[1].operation(), b"second".as_slice());
     Ok(())
 }
 
@@ -508,7 +586,8 @@ async fn rejected_candidate_remains_pending_when_the_winner_read_fails()
 
 async fn open(store: Arc<dyn ObjectStore>, id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
-    let scoped = ScopedStore::new(store, Path::from("protocol-tests"), &log_id);
+    let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
+    let scoped = backend.scope(&log_id);
     Log::open(scoped, Options::default()).await
 }
 
@@ -521,6 +600,11 @@ struct InstrumentedStore {
     object_before_update: AtomicBool,
     lie_conditional_read: AtomicBool,
     fail_head_get: AtomicBool,
+    pause_after_update: AtomicBool,
+    visible_update: Notify,
+    reorder_wal_reads: AtomicBool,
+    wal_read_count: AtomicU8,
+    second_wal_read: Notify,
 }
 
 impl InstrumentedStore {
@@ -533,6 +617,11 @@ impl InstrumentedStore {
             object_before_update: AtomicBool::new(false),
             lie_conditional_read: AtomicBool::new(false),
             fail_head_get: AtomicBool::new(false),
+            pause_after_update: AtomicBool::new(false),
+            visible_update: Notify::new(),
+            reorder_wal_reads: AtomicBool::new(false),
+            wal_read_count: AtomicU8::new(0),
+            second_wal_read: Notify::new(),
         }
     }
 
@@ -567,6 +656,19 @@ impl InstrumentedStore {
 
     fn fail_next_head_get(&self) {
         self.fail_head_get.store(true, Ordering::SeqCst);
+    }
+
+    fn pause_next_update_after_success(&self) {
+        self.pause_after_update.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_visible_update(&self) {
+        self.visible_update.notified().await;
+    }
+
+    fn complete_second_wal_read_first(&self) {
+        self.wal_read_count.store(0, Ordering::SeqCst);
+        self.reorder_wal_reads.store(true, Ordering::SeqCst);
     }
 }
 
@@ -622,6 +724,10 @@ impl ObjectStore for InstrumentedStore {
         {
             return Err(Self::lost_ack_error());
         }
+        if is_update && result.is_ok() && self.pause_after_update.swap(false, Ordering::SeqCst) {
+            self.visible_update.notify_one();
+            std::future::pending::<()>().await;
+        }
         result
     }
 
@@ -638,6 +744,20 @@ impl ObjectStore for InstrumentedStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if location.to_string().contains("/wal/") && self.reorder_wal_reads.load(Ordering::SeqCst) {
+            match self.wal_read_count.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    self.second_wal_read.notified().await;
+                    return self.inner.get_opts(location, options).await;
+                }
+                1 => {
+                    let result = self.inner.get_opts(location, options).await;
+                    self.second_wal_read.notify_one();
+                    return result;
+                }
+                _ => {}
+            }
+        }
         if location.to_string().ends_with("/index.cbor")
             && self.fail_head_get.swap(false, Ordering::SeqCst)
         {

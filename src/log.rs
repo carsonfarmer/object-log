@@ -23,8 +23,8 @@ pub struct Options {
     pub max_inline_operation_bytes: usize,
     /// Maximum inline result bytes in one commit.
     pub max_inline_result_bytes: usize,
-    /// Maximum immutable object references in one commit.
-    pub max_object_refs_per_commit: usize,
+    /// Maximum immutable object references in one commit or checkpoint.
+    pub max_object_refs: usize,
     /// Maximum bytes in one immutable object.
     pub max_object_bytes: usize,
     /// Maximum encoded bytes in one WAL entry.
@@ -42,7 +42,7 @@ impl Default for Options {
             resolution_window: 1_024,
             max_inline_operation_bytes: 64 * 1_024,
             max_inline_result_bytes: 4 * 1_024,
-            max_object_refs_per_commit: 1_024,
+            max_object_refs: 1_024,
             max_object_bytes: 64 * 1024 * 1024,
             max_commit_bytes: 1024 * 1024,
             max_head_bytes: 256 * 1024,
@@ -192,6 +192,48 @@ impl CommitRecord {
     }
 }
 
+/// One decoded checkpoint and its declared immutable dependencies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointRecord {
+    snapshot: Bytes,
+    objects: Vec<ObjectRef>,
+}
+
+impl CheckpointRecord {
+    /// Returns the caller-defined snapshot bytes.
+    #[must_use]
+    pub const fn snapshot(&self) -> &Bytes {
+        &self.snapshot
+    }
+
+    /// Returns every immutable object needed to restore the snapshot.
+    #[must_use]
+    pub fn objects(&self) -> &[ObjectRef] {
+        &self.objects
+    }
+}
+
+/// One immutable node with opaque payload and traversable child references.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReferenceNode {
+    payload: Bytes,
+    children: Vec<ObjectRef>,
+}
+
+impl ReferenceNode {
+    /// Returns the caller-defined node payload.
+    #[must_use]
+    pub const fn payload(&self) -> &Bytes {
+        &self.payload
+    }
+
+    /// Returns the node's direct immutable children.
+    #[must_use]
+    pub fn children(&self) -> &[ObjectRef] {
+        &self.children
+    }
+}
+
 /// A linearizable log in one namespace-safe object-store scope.
 #[derive(Clone, Debug)]
 pub struct Log {
@@ -203,14 +245,11 @@ pub struct Log {
 impl Log {
     /// Opens a writable log and creates its initial head when it is absent.
     ///
-    /// This probes the backend contract before it accesses the durable head.
-    ///
     /// # Errors
     ///
-    /// Returns an error when the backend lacks a required behavior, the head
-    /// cannot be created or read, or an existing head is invalid.
+    /// Returns an error when the head cannot be created or read, or an existing
+    /// head is invalid.
     pub async fn open(store: ScopedStore, options: Options) -> Result<Self, Error> {
-        store.validate_backend().await?;
         let initial = Head::empty(store.log_id().clone(), uuid::Uuid::new_v4(), options);
         let initial_bytes = format::encode_head(&initial)?;
         Self::validate_head_size(options, &initial_bytes)?;
@@ -296,6 +335,40 @@ impl Log {
         Ok(object)
     }
 
+    /// Stores one immutable reference node after its direct children exist.
+    ///
+    /// The opaque payload can describe an adapter-specific tree node. All
+    /// durable child objects must appear in `children` so a generic collector
+    /// can traverse the complete graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid dependencies, configured limits, missing
+    /// or corrupt children, or a backend failure.
+    pub async fn put_node(
+        &self,
+        payload: Bytes,
+        children: Vec<ObjectRef>,
+    ) -> Result<ObjectRef, Error> {
+        self.validate_dependencies(&children)?;
+        let node = format::Node { payload, children };
+        let bytes = format::encode_node(&node)?;
+        if bytes.len() > self.options.max_object_bytes {
+            return Err(Error::LimitExceeded("object bytes"));
+        }
+        self.verify_objects(&node.children).await?;
+        let len =
+            u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("object byte length"))?;
+        let object = ObjectRef {
+            kind: ObjectKind::Node,
+            digest: Digest::of(&bytes),
+            len,
+        };
+        self.create_immutable(Self::object_key(&object), bytes)
+            .await?;
+        Ok(object)
+    }
+
     /// Reads and verifies one object from this log namespace.
     ///
     /// # Errors
@@ -303,6 +376,39 @@ impl Log {
     /// Returns an error when the object is absent, corrupt, has the wrong
     /// length, or cannot be read.
     pub async fn read_object(&self, object: &ObjectRef) -> Result<Bytes, Error> {
+        if object.kind != ObjectKind::Blob {
+            return Err(Error::InvalidFormat(
+                "a payload read requires a blob reference".to_owned(),
+            ));
+        }
+        self.read_immutable(object).await
+    }
+
+    /// Reads and verifies one immutable reference node.
+    ///
+    /// Child objects remain lazy. Call [`Log::read_object`] or
+    /// [`Log::read_node`] for each child that the adapter needs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for the wrong object kind, invalid node data,
+    /// configured limits, or a backend failure.
+    pub async fn read_node(&self, object: &ObjectRef) -> Result<ReferenceNode, Error> {
+        if object.kind != ObjectKind::Node {
+            return Err(Error::InvalidFormat(
+                "a node read requires a reference-node object".to_owned(),
+            ));
+        }
+        let bytes = self.read_immutable(object).await?;
+        let node = format::decode_node(&bytes)?;
+        self.validate_dependencies(&node.children)?;
+        Ok(ReferenceNode {
+            payload: node.payload,
+            children: node.children,
+        })
+    }
+
+    async fn read_immutable(&self, object: &ObjectRef) -> Result<Bytes, Error> {
         let declared_len =
             usize::try_from(object.len).map_err(|_| Error::LimitExceeded("object byte length"))?;
         if declared_len > self.options.max_object_bytes {
@@ -336,7 +442,7 @@ impl Log {
     ) -> Result<PreparedCommit, Error> {
         self.validate_cursor(cursor)?;
         self.validate_prepared_sizes(&operation, &result)?;
-        self.validate_object_count(&objects)?;
+        self.validate_dependencies(&objects)?;
         if cursor.head.tail.len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
@@ -526,8 +632,9 @@ impl Log {
 
     /// Reads and verifies every commit in the active tail.
     ///
-    /// Object reads run concurrently. The returned records remain in sequence
-    /// order.
+    /// Commit reads run concurrently. The returned records remain in sequence
+    /// order. Referenced objects are loaded and verified only when the caller
+    /// passes their references to [`Log::read_object`].
     ///
     /// # Errors
     ///
@@ -555,16 +662,6 @@ impl Log {
             }
             expected_tip = Some(record.reference.digest);
         }
-        stream::iter(
-            records
-                .iter()
-                .flat_map(|record| record.objects.iter())
-                .map(Ok::<_, Error>),
-        )
-        .try_for_each_concurrent(MAX_CONCURRENT_READS, |object| async move {
-            self.verify_object_durable(object).await
-        })
-        .await?;
         Ok(records)
     }
 
@@ -585,14 +682,18 @@ impl Log {
         view: &View,
         through: &CommitRef,
         snapshot: Bytes,
+        objects: Vec<ObjectRef>,
     ) -> Result<CheckpointStatus, Error> {
         self.read_tail(view).await?;
+        self.validate_dependencies(&objects)?;
+        self.verify_objects(&objects).await?;
         let checkpoint = format::Checkpoint {
             log_id: self.store.log_id().clone(),
             incarnation: self.incarnation,
             through_sequence: through.sequence,
             through_commit: through.digest,
             snapshot,
+            objects,
         };
         let bytes = format::encode_checkpoint(&checkpoint)?;
         self.validate_checkpoint_bytes(bytes.len())?;
@@ -757,7 +858,7 @@ impl Log {
     ///
     /// Returns an error when the view is foreign or its base is missing,
     /// oversized, corrupt, or does not cover the declared entry.
-    pub async fn read_checkpoint(&self, view: &View) -> Result<Option<Bytes>, Error> {
+    pub async fn read_checkpoint(&self, view: &View) -> Result<Option<CheckpointRecord>, Error> {
         self.validate_cursor(view.cursor())?;
         let Some(reference) = view.checkpoint() else {
             return Ok(None);
@@ -765,19 +866,25 @@ impl Log {
         let declared_len = usize::try_from(reference.object.len)
             .map_err(|_| Error::LimitExceeded("checkpoint byte length"))?;
         self.validate_checkpoint_bytes(declared_len)?;
-        Ok(Some(self.load_checkpoint(reference).await?.snapshot))
+        let checkpoint = self.load_checkpoint(reference).await?;
+        Ok(Some(CheckpointRecord {
+            snapshot: checkpoint.snapshot,
+            objects: checkpoint.objects,
+        }))
     }
 
     async fn verify_checkpoint(&self, reference: &CheckpointRef) -> Result<(), Error> {
-        self.load_checkpoint(reference).await.map(|_| ())
+        let checkpoint = self.load_checkpoint(reference).await?;
+        self.verify_objects(&checkpoint.objects).await
     }
 
     async fn load_checkpoint(
         &self,
         reference: &CheckpointRef,
     ) -> Result<format::Checkpoint, Error> {
-        let bytes = self.read_object(&reference.object).await?;
+        let bytes = self.read_immutable(&reference.object).await?;
         let checkpoint = format::decode_checkpoint(&bytes)?;
+        self.validate_dependencies(&checkpoint.objects)?;
         if checkpoint.log_id != *self.store.log_id()
             || checkpoint.incarnation != self.incarnation
             || checkpoint.through_sequence != reference.through_sequence
@@ -841,8 +948,21 @@ impl Log {
     }
 
     fn validate_object_count(&self, objects: &[ObjectRef]) -> Result<(), Error> {
-        if objects.len() > self.options.max_object_refs_per_commit {
-            return Err(Error::LimitExceeded("object references per commit"));
+        if objects.len() > self.options.max_object_refs {
+            return Err(Error::LimitExceeded("object references"));
+        }
+        Ok(())
+    }
+
+    fn validate_dependencies(&self, objects: &[ObjectRef]) -> Result<(), Error> {
+        self.validate_object_count(objects)?;
+        if objects
+            .iter()
+            .any(|object| object.kind == ObjectKind::Checkpoint)
+        {
+            return Err(Error::InvalidFormat(
+                "application dependencies cannot name a checkpoint".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -871,7 +991,7 @@ impl Log {
     async fn validate_prepared(&self, prepared: &PreparedCommit) -> Result<(), Error> {
         self.validate_cursor(&prepared.cursor)?;
         self.validate_prepared_sizes(&prepared.operation, &prepared.result)?;
-        self.validate_object_count(&prepared.objects)?;
+        self.validate_dependencies(&prepared.objects)?;
         if prepared.cursor.head.tail.len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
@@ -1020,7 +1140,7 @@ impl Log {
     fn validate_pending(&self, pending: &PendingCommit) -> Result<(), Error> {
         self.validate_cursor(&pending.prepared.cursor)?;
         self.validate_prepared_sizes(&pending.prepared.operation, &pending.prepared.result)?;
-        self.validate_object_count(&pending.prepared.objects)?;
+        self.validate_dependencies(&pending.prepared.objects)?;
         if pending.prepared.cursor.head.tail.len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
@@ -1055,7 +1175,7 @@ impl Log {
         }
         let commit = format::decode_commit(&stored.bytes)?;
         self.validate_prepared_sizes(&commit.operation, &commit.result)?;
-        self.validate_object_count(&commit.objects)?;
+        self.validate_dependencies(&commit.objects)?;
         if commit.log_id != *self.store.log_id()
             || commit.incarnation != self.incarnation
             || commit.transaction_id != reference.transaction_id
@@ -1130,6 +1250,7 @@ impl Log {
     fn object_key(object: &ObjectRef) -> StoreKey {
         match object.kind {
             ObjectKind::Blob => StoreKey::Blob(object.digest),
+            ObjectKind::Node => StoreKey::Node(object.digest),
             ObjectKind::Checkpoint => StoreKey::Checkpoint(object.digest),
         }
     }
@@ -1173,6 +1294,7 @@ impl Log {
 mod tests {
     use std::sync::Arc;
 
+    use crate::ValidatedBackend;
     use object_store::memory::InMemory;
     use object_store::path::Path;
 
@@ -1257,11 +1379,9 @@ mod tests {
     }
 
     async fn test_log(id: &str, options: Options) -> Result<Log, Error> {
-        let store = ScopedStore::new(
-            Arc::new(InMemory::new()),
-            Path::from("log-tests"),
-            &LogId::new(id)?,
-        );
+        let backend =
+            ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("log-tests")).await?;
+        let store = backend.scope(&LogId::new(id)?);
         Log::open(store, options).await
     }
 

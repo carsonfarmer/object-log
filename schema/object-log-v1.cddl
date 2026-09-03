@@ -1,6 +1,6 @@
 ; object-log durable format version 1
 ; All top-level values are stored as an envelope. The envelope payload is the
-; canonical CBOR encoding of exactly one index, entry, or base.
+; canonical CBOR encoding of exactly one index, entry, base, or reference node.
 
 envelope = {
   1: bstr,                         ; encoded payload
@@ -24,7 +24,7 @@ options = {
   2: uint,                         ; outcome resolution window
   3: uint,                         ; maximum inline operation bytes
   4: uint,                         ; maximum inline result bytes
-  5: uint,                         ; maximum object references per entry
+  5: uint,                         ; maximum object references per entry or base
   6: uint,                         ; maximum encoded entry bytes
   7: uint,                         ; maximum encoded index bytes
   8: uint,                         ; maximum encoded base bytes
@@ -49,7 +49,14 @@ base = {
   3: uint,                         ; covered sequence
   4: digest,                       ; covered entry digest
   5: bstr,                         ; opaque snapshot
-  6: incarnation-id                ; durable log incarnation
+  6: incarnation-id,               ; durable log incarnation
+  7: [* object-ref]                ; all immutable objects needed by this base
+}
+
+reference-node = {
+  1: 1,                            ; format version
+  2: bstr,                         ; opaque adapter payload
+  3: [* object-ref]                ; payload or reference-node children
 }
 
 ; Caller-owned recovery token. Persist before attempting publication.
@@ -83,7 +90,7 @@ object-ref = {
   3: uint                          ; byte length
 }
 
-object-kind = 1 / 2                ; payload / base
+object-kind = 1 / 2 / 3            ; payload / base / reference node
 digest = bstr .size 32
 transaction-id = bstr .size 16
 incarnation-id = bstr .size 16
