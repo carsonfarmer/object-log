@@ -7,19 +7,20 @@ canonical v1 snapshot record for the first changed transaction and canonical
 v1 WAL records for later changed transactions. A local SQLite file is a
 disposable cache. Cold open rebuilds it from the object log.
 
-The final regular suite has 43 tests: 6 unit, 4 allocation-bound, 16 database,
-11 fault, 1 garbage-collection, 1 collection-race, and 4 recovery and policy
-tests. The separate MinIO test stays ignored in regular runs.
+The final regular suite has 44 tests: 6 unit, 4 allocation-bound, 16 database,
+11 fault, 1 garbage-collection, 1 collection-race, and 5 recovery and policy
+tests. The recovery set includes an exact 1,000-record case. The separate
+MinIO test stays ignored in regular runs.
 
 Relevant revisions:
 
 - Product and final regular test count:
-  `2e2696bedd0da8c3104aff0e62e996bc9fb8ce05`.
-- Retained Criterion run: `626311062b46cb8acae8982773bc12bb54318a46`.
+  `1cbde302f01cc249efaf7da31051c092a8a318c2`.
+- Retained base Criterion run: `626311062b46cb8acae8982773bc12bb54318a46`.
+  The chunked WAL result is from `d36b987`, and the final conditional-read
+  result is from `1cbde30`.
 - Loopback MinIO implementation: `907ba8ae76911dd7c2ae7fb867433f39d51da3e9`
   and its target in `6f9cb9543b5779a87247be56b219be50d5d16930`.
-- This documentation worktree started at
-  `59c8d3015b26447d8397151fb202a94b9a85e0b8`.
 
 ## Durable and memory bounds
 
@@ -33,8 +34,8 @@ rolling checksum chain.
 The adapter derives snapshot and WAL capacities from `Log::options()`. It
 rejects an oversized WAL range after the NOOP frame-count query and before the
 VFS read or allocation. It checks a private backup file's size before it loads
-the snapshot into memory. Recovery checks declared object sizes and their
-aggregate before allocation or object reads. Fallible reserve handles each
+the snapshot into memory. Recovery checks each record's declared object sizes
+and aggregate before allocation or object reads. Fallible reserve handles each
 large allocation.
 
 External uploads use zero-copy `Bytes` slices. Upload and recovery reads keep
@@ -82,7 +83,7 @@ network storage.
 
 ## Loopback MinIO
 
-`make sqlite-minio-test` passed. The test binary reported 0.40 seconds. The
+`make sqlite-minio-test` passed. The final test binary reported 0.28 seconds. The
 script used this pinned image:
 
 ```text
@@ -93,7 +94,7 @@ The script created a new empty bucket on an ephemeral loopback port. The test
 covered multi-object snapshot and WAL payloads, a hidden successful
 publication, exact resume, checkpointing, collection, deleted-cache recovery,
 and integrity checks. The cleanup check confirmed that the test container no
-longer existed. The 0.40-second value excludes container startup and is not a
+longer existed. The 0.28-second value excludes container startup and is not a
 remote-performance result.
 
 ## Criterion results
@@ -110,22 +111,48 @@ interval.
 | Small adapter transaction | 67.109 us | 66.589-67.909 us |
 | 1 MiB direct transaction | 3.761 ms | 3.710-3.808 ms |
 | 1 MiB adapter transaction | 4.003 ms | 3.956-4.069 ms |
-| Unchanged adapter read | 3.263 us | 3.242-3.287 us |
+| 1 MiB adapter transaction, 129 chunks | 5.264 ms | 5.209-5.322 ms |
+| Unchanged adapter read | 1.249 us | 1.244-1.255 us |
 | Conflict publish and rebuild | 299.347 us | 292.622-309.847 us |
 | Cold recovery, 10 tail records | 385.307 us | 382.043-389.305 us |
 | Cold recovery, 1,000 tail records | 12.396 ms | 12.256-12.561 ms |
 | 1 MiB checkpoint | 2.382 ms | 2.318-2.473 ms |
 | 100 MiB checkpoint | 230.326 ms | 213.866-261.499 ms |
 
-The six groups contain all 10 IDs shown above. The small direct transaction
+The seven groups contain all 11 IDs shown above. Conditional refresh made the
+unchanged read 61.7% faster and reduced its head transfer to zero bytes. The
+small direct transaction
 had 2 high severe outliers among its 10 samples. The 100 MiB checkpoint had 3
 outliers and measured 434.17 MiB/s, with a 382.41-467.58 MiB/s interval. The
 [machine-readable intervals](sqlite-criterion-2026-09-03.tsv) retain the
 reported nanosecond values.
 
 These benchmarks measure one local process and an in-memory object store. They
-do not report remote latency, request counts, write amplification, memory use,
-or multi-process throughput.
+do not report remote latency, memory use, or multi-process throughput. The
+transaction timer excludes checkpoint and garbage-collection work. Checkpoint
+setup warms the local database, and cold recovery uses a hot in-memory object
+store. The direct path does not install the adapter's SQLite policy settings.
+
+## Untimed object-store accounting
+
+A separate audit at `c73b4fe` disabled detailed event recording and inspected
+the counters after each operation. These counters did not run in the Criterion
+timed path. Durable growth is namespace growth before garbage collection.
+
+| Operation | Logical bytes | Requests | Uploaded | Downloaded | Durable growth |
+|---|---:|---:|---:|---:|---:|
+| 64-byte update | 64 | 1 GET, 2 PUT | 4,727 | 333 | 4,394 |
+| 1 MiB update | 1,048,576 | 2 GET, 3 PUT | 1,059,507 | 1,059,171 | 1,059,176 |
+| Recover 1,000 updates | 64,000 | 1,003 GET | 0 | 4,492,914 | 0 |
+| 1 MiB checkpoint | 1,048,576 | 3 GET, 3 PUT | 1,057,315 | 1,057,198 | 1,057,075 |
+| 100 MiB checkpoint | 104,857,600 | 4 GET, 4 PUT | 104,968,806 | 104,968,688 | 104,968,564 |
+
+Publication reads every newly uploaded external object back through the core
+dependency validator. A checkpoint after 1,000 small WAL records used 1,001
+GET requests, 2 PUT requests, 4,412,518 downloaded bytes, and 88,424 uploaded
+bytes. These costs are correct under the current untrusted-reference API, but
+they are not suitable remote-storage targets. A later core design must remove
+the read-back without accepting forged or missing object references.
 
 ## Simplification and line counts
 
@@ -134,14 +161,20 @@ views, repeated status state, a second WAL checksum scan, redundant record and
 object checks, and per-callback policy clones. It retained the boxed prepared
 commit because direct storage made the public result enum at least 664 bytes.
 
-The line snapshot at `2e2696bedd0da8c3104aff0e62e996bc9fb8ce05`
+At the final code revision, the SQLite adapter contains 1,507 product lines,
+2,584 test lines, and 390 benchmark lines. The final review also removed 52
+lines from a policy test that the broader policy matrix superseded. It found no
+additional helper, layer, or comment that could be removed without weakening a
+required boundary.
+
+The line snapshot at `1cbde302f01cc249efaf7da31051c092a8a318c2`
 excludes `Cargo.lock`, `.gitignore`, and this documentation change:
 
 | Category | Lines |
 |---|---:|
-| Product | 6,372 |
-| Test and support | 9,588 |
-| Benchmark | 820 |
+| Product | 6,371 |
+| Test and support | 9,611 |
+| Benchmark | 854 |
 | Documentation | 2,334 |
 | Schema | 184 |
 | Operator and infrastructure | 226 |
@@ -150,7 +183,7 @@ The count treats `src/sim.rs` as test support. It moves each source file's
 `#[cfg(test)]` suffix from product to test. This command reproduces the table:
 
 ```sh
-revision=2e2696bedd0da8c3104aff0e62e996bc9fb8ce05
+revision=1cbde302f01cc249efaf7da31051c092a8a318c2
 git ls-tree -r --name-only "$revision" | while IFS= read -r file; do
   case "$file" in
     benches/*.rs|crates/*/benches/*.rs)
@@ -170,8 +203,8 @@ git ls-tree -r --name-only "$revision" | while IFS= read -r file; do
 done | sort | uniq -c
 ```
 
-Later test commits and this documentation commit will change the matching
-categories. Record their revision before comparing counts.
+This documentation commit changes only the documentation count. Record a
+revision before comparing later counts.
 
 ## Limits
 
@@ -180,3 +213,10 @@ categories. Record their revision before comparing counts.
 - No native sanitizer or Miri result exists for this adapter.
 - MinIO tests compatibility and cleanup on loopback. It does not qualify S3.
 - The Criterion results do not predict remote object-store performance.
+- Recovery bounds each record, but it does not bound the aggregate retained
+  WAL tail. The 32-operation transfer limit is also a count limit, not a byte
+  limit. Add an aggregate recovery limit or stream validated WAL ranges before
+  using this adapter as a multi-tenant Spin factor.
+- SQLite callbacks, backup, WAL capture, and local file operations are
+  synchronous. A multi-tenant host must run each database owner where this
+  work cannot block unrelated tenants.

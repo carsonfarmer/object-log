@@ -69,4 +69,7 @@ Object-log publication defines durability. SQLite uses `synchronous=NORMAL`, so
 an operating-system or power failure can remove unpublished local changes.
 Cold open rebuilds from the object log. The current crate has no Windows or
 custom-VFS proof, live AWS qualification, Spin integration, sanitizer result,
-Miri result, or remote performance data.
+Miri result, or remote performance data. It bounds each durable record but not
+the aggregate retained WAL tail. Add an aggregate recovery limit or stream the
+tail before multi-tenant use. SQLite callbacks, backup, and local file work run
+on the caller's thread. A multi-tenant host must isolate that blocking work.

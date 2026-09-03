@@ -152,8 +152,9 @@ and open again.
 Callbacks are trusted Rust extension points. The write callback receives a
 borrowed `rusqlite::Transaction`. Keep one authorizer installed through prepare
 and step. Deny `ATTACH`, `DETACH`, outer transaction control, all pragmas,
-extension loading, direct schema-table writes, and mutations outside `main`,
-including `TEMP`. The read callback also denies mutations. Allow savepoints.
+extension loading, and mutations outside `main`, including `TEMP`. Denying
+pragmas keeps `writable_schema` off, so SQLite rejects direct schema-table
+writes. The read callback also denies mutations. Allow savepoints.
 Enable defensive mode and disable trusted schema. Because `Transaction` can
 access its connection, callbacks remain trusted Rust extension points. Flush
 SQLite's prepared-statement cache before each callback so a cached statement
@@ -206,7 +207,7 @@ Result bytes stay in the core commit result field.
 | Format and bounds | Canonical v1 golden bytes, corrupt records and WALs, chunk order, declared sizes, allocation bounds, and first-snapshot capacity | Release compatibility policy after the first release |
 | Transactions | Changed and read-only work, callback rollback, savepoints, main DDL and DML, policy rejection, inline and chunked payloads | Spin guest boundary |
 | Publication | Commit, conflict, lost success, exact resume results, cancellation, callback-once behavior, and checkpoint resolution | Live provider fault campaign |
-| Recovery and GC | Deleted-cache recovery, exact WAL verification, integrity checks, 10- and 1,000-record benchmark states, collection cleanup, and collection-race recovery | Larger retained recovery matrix |
+| Recovery and GC | Deleted-cache recovery with exact 10- and 1,000-record tails, WAL verification, integrity checks, collection cleanup, and collection-race recovery | Larger retained recovery matrix |
 | Checkpoints | Backup, publish-before-truncate, conflict, pending, cancellation before and after CAS, expiry, new epochs, and 1 MiB and 100 MiB benchmarks | Remote latency and request accounting |
 | Backends | In-memory tests and one pinned loopback MinIO flow | Live AWS qualification |
 
@@ -218,14 +219,16 @@ MinIO proves only local compatibility and cleanup.
 ## Benchmarks
 
 The Criterion suite uses 10 samples, a 1-second warm-up, and a 2-second
-measurement. Its six groups contain 10 benchmark IDs: direct and adapter
-transactions at 64 bytes and 1 MiB, unchanged adapter read, conflict publish
-and rebuild, cold recovery with 10 and 1,000 tail records, and checkpoints at
-1 MiB and 100 MiB. Setup stays outside the timed sections.
+measurement. Its seven groups contain 11 benchmark IDs: direct and adapter
+transactions at 64 bytes and 1 MiB, a 129-chunk 1 MiB WAL transaction,
+unchanged adapter read, conflict publish and rebuild, cold recovery with 10
+and 1,000 tail records, and checkpoints at 1 MiB and 100 MiB. Setup stays
+outside the timed sections.
 
-The retained local run covers all 10 IDs. It uses the in-memory object-store
-backend on one macOS host. It records latency and declared throughput. Request
-counts and write amplification are not instrumented yet. See the
+The retained local runs cover all 11 IDs. They use the in-memory object-store
+backend on one macOS host. Criterion records latency and declared throughput.
+A separate untimed audit records object requests, transferred bytes, and
+durable growth without adding counters to the timed path. See the
 [SQLite local evidence](docs/evidence/sqlite-local-2026-09-03.md) and
 [raw intervals](docs/evidence/sqlite-criterion-2026-09-03.tsv). MinIO results
 do not measure remote latency.
@@ -264,7 +267,9 @@ connections. Run the WAL-access proof on each newly supported system or VFS.
 1. Run the native memory-safety sanitizer for the WAL FFI boundary.
 2. Prove Windows or another VFS before adding it to the support statement.
 3. Run the reviewed live AWS campaign.
-4. Design the Spin factor around this public adapter API.
+4. Bound aggregate recovery memory or stream the retained WAL tail.
+5. Isolate synchronous SQLite and local file work in the host runtime.
+6. Design the Spin factor around this public adapter API.
 
 ## Primary references
 

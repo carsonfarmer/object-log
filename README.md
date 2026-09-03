@@ -22,12 +22,12 @@ only the public core API. The [`object-log-sqlite`](crates/object-log-sqlite)
 crate is the second consumer. It stores a complete first snapshot and later
 committed WAL ranges in the same log contract. Its local memory, fault,
 garbage-collection, benchmark, and loopback `MinIO` paths are implemented. The
-regular SQLite suite has 43 tests.
+regular `SQLite` suite has 44 tests.
 
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the
 current contracts. The
-[SQLite local evidence](docs/evidence/sqlite-local-2026-09-03.md) records the
+[`SQLite` local evidence](docs/evidence/sqlite-local-2026-09-03.md) records the
 tests, measured local results, and remaining qualification work.
 
 See [docs/follow-ons.md](docs/follow-ons.md) for the ordered Git, WASI
@@ -47,7 +47,7 @@ Run the opt-in single-flow `MinIO` compatibility test with:
 make minio-test
 ```
 
-Run the separate SQLite recovery, checkpoint, collection, and cold-recovery
+Run the separate `SQLite` recovery, checkpoint, collection, and cold-recovery
 flow with:
 
 ```sh

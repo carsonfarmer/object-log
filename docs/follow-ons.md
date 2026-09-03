@@ -15,8 +15,8 @@ expiry, and best-effort plan-object cleanup. Current qualification is local.
 
 The selected demonstration contract and implementation gates are in
 [`SQLITE_PLAN.md`](../SQLITE_PLAN.md). The adapter uses a disposable SQLite
-cache, a canonical v1 record, committed WAL ranges, bounded payloads, and
-32-way ordered object transfers.
+cache, a canonical v1 record, committed WAL ranges, per-record payload bounds,
+and ordered object transfers.
 
 ### Required contract
 
@@ -24,8 +24,7 @@ cache, a canonical v1 record, committed WAL ranges, bounded payloads, and
 - One SQLite transaction maps to one atomic log publication.
 - Recovery produces one database image that passes SQLite integrity checks.
 - A local database file is a cache. Removing it does not remove durable state.
-- The adapter defines its page size, journal mode, lock behavior, and maximum
-  recovery work.
+- The adapter defines its page size, journal mode, and lock behavior.
 
 ### Local evidence
 
@@ -34,12 +33,26 @@ cache, a canonical v1 record, committed WAL ranges, bounded payloads, and
   collection, and deleted-cache recovery.
 - The loopback MinIO flow covers chunked writes, uncertain publication,
   checkpointing, collection, and cold recovery.
-- The Criterion suite covers 10 local latency cases. It does not count object
-  requests or measure a remote service.
+- The Criterion suite covers 11 local latency cases. A separate untimed audit
+  records object requests, transferred bytes, and durable growth. Neither path
+  measures a remote service.
 
 The same WAL-access proof passed on macOS and Linux with SQLite's public
-journal-pointer control. Windows, other VFS implementations, a native
-memory-safety sanitizer, live AWS, and Spin integration remain.
+journal-pointer control. Before multi-tenant use, add aggregate recovery and
+transfer-byte limits, bound recovery retries, and isolate synchronous SQLite
+work on a capped owner executor. Streaming recovery can follow those
+guardrails. Windows, other VFS implementations, a native memory-safety
+sanitizer, live AWS, and Spin integration remain.
+
+## Core performance decision
+
+External publication currently reads each staged object back to prove its
+hash and presence. The review recommends an opaque, process-local staged-object
+capability bound to one log and collection epoch. New objects could then skip
+the read-back. Serialized recovery tokens would keep the current full
+verification path. This preserves the durable v1 format. It changes the public
+core API, so implementation requires owner review. The Git example can use the
+current API if this decision remains open.
 
 ## 1. Minimal serverless Git
 
