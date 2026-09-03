@@ -16,7 +16,16 @@ type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
 
 #[tokio::test]
 async fn ten_wal_transactions_recover_without_the_cache() -> TestResult {
-    let (_, log) = open_log("ten-wal", Options::default()).await?;
+    recover_wal_tail("ten-wal", 10).await
+}
+
+#[tokio::test]
+async fn thousand_wal_transactions_recover_without_the_cache() -> TestResult {
+    recover_wal_tail("thousand-wal", 1_000).await
+}
+
+async fn recover_wal_tail(id: &str, records: i64) -> TestResult {
+    let (_, log) = open_log(id, Options::default()).await?;
     let directory = tempfile::tempdir()?;
     let cache = directory.path().join("cache/database.sqlite3");
     let mut database = Database::open(log.clone(), &cache).await?;
@@ -27,7 +36,11 @@ async fn ten_wal_transactions_recover_without_the_cache() -> TestResult {
          INSERT INTO events VALUES (0, 'event-0');",
     )
     .await?;
-    for sequence in 1..=10 {
+    assert!(matches!(
+        database.checkpoint().await?,
+        SqliteCheckpointStatus::Published(_)
+    ));
+    for sequence in 1..=records {
         let StageStatus::Staged(staged) = database
             .stage_write(TransactionId::new(), move |transaction| {
                 transaction.execute(
@@ -45,7 +58,9 @@ async fn ten_wal_transactions_recover_without_the_cache() -> TestResult {
             CommitStatus::Committed(_)
         ));
     }
-    assert_eq!(log.load().await?.tail().len(), 11);
+    let view = log.load().await?;
+    assert!(view.checkpoint().is_some());
+    assert_eq!(view.tail().len(), usize::try_from(records)?);
 
     drop(database);
     remove_cache(&cache)?;
@@ -63,7 +78,7 @@ async fn ten_wal_transactions_recover_without_the_cache() -> TestResult {
         .await?;
     assert_eq!(
         events,
-        (0..=10)
+        (0..=records)
             .map(|sequence| (sequence, format!("event-{sequence}")))
             .collect::<Vec<_>>()
     );

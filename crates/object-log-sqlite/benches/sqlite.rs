@@ -70,6 +70,38 @@ fn transaction_benchmarks(criterion: &mut Criterion) {
     }
 }
 
+fn chunked_wal_benchmark(criterion: &mut Criterion) {
+    let runtime = runtime();
+    let options = Options {
+        max_inline_operation_bytes: 1_024,
+        max_object_bytes: 8_240,
+        ..Options::default()
+    };
+    let mut group = criterion.benchmark_group("sqlite/transaction/1_mib_chunked");
+    group.throughput(Throughput::Bytes(usize_to_u64(MIB)));
+    group.bench_function("adapter", |bencher| {
+        let chunks = runtime.block_on(async {
+            let mut state = checkpointed_adapter_with_options(MIB, options).await;
+            publish_update(&mut state.database, 1, MIB).await;
+            let view = require(state.log.load().await);
+            let records = require(state.log.read_tail(&view).await);
+            records.last().map_or(0, |record| record.objects().len())
+        });
+        if !(120..=140).contains(&chunks) {
+            std::process::abort();
+        }
+        bencher.iter_batched(
+            || runtime.block_on(checkpointed_adapter_with_options(MIB, options)),
+            |mut state| {
+                runtime.block_on(publish_update(&mut state.database, 1, MIB));
+                black_box(state)
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    group.finish();
+}
+
 fn read_benchmark(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("sqlite/read");
@@ -177,15 +209,13 @@ fn checkpoint_benchmarks(criterion: &mut Criterion) {
 }
 
 async fn fresh_adapter(payload_bytes: usize) -> AdapterState {
+    fresh_adapter_with_options(payload_bytes, Options::default()).await
+}
+
+async fn fresh_adapter_with_options(payload_bytes: usize, options: Options) -> AdapterState {
     let backend =
         require(ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("sqlite-bench")).await);
-    let log = require(
-        Log::open(
-            backend.scope(&require(LogId::new("database"))),
-            Options::default(),
-        )
-        .await,
-    );
+    let log = require(Log::open(backend.scope(&require(LogId::new("database"))), options).await);
     let directory = require(tempfile::tempdir());
     let mut database =
         require(Database::open(log.clone(), directory.path().join("active.sqlite3")).await);
@@ -212,7 +242,11 @@ async fn fresh_adapter(payload_bytes: usize) -> AdapterState {
 }
 
 async fn checkpointed_adapter(payload_bytes: usize) -> AdapterState {
-    let mut state = fresh_adapter(payload_bytes).await;
+    checkpointed_adapter_with_options(payload_bytes, Options::default()).await
+}
+
+async fn checkpointed_adapter_with_options(payload_bytes: usize, options: Options) -> AdapterState {
+    let mut state = fresh_adapter_with_options(payload_bytes, options).await;
     checkpoint(&mut state.database).await;
     state
 }
@@ -350,7 +384,7 @@ criterion_group! {
         .sample_size(10)
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(2));
-    targets = transaction_benchmarks, read_benchmark, conflict_benchmark,
+    targets = transaction_benchmarks, chunked_wal_benchmark, read_benchmark, conflict_benchmark,
         recovery_benchmarks, checkpoint_benchmarks
 }
 criterion_main!(benches);
