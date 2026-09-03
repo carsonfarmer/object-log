@@ -39,13 +39,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 docker info >/dev/null
+container_started=1
 docker run --detach --rm \
   --name "${container}" \
   --publish 127.0.0.1::9000 \
   --env "MINIO_ROOT_USER=${access_key}" \
   --env "MINIO_ROOT_PASSWORD=${secret_key}" \
   "${image}" server /data >/dev/null
-container_started=1
 
 published="$(docker port "${container}" 9000/tcp)"
 endpoint="http://${published}"
