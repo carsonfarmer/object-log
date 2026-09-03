@@ -289,9 +289,23 @@ impl FaultStore {
         self.pause_next(Operation::Put, phase)
     }
 
+    /// Pauses one single-part object write occurrence at `phase`.
+    ///
+    /// `occurrence` is one-based and relative to the last call to [`Self::reset`].
+    pub fn pause_put_at(&self, occurrence: u64, phase: FailurePhase) -> PauseControl {
+        self.pause_at(Operation::Put, occurrence, phase)
+    }
+
     /// Pauses the next object deletion at `phase`.
     pub fn pause_next_delete(&self, phase: FailurePhase) -> PauseControl {
         self.pause_next(Operation::Delete, phase)
+    }
+
+    /// Pauses one object deletion occurrence at `phase`.
+    ///
+    /// `occurrence` is one-based and relative to the last call to [`Self::reset`].
+    pub fn pause_delete_at(&self, occurrence: u64, phase: FailurePhase) -> PauseControl {
+        self.pause_at(Operation::Delete, occurrence, phase)
     }
 
     /// Removes faults that have not fired. Existing metrics remain unchanged.
@@ -366,6 +380,19 @@ impl FaultStore {
             .operation(operation)
             .requests
             .saturating_add(1);
+        Self::schedule_pause(&mut state, operation, occurrence, phase)
+    }
+
+    fn pause_at(&self, operation: Operation, occurrence: u64, phase: FailurePhase) -> PauseControl {
+        Self::schedule_pause(&mut lock(&self.state), operation, occurrence, phase)
+    }
+
+    fn schedule_pause(
+        state: &mut State,
+        operation: Operation,
+        occurrence: u64,
+        phase: FailurePhase,
+    ) -> PauseControl {
         let (entered, wait_for_entered) = oneshot::channel();
         let (release, wait_for_release) = oneshot::channel();
         state.pause = Some(ScheduledPause {
@@ -998,6 +1025,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_pause_at_second_occurrence_skips_first_request() -> TestResult {
+        let store = FaultStore::new(InMemory::new());
+        let mut pause = store.pause_put_at(2, FailurePhase::Before);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            store.put(
+                &Path::from("pause/put-unpaused"),
+                Bytes::from_static(b"unpaused").into(),
+            ),
+        )
+        .await??;
+        let path = Path::from("pause/put-second");
+        let write_store = store.clone();
+        let write_path = path.clone();
+        let write = tokio::spawn(async move {
+            write_store
+                .put(&write_path, Bytes::from_static(b"second").into())
+                .await
+        });
+
+        assert!(pause.wait_until_entered().await);
+        assert!(matches!(
+            store.get(&path).await,
+            Err(Error::NotFound { .. })
+        ));
+        assert!(pause.release());
+        write.await??;
+        assert_eq!(store.metrics().operation(Operation::Put).requests, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn delete_pause_before_preserves_visibility_until_release() -> TestResult {
         let store = FaultStore::new(InMemory::new());
         let path = Path::from("pause/delete-before");
@@ -1045,6 +1105,36 @@ mod tests {
         assert!(pause.release());
         delete.await??;
         assert_eq!(store.metrics().operation(Operation::Delete).succeeded, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_pause_at_second_occurrence_skips_first_request() -> TestResult {
+        let store = FaultStore::new(InMemory::new());
+        let first = Path::from("pause/delete-first");
+        let second = Path::from("pause/delete-second");
+        store
+            .put(&first, Bytes::from_static(b"first").into())
+            .await?;
+        store
+            .put(&second, Bytes::from_static(b"second").into())
+            .await?;
+        store.reset();
+        let mut pause = store.pause_delete_at(2, FailurePhase::After);
+
+        tokio::time::timeout(Duration::from_secs(1), store.delete(&first)).await??;
+        let delete_store = store.clone();
+        let delete_path = second.clone();
+        let delete = tokio::spawn(async move { delete_store.delete(&delete_path).await });
+
+        assert!(pause.wait_until_entered().await);
+        assert!(matches!(
+            store.get(&second).await,
+            Err(Error::NotFound { .. })
+        ));
+        assert!(pause.release());
+        delete.await??;
+        assert_eq!(store.metrics().operation(Operation::Delete).requests, 2);
         Ok(())
     }
 }
