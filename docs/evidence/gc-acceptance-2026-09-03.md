@@ -39,9 +39,10 @@ container after the test.
 
 ## Limits
 
-This is a liveness and correctness acceptance test. It is not a Criterion
-benchmark. The elapsed values are diagnostic results from one run. The
-30-second limit is a broad local failure boundary, not a performance promise.
+This acceptance test covers liveness and correctness. The elapsed values are
+diagnostic results from one run, not Criterion benchmark results. The
+30-second limit is a broad local failure boundary and makes no performance
+promise.
 
 The object-store `LocalFileSystem` backend does not supply the conditional
 update operation that the log publication contract requires. Local MinIO gives

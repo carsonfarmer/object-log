@@ -6,25 +6,23 @@ Scope: object-store WALs, key-value storage, SQLite, and `wasi:filesystem`
 
 ## Direct answer
 
-The design is viable. A small log with immutable entries and one conditional
-object-store update can be the durable authority for one tenant resource. A
-local owner can materialize state, serialize operations, and batch them. A new
-owner can rebuild from a checkpoint and the active tail. This gives Spin apps
-the main storage properties of a durable object: per-resource ordering,
+A small log with immutable entries and one conditional object-store update can
+be the durable authority for one tenant resource. A local owner can materialize
+state, serialize operations, and batch them. A new owner can rebuild from a
+checkpoint and the active tail. Spin apps then get per-resource ordering,
 durable state, disposable compute, and safe failover.
 
-It does not provide a complete durable-object platform. Request routing,
-advisory ownership, alarms, execution limits, and transactions across resources
-remain outside the log. A single object-store compare-and-swap also limits
-strict commit throughput for one resource.
+Request routing, advisory ownership, alarms, execution limits, and transactions
+across resources remain outside the log. A single object-store compare-and-swap
+also limits strict commit throughput for one resource.
 
-The implemented `object-log` protocol is a reasonable independent core. Do not
-replace it with one surveyed project now. Use `wal3`, WalTier, Micelio, objwal,
-and Graft as design and test sources for the next tranches.
+Keep the implemented `object-log` protocol as the independent core. Use `wal3`,
+WalTier, Micelio, objwal, and Graft as design and test sources for the next
+tranches.
 
 ## The common durable shape
 
-The strongest projects converge on the same structure:
+The projects selected for comparison use the same structure:
 
 1. Upload immutable data before publication.
 2. Publish ordered references with one conditional mutable object.
@@ -39,8 +37,8 @@ Cursor reports up to 120 pushes/s on S3 Standard and more than 300 pushes/s on
 S3 Express One Zone for its Git workload. [Cursor, “Git at any
 scale”](https://cursor.com/blog/git-at-any-scale).
 
-Apache Arrow's Rust `object_store` crate is the correct provider seam. It
-supports conditional updates through `PutMode::Update` and an opaque
+Use Apache Arrow's Rust `object_store` crate as the provider seam. It supports
+conditional updates through `PutMode::Update` and an opaque
 `UpdateVersion`. Its documentation presents this operation as a way to build
 optimistic transactions over object storage. [object_store conditional-put
 documentation](https://docs.rs/object_store/latest/object_store/#conditional-put).
@@ -60,14 +58,15 @@ The whole-live-log rewrite is confirmed in both documentation and code. Its
 WAL image contains the current snapshot pointer and live entries. Every write
 encodes that image and sends the complete bytes through `put_if_match`.
 [WalTier write implementation](https://raw.githubusercontent.com/danthegoodman1/waltier/main/src/wal.rs).
-This gives one-read bootstrap, but its write bytes grow with the active image.
-WalTier also documents ambiguous writes as at-least-once and asks applications
-to make entries idempotent or detect duplicates. That contract is weaker than
-the exact pending-resolution contract needed for generic storage factors.
+The complete image permits one-read bootstrap while making write bytes grow
+with the active image. WalTier also documents ambiguous writes as at-least-once
+and asks applications to make entries idempotent or detect duplicates. That
+contract is weaker than the exact pending-resolution contract needed for
+generic storage factors.
 
 ### Chroma wal3
 
-Chroma's `wal3` is the closest high-throughput architecture. It batches records
+Chroma's `wal3` provides a high-throughput architecture. It batches records
 into immutable Parquet fragments, publishes fragments through a CAS manifest,
 uses immutable manifest snapshots as a tree, supports cursor-aware garbage
 collection, and schedules critical writes so task cancellation cannot stop
@@ -87,14 +86,12 @@ its candidate set. A grace period alone permits an old verified object to be
 deleted before a later CAS makes it live. [wal3 garbage-collection
 protocol](https://github.com/chroma-core/chroma/blob/f60fe42cdad202a92acad55a1f0fbf8ce757c8b1/rust/wal3/README.md#garbage-collection).
 
-It is not a clean reusable dependency. The crate is part of the Chroma
-workspace and depends on Chroma types, configuration, storage, telemetry,
-Parquet, Arrow, gRPC, and Google Cloud Spanner packages.
+The crate is part of the Chroma workspace and depends on Chroma types,
+configuration, storage, telemetry, Parquet, Arrow, gRPC, and Google Cloud
+Spanner packages.
 [wal3 Cargo manifest](https://raw.githubusercontent.com/chroma-core/chroma/main/rust/wal3/Cargo.toml).
-Its fragment tree and garbage-collection protocol are important sources for
-the fast follow-on work. Direct reuse remains a poor fit. At the reviewed
-revision, the crate depends on Arrow, Parquet, Chroma packages, telemetry,
-tonic, and Google Cloud Spanner.
+Use its fragment tree and garbage-collection protocol as sources for follow-on
+work, but do not reuse the crate directly.
 
 ### Micelio
 
@@ -104,10 +101,10 @@ the sequence number out of the immutable entry and assigns order in the index.
 The index repeats selected entry metadata to reduce catch-up reads.
 [Micelio WAL schema](https://github.com/tuist/micelio/blob/main/priv/proto/micelio/wal/v1/wal.proto).
 
-The project is Git-specific and uses Protobuf. The useful parts are the object
-layout, sequence assignment, base-plus-tail model, and explicit durable-schema
-discipline. `object-log` adopts those concepts with canonical CBOR maps and a
-CDDL schema. It does not need Protobuf.
+The project is Git-specific and uses Protobuf. `object-log` adopts its object
+layout, sequence assignment, base-plus-tail model, and durable-schema
+discipline with canonical CBOR maps and a CDDL schema. It does not need
+Protobuf.
 
 ### objwal and walgit
 
@@ -118,8 +115,8 @@ uses one epoch-fenced primary and read-only replicas, so it is not the arbitrary
 writer contract used by `object-log`. [objwal
 design](https://github.com/JayJamieson/objwal).
 
-walgit contains the same useful Git-level ideas: immutable packs, a CAS
-manifest, checkpoint plus tail recovery, conditional reads, and group commit.
+walgit uses immutable packs, a CAS manifest, checkpoint plus tail recovery,
+conditional reads, and group commit.
 It also includes leases, policy, bundles, remote pack readers, a web product,
 and several mutable objects. It is too broad and Git-specific to use as the
 generic storage core. [walgit architecture](https://github.com/tobi/walgit).
@@ -130,7 +127,7 @@ SlateDB is a mature direction for a complete object-store key-value engine. It
 uses the same Rust `object_store` interface and makes the latency and request
 cost trade-off explicit. [SlateDB](https://github.com/slatedb/slatedb).
 
-The smaller `slatedb_txn_obj` crate is directly relevant. It provides a generic
+The smaller `slatedb_txn_obj` crate provides a generic
 transactional object with conditional update, sequenced versions, and optional
 epoch fencing. It can replace some low-level CAS plumbing, but it does not
 provide the immutable WAL, exact pending-result evidence, or application
@@ -139,29 +136,29 @@ documentation](https://docs.rs/slatedb-txn-obj/latest/slatedb_txn_obj/).
 
 ### SQLite and filesystem projects
 
-Graft is the strongest SQLite research target. It provides transactional page
+Use Graft as the SQLite research target. It provides transactional page
 storage, immutable snapshots, lazy partial replication, read-your-write state,
 and conditional remote commits. Its SQLite extension is already built on this
 volume model. It is alpha software and brings a larger storage engine, so the
 next tranche should compare its page and changeset choices before selecting an
 adapter. [Graft architecture](https://graft.rs/docs/internals/).
 
-Turbolite is useful for page grouping, compression, range reads, prefetch, and
-cache design. Its documented standalone contract has one safe writer. Direct
+Turbolite shows page grouping, compression, range reads, prefetch, and cache
+design. Its documented standalone contract has one safe writer. Direct
 multi-writer use can corrupt its manifest. It is not the ordering authority for
 multi-tenant factors. [Turbolite](https://github.com/russellromney/turbolite).
 
-`s3-wasi-fs` is a useful host-binding and conformance reference. It separates a
+`s3-wasi-fs` provides a host-binding and conformance reference. It separates a
 Wasmtime-free filesystem core from Wasmtime `wasi:filesystem` bindings and has
 a MinIO SQLite demonstration. Its documented limits include non-atomic rename,
 open-unlink differences, and last-writer-wins concurrent writes. It must not be
 used as the durable multi-writer authority. [s3-wasi-fs compatibility
 summary](https://github.com/aruokhai/s3-wasi-fs#compatibility-matrix).
 
-Crab is less direct. Its useful ideas are content-defined immutable chunks,
-hash verification, lazy hydration, and the rule that immutable data must exist
-before a conditional mutable reference update. It does not provide the generic
-ordered state-machine log. [Crab](https://github.com/crabbuild/crab).
+Crab uses content-defined immutable chunks, hash verification, lazy hydration,
+and conditional mutable references that publish only after immutable data
+exists. It does not provide the generic ordered state-machine log.
+[Crab](https://github.com/crabbuild/crab).
 
 ## Why the host boundary matters
 
@@ -177,7 +174,7 @@ is slow. Caching is not only a byte cache: it must preserve coherent handle and
 metadata behavior across updates. The `s3-wasi-fs` limitations show why direct
 object mapping is not enough for safe concurrent tenants.
 
-The clean order is therefore:
+Implement in this order:
 
 1. Keep the WAL as the only durable ordering authority.
 2. Prove key-value operations and checkpoints.

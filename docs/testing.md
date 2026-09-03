@@ -167,8 +167,8 @@ on failure. It currently checks:
   history until it resolves.
 - Every referenced object passes integrity verification before publication.
 
-This is not yet an independent model. It derives prior history from the
-implementation output. The remaining qualification work must add an
+The current model derives prior history from the implementation output, so it
+is not independent. The remaining qualification work must add an
 independent canonical history, a checkpoint worker, checkpoint and object
 oracles, and separate prepare, stage, checkpoint, and crash actions.
 
@@ -230,8 +230,8 @@ before making claims about those paths.
 
 The MinIO flow uses a pinned image and an isolated loopback endpoint. Its
 integrated rerun passed one test in 2.22 seconds. The GC log contained only
-`index.cbor` after collection. This is compatibility evidence, not a MinIO
-latency result.
+`index.cbor` after collection. This provides compatibility evidence only; it
+does not measure MinIO latency.
 
 `CollectionReport::delete_attempts` counts candidate keys submitted for
 deletion. It does not count HTTP requests. A provider can combine one batch

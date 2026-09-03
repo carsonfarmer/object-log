@@ -119,7 +119,7 @@ pub enum CommitStatus {
     Committed(View),
     /// Another head update definitely rejected this candidate.
     Conflict(View),
-    /// The safe final view or classification is not available yet.
+    /// The final view or classification cannot be determined safely.
     Pending(PendingCommit),
 }
 
@@ -130,7 +130,7 @@ pub enum Resolution {
     Committed(View),
     /// Retained evidence proves that the candidate did not publish.
     NotCommitted(View),
-    /// Storage is not available enough to determine the result.
+    /// A storage failure prevents result determination.
     StillPending(PendingCommit),
     /// The outcome evidence is no longer retained.
     ///
@@ -146,7 +146,7 @@ pub enum CheckpointStatus {
     Published(View),
     /// Another head update definitely rejected this checkpoint.
     Conflict(View),
-    /// The safe final view or classification is not available yet.
+    /// The final view or classification cannot be determined safely.
     Pending(PendingCheckpoint),
 }
 
@@ -157,7 +157,7 @@ pub enum CheckpointResolution {
     Published(View),
     /// Retained evidence proves that the checkpoint did not publish.
     NotPublished(View),
-    /// Storage is not available enough to determine the result.
+    /// A storage failure prevents result determination.
     StillPending(PendingCheckpoint),
     /// Later head updates removed conclusive publication evidence.
     Expired(View),

@@ -7,8 +7,8 @@ One log is the durable history for one SQLite database. The local database is
 a disposable cache. This tranche does not include a Spin factor.
 
 Move the key-value example to `object-log-kv`. Both adapter crates use only the
-public `object-log` API. The only proposed core addition is the following
-read-only getter. It prevents a duplicate limit configuration.
+public `object-log` API. The only proposed core addition is a read-only getter
+that prevents a duplicate limit configuration.
 
 ```rust
 impl Log {
@@ -142,10 +142,9 @@ borrowed `rusqlite::Transaction`. Keep one authorizer installed through prepare
 and step. Deny `ATTACH`, `DETACH`, outer transaction control, all pragmas,
 extension loading, direct schema-table writes, and mutations outside `main`,
 including `TEMP`. The read callback also denies mutations. Allow savepoints.
-Enable defensive mode and disable trusted schema. This prevents mistakes, but
-it is not a hostile Rust boundary because
-`Transaction` can access its connection. A Spin guest will not receive this
-callback or SQLite handle.
+Enable defensive mode and disable trusted schema. Because `Transaction` can
+access its connection, callbacks remain trusted Rust extension points. A Spin
+guest will not receive this callback or SQLite handle.
 
 ## Durable SQLite record v1
 

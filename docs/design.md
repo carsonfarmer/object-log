@@ -18,22 +18,22 @@ Exact commit recovery reuses only the physical ID in its recovery evidence.
 This prevents an old delete from addressing a later write with the same content
 digest.
 
-This structure follows Cursor's mutable metadata plus immutable object model.
-It also follows Micelio's concrete split between one index, ordered entry
-pointers, content-addressed WAL entries, payload objects, and bases. The Rust
-type `Head` is the decoded index. The Rust type `Commit` is one WAL entry.
+This structure uses Cursor's mutable metadata and immutable object model, with
+Micelio's split between one index, ordered entry pointers, content-addressed
+WAL entries, payload objects, and bases. The Rust type `Head` is the decoded
+index. The Rust type `Commit` is one WAL entry.
 
 The durable encoding is CBOR, not Protobuf. Each structure is a CBOR map with
 stable positive integer keys. The exact schema is in
 `schema/object-log-v1.cddl`. Encoders write keys in ascending order. Decoders
 reject non-canonical bytes, unknown fields, and unsupported versions. Before
 the first tagged release, the schema can change while its version remains 1.
-The first release will not support mixed-version writers. This strict rule replaces Micelio's unknown-field
-preservation rule because the selected CBOR codec does not retain unknown
-fields during an index rewrite. The current `0.1.0` format is pre-release. It
-rejects older development data and has no compatibility guarantee. After the
-first tagged durable-format release, every incompatible schema change must use
-a new format version.
+The first release will not support mixed-version writers. This rule replaces
+Micelio's unknown-field preservation rule because the selected CBOR codec does
+not retain unknown fields during an index rewrite. The current `0.1.0` format
+is pre-release. It rejects older development data and has no compatibility
+guarantee. After the first tagged durable-format release, every incompatible
+schema change must use a new format version.
 
 ## Head
 
@@ -110,7 +110,7 @@ data. This keeps tenant open and close cheap.
 
 The capability probe writes and deletes one private object when the backend
 handle is created. Provisioning and collection credentials need delete
-permission. Only the capability probe and collection issue deletes.
+permission because only these two operations delete objects.
 
 `load` reads and validates only the index. `read_checkpoint` reads its base.
 `read_tail` fetches active WAL entries concurrently because the index contains
@@ -235,9 +235,9 @@ the current epoch is corruption. An epoch can advance only when the fence CAS
 observes no retention, so later reuse of the same retention ID cannot restore
 an older view.
 
-Compacted commit bodies are not live only because the head retains the complete
-recent outcome evidence needed for commit resolution. The active tail, current
-checkpoint, and their transitive object graph remain live. A valid
+The head retains complete recent outcome evidence, which permits collection of
+compacted commit bodies without losing commit resolution. The active tail,
+current checkpoint, and their transitive object graph remain live. A valid
 content-addressed cycle cannot be formed without breaking digest verification.
 
 ## Materializer
@@ -294,5 +294,5 @@ If ownership changes, the new owner loads the current head. An old owner can
 still attempt a write, but it cannot overwrite a newer head. It loses the CAS,
 refreshes, and stops accepting ownership work.
 
-This layer increases logical operation throughput. It does not change the
-linearization point or allow acknowledgement before durable publication.
+This layer increases logical operation throughput without changing the
+linearization point or allowing acknowledgement before durable publication.

@@ -231,7 +231,7 @@ struct RequestTicket {
 
 /// An [`ObjectStore`] wrapper with deterministic one-shot failures and counters.
 ///
-/// A failure in [`FailurePhase::After`] is ambiguous by design. The wrapped
+/// A failure in [`FailurePhase::After`] is ambiguous. The wrapped
 /// mutation succeeded and became visible, but the caller receives an error.
 #[derive(Clone)]
 pub struct FaultStore {

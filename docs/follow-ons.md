@@ -75,8 +75,7 @@ the caller to validate the ref preconditions again.
 
 ## 4. Live AWS qualification
 
-This is a separate qualification goal. It does not block local product
-completion.
+Live AWS qualification is separate from local product completion.
 
 Before any run, record:
 

@@ -23,14 +23,17 @@ block local SQLite completion.
 - A checkpoint contains the complete direct-ref map and references the pack set
   required to serve it. Later commits contain incremental packs and ref
   transactions.
-- Object-log retention protects a fetch or rebuild from concurrent collection.
-  Garbage collection removes packs only after no current or retained view
-  references them.
+- A fetch or rebuild confirms the current head, retains the selected view,
+  loads or materializes every pack that the view requires, and then releases
+  retention. Garbage collection removes packs only after no current or retained
+  view references them.
 - A local bare repository, pack index, and object cache are disposable. A cold
   invocation can recover from the checkpoint and ordered tail.
 
-This follows the Cursor shape: immutable base packs, immutable incremental
-packs, one conditional publication point, bounded replay, and safe collection.
+This example uses Cursor's immutable WAL plus CAS publication model. It omits
+Cursor's warm-owner routing, replication, batching, and physical pack
+compaction. Checkpoints bound ref-log replay. Pack count and cold-recovery bytes
+can grow without a fixed limit until a later pack-compaction stage.
 
 ## Minimal public API
 

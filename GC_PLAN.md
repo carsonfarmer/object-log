@@ -140,8 +140,8 @@ lines. More than 750 lines requires a reduction review before integration.
 Revision `5419e9aa793bf94fad77e22da75fb96c346ccb28` passes 135 local
 tests. The focused GC suite has 27 tests. The independent correctness review
 found no remaining P0 or P1 defect. The Rust simplification change removed 80
-net lines from its code-and-test change. It removed redundant validation and
-allocation while it kept the safety contract.
+net lines of code and tests by deleting redundant validation and allocation
+without changing the safety contract.
 
 From baseline `825447c` through evidence revision `5419e9a`, GC added 1,344
 product lines, 2,601 test and support lines, 163 benchmark lines, 169

@@ -136,7 +136,7 @@ operation after expiry.
 
 ## Work streams
 
-### 1. Repository and contract — root agent
+### 1. Repository and contract (root agent)
 
 Create the workspace, design record, test plan, CI-equivalent local commands,
 and stable module ownership. Use the one versioned CBOR contract in
@@ -148,7 +148,7 @@ Exit evidence:
 - `cargo fmt`, `cargo clippy`, and `cargo test` have one local command.
 - No Spin dependency exists.
 
-### 2. Storage boundary — backend agent
+### 2. Storage boundary (backend agent)
 
 Implement the minimum operations needed from `object_store`. Add namespace
 validation and a capability probe for conditional create, conditional update,
@@ -169,7 +169,7 @@ Exit evidence:
 - Unsupported conditional behavior fails before a log is opened for writes.
 - Tests use temporary directories and leave no files or processes behind.
 
-### 3. Publication protocol — protocol agent
+### 3. Publication protocol (protocol agent)
 
 Implement immutable object staging, head creation, load, conditional refresh,
 commit publication, conflict reporting, and pending-result resolution.
@@ -181,7 +181,7 @@ Exit evidence:
 - Lost success responses resolve to the original commit.
 - A commit never becomes visible before all referenced objects exist.
 
-### 4. Verification system — verification agent
+### 4. Verification system (verification agent)
 
 Build a deterministic wrapper around an object store. It must inject failures
 before and after each visible storage mutation. Add model-based concurrent
@@ -200,7 +200,7 @@ commit, resolve, refresh, reload, reopen, and read actions. It does not yet have
 an independent history oracle, checkpoint worker, prepare-only action,
 stage-only action, or explicit crash action.
 
-### 5. Checkpoints — root agent
+### 5. Checkpoints (root agent)
 
 Add opaque snapshot objects and conditional checkpoint publication. A
 checkpoint can cover a prefix while newer commits remain in the tail. Garbage
@@ -213,7 +213,7 @@ Exit evidence:
 - Recovery uses the newest valid checkpoint and its ordered tail.
 - An invalid or incomplete checkpoint cannot replace a valid base.
 
-### 6. Materializer and key-value proof — root agent
+### 6. Materializer and key-value proof (root agent)
 
 Add an optional typed helper that restores a checkpoint and applies ordered
 operation bytes. Keep serialization and domain validation outside the core.
@@ -227,7 +227,7 @@ Exit evidence:
 - Increment returns the committed value.
 - Replay and checkpoint restore produce identical state hashes.
 
-### 7. Performance suite — verification agent and root agent
+### 7. Performance suite (verification agent and root agent)
 
 Measure:
 
@@ -250,7 +250,7 @@ size, inline size, staged payloads, contention, tail recovery, bounded
 collection scans, graph shapes, fence lookup, and collection resume. It does
 not yet cover filesystem or remote-service performance.
 
-### 8. MinIO local qualification — backend agent and root agent
+### 8. MinIO local qualification (backend agent and root agent)
 
 Add an opt-in test command that starts a pinned MinIO container, creates an
 isolated bucket, runs the full backend conformance and protocol suites, and
@@ -268,7 +268,7 @@ probing, one ambiguous commit, resolution, checkpoint publication, reopen,
 recovery, and collection of 1,001 objects across the bulk-delete boundary. The
 complete backend and protocol suites do not yet run against MinIO.
 
-### 9. Independent review and reduction — review agent
+### 9. Independent review and reduction (review agent)
 
 Review the protocol after all local tests pass. Look for false conflict
 classification, unbounded metadata, unsafe decoding, hidden mutable authority,
@@ -321,7 +321,7 @@ values, filesystem benchmarks, full MinIO conformance, and live AWS tests.
 
 ## Later high-throughput stage
 
-A preferred owner is a performance layer, not a second source of truth.
+A preferred owner adds performance without becoming a second source of truth.
 Rendezvous hashing can select one process for each log. That process keeps a
 materialized state, serializes requests through one bounded queue, and combines
 compatible requests into one commit. It replies after the head CAS succeeds.

@@ -90,7 +90,7 @@ writers. These are two local runs, not a stable regression threshold.
 
 ## Local MinIO evidence
 
-- Harness and run revision: `ff13f52ec3cdedc48f8f0107cc49b2e35e9d14af`
+- Test script and run revision: `ff13f52ec3cdedc48f8f0107cc49b2e35e9d14af`
 - Image: `minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`
 - Endpoint: ephemeral loopback port
 - Bucket: new empty `object-log-test` bucket in an ephemeral container
@@ -99,5 +99,5 @@ writers. These are two local runs, not a stable regression threshold.
   conditional read, lost successful update response, pending resolution,
   checkpoint publication, process reopen, base recovery, and container cleanup
 
-The MinIO run is one compatibility flow. It is not the full conformance or
-protocol suite. It is not a latency or throughput measurement.
+The MinIO run is one compatibility flow rather than the full conformance and
+protocol suite. It does not measure latency or throughput.
