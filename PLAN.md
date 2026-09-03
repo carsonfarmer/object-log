@@ -5,7 +5,7 @@
 Create a small Rust library that publishes an ordered log through a general
 object-store interface. The library must support concurrent writers, immutable
 payload objects, disposable local caches, explicit uncertain outcomes, and
-bounded recovery through checkpoints.
+bounded recovery through checkpoints and bounded garbage collection.
 
 The first proof is a key-value state machine. Spin, SQLite, filesystem, Git,
 and actor integrations are later consumers. They are not part of the first
@@ -18,16 +18,18 @@ The first release has one authority protocol:
 - Each logical resource has its own log.
 - Each log has one small mutable `index.cbor` object.
 - A conditional update of the index publishes an entry.
-- Commit, blob, reference-node, and checkpoint objects are immutable and
-  content-addressed.
-- The head contains a checkpoint reference and a bounded ordered tail of
-  commit references.
+- Commit, blob, reference-node, checkpoint, and collection-plan objects are
+  immutable. Each key combines a random physical ID with a deterministic
+  BLAKE3 content digest.
+- The head contains a checkpoint, a bounded ordered commit tail, recent
+  outcomes, retention IDs, a collection epoch, and at most one active plan.
 - A transport error during head publication produces a `PendingCommit`.
 - The core does not automatically merge or rebase application operations.
 - Apache Arrow's `object_store` crate provides the storage interface.
 - A versioned CBOR map is the durable wire format. Numeric field keys follow
   `schema/object-log-v1.cddl`.
-- The first release does not delete durable objects.
+- Bounded garbage collection deletes only the positive set in an installed
+  durable plan. The head CAS installs and clears its fence.
 - One validated backend/root handle creates many tenant scopes without another
   capability probe.
 
@@ -53,6 +55,9 @@ Required value types:
 - `PendingCheckpoint`: enough evidence to resolve one exact maintenance
   publication.
 - `CheckpointRef`: covered sequence, covered commit, and snapshot object.
+- `RetentionId`: one stable reader-retention attempt.
+- `CollectionReport`: candidate count, candidate bytes, and submitted delete
+  key count.
 
 Required operations:
 
@@ -64,8 +69,8 @@ load() -> View
 refresh(cursor) -> Refresh
 put_object(bytes) -> ObjectRef
 put_node(payload, children) -> ObjectRef
-read_object(reference) -> bytes
-read_node(reference) -> ReferenceNode
+read_object(view, reference) -> bytes
+read_node(view, reference) -> ReferenceNode
 prepare(cursor, transaction_id, operation, result, objects) -> PreparedCommit
 commit(prepared) -> CommitStatus
 resolve(pending) -> Resolution
@@ -74,6 +79,10 @@ read_tail(view) -> ordered commit records
 read_checkpoint(view) -> CheckpointRecord
 publish_checkpoint(view, through, snapshot, roots) -> CheckpointStatus
 resolve_checkpoint(pending) -> CheckpointResolution
+retain(view, retention_id) -> RetentionStatus
+release_retention(view, retention_id) -> RetentionStatus
+start_collection(view) -> CollectionStart
+resume_collection(view) -> CollectionFinish
 ```
 
 Required result distinctions:
@@ -83,6 +92,9 @@ CommitStatus = Committed | Conflict | Pending
 Resolution   = Committed | NotCommitted | StillPending | Expired
 CheckpointStatus = Published | Conflict | Pending
 CheckpointResolution = Published | NotPublished | StillPending | Expired
+RetentionStatus = Applied | ActiveCollection | Conflict | Pending
+CollectionStart = Empty | Installed | Active | Retained | Conflict | Pending
+CollectionFinish = Complete | Conflict | Pending
 ```
 
 `Conflict` is a definite CAS rejection with its winning view. `Pending` means
@@ -115,6 +127,12 @@ operation after expiry.
 14. Checkpoint roots and reference-node edges enumerate every durable object
     needed by a snapshot.
 15. Normal replay verifies ordered metadata and loads payloads only on demand.
+16. Every collection plan is a bounded, sorted, positive set of physical keys.
+17. A fence blocks publication of a direct or transitive planned reference.
+18. A collection retry submits the complete plan again. It stores no mutable
+    progress record.
+19. A missing read from a prior collection epoch returns view expiry. A
+    missing read from the current epoch is corruption.
 
 ## Work streams
 
@@ -134,8 +152,8 @@ Exit evidence:
 
 Implement the minimum operations needed from `object_store`. Add namespace
 validation and a capability probe for conditional create, conditional update,
-conditional read, and strong read-after-write behavior. Listing belongs to the
-garbage-collection follow-on.
+conditional read, and strong read-after-write behavior. Scoped listing and
+immutable-only batch deletion support garbage collection.
 
 Backends in this stream:
 
@@ -185,8 +203,9 @@ stage-only action, or explicit crash action.
 ### 5. Checkpoints — root agent
 
 Add opaque snapshot objects and conditional checkpoint publication. A
-checkpoint can cover a prefix while newer commits remain in the tail. Do not
-delete old commits in this release.
+checkpoint can cover a prefix while newer commits remain in the tail. Garbage
+collection can later delete the compacted commit bodies while the head keeps
+the bounded resolution evidence.
 
 Exit evidence:
 
@@ -227,8 +246,9 @@ baseline, retain a machine-readable comparison and fail only on large,
 repeatable regressions.
 
 Current status: partial. The in-memory Criterion suite covers batch payload
-size, inline size, staged payloads, contention, and tail recovery. It does not
-yet cover the full matrix above.
+size, inline size, staged payloads, contention, tail recovery, bounded
+collection scans, graph shapes, fence lookup, and collection resume. It does
+not yet cover filesystem or remote-service performance.
 
 ### 8. MinIO local qualification — backend agent and root agent
 
@@ -244,9 +264,9 @@ Exit evidence:
 - Repeated runs start from empty isolated prefixes.
 
 Current status: partial. One local MinIO compatibility flow covers capability
-probing, one ambiguous commit, resolution, checkpoint publication, reopen, and
-recovery. The complete backend and protocol suites do not yet run against
-MinIO.
+probing, one ambiguous commit, resolution, checkpoint publication, reopen,
+recovery, and collection of 1,001 objects across the bulk-delete boundary. The
+complete backend and protocol suites do not yet run against MinIO.
 
 ### 9. Independent review and reduction — review agent
 
@@ -259,6 +279,11 @@ Exit evidence:
 - Every finding is fixed, rejected with evidence, or recorded as a later
   limitation.
 - Unused public API and speculative abstraction are removed.
+
+Status: complete for garbage collection. The independent review found no
+remaining P0 or P1 defect. The Rust simplification pass removed 80 net lines
+from its code-and-test change while it removed redundant validation and
+allocation.
 
 ## Agent file ownership
 
@@ -276,7 +301,8 @@ the edit.
 
 ## Local completion gate
 
-The first implementation is complete only when:
+The core log, checkpoint, key-value, and garbage-collection implementation is
+locally complete. Its current gate requires:
 
 - Formatting and strict lint pass.
 - Unit, conformance, protocol, model, and documentation tests pass.
@@ -286,8 +312,12 @@ The first implementation is complete only when:
 - Criterion benchmarks run and save a baseline.
 - The key-value example recovers after removal of its local cache.
 - The limitations document states that one log has one serialized publication
-  point.
+  point and that current performance evidence is local.
 - No remote provider has been contacted.
+
+The remaining qualification gaps do not change this local product result.
+They include broader generated-model coverage, more durable-format golden
+values, filesystem benchmarks, full MinIO conformance, and live AWS tests.
 
 ## Later high-throughput stage
 
@@ -317,29 +347,27 @@ first protocol.
 The local first release is the dependency for these milestones. Complete them
 in this order unless a correctness defect changes the order.
 
-### 1. Garbage collection
+### Completed: garbage collection
 
-Add durable reachability records, a grace period, and safe deletion of
-unreachable entries, objects, bases, and old index history. A reader that
-started before collection must either complete or receive an explicit expired
-result. Crash recovery must resume an interrupted collection without deleting
-reachable data.
+The v1 protocol now has bounded graph marking, reader retention, a durable
+positive plan and publication fence, complete-set retry, view expiry, and
+immutable deletion. The current evidence is local.
 
-### 2. SQLite storage
+### 1. SQLite storage
 
 Implement a SQLite state machine over the log. Start with one database per
 log. Define page or changeset objects, transaction boundaries, checkpoint
 rules, and recovery limits. Measure write amplification, recovery time, and
 contention before adding a Spin factor adapter.
 
-### 3. WASI filesystem storage
+### 2. WASI filesystem storage
 
 Implement filesystem metadata and file content over the same log and object
 model. Define inode identity, directory operations, rename atomicity, open-file
 behavior, sparse files, and capability boundaries. Then expose the proven
 model through `wasi:filesystem` for Spin.
 
-### 4. Live AWS qualification
+### 3. Live AWS qualification
 
 Run the backend conformance, fault, recovery, and performance suites against an
 isolated AWS S3 prefix. Record the AWS region, bucket settings, request limits,

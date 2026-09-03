@@ -2,9 +2,8 @@
 
 ## Outcome
 
-Add bounded and restart-safe deletion for one log namespace. Keep the mutable
-head as the only authority. Do not start SQLite or WASI filesystem work in this
-tranche.
+Bounded and restart-safe deletion is complete for one log namespace. The
+mutable head remains the only authority. SQLite is the next product goal.
 
 ## Safety contract
 
@@ -23,7 +22,7 @@ tranche.
 5. `start_collection` verifies the complete live graph from one exact view,
    lists the bounded namespace, writes a sorted positive deletion plan, and
    installs its reference with the same head CAS that increments the collection
-   epoch. It does not delete objects.
+   epoch. Candidate deletion starts only after that fence is active.
 6. The caller controls the grace interval between `start_collection` and
    `resume_collection`. Retention, not elapsed time, is the proof that a reader
    must finish.
@@ -47,9 +46,14 @@ tranche.
     view and current head determine expiry. An unretained view from an older
     collection epoch returns explicit expiry. A retained view or current-epoch
     view reports missing data as corruption.
-13. Exact commit and checkpoint recovery can recreate its physical key only as
-    part of the original non-rebased source-head CAS. A new logical attempt
-    allocates a new physical ID and restages any collected payload references.
+13. Exact commit recovery can recreate its WAL object only as part of the
+    original non-rebased source-head CAS. Checkpoint resolution requires its
+    staged checkpoint object to remain durable. A new logical attempt allocates
+    a new physical ID and restages collected payload references.
+14. The plan object is not part of its own positive set. After a definite
+    rejected fence CAS or a completed clear, the library deletes that plan
+    object on a best-effort basis. A later collection can remove it if cleanup
+    fails.
 
 ## Public API boundary
 
@@ -71,8 +75,8 @@ a head conflict, and an uncertain update. `CollectionStart` distinguishes an
 empty plan, an active fence, a head conflict, an active retention, and an
 uncertain fence update. `CollectionFinish` distinguishes completion, a head
 conflict, and an uncertain clear or delete. A collection report contains
-candidate count, candidate bytes, and delete attempts. Fields stay private and
-have getters.
+candidate count, candidate bytes, and the number of candidate keys submitted
+for deletion. Fields stay private and have getters.
 
 An installed plan reference is durable recovery evidence in the head. After a
 `Pending` start, the caller loads the head: an active plan is resumed, while an
@@ -89,8 +93,9 @@ lease, mutable deletion bitmap, Bloom filter, or provider-specific branch.
 - Append, checkpoint, retention, and collection races have both CAS orderings.
 - A direct deletion-set reference and a nested node reference cannot publish.
 - The newly encoded commit or checkpoint object cannot be in the deletion set.
-- Missing, corrupt, oversized, cyclic, or over-budget live graphs fail before
-  fence installation or deletion.
+- Missing, corrupt, oversized, or over-budget live graphs fail before fence
+  installation or deletion. A valid content-addressed cycle cannot be built
+  without breaking digest verification.
 - Cancellation before and after fence installation and before and after a
   visible delete is restart-safe.
 - Two collectors can repeat deletes, but only one clears the exact plan.
@@ -105,7 +110,7 @@ lease, mutable deletion bitmap, Bloom filter, or provider-specific branch.
   corruption.
 - Listing counts unknown entries toward its limit and never deletes them.
 - Memory and filesystem deletion are repeatable. The pinned MinIO flow covers
-  listing and a 1,000-object bulk-delete boundary.
+  listing and 1,001 candidates across the 1,000-key bulk-delete boundary.
 - Benchmarks measure 1,000, 10,000, and 100,000 listed objects, several live
   ratios, graph shapes, fence checks, and partial-resume cases.
 
@@ -114,17 +119,36 @@ lease, mutable deletion bitmap, Bloom filter, or provider-specific branch.
 - [x] Adversarially review the fence and delayed-delete protocol.
 - [x] Review the smallest backend list and delete boundary.
 - [x] Review the Rust API, test matrix, and line budget.
-- [ ] Add physical storage identity to durable references and keys.
-- [ ] Add the collection epoch, active-plan reference, and retention IDs.
-- [ ] Add canonical collection-plan encoding and strict limits.
+- [x] Add physical storage identity to durable references and keys.
+- [x] Add the collection epoch, active-plan reference, and retention IDs.
+- [x] Add canonical collection-plan encoding and strict limits.
 - [x] Add namespace-safe list and immutable-only batch delete.
-- [ ] Add retention acquisition and release.
-- [ ] Add bounded live-graph marking and positive plan creation.
-- [ ] Add fenced publication, repeatable deletion, and plan clearing.
-- [ ] Add deterministic race, fault, cancellation, and model tests.
-- [ ] Add collection benchmarks and update local evidence.
-- [ ] Update the README and protocol documentation with measured behavior.
-- [ ] Complete independent correctness and strict line reviews.
+- [x] Add retention acquisition and release.
+- [x] Add bounded live-graph marking and positive plan creation.
+- [x] Add fenced publication, repeatable deletion, and plan clearing.
+- [x] Add deterministic race, fault, cancellation, and model tests.
+- [x] Add collection benchmarks and update local evidence.
+- [x] Update the README and protocol documentation with measured behavior.
+- [x] Complete independent correctness and strict line reviews.
 
 The product-code review threshold for this tranche is 650 net new physical
 lines. More than 750 lines requires a reduction review before integration.
+
+## Completion record
+
+Revision `5419e9aa793bf94fad77e22da75fb96c346ccb28` passes 135 local
+tests. The focused GC suite has 27 tests. The independent correctness review
+found no remaining P0 or P1 defect. The Rust simplification change removed 80
+net lines from its code-and-test change. It removed redundant validation and
+allocation while it kept the safety contract.
+
+From baseline `825447c` through evidence revision `5419e9a`, GC added 1,344
+product lines, 2,601 test and support lines, 163 benchmark lines, 169
+documentation lines, and no operator or infrastructure lines. At `5419e9a`,
+the repository contains 4,857 product, 6,812 test and support, 464 benchmark,
+1,637 documentation and schema, and 138 operator and infrastructure lines. The
+total is 13,908 lines without `Cargo.lock`.
+
+The local MinIO flow passed one test in 2.22 seconds. It deleted 1,001
+candidates and left only `index.cbor` in the GC log. The benchmark evidence is
+in [the GC local record](docs/evidence/gc-local-2026-09-03.md).

@@ -1,43 +1,17 @@
 # Ordered follow-on goals
 
-These goals start only after the local log, checkpoint, key-value proof, model
-tests, benchmarks, and MinIO tests pass. Each goal keeps object storage as the
-durable authority.
+The local log, checkpoint, key-value proof, bounded garbage collection,
+benchmarks, and MinIO compatibility flow are complete. Each next goal keeps
+object storage as the durable authority.
 
-## 1. Garbage collection
+## Completed: garbage collection
 
-The implementation contract and current task record are in
-[`GC_PLAN.md`](../GC_PLAN.md).
+The implementation contract and completion record are in
+[`GC_PLAN.md`](../GC_PLAN.md). The v1 protocol has bounded graph marking,
+reader retention, a positive durable plan and fence, complete-set retry, view
+expiry, and best-effort plan-object cleanup. Current qualification is local.
 
-### Required contract
-
-- Collection operates on one log namespace.
-- A plan names one observed index generation and a positive immutable deletion
-  set.
-- The collector CAS-installs the deletion-set digest as a head fence.
-- New commit and checkpoint publications reject every transitive reference to
-  an object in the active deletion set.
-- Deletion runs only while the exact fence remains active.
-- A partial failure leaves the fence active so deletion can resume.
-- The collector clears the fence through another head CAS after completion.
-- Interrupted collection is safe to repeat.
-- Readers either finish from retained objects or receive an explicit expiry.
-- The collector never derives reachability from a local cache.
-- Retention pins are separate CAS-managed roots. They are not log cursors.
-- A missing or invalid retention boundary fails closed.
-
-### Required evidence
-
-- Model tests race append, base publication, reader recovery, and collection.
-- Fault tests stop before and after every deletion.
-- Tests retain every index, entry, base, node, and payload that is reachable at
-  the safety boundary.
-- Tests prove that an old writer, a new node with an old child, and a new
-  retention pin cannot race an active deletion fence.
-- Benchmarks report list requests, delete requests, bytes retained, and time by
-  namespace size.
-
-## 2. SQLite storage
+## 1. SQLite storage
 
 ### Required contract
 
@@ -59,7 +33,7 @@ The implementation contract and current task record are in
 The first design study must compare page objects, SQLite sessions changesets,
 and a VFS-level journal before it selects one current contract.
 
-## 3. WASI filesystem storage
+## 2. WASI filesystem storage
 
 ### Required contract
 
@@ -82,7 +56,7 @@ and a VFS-level journal before it selects one current contract.
 - Benchmarks report metadata latency, sequential and random I/O, cold restore,
   write amplification, and object-store requests.
 
-## 4. Live AWS qualification
+## 3. Live AWS qualification
 
 This is a separate qualification goal. It does not block local product
 completion.

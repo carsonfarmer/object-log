@@ -220,10 +220,10 @@ WAL and checkpoint store in that design.
 ## Implemented decision
 
 The current library keeps one mutable `index.cbor`. WAL entries, payloads,
-reference nodes, and checkpoints are immutable and content-addressed. The
-random durable incarnation prevents a cursor from one log lifetime from
-authorizing another lifetime. BLAKE3 provides deterministic content identities
-within that namespace.
+reference nodes, checkpoints, and collection plans are immutable. Each
+deletable key combines a random physical ID with its deterministic BLAKE3
+content identity. The random durable incarnation prevents a cursor from one
+log lifetime from authorizing another lifetime.
 
 Checkpoints expose their declared roots. Reference nodes have opaque payloads
 and explicit children. This permits adapter-specific trees without hiding GC
@@ -234,13 +234,16 @@ tenant scopes without more probe requests.
 The public result model distinguishes committed, definite conflict, pending,
 and expired evidence. A recovery token preserves the exact candidate before
 publication. The local key-value module proves atomic commands and recorded
-results. Garbage collection remains the first follow-on. SQLite, then
-`wasi:filesystem`, follow it. Live AWS qualification is separate.
+results. Cursor-style bounded garbage collection is locally complete. SQLite
+is next, then `wasi:filesystem`. Live AWS qualification is separate.
 
-The final all-feature local gate passes 79 tests plus one pinned MinIO flow.
-The Criterion matrix measures in-memory append, recovery, and contention. These
-results do not prove S3 latency, multi-process behavior, or the full fault
-matrix. See [local evidence](evidence/local-baseline-2026-09-02.md) and [test
+The final all-feature local gate passes 135 tests. A pinned MinIO rerun passed
+one integrated test, including 1,001 collection candidates. The Criterion
+matrix measures in-memory append, recovery, contention, collection graph
+shapes, fence lookup, and complete-set resume. These results do not prove S3
+latency, multi-process behavior, or the full fault matrix. See [the initial
+baseline](evidence/local-baseline-2026-09-02.md), [GC
+evidence](evidence/gc-local-2026-09-03.md), and [test
 gaps](testing.md#current-matrix-gaps).
 
 ## Material limits and disagreements

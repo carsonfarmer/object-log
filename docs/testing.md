@@ -14,6 +14,12 @@ Run tests in this order:
 
 No cloud backend is part of this stage.
 
+At revision `5419e9aa793bf94fad77e22da75fb96c346ccb28`, the local
+all-feature gate passes 135 tests. The focused garbage-collection suite has 27
+tests. The memory and temporary-filesystem tests prove repeatable immutable
+deletion. The opt-in MinIO flow proves 1,001 candidates across the 1,000-key
+bulk-delete boundary.
+
 Format tests include one stable hexadecimal encoding assertion for an empty
 head. A complete set of checked-in golden values for commits, checkpoints, and
 recovery tokens remains qualification work. The CDDL file defines the
@@ -109,11 +115,38 @@ creation before/after failures remains qualification work.
 - One opened log cannot request another log's head, blob, or checkpoint key.
 - Invalid separators, traversal elements, empty IDs, and overlong IDs fail.
 
+### Garbage collection
+
+- Exact reports and deletion of unreachable objects only.
+- Preservation of the current checkpoint, tail, and nested live graph.
+- Empty collection without a plan or head write.
+- Both CAS orders for append, checkpoint, retention, and plan installation.
+- Plan preservation through successful append and checkpoint publication.
+- Direct and nested fence rejection for commits and checkpoints.
+- Fence rejection for exact commit and checkpoint physical keys.
+- Missing, corrupt, oversized, and over-budget live graphs before listing or
+  deletion.
+- Retention loss, release, reacquisition, and uncertain response recovery.
+- Lost fence and clear responses.
+- Complete-plan retry after partial delete and cancellation.
+- Two collectors with one exact clear.
+- Isolation from delayed deletes and old incarnations.
+- Older-view expiry and current or retained-view corruption.
+- Unknown entry scan accounting without deletion.
+- Resolution of a compacted commit after its immutable body is collected.
+
+A valid content-addressed cycle cannot be constructed because each node digest
+binds its child references. An attempted cycle with false bytes fails digest or
+format verification.
+
 ### Current matrix gaps
 
 - Complete the blob-create and commit-create fault points listed above.
 - Add checked-in golden values for commits, checkpoints, and recovery tokens.
-- Add a bounded full-graph scrub after the GC graph walker exists.
+- Extend the generated model with independent checkpoint and collection
+  oracles.
+- Run the complete conformance and protocol suites against MinIO.
+- Add filesystem and live object-store performance evidence.
 
 ## Current deterministic scenario
 
@@ -161,18 +194,41 @@ The target benchmark matrix is:
 | Tail length | 0, 16, 64, 256, 1024 |
 | Backend | memory, filesystem, MinIO |
 
+The garbage-collection matrix is:
+
+| Operation | Shape and size |
+|---|---|
+| Start | 1,000 flat live objects |
+| Start | 1,000 deep live objects |
+| Start | 10,000 objects, half live, wide graph |
+| Start | 100,000 unreachable objects |
+| Fence | Planned reference in 100,000 candidates |
+| Resume | 1,000 clean candidates |
+| Resume | 1,001 candidates after a partial attempt |
+
 Cold-recovery benchmarks must clear process caches. Filesystem results must
 state whether the operating-system page cache was cold or warm. MinIO results
 must record image version, container resources, filesystem, endpoint, and
 whether the client and server share one host.
 
 The current process-local suite covers batch payload size, inline operation
-size, staged payloads, contending candidates, and metadata-only active-tail
-recovery. The first measured baseline is in
+size, staged payloads, contending candidates, metadata-only active-tail
+recovery, and the garbage-collection matrix above. The first measured baseline
+is in
 [`docs/evidence/local-baseline-2026-09-02.md`](evidence/local-baseline-2026-09-02.md).
-It states the cases that remain unmeasured. Add refresh, checkpoint, filesystem,
-and MinIO performance cases before making claims about
-those paths.
+The garbage-collection measurements are in
+[`docs/evidence/gc-local-2026-09-03.md`](evidence/gc-local-2026-09-03.md).
+Add refresh, checkpoint, filesystem, and remote-service performance cases
+before making claims about those paths.
+
+The MinIO flow uses a pinned image and an isolated loopback endpoint. Its
+integrated rerun passed one test in 2.22 seconds. The GC log contained only
+`index.cbor` after collection. This is compatibility evidence, not a MinIO
+latency result.
+
+`CollectionReport::delete_attempts` counts candidate keys submitted for
+deletion. It does not count HTTP requests. A provider can combine one batch
+into fewer requests.
 
 Later gates can compare against a retained machine-readable baseline. Do not
 set a hard target that the system has not measured repeatedly.

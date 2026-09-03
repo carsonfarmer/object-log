@@ -10,13 +10,13 @@
 The library derives every key. A caller cannot supply a raw object path after
 opening a log.
 
-Only `index.cbor` is mutable. Its update version is an opaque token supplied by the
+Only `index.cbor` is mutable. Its update version is an opaque token from the
 object store. Every other object uses create-only publication. Its key contains
 a random physical storage ID and a deterministic BLAKE3 content digest. A new
-blob, reference node, or checkpoint staging call always allocates a new physical
-ID. Exact commit recovery reuses only the physical ID recorded in its recovery
-evidence. This prevents an old delete from addressing a later write with the
-same content digest.
+blob, reference node, checkpoint, or collection plan gets a new physical ID.
+Exact commit recovery reuses only the physical ID in its recovery evidence.
+This prevents an old delete from addressing a later write with the same content
+digest.
 
 This structure follows Cursor's mutable metadata plus immutable object model.
 It also follows Micelio's concrete split between one index, ordered entry
@@ -48,6 +48,9 @@ generation
 base_checkpoint
 tail[]
 recent_outcomes[]
+collection_epoch
+retention_ids[]
+active_collection_plan
 integrity_digest
 ```
 
@@ -68,6 +71,11 @@ the entry content-addressable before publication.
 `recent_outcomes` is a bounded resolution window. It records enough data to
 identify the result of a recent transaction after checkpointing removes its
 commit from the active tail. Expiry must be explicit.
+
+`collection_epoch` increases when a positive deletion plan becomes active.
+`retention_ids` is a bounded sorted set. `active_collection_plan` is empty or
+names one immutable positive deletion plan. Retentions and an active plan
+cannot exist together.
 
 The implementation must enforce encoded byte and entry-count limits. It must
 request a checkpoint before the head becomes an unbounded manifest.
@@ -101,8 +109,8 @@ the initial index when needed. It does not probe the backend or load all log
 data. This keeps tenant open and close cheap.
 
 The capability probe writes and deletes one private object when the backend
-handle is created. Provisioning credentials need delete permission. Normal log
-open and use do not need delete permission in this release.
+handle is created. Provisioning and collection credentials need delete
+permission. Only the capability probe and collection issue deletes.
 
 `load` reads and validates only the index. `read_checkpoint` reads its base.
 `read_tail` fetches active WAL entries concurrently because the index contains
@@ -119,7 +127,8 @@ tail that the view names.
 The caller prepares one candidate against one cursor.
 
 1. Validate all sizes, references, log identities, and the expected cursor.
-2. Verify that every referenced blob or node is already durable and valid.
+2. Verify the complete transitive object graph. This also proves that each
+   referenced blob or node is durable and valid.
 3. Create the immutable commit object.
 4. Build a new head that appends the commit reference.
 5. Conditionally replace the observed head version.
@@ -184,11 +193,52 @@ Opaque bytes must not hide another durable reachability graph. The materializer
 must also prove that the snapshot is the correct state for the covered prefix.
 These are the checkpoint trust boundaries.
 
-The first release retains all prior objects. Deletion is not safe yet. The GC
-follow-on must install a deletion fence through the same head CAS that orders
-publication. While the fence is active, commit and checkpoint publication must
-reject any candidate that transitively reaches an object in its positive
-deletion set. A grace period alone is not sufficient.
+## Garbage collection
+
+Garbage collection follows the Cursor-style positive-plan model. The head is
+the only mutable authority.
+
+`start_collection` requires no retention and no active plan. It validates the
+active tail, current checkpoint, and their complete transitive object graph.
+It then lists one bounded log scope. Unknown entries count against the scan
+limit but cannot enter the deletion set. If unreachable immutable objects
+exist, the method writes one sorted positive plan and installs its reference
+with the head CAS that increments the collection epoch. Candidate deletion
+starts only after that fence is durable.
+
+Every head update preserves an active plan. Commit and checkpoint publication
+read that plan. They reject a direct or transitive reference to a planned key.
+They also reject a planned commit key. A checkpoint staging call selects
+another physical ID if its first new key is in the plan. Full graph validation
+also runs without a fence. This prevents publication of an old node whose
+child was deleted by an earlier collection.
+
+`resume_collection` first loads the current head and confirms the exact plan.
+It submits the complete positive set in batches of at most 1,000 keys. A
+missing key is success. An error or cancellation leaves the plan active. A
+retry submits the complete set again. After all candidate submissions succeed,
+one head CAS clears the exact plan. The protocol has no progress bitmap,
+collector lease, background worker, or second authority.
+
+The plan object is not in its positive set. After a definite rejected fence
+CAS or a successful clear, the library deletes the plan object on a
+best-effort basis. A later collection can remove it if that cleanup fails.
+
+A retention ID protects the full log namespace and has no automatic expiry.
+Any retention blocks plan installation. An active plan blocks a new retention.
+A caller reuses one ID only to resolve an uncertain retention update. It uses a
+new ID after a confirmed release.
+
+Object, node, tail, and checkpoint reads take a `View`. A missing object from a
+view in an older collection epoch returns `ViewExpired`. A missing object from
+the current epoch is corruption. An epoch can advance only when the fence CAS
+observes no retention, so later reuse of the same retention ID cannot restore
+an older view.
+
+Compacted commit bodies are not live only because the head retains the complete
+recent outcome evidence needed for commit resolution. The active tail, current
+checkpoint, and their transitive object graph remain live. A valid
+content-addressed cycle cannot be formed without breaking digest verification.
 
 ## Materializer
 
