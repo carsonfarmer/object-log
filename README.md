@@ -22,7 +22,8 @@ only the public core API. The [`object-log-sqlite`](crates/object-log-sqlite)
 crate is the second consumer. It stores a complete first snapshot and later
 committed WAL ranges in the same log contract. Its local memory, fault,
 garbage-collection, benchmark, and loopback `MinIO` paths are implemented. The
-regular `SQLite` suite has 44 tests.
+regular `SQLite` suite has 43 tests. A separate local acceptance test recovers
+an exact 1,000-record WAL tail.
 
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the
@@ -52,6 +53,12 @@ flow with:
 
 ```sh
 make sqlite-minio-test
+```
+
+Run the large local `SQLite` recovery case with:
+
+```sh
+make sqlite-recovery-acceptance
 ```
 
 Run the opt-in large garbage-collection acceptance test with:

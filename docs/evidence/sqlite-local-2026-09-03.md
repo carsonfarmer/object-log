@@ -7,10 +7,10 @@ canonical v1 snapshot record for the first changed transaction and canonical
 v1 WAL records for later changed transactions. A local SQLite file is a
 disposable cache. Cold open rebuilds it from the object log.
 
-The final regular suite has 44 tests: 6 unit, 4 allocation-bound, 16 database,
-11 fault, 1 garbage-collection, 1 collection-race, and 5 recovery and policy
-tests. The recovery set includes an exact 1,000-record case. The separate
-MinIO test stays ignored in regular runs.
+The final regular suite has 43 tests: 6 unit, 4 allocation-bound, 16 database,
+11 fault, 1 garbage-collection, 1 collection-race, and 4 recovery and policy
+tests. The separate acceptance target runs an exact 1,000-record recovery
+case. The MinIO test also stays outside regular runs.
 
 Relevant revisions:
 

@@ -58,6 +58,12 @@ Run the loopback MinIO flow with:
 make sqlite-minio-test
 ```
 
+Run the exact 1,000-record cold-recovery case with:
+
+```sh
+make sqlite-recovery-acceptance
+```
+
 The MinIO script pins its container image, creates an empty bucket, and checks
 container removal. See the
 [local evidence](../../docs/evidence/sqlite-local-2026-09-03.md) for the

@@ -20,6 +20,7 @@ async fn ten_wal_transactions_recover_without_the_cache() -> TestResult {
 }
 
 #[tokio::test]
+#[ignore = "large local recovery acceptance test; run make sqlite-recovery-acceptance"]
 async fn thousand_wal_transactions_recover_without_the_cache() -> TestResult {
     recover_wal_tail("thousand-wal", 1_000).await
 }
