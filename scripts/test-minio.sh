@@ -8,6 +8,8 @@ secret_key="objectlog-local-test-secret"
 bucket="object-log-test"
 test_target="${1:-minio}"
 test_filter="${2:-minio_passes_recovery_checkpoint_and_gc_flow}"
+package="${3:-object-log}"
+features="${4:-aws,test-util}"
 container_started=0
 
 cleanup() {
@@ -75,4 +77,5 @@ OBJECT_LOG_MINIO_ENDPOINT="${endpoint}" \
 OBJECT_LOG_MINIO_ACCESS_KEY="${access_key}" \
 OBJECT_LOG_MINIO_SECRET_KEY="${secret_key}" \
 OBJECT_LOG_MINIO_BUCKET="${bucket}" \
-cargo test --features aws,test-util --test "${test_target}" "${test_filter}" -- --ignored --nocapture
+cargo test --package "${package}" --features "${features}" \
+  --test "${test_target}" "${test_filter}" -- --ignored --nocapture

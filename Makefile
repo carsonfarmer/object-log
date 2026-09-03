@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test gc-acceptance
+.PHONY: check test bench minio-test sqlite-minio-test gc-acceptance
 
 check:
 	cargo fmt --all --check
@@ -13,6 +13,9 @@ bench:
 
 minio-test:
 	./scripts/test-minio.sh
+
+sqlite-minio-test:
+	./scripts/test-minio.sh minio minio_sqlite_recovers_before_and_after_collection object-log-sqlite aws
 
 gc-acceptance:
 	cargo test --features test-util --test gc_acceptance memory_gc_removes_100k_objects -- --ignored --nocapture
