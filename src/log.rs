@@ -676,7 +676,8 @@ impl Log {
     /// Returns an error for a foreign view, a reference outside its active
     /// tail, an oversized base, invalid history, or a backend failure. A store
     /// error during the index update can hide a successful maintenance update.
-    /// The caller must load the index before it retries.
+    /// The method then returns [`CheckpointStatus::Pending`]. The caller must
+    /// preserve that evidence and pass it to [`Log::resolve_checkpoint`].
     pub async fn publish_checkpoint(
         &self,
         view: &View,
@@ -853,6 +854,9 @@ impl Log {
     }
 
     /// Reads and verifies the base snapshot referenced by `view`.
+    ///
+    /// The returned object references remain lazy. This method verifies the
+    /// checkpoint envelope, but it does not read the declared root objects.
     ///
     /// # Errors
     ///
