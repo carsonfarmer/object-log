@@ -56,7 +56,7 @@ fn require_i64(conn: &Connection, name: &str, expected: i64) -> Result<(), Sqlit
 }
 
 fn require_config(conn: &Connection, config: DbConfig, value: bool) -> Result<(), SqliteError> {
-    if conn.set_db_config(config, value)? != value || conn.db_config(config)? != value {
+    if conn.set_db_config(config, value)? != value {
         return Err(SqliteError::Configuration(format!(
             "SQLite did not retain {config:?}={value}"
         )));

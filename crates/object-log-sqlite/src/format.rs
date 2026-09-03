@@ -9,12 +9,12 @@ const WAL_FRAME_BYTES: usize = PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Record {
-    kind: RecordData,
+    kind: RecordKind,
     payload: Payload,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum RecordData {
+pub(crate) enum RecordKind {
     Snapshot,
     Wal {
         header: [u8; WAL_HEADER_BYTES],
@@ -36,7 +36,7 @@ impl Record {
         chunks: usize,
     ) -> Result<Self, SqliteError> {
         Ok(Self {
-            kind: RecordData::Snapshot,
+            kind: RecordKind::Snapshot,
             payload: Payload::new(len, inline, chunks, PAGE_SIZE as usize)?,
         })
     }
@@ -51,7 +51,7 @@ impl Record {
     ) -> Result<Self, SqliteError> {
         validate_wal_range(u64::try_from(len)?, prior, current)?;
         Ok(Self {
-            kind: RecordData::Wal {
+            kind: RecordKind::Wal {
                 header,
                 prior,
                 current,
@@ -67,11 +67,7 @@ impl Record {
     }
 
     pub(crate) fn decode(bytes: &[u8], objects: usize) -> Result<Self, SqliteError> {
-        let mut decoder = minicbor::Decoder::new(bytes);
-        let wire: RecordWire<'_> = decoder.decode().map_err(codec_error)?;
-        if decoder.position() != bytes.len() {
-            return Err(invalid("record has trailing bytes"));
-        }
+        let wire: RecordWire<'_> = minicbor::decode(bytes).map_err(codec_error)?;
         if !is_canonical(&wire, bytes) {
             return Err(invalid("record is not canonical CBOR"));
         }
@@ -85,10 +81,10 @@ impl Record {
             wire.prior_mx_frame,
             wire.mx_frame,
         ) {
-            (0, None, None, None) => RecordData::Snapshot,
+            (0, None, None, None) => RecordKind::Snapshot,
             (1, Some(header), Some(prior), Some(current)) => {
                 validate_wal_range(wire.payload_len, prior, current)?;
-                RecordData::Wal {
+                RecordKind::Wal {
                     header: header
                         .try_into()
                         .map_err(|_| invalid("WAL header is not 32 bytes"))?,
@@ -101,8 +97,8 @@ impl Record {
             _ => return Err(invalid("record has an unknown kind")),
         };
         let unit = match kind {
-            RecordData::Snapshot => PAGE_SIZE as usize,
-            RecordData::Wal { .. } => WAL_FRAME_BYTES,
+            RecordKind::Snapshot => PAGE_SIZE as usize,
+            RecordKind::Wal { .. } => WAL_FRAME_BYTES,
         };
         Ok(Self {
             kind,
@@ -110,8 +106,8 @@ impl Record {
         })
     }
 
-    pub(crate) const fn is_snapshot(&self) -> bool {
-        matches!(self.kind, RecordData::Snapshot)
+    pub(crate) const fn kind(&self) -> &RecordKind {
+        &self.kind
     }
 
     pub(crate) const fn payload_len(&self) -> usize {
@@ -128,25 +124,14 @@ impl Record {
         }
     }
 
-    pub(crate) const fn wal_boundary(&self) -> Option<(&[u8; WAL_HEADER_BYTES], u32, u32)> {
-        match &self.kind {
-            RecordData::Snapshot => None,
-            RecordData::Wal {
-                header,
-                prior,
-                current,
-            } => Some((header, *prior, *current)),
-        }
-    }
-
     fn wire(&self) -> Result<RecordWire<'_>, SqliteError> {
         let (inline_payload, chunk_count) = match &self.payload {
             Payload::Inline(bytes) => (Some(bytes.as_ref()), None),
             Payload::Chunks { count, .. } => (None, Some(*count)),
         };
         let (kind, wal_header, prior_mx_frame, mx_frame) = match &self.kind {
-            RecordData::Snapshot => (0, None, None, None),
-            RecordData::Wal {
+            RecordKind::Snapshot => (0, None, None, None),
+            RecordKind::Wal {
                 header,
                 prior,
                 current,

@@ -25,17 +25,17 @@ impl Policy {
         Ok(policy)
     }
 
-    pub(crate) fn read(&self) -> Guard {
+    pub(crate) fn read(&self) -> Guard<'_> {
         self.enter(READ)
     }
 
-    pub(crate) fn write(&self) -> Guard {
+    pub(crate) fn write(&self) -> Guard<'_> {
         self.enter(WRITE)
     }
 
-    fn enter(&self, mode: u8) -> Guard {
+    fn enter(&self, mode: u8) -> Guard<'_> {
         self.0.store(mode, Ordering::Relaxed);
-        Guard(self.clone())
+        Guard(self)
     }
 
     fn authorize(&self, context: AuthContext<'_>) -> Authorization {
@@ -48,9 +48,9 @@ impl Policy {
     }
 }
 
-pub(crate) struct Guard(Policy);
+pub(crate) struct Guard<'a>(&'a Policy);
 
-impl Drop for Guard {
+impl Drop for Guard<'_> {
     fn drop(&mut self) {
         self.0.0.store(INTERNAL, Ordering::Relaxed);
     }

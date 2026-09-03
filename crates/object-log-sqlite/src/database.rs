@@ -12,7 +12,7 @@ use rusqlite::{Connection, MAIN_DB};
 use uuid::Uuid;
 
 use crate::connection::open as open_connection;
-use crate::format::Record;
+use crate::format::{Record, RecordKind};
 use crate::policy::Policy;
 use crate::wal::{self, WAL_FRAME_HEADER_BYTES, WAL_HEADER_BYTES, WalCapture, WalPosition};
 use crate::{PAGE_SIZE, SqliteError};
@@ -23,7 +23,6 @@ const WAL_FRAME_BYTES: usize = PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES;
 enum CacheState {
     Clean,
     Dirty,
-    PendingCommit,
     PendingCheckpoint(Box<PendingCheckpoint>),
 }
 
@@ -42,7 +41,6 @@ pub struct Database {
 /// One locally committed write ready for object-log publication.
 pub struct StagedWrite<'a> {
     database: &'a mut Database,
-    source: Box<View>,
     prepared: Box<PreparedCommit>,
     recovery_token: Bytes,
     wal: Option<WalPosition>,
@@ -90,16 +88,14 @@ impl StagedWrite<'_> {
     pub async fn publish(self) -> Result<CommitStatus, SqliteError> {
         let Self {
             database,
-            source,
             prepared,
             recovery_token: _,
             wal,
         } = self;
-        let transaction_id = prepared.transaction_id();
-        database.state = CacheState::PendingCommit;
+        let source_generation = prepared.cursor().generation();
         let status = database.log.commit(*prepared).await?;
         if let CommitStatus::Committed(view) = &status {
-            if exact_commit(&source, view, transaction_id) {
+            if is_next_generation(source_generation, view) {
                 database.accept_local(view.clone(), wal)?;
             } else {
                 database.rebuild(view.clone()).await?;
@@ -178,7 +174,7 @@ impl Database {
         )?;
         let first = self.view.checkpoint().is_none() && self.view.tail().is_empty();
         let prior = self.wal;
-        let policy = self.policy.clone();
+        let policy = &self.policy;
         let transaction = self
             .connection
             .as_mut()
@@ -208,7 +204,6 @@ impl Database {
                 &self.path,
                 payload_limit(&self.log, PAGE_SIZE as usize)?,
             )?;
-            validate_snapshot(&payload)?;
             let (record, objects) = self.stage_snapshot(payload).await?;
             (record, objects, None)
         } else {
@@ -226,7 +221,7 @@ impl Database {
                 .header
                 .ok_or_else(|| SqliteError::InvalidWal("committed WAL has no header".into()))?;
             let (record, objects) = self
-                .stage_wal(current.bytes.clone(), header, prior, current.position)
+                .stage_wal(current.bytes, header, prior.frames, current.position.frames)
                 .await?;
             (record, objects, Some(current.position))
         };
@@ -234,10 +229,8 @@ impl Database {
             self.log
                 .prepare(self.view.cursor(), transaction_id, record, result, objects)?;
         let recovery_token = prepared.recovery_token()?;
-        let source = Box::new(self.view.clone());
         Ok(StageStatus::Staged(StagedWrite {
             database: self,
-            source,
             prepared: Box::new(prepared),
             recovery_token,
             wal,
@@ -251,7 +244,7 @@ impl Database {
     /// Returns an error for an invalid token, object-store failure, or failed
     /// cache recovery after a definite result.
     pub async fn resume(&mut self, token: &[u8]) -> Result<Resolution, SqliteError> {
-        self.state = CacheState::PendingCommit;
+        self.state = CacheState::Dirty;
         let resolution = self.log.resume(token).await?;
         let view = match &resolution {
             Resolution::Committed(view)
@@ -290,17 +283,16 @@ impl Database {
             &self.path,
             payload_limit(&self.log, PAGE_SIZE as usize)?,
         )?;
-        validate_snapshot(&payload)?;
         let (snapshot, objects) = self.stage_snapshot(payload).await?;
         self.state = CacheState::Dirty;
-        let source = self.view.clone();
+        let source_generation = self.view.cursor().generation();
         match self
             .log
             .publish_checkpoint(&self.view, &through, snapshot, objects)
             .await?
         {
             CheckpointStatus::Published(view) => {
-                if exact_checkpoint(&source, &view, &through) {
+                if is_next_generation(source_generation, &view) {
                     self.accept_local(view.clone(), None)?;
                 } else {
                     self.rebuild(view.clone()).await?;
@@ -391,16 +383,11 @@ impl Database {
         &self,
         payload: Bytes,
         header: [u8; WAL_HEADER_BYTES],
-        prior: WalPosition,
-        current: WalPosition,
+        prior: u32,
+        current: u32,
     ) -> Result<(Bytes, Vec<ObjectRef>), SqliteError> {
-        if wal::validate_record(&header, &payload, prior)? != current {
-            return Err(SqliteError::InvalidWal(
-                "captured WAL does not match its validated boundary".into(),
-            ));
-        }
         self.stage_payload(payload, WAL_FRAME_BYTES, |len, inline, chunks| {
-            Record::wal(len, inline, chunks, header, prior.frames, current.frames)
+            Record::wal(len, inline, chunks, header, prior, current)
         })
         .await
     }
@@ -478,7 +465,7 @@ async fn materialize(log: &Log, mut view: View) -> Result<(Materialized, View), 
             Err(error) => return Err(error),
         };
         let current = log.load().await?;
-        if same_history(&view, &current) {
+        if view.checkpoint() == current.checkpoint() && view.tail() == current.tail() {
             return Ok((materialized, current));
         }
         view = current;
@@ -494,37 +481,43 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
 
     if let Some(checkpoint) = checkpoint {
         let descriptor = Record::decode(checkpoint.snapshot(), checkpoint.objects().len())?;
-        if !descriptor.is_snapshot() {
+        if !matches!(descriptor.kind(), RecordKind::Snapshot) {
             return Err(SqliteError::InvalidRecord(
                 "checkpoint does not contain a snapshot".into(),
             ));
         }
-        let payload = load_payload(log, view, &descriptor, checkpoint.objects()).await?;
+        let payload = load_payload(
+            log,
+            view,
+            &descriptor,
+            checkpoint.objects(),
+            PAGE_SIZE as usize,
+        )
+        .await?;
         validate_snapshot(&payload)?;
         snapshot = Some(payload);
     }
     for commit in tail {
         let descriptor = Record::decode(commit.operation(), commit.objects().len())?;
-        let payload = load_payload(log, view, &descriptor, commit.objects()).await?;
-        match (descriptor.is_snapshot(), descriptor.wal_boundary()) {
-            (true, None) if snapshot.is_none() && position.frames == 0 => {
+        match descriptor.kind() {
+            RecordKind::Snapshot if snapshot.is_none() && position.frames == 0 => {
+                let payload =
+                    load_payload(log, view, &descriptor, commit.objects(), PAGE_SIZE as usize)
+                        .await?;
                 validate_snapshot(&payload)?;
                 snapshot = Some(payload);
             }
-            (false, Some((record_header, prior, current))) if snapshot.is_some() => {
-                if prior != position.frames {
+            RecordKind::Wal { header, prior, .. } if snapshot.is_some() => {
+                if *prior != position.frames {
                     return Err(SqliteError::InvalidRecord(
                         "WAL records do not form one continuous epoch".into(),
                     ));
                 }
-                position = wal::validate_record(record_header, &payload, position)?;
-                if current != position.frames {
-                    return Err(SqliteError::InvalidRecord(
-                        "WAL record does not match its current boundary".into(),
-                    ));
-                }
+                let payload =
+                    load_payload(log, view, &descriptor, commit.objects(), WAL_FRAME_BYTES).await?;
+                position = wal::validate_record(header, &payload, position)?;
                 if wal.is_empty() {
-                    append(&mut wal, record_header)?;
+                    append(&mut wal, header)?;
                 }
                 append(&mut wal, &payload)?;
             }
@@ -549,24 +542,16 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
     })
 }
 
-fn same_history(left: &View, right: &View) -> bool {
-    left.checkpoint() == right.checkpoint() && left.tail() == right.tail()
-}
-
 async fn load_payload(
     log: &Log,
     view: &View,
     record: &Record,
     objects: &[ObjectRef],
+    unit: usize,
 ) -> Result<Bytes, SqliteError> {
     if let Some(payload) = record.inline() {
         return Ok(payload.clone());
     }
-    let unit = if record.is_snapshot() {
-        PAGE_SIZE as usize
-    } else {
-        WAL_FRAME_BYTES
-    };
     let options = log.options();
     if objects.len() > options.max_object_refs {
         return Err(SqliteError::PayloadLimit);
@@ -602,11 +587,6 @@ async fn load_payload(
         .map_err(|_| SqliteError::PayloadLimit)?;
     for object in objects {
         let chunk = log.read_object(view, object).await?;
-        if chunk.len() != usize::try_from(object.len())? {
-            return Err(SqliteError::InvalidRecord(
-                "record chunk does not match its declared length".into(),
-            ));
-        }
         payload.extend_from_slice(&chunk);
     }
     Ok(Bytes::from(payload))
@@ -728,32 +708,10 @@ impl CacheLease {
     }
 }
 
-fn exact_commit(source: &View, current: &View, transaction_id: TransactionId) -> bool {
+fn is_next_generation(source: u64, current: &View) -> bool {
     source
-        .cursor()
-        .generation()
         .checked_add(1)
         .is_some_and(|generation| current.cursor().generation() == generation)
-        && source.collection_epoch() == current.collection_epoch()
-        && source.checkpoint() == current.checkpoint()
-        && current
-            .tail()
-            .strip_prefix(source.tail())
-            .is_some_and(|tail| tail.len() == 1 && tail[0].transaction_id() == transaction_id)
-}
-
-fn exact_checkpoint(source: &View, current: &View, through: &object_log::CommitRef) -> bool {
-    source
-        .cursor()
-        .generation()
-        .checked_add(1)
-        .is_some_and(|generation| current.cursor().generation() == generation)
-        && source.collection_epoch() == current.collection_epoch()
-        && current.tail().is_empty()
-        && current.checkpoint().is_some_and(|checkpoint| {
-            checkpoint.through_sequence() == through.sequence()
-                && checkpoint.through_commit() == through.digest()
-        })
 }
 
 fn validate_options(log: &Log) -> Result<(), SqliteError> {
