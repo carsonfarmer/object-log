@@ -878,9 +878,8 @@ impl Log {
         result: Bytes,
         objects: Vec<StagedObject>,
     ) -> Result<PreparedCommit, Error> {
-        self.validate_cursor(cursor)?;
-        self.validate_prepared_sizes(&operation, &result)?;
         self.validate_staged_objects(cursor, &objects)?;
+        self.validate_prepared_sizes(&operation, &result)?;
         if cursor.head.tail.len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
@@ -896,7 +895,7 @@ impl Log {
             ));
         }
         let mut cursor = cursor.clone();
-        cursor.staging_domain = Some(Arc::clone(&self.staging_domain));
+        cursor.staging_domain = Arc::clone(&self.staging_domain);
         Ok(PreparedCommit {
             cursor,
             transaction_id,
@@ -920,21 +919,18 @@ impl Log {
     /// invalid.
     pub async fn commit(&self, prepared: PreparedCommit) -> Result<CommitStatus, Error> {
         let mut prepared = prepared;
-        if !self.proof_matches(prepared.cursor.staging_domain.as_ref()) {
-            prepared.cursor.staging_domain = None;
-        }
         self.validate_prepared(&prepared)?;
         let (commit_ref, commit_bytes) = self.encode_prepared(&prepared)?;
         self.verify_publication(
             &prepared.cursor.head,
             self.commit_immutable_key(&commit_ref),
             &prepared.objects,
-            prepared.cursor.staging_domain.as_ref(),
+            &prepared.cursor.staging_domain,
         )
         .await?;
         self.create_new_commit(self.commit_key(&commit_ref), commit_bytes)
             .await?;
-        prepared.cursor.staging_domain = Some(Arc::clone(&self.staging_domain));
+        prepared.cursor.staging_domain = Arc::clone(&self.staging_domain);
         let candidate = Self::candidate_head(&prepared, &commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
@@ -962,19 +958,7 @@ impl Log {
                     Err(error) => return Err(error),
                 };
                 match Self::classify_resolution(&pending, current)? {
-                    Some(Resolution::Committed(view)) => {
-                        if Self::tail_contains(&view, &pending.commit_ref)
-                            && !self.proof_matches(pending.prepared.cursor.staging_domain.as_ref())
-                        {
-                            match self.verify_published_commit(&pending.commit_ref).await {
-                                Ok(()) => Ok(CommitStatus::Committed(view)),
-                                Err(Error::Store(_)) => Ok(CommitStatus::Pending(pending)),
-                                Err(error) => Err(error),
-                            }
-                        } else {
-                            Ok(CommitStatus::Committed(view))
-                        }
-                    }
+                    Some(Resolution::Committed(view)) => Ok(CommitStatus::Committed(view)),
                     Some(Resolution::NotCommitted(view)) => Ok(CommitStatus::Conflict(view)),
                     Some(Resolution::Expired(_)) | None => Ok(CommitStatus::Pending(pending)),
                     Some(Resolution::StillPending(_)) => Err(Error::InvalidFormat(
@@ -1001,9 +985,6 @@ impl Log {
     /// this log.
     pub async fn resolve(&self, pending: PendingCommit) -> Result<Resolution, Error> {
         let mut pending = pending;
-        if !self.proof_matches(pending.prepared.cursor.staging_domain.as_ref()) {
-            pending.prepared.cursor.staging_domain = None;
-        }
         self.validate_pending(&pending)?;
         let current = match self.load().await {
             Ok(view) => view,
@@ -1014,7 +995,7 @@ impl Log {
         if let Some(resolution) = Self::classify_resolution(&pending, current)? {
             if let Resolution::Committed(view) = &resolution
                 && Self::tail_contains(view, &pending.commit_ref)
-                && !self.proof_matches(pending.prepared.cursor.staging_domain.as_ref())
+                && !self.proof_matches(&pending.prepared.cursor.staging_domain)
             {
                 match self.verify_published_commit(&pending.commit_ref).await {
                     Ok(()) => {}
@@ -1031,7 +1012,7 @@ impl Log {
                 &pending.prepared.cursor.head,
                 self.commit_immutable_key(&pending.commit_ref),
                 &pending.prepared.objects,
-                pending.prepared.cursor.staging_domain.as_ref(),
+                &pending.prepared.cursor.staging_domain,
             )
             .await
         {
@@ -1039,7 +1020,7 @@ impl Log {
             Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
             Err(error) => return Err(error),
         }
-        if !self.proof_matches(pending.prepared.cursor.staging_domain.as_ref()) {
+        if !self.proof_matches(&pending.prepared.cursor.staging_domain) {
             match self
                 .ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
                 .await
@@ -1049,7 +1030,7 @@ impl Log {
                 Err(error) => return Err(error),
             }
         }
-        pending.prepared.cursor.staging_domain = Some(Arc::clone(&self.staging_domain));
+        pending.prepared.cursor.staging_domain = Arc::clone(&self.staging_domain);
         let candidate = Self::candidate_head(&pending.prepared, &pending.commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
@@ -1198,7 +1179,7 @@ impl Log {
                 object,
             },
         };
-        pending.view.cursor.staging_domain = Some(Arc::clone(&self.staging_domain));
+        pending.view.cursor.staging_domain = Arc::clone(&self.staging_domain);
 
         match self
             .store
@@ -1215,17 +1196,7 @@ impl Log {
                     Err(error) => return Err(error),
                 };
                 match Self::classify_checkpoint(&pending, current)? {
-                    CheckpointEvidence::Published(view) => {
-                        if self.proof_matches(pending.view.cursor.staging_domain.as_ref()) {
-                            Ok(CheckpointStatus::Published(view))
-                        } else {
-                            match self.verify_checkpoint(&pending.checkpoint).await {
-                                Ok(()) => Ok(CheckpointStatus::Published(view)),
-                                Err(Error::Store(_)) => Ok(CheckpointStatus::Pending(pending)),
-                                Err(error) => Err(error),
-                            }
-                        }
-                    }
+                    CheckpointEvidence::Published(view) => Ok(CheckpointStatus::Published(view)),
                     CheckpointEvidence::NotPublished(view) => Ok(CheckpointStatus::Conflict(view)),
                     CheckpointEvidence::Expired(_) | CheckpointEvidence::Retry => {
                         Ok(CheckpointStatus::Pending(pending))
@@ -1250,9 +1221,6 @@ impl Log {
         pending: PendingCheckpoint,
     ) -> Result<CheckpointResolution, Error> {
         let mut pending = pending;
-        if !self.proof_matches(pending.view.cursor.staging_domain.as_ref()) {
-            pending.view.cursor.staging_domain = None;
-        }
         self.validate_cursor(pending.view.cursor())?;
         let candidate = Self::checkpoint_head(
             &pending.view,
@@ -1272,7 +1240,7 @@ impl Log {
         };
         match Self::classify_checkpoint(&pending, current)? {
             CheckpointEvidence::Published(view) => {
-                if self.proof_matches(pending.view.cursor.staging_domain.as_ref()) {
+                if self.proof_matches(&pending.view.cursor.staging_domain) {
                     return Ok(CheckpointResolution::Published(view));
                 }
                 return match self.verify_checkpoint(&pending.checkpoint).await {
@@ -1300,7 +1268,7 @@ impl Log {
             Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
             Err(error) => return Err(error),
         }
-        pending.view.cursor.staging_domain = Some(Arc::clone(&self.staging_domain));
+        pending.view.cursor.staging_domain = Arc::clone(&self.staging_domain);
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
         match self
@@ -1372,26 +1340,22 @@ impl Log {
         &self,
         pending: &PendingCheckpoint,
     ) -> Result<(), Error> {
-        if self.proof_matches(pending.view.cursor.staging_domain.as_ref()) {
-            let blocked = self
-                .active_collection_candidates(&pending.view.cursor.head)
-                .await?;
-            if blocked.as_deref().is_some_and(|blocked| {
-                Self::is_collection_candidate(
-                    blocked,
+        if self.proof_matches(&pending.view.cursor.staging_domain) {
+            return self
+                .verify_publication(
+                    &pending.view.cursor.head,
                     self.object_immutable_key(&pending.checkpoint.object),
+                    &[],
+                    &pending.view.cursor.staging_domain,
                 )
-            }) {
-                return Err(Error::CollectionFence);
-            }
-            return Ok(());
+                .await;
         }
         let checkpoint = self.load_checkpoint(&pending.checkpoint).await?;
         self.verify_publication(
             &pending.view.cursor.head,
             self.object_immutable_key(&pending.checkpoint.object),
             &checkpoint.objects,
-            None,
+            &pending.view.cursor.staging_domain,
         )
         .await
     }
@@ -1469,7 +1433,7 @@ impl Log {
         Cursor {
             head,
             version,
-            staging_domain: Some(Arc::clone(&self.staging_domain)),
+            staging_domain: Arc::clone(&self.staging_domain),
         }
     }
 
@@ -1540,15 +1504,14 @@ impl Log {
         if objects.iter().any(|object| {
             !Arc::ptr_eq(&object.domain, &self.staging_domain)
                 || object.collection_epoch != cursor.head.collection_epoch
-                || object.object.kind == ObjectKind::Checkpoint
         }) {
             return Err(Error::InvalidStagedObject);
         }
         Ok(())
     }
 
-    fn proof_matches(&self, proof: Option<&Arc<StagingDomain>>) -> bool {
-        proof.is_some_and(|proof| Arc::ptr_eq(proof, &self.staging_domain))
+    fn proof_matches(&self, proof: &Arc<StagingDomain>) -> bool {
+        Arc::ptr_eq(proof, &self.staging_domain)
     }
 
     fn validate_encoded_head(&self, bytes: &Bytes) -> Result<(), Error> {
@@ -1801,7 +1764,7 @@ impl Log {
         head: &Head,
         new_key: ImmutableKey,
         objects: &[ObjectRef],
-        staging: Option<&Arc<StagingDomain>>,
+        staging: &Arc<StagingDomain>,
     ) -> Result<(), Error> {
         let blocked = if self.proof_matches(staging) {
             self.active_collection_candidates(head).await?

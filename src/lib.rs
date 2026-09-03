@@ -303,7 +303,7 @@ impl CheckpointRef {
 pub struct Cursor {
     pub(crate) head: format::Head,
     pub(crate) version: UpdateVersion,
-    pub(crate) staging_domain: Option<Arc<StagingDomain>>,
+    pub(crate) staging_domain: Arc<StagingDomain>,
 }
 
 #[derive(Debug)]

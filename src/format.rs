@@ -11,6 +11,7 @@ use minicbor::bytes::ByteVec;
 use minicbor::{Decode, Encode};
 use object_store::UpdateVersion;
 use std::collections::{BTreeSet, HashSet};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub(crate) const FORMAT_VERSION: u32 = 1;
@@ -699,7 +700,7 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
                 e_tag: wire.e_tag,
                 version: wire.storage_version,
             },
-            staging_domain: None,
+            staging_domain: Arc::new(crate::StagingDomain),
         },
         transaction_id: transaction_id(&wire.transaction_id)?,
         storage_id: storage_id(&wire.storage_id)?,
@@ -1072,6 +1073,7 @@ fn option_to_usize(value: u64) -> Result<usize, Error> {
 #[allow(clippy::panic)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::Arc;
 
     use super::{
         Checkpoint, CollectionCandidate, CollectionCandidateWire, CollectionPlan,
@@ -1400,7 +1402,7 @@ mod tests {
                     e_tag: Some("etag".to_owned()),
                     version: Some("version".to_owned()),
                 },
-                staging_domain: None,
+                staging_domain: Arc::new(crate::StagingDomain),
             },
             transaction_id: crate::TransactionId::new(),
             storage_id: storage_id(),
@@ -1436,7 +1438,7 @@ mod tests {
                     e_tag: Some("etag".to_owned()),
                     version: Some("version".to_owned()),
                 },
-                staging_domain: None,
+                staging_domain: Arc::new(crate::StagingDomain),
             },
             transaction_id: crate::TransactionId::from_uuid(uuid::Uuid::from_u128(3)),
             storage_id: storage_id(),
@@ -1451,7 +1453,7 @@ mod tests {
         };
         let without_proof = encode_recovery_token(&prepared)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
-        prepared.cursor.staging_domain = Some(std::sync::Arc::new(crate::StagingDomain));
+        prepared.cursor.staging_domain = Arc::new(crate::StagingDomain);
         let with_proof = encode_recovery_token(&prepared)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
 
@@ -1460,8 +1462,6 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_token_cannot_change_the_durable_options() {
-        use std::sync::Arc;
-
         use object_store::memory::InMemory;
         use object_store::path::Path;
 
