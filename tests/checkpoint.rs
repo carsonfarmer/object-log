@@ -2,10 +2,13 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(feature = "test-util")]
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
+#[cfg(feature = "test-util")]
+use object_log::{CheckpointResolution, PendingCommit};
 use object_log::{
-    CheckpointResolution, CheckpointStatus, CommitStatus, Log, LogId, Options, PendingCommit,
-    Resolution, ScopedStore, TransactionId, View,
+    CheckpointStatus, CommitStatus, Log, LogId, Options, Resolution, ScopedStore, TransactionId,
+    View,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -181,6 +184,7 @@ async fn checkpoint_limit_fails_before_index_publication() -> TestResult {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-util")]
 async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let log = open(
@@ -215,6 +219,7 @@ async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-util")]
 async fn failed_checkpoint_update_retries_the_exact_prefix() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let log = open(
@@ -249,6 +254,7 @@ async fn failed_checkpoint_update_retries_the_exact_prefix() -> TestResult {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-util")]
 async fn superseded_pending_checkpoint_reports_expired_not_conflict() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let log = open(
@@ -293,6 +299,7 @@ async fn superseded_pending_checkpoint_reports_expired_not_conflict() -> TestRes
 }
 
 #[tokio::test]
+#[cfg(feature = "test-util")]
 async fn checkpoint_retains_a_pending_commit_outcome() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let log = open(
@@ -319,6 +326,7 @@ async fn checkpoint_retains_a_pending_commit_outcome() -> TestResult {
 }
 
 #[tokio::test]
+#[cfg(feature = "test-util")]
 async fn checkpoint_reports_expired_when_the_durable_window_is_zero() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let options = Options {
@@ -441,6 +449,7 @@ async fn append(
     }
 }
 
+#[cfg(feature = "test-util")]
 async fn append_with_lost_response(
     log: &Log,
     faults: &FaultStore,

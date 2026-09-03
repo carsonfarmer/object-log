@@ -213,8 +213,8 @@ publication. The local key-value module proves atomic commands and recorded
 results. Garbage collection remains the first follow-on. SQLite, then
 `wasi:filesystem`, follow it. Live AWS qualification is separate.
 
-The final local run passes 67 default tests plus one pinned MinIO flow. The
-Criterion matrix measures in-memory append, recovery, and contention. These
+The final all-feature local gate passes 67 tests plus one pinned MinIO flow.
+The Criterion matrix measures in-memory append, recovery, and contention. These
 results do not prove S3 latency, multi-process behavior, or the full fault
 matrix. See [local evidence](evidence/local-baseline-2026-09-02.md) and [test
 gaps](testing.md#current-matrix-gaps).
