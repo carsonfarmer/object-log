@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation, RequestOutcome};
 use object_log::{
-    CommitStatus, Log, LogId, Options, PendingCommit, Refresh, Resolution, ScopedStore,
+    CommitRef, CommitStatus, Log, LogId, Options, PendingCommit, Refresh, Resolution, ScopedStore,
     TransactionId, View,
 };
 use object_store::memory::InMemory;
@@ -241,13 +241,13 @@ async fn concurrent_writers_have_one_winner_and_one_definite_loser() -> TestResu
     let view = log.load().await?;
     let records = log.read_tail(&view).await?;
     assert_eq!(records.len(), 1);
-    let winner = records[0].reference().transaction_id;
+    let winner = records[0].reference().transaction_id();
     assert!(winner == left_id || winner == right_id);
     let loser = if winner == left_id { right_id } else { left_id };
     assert!(
         !records
             .iter()
-            .any(|record| record.reference().transaction_id == loser)
+            .any(|record| record.reference().transaction_id() == loser)
     );
     assert_eq!(
         store.metrics().operation(Operation::Put).visible_mutations,
@@ -268,25 +268,28 @@ async fn pending_evidence_survives_reopen_and_failed_resolution_read() -> TestRe
         Bytes::from_static(b"result"),
         Vec::new(),
     )?;
+    let recovery_token = prepared.recovery_token()?;
     schedule_head_fault(&store, FailurePhase::After);
-    let pending = match log.commit(prepared).await? {
-        CommitStatus::Pending(pending) => pending,
+    match log.commit(prepared).await? {
+        CommitStatus::Pending(_) => {}
         CommitStatus::Committed(_) | CommitStatus::Conflict(_) => {
             return Err(test_error("lost response did not produce pending evidence").into());
         }
-    };
+    }
+    drop(log);
 
     let reopened = reopen_model_log(&store, &log_id).await?;
     store.fail_next(Operation::Get, FailurePhase::Before);
-    let pending = match reopened.resolve(pending).await? {
-        Resolution::StillPending(pending) => pending,
+    match reopened.resume(&recovery_token).await? {
+        Resolution::StillPending(_) => {}
         Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
             return Err(test_error("failed resolution read was classified as definite").into());
         }
-    };
+    }
+    drop(reopened);
 
     let reopened = reopen_model_log(&store, &log_id).await?;
-    let committed = match reopened.resolve(pending).await? {
+    let committed = match reopened.resume(&recovery_token).await? {
         Resolution::Committed(view) => view,
         Resolution::NotCommitted(_) | Resolution::StillPending(_) | Resolution::Expired(_) => {
             return Err(test_error("visible pending commit did not resolve as committed").into());
@@ -296,6 +299,32 @@ async fn pending_evidence_survives_reopen_and_failed_resolution_read() -> TestRe
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].operation(), &Bytes::from_static(b"operation"));
     assert_eq!(records[0].result(), &Bytes::from_static(b"result"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_token_can_stage_and_publish_after_process_loss() -> TestResult {
+    let (store, log, log_id) = open_model_log(14).await?;
+    let view = log.load().await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        transaction_id(14, 1),
+        Bytes::from_static(b"operation"),
+        Bytes::from_static(b"result"),
+        Vec::new(),
+    )?;
+    let recovery_token = prepared.recovery_token()?;
+    drop(prepared);
+    drop(log);
+
+    let reopened = reopen_model_log(&store, &log_id).await?;
+    let committed = match reopened.resume(&recovery_token).await? {
+        Resolution::Committed(view) => view,
+        Resolution::NotCommitted(_) | Resolution::StillPending(_) | Resolution::Expired(_) => {
+            return Err(test_error("persisted candidate did not resume").into());
+        }
+    };
+    assert_eq!(reopened.read_tail(&committed).await?.len(), 1);
     Ok(())
 }
 
@@ -401,349 +430,278 @@ struct Writer {
     pending: Option<PendingCommit>,
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run_scenario(seed: u64, steps: usize) -> TestResult {
-    let (store, mut log, log_id) = open_model_log(seed).await?;
-    store.reset();
-    let initial = log.load().await?;
-    let mut writers = [
-        Writer {
-            view: Some(initial.clone()),
-            pending: None,
-        },
-        Writer {
-            view: Some(initial.clone()),
-            pending: None,
-        },
-    ];
-    let mut reader = Some(initial);
-    let mut accepted = HashSet::new();
-    let mut rejected = HashSet::new();
-    let mut prior_history = Vec::new();
-    let mut next_transaction = 1_u64;
-    let mut random = Seeded::new(seed);
-    let mut trace = Vec::with_capacity(steps);
-
+    let mut scenario = Scenario::new(seed, steps).await?;
     for step in 0..steps {
-        let choice = random.next() % 12;
-        let writer_index = usize::try_from(random.next() % 2).unwrap_or_default();
+        scenario.step(step).await?;
+        scenario.check().await?;
+    }
+    scenario.finish().await?;
+    Ok(())
+}
+
+struct Scenario {
+    seed: u64,
+    store: FaultStore,
+    log: Log,
+    log_id: LogId,
+    writers: [Writer; 2],
+    reader: Option<View>,
+    accepted: HashSet<TransactionId>,
+    rejected: HashSet<TransactionId>,
+    prior_history: Vec<TransactionId>,
+    next_transaction: u64,
+    random: Seeded,
+    trace: Vec<String>,
+}
+
+impl Scenario {
+    async fn new(seed: u64, steps: usize) -> Result<Self, Box<dyn StdError>> {
+        let (store, log, log_id) = open_model_log(seed).await?;
+        store.reset();
+        let initial = log.load().await?;
+        Ok(Self {
+            seed,
+            store,
+            log,
+            log_id,
+            writers: [
+                Writer {
+                    view: Some(initial.clone()),
+                    pending: None,
+                },
+                Writer {
+                    view: Some(initial.clone()),
+                    pending: None,
+                },
+            ],
+            reader: Some(initial),
+            accepted: HashSet::new(),
+            rejected: HashSet::new(),
+            prior_history: Vec::new(),
+            next_transaction: 1,
+            random: Seeded::new(seed),
+            trace: Vec::with_capacity(steps),
+        })
+    }
+
+    async fn step(&mut self, step: usize) -> TestResult {
+        let choice = self.random.next() % 12;
+        let writer = usize::from(!self.random.next().is_multiple_of(2));
         match choice {
+            0..=5 if self.writers[writer].pending.is_some() => {
+                self.resolve(writer, false).await?;
+            }
             0..=5 => {
-                if writers[writer_index].pending.is_some() {
-                    resolve_writer(
-                        &log,
-                        &store,
-                        &mut writers[writer_index],
-                        &mut accepted,
-                        &mut rejected,
-                        false,
-                        &mut trace,
-                    )
-                    .await?;
-                } else {
-                    commit_writer(
-                        seed,
-                        writer_index,
-                        next_transaction,
-                        &log,
-                        &store,
-                        &mut writers[writer_index],
-                        &mut accepted,
-                        &mut rejected,
-                        choice,
-                        &mut trace,
-                    )
-                    .await?;
-                    next_transaction = next_transaction.saturating_add(1);
-                }
+                self.commit(writer, choice).await?;
+                self.next_transaction = self
+                    .next_transaction
+                    .checked_add(1)
+                    .ok_or_else(|| test_error("model transaction counter overflowed"))?;
             }
             6 => {
-                resolve_writer(
-                    &log,
-                    &store,
-                    &mut writers[writer_index],
-                    &mut accepted,
-                    &mut rejected,
-                    random.next().is_multiple_of(4),
-                    &mut trace,
-                )
-                .await?;
+                let fail_read = self.random.next().is_multiple_of(4);
+                self.resolve(writer, fail_read).await?;
             }
             7 | 8 => {
-                refresh_reader(&log, &mut reader).await?;
-                trace.push(format!("{step}: reader refresh"));
+                self.refresh_reader().await?;
+                self.trace.push(format!("{step}: reader refresh"));
             }
             9 => {
-                writers[writer_index].view = Some(log.load().await?);
-                trace.push(format!("{step}: writer {writer_index} reload"));
+                self.writers[writer].view = Some(self.log.load().await?);
+                self.trace.push(format!("{step}: writer {writer} reload"));
             }
             10 => {
-                log = reopen_model_log(&store, &log_id).await?;
-                for writer in &mut writers {
+                self.log = reopen_model_log(&self.store, &self.log_id).await?;
+                for writer in &mut self.writers {
                     writer.view = None;
                 }
-                reader = None;
-                trace.push(format!("{step}: crash and reopen"));
+                self.reader = None;
+                self.trace.push(format!("{step}: crash and reopen"));
             }
             _ => {
-                let view = log.load().await?;
-                let _records = log.read_tail(&view).await?;
-                trace.push(format!("{step}: recovery read"));
+                let view = self.log.load().await?;
+                self.log.read_tail(&view).await?;
+                self.trace.push(format!("{step}: recovery read"));
             }
         }
-
-        check_oracle(
-            seed,
-            &trace,
-            &log,
-            reader.as_ref(),
-            &writers,
-            &accepted,
-            &rejected,
-            &mut prior_history,
-        )
-        .await?;
+        Ok(())
     }
 
-    for writer in &mut writers {
-        while writer.pending.is_some() {
-            resolve_writer(
-                &log,
-                &store,
-                writer,
-                &mut accepted,
-                &mut rejected,
-                false,
-                &mut trace,
-            )
-            .await?;
+    async fn commit(&mut self, writer: usize, fault_choice: u64) -> TestResult {
+        if self.writers[writer].view.is_none() {
+            self.writers[writer].view = Some(self.log.load().await?);
         }
-    }
-    check_oracle(
-        seed,
-        &trace,
-        &log,
-        reader.as_ref(),
-        &writers,
-        &accepted,
-        &rejected,
-        &mut prior_history,
-    )
-    .await?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn commit_writer(
-    seed: u64,
-    writer_index: usize,
-    transaction_number: u64,
-    log: &Log,
-    store: &FaultStore,
-    writer: &mut Writer,
-    accepted: &mut HashSet<TransactionId>,
-    rejected: &mut HashSet<TransactionId>,
-    fault_choice: u64,
-    trace: &mut Vec<String>,
-) -> TestResult {
-    if writer.view.is_none() {
-        writer.view = Some(log.load().await?);
-    }
-    let view = writer
-        .view
-        .as_ref()
-        .ok_or_else(|| test_error("writer view did not load"))?;
-    let transaction_id = transaction_id(seed, transaction_number);
-    let mut operation = Vec::with_capacity(24);
-    operation.extend_from_slice(&seed.to_le_bytes());
-    operation.extend_from_slice(&transaction_number.to_le_bytes());
-    operation.extend_from_slice(
-        &u64::try_from(writer_index)
-            .unwrap_or_default()
-            .to_le_bytes(),
-    );
-    let prepared = log.prepare(
-        view.cursor(),
-        transaction_id,
-        Bytes::from(operation),
-        Bytes::copy_from_slice(&transaction_number.to_le_bytes()),
-        Vec::new(),
-    )?;
-
-    let fault = match fault_choice {
-        0 => Some(FailurePhase::Before),
-        1 => Some(FailurePhase::After),
-        _ => None,
-    };
-    if let Some(phase) = fault {
-        schedule_head_fault(store, phase);
+        let view = self.writers[writer]
+            .view
+            .as_ref()
+            .ok_or_else(|| test_error("writer view did not load"))?;
+        let transaction_id = transaction_id(self.seed, self.next_transaction);
+        let mut operation = Vec::with_capacity(24);
+        operation.extend_from_slice(&self.seed.to_le_bytes());
+        operation.extend_from_slice(&self.next_transaction.to_le_bytes());
+        operation.extend_from_slice(&[0_u64, 1][writer].to_le_bytes());
+        let prepared = self.log.prepare(
+            view.cursor(),
+            transaction_id,
+            Bytes::from(operation),
+            Bytes::copy_from_slice(&self.next_transaction.to_le_bytes()),
+            Vec::new(),
+        )?;
+        let fault = match fault_choice {
+            0 => Some(FailurePhase::Before),
+            1 => Some(FailurePhase::After),
+            _ => None,
+        };
+        if let Some(phase) = fault {
+            schedule_head_fault(&self.store, phase);
+        }
+        match self.log.commit(prepared).await? {
+            CommitStatus::Committed(view) => {
+                self.accepted.insert(transaction_id);
+                self.writers[writer].view = Some(view);
+                self.trace.push(format!(
+                    "writer {writer} committed {}",
+                    self.next_transaction
+                ));
+            }
+            CommitStatus::Conflict(view) => {
+                self.rejected.insert(transaction_id);
+                self.writers[writer].view = Some(view);
+                self.trace.push(format!(
+                    "writer {writer} conflicted {}",
+                    self.next_transaction
+                ));
+            }
+            CommitStatus::Pending(pending) => {
+                self.writers[writer].pending = Some(pending);
+                self.trace.push(format!(
+                    "writer {writer} pending {} {fault:?}",
+                    self.next_transaction
+                ));
+            }
+        }
+        Ok(())
     }
 
-    match log.commit(prepared).await? {
-        CommitStatus::Committed(view) => {
-            accepted.insert(transaction_id);
-            writer.view = Some(view);
-            trace.push(format!(
-                "writer {writer_index} committed {transaction_number}"
-            ));
+    async fn resolve(&mut self, writer: usize, fail_read: bool) -> TestResult {
+        let Some(pending) = self.writers[writer].pending.take() else {
+            self.trace.push("resolve skipped".to_owned());
+            return Ok(());
+        };
+        let transaction_id = pending.transaction_id();
+        if fail_read {
+            self.store.fail_next(Operation::Get, FailurePhase::Before);
         }
-        CommitStatus::Conflict(view) => {
-            rejected.insert(transaction_id);
-            writer.view = Some(view);
-            trace.push(format!(
-                "writer {writer_index} conflicted {transaction_number}"
-            ));
+        match self.log.resolve(pending).await? {
+            Resolution::Committed(view) => {
+                self.accepted.insert(transaction_id);
+                self.writers[writer].view = Some(view);
+                self.trace
+                    .push(format!("resolved {transaction_id} committed"));
+            }
+            Resolution::NotCommitted(view) => {
+                self.rejected.insert(transaction_id);
+                self.writers[writer].view = Some(view);
+                self.trace
+                    .push(format!("resolved {transaction_id} not committed"));
+            }
+            Resolution::StillPending(pending) => {
+                self.writers[writer].pending = Some(pending);
+                self.trace
+                    .push(format!("resolved {transaction_id} still pending"));
+            }
+            Resolution::Expired(view) => {
+                self.writers[writer].view = Some(view);
+                return Err(test_error("pending result expired without checkpointing").into());
+            }
         }
-        CommitStatus::Pending(pending) => {
-            writer.pending = Some(pending);
-            trace.push(format!(
-                "writer {writer_index} pending {transaction_number} {fault:?}"
-            ));
-        }
+        Ok(())
     }
-    Ok(())
-}
 
-#[allow(clippy::too_many_arguments)]
-async fn resolve_writer(
-    log: &Log,
-    store: &FaultStore,
-    writer: &mut Writer,
-    accepted: &mut HashSet<TransactionId>,
-    rejected: &mut HashSet<TransactionId>,
-    fail_read: bool,
-    trace: &mut Vec<String>,
-) -> TestResult {
-    let Some(pending) = writer.pending.take() else {
-        trace.push("resolve skipped".to_owned());
-        return Ok(());
-    };
-    let transaction_id = pending.prepared().transaction_id();
-    if fail_read {
-        store.fail_next(Operation::Get, FailurePhase::Before);
+    async fn refresh_reader(&mut self) -> TestResult {
+        let Some(view) = self.reader.as_ref() else {
+            self.reader = Some(self.log.load().await?);
+            return Ok(());
+        };
+        match self.log.refresh(view.cursor()).await? {
+            Refresh::NotModified => {}
+            Refresh::Updated(updated) => self.reader = Some(*updated),
+        }
+        Ok(())
     }
-    match log.resolve(pending).await? {
-        Resolution::Committed(view) => {
-            accepted.insert(transaction_id);
-            writer.view = Some(view);
-            trace.push(format!("resolved {transaction_id} committed"));
-        }
-        Resolution::NotCommitted(view) => {
-            rejected.insert(transaction_id);
-            writer.view = Some(view);
-            trace.push(format!("resolved {transaction_id} not committed"));
-        }
-        Resolution::StillPending(pending) => {
-            writer.pending = Some(pending);
-            trace.push(format!("resolved {transaction_id} still pending"));
-        }
-        Resolution::Expired(view) => {
-            writer.view = Some(view);
-            return Err(test_error("pending result expired without checkpointing").into());
-        }
-    }
-    Ok(())
-}
 
-async fn refresh_reader(log: &Log, reader: &mut Option<View>) -> TestResult {
-    let Some(view) = reader.as_ref() else {
-        *reader = Some(log.load().await?);
-        return Ok(());
-    };
-    match log.refresh(view.cursor()).await? {
-        Refresh::NotModified => {}
-        Refresh::Updated(updated) => *reader = Some(*updated),
+    async fn finish(&mut self) -> TestResult {
+        for writer in 0..self.writers.len() {
+            while self.writers[writer].pending.is_some() {
+                self.resolve(writer, false).await?;
+            }
+        }
+        self.check().await
     }
-    Ok(())
-}
 
-#[allow(clippy::too_many_arguments)]
-async fn check_oracle(
-    seed: u64,
-    trace: &[String],
-    log: &Log,
-    reader: Option<&View>,
-    writers: &[Writer; 2],
-    accepted: &HashSet<TransactionId>,
-    rejected: &HashSet<TransactionId>,
-    prior_history: &mut Vec<TransactionId>,
-) -> TestResult {
-    let durable_view = log.load().await?;
-    assert!(
-        durable_view.checkpoint().is_none(),
-        "seed {seed:#x}: {trace:#?}"
-    );
-    let records = log.read_tail(&durable_view).await?;
-    let history = records
-        .iter()
-        .map(|record| record.reference().transaction_id)
-        .collect::<Vec<_>>();
-    assert!(
-        history.starts_with(prior_history),
-        "history shrank for seed {seed:#x}: {trace:#?}"
-    );
-    assert_eq!(
-        records.len(),
-        durable_view.tail().len(),
-        "tail load mismatch for seed {seed:#x}: {trace:#?}"
-    );
-    for (index, record) in records.iter().enumerate() {
-        assert_eq!(
-            record.reference(),
-            &durable_view.tail()[index],
-            "head/record mismatch for seed {seed:#x}: {trace:#?}"
+    async fn check(&mut self) -> TestResult {
+        let durable_view = self.log.load().await?;
+        assert!(
+            durable_view.checkpoint().is_none(),
+            "seed {:#x}: {:#?}",
+            self.seed,
+            self.trace
         );
-        assert_eq!(
-            record.reference().sequence,
-            u64::try_from(index).unwrap_or_default(),
-            "non-contiguous sequence for seed {seed:#x}: {trace:#?}"
+        let records = self.log.read_tail(&durable_view).await?;
+        let history = records
+            .iter()
+            .map(|record| record.reference().transaction_id())
+            .collect::<Vec<_>>();
+        assert!(
+            history.starts_with(&self.prior_history),
+            "history shrank for seed {:#x}: {:#?}",
+            self.seed,
+            self.trace
         );
-    }
-    let unique = history.iter().copied().collect::<HashSet<_>>();
-    assert_eq!(
-        unique.len(),
-        history.len(),
-        "duplicate transaction for seed {seed:#x}: {trace:#?}"
-    );
-    assert!(
-        accepted.iter().all(|transaction| {
+        assert_eq!(records.len(), durable_view.tail().len());
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(record.reference(), &durable_view.tail()[index]);
+            assert_eq!(record.reference().sequence(), u64::try_from(index)?);
+        }
+        let unique = history.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), history.len());
+        assert!(self.accepted.iter().all(|transaction| {
             history
                 .iter()
                 .filter(|candidate| *candidate == transaction)
                 .count()
                 == 1
-        }),
-        "acknowledged transaction missing for seed {seed:#x}: {trace:#?}"
-    );
-    assert!(
-        rejected
-            .iter()
-            .all(|transaction| !history.contains(transaction)),
-        "conflict candidate visible for seed {seed:#x}: {trace:#?}"
-    );
-    for pending in writers.iter().filter_map(|writer| writer.pending.as_ref()) {
-        let occurrences = history
-            .iter()
-            .filter(|transaction| **transaction == pending.prepared().transaction_id())
-            .count();
+        }));
         assert!(
-            occurrences <= 1,
-            "pending transaction duplicated for seed {seed:#x}: {trace:#?}"
+            self.rejected
+                .iter()
+                .all(|transaction| !history.contains(transaction))
         );
-    }
-    if let Some(reader) = reader {
-        let reader_history = reader
-            .tail()
+        for pending in self
+            .writers
             .iter()
-            .map(|reference| reference.transaction_id)
-            .collect::<Vec<_>>();
-        assert!(
-            history.starts_with(&reader_history),
-            "reader is not a prefix for seed {seed:#x}: {trace:#?}"
-        );
+            .filter_map(|writer| writer.pending.as_ref())
+        {
+            assert!(
+                history
+                    .iter()
+                    .filter(|transaction| **transaction == pending.transaction_id())
+                    .count()
+                    <= 1
+            );
+        }
+        if let Some(reader) = self.reader.as_ref() {
+            let reader_history = reader
+                .tail()
+                .iter()
+                .map(CommitRef::transaction_id)
+                .collect::<Vec<_>>();
+            assert!(history.starts_with(&reader_history));
+        }
+        self.prior_history = history;
+        Ok(())
     }
-    *prior_history = history;
-    Ok(())
 }
 
 async fn open_model_log(seed: u64) -> Result<(FaultStore, Log, LogId), Box<dyn StdError>> {

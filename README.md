@@ -24,7 +24,7 @@ collection, `SQLite`, WASI filesystem, and live AWS qualification goals.
 make check
 ```
 
-Run the opt-in `MinIO` compatibility test with:
+Run the opt-in single-flow `MinIO` compatibility test with:
 
 ```sh
 make minio-test

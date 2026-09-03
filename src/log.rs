@@ -1,25 +1,37 @@
 //! Object-log publication protocol.
 
 use bytes::Bytes;
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::format::{self, Head};
 use crate::store::{ConditionalRead, CreateResult, ScopedStore, StoreKey, UpdateResult};
 use crate::{
-    CheckpointRef, CommitRef, Cursor, Digest, Error, LogId, ObjectKind, ObjectRef, PendingCommit,
-    PreparedCommit, TransactionId,
+    CheckpointRef, CommitRef, Cursor, Digest, Error, LogId, ObjectKind, ObjectRef,
+    PendingCheckpoint, PendingCommit, PreparedCommit, TransactionId,
 };
+
+const MAX_CONCURRENT_READS: usize = 32;
 
 /// Limits applied by one log writer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
+    /// Maximum commit references in the active tail.
     pub max_tail_entries: usize,
+    /// Maximum compacted commit outcomes retained for resolution.
     pub resolution_window: usize,
+    /// Maximum inline operation bytes in one commit.
     pub max_inline_operation_bytes: usize,
+    /// Maximum inline result bytes in one commit.
     pub max_inline_result_bytes: usize,
+    /// Maximum immutable object references in one commit.
     pub max_object_refs_per_commit: usize,
+    /// Maximum bytes in one immutable object.
+    pub max_object_bytes: usize,
+    /// Maximum encoded bytes in one WAL entry.
     pub max_commit_bytes: usize,
+    /// Maximum encoded bytes in the mutable head.
     pub max_head_bytes: usize,
+    /// Maximum encoded bytes in one checkpoint.
     pub max_checkpoint_bytes: usize,
 }
 
@@ -31,6 +43,7 @@ impl Default for Options {
             max_inline_operation_bytes: 64 * 1_024,
             max_inline_result_bytes: 4 * 1_024,
             max_object_refs_per_commit: 1_024,
+            max_object_bytes: 64 * 1024 * 1024,
             max_commit_bytes: 1024 * 1024,
             max_head_bytes: 256 * 1024,
             max_checkpoint_bytes: 16 * 1024 * 1024,
@@ -45,6 +58,7 @@ pub struct View {
 }
 
 impl View {
+    /// Returns the opaque cursor for conditional work against this view.
     #[must_use]
     pub const fn cursor(&self) -> &Cursor {
         &self.cursor
@@ -72,32 +86,68 @@ impl View {
 /// The result of a conditional head refresh.
 #[derive(Debug)]
 pub enum Refresh {
+    /// The durable head still matches the supplied cursor.
     NotModified,
+    /// The durable head changed and this is its current view.
     Updated(Box<View>),
 }
 
 /// The immediate result of publishing one prepared commit.
 #[derive(Debug)]
 pub enum CommitStatus {
+    /// The exact candidate is durable and visible.
     Committed(View),
+    /// Another head update definitely rejected this candidate.
     Conflict(View),
+    /// A storage error can hide a successful publication.
     Pending(PendingCommit),
 }
 
 /// The result of resolving one uncertain publication.
 #[derive(Debug)]
 pub enum Resolution {
+    /// The exact candidate is durable and visible.
     Committed(View),
+    /// Retained evidence proves that the candidate did not publish.
     NotCommitted(View),
+    /// Storage is not available enough to determine the result.
     StillPending(PendingCommit),
+    /// The outcome evidence is no longer retained.
+    ///
+    /// This does not mean `NotCommitted`. Do not submit a non-idempotent
+    /// operation again as new work after this result.
     Expired(View),
 }
 
 /// The result of publishing a checkpoint.
 #[derive(Debug)]
 pub enum CheckpointStatus {
+    /// The exact checkpoint is durable and visible.
     Published(View),
+    /// Another head update definitely rejected this checkpoint.
     Conflict(View),
+    /// A storage error can hide a successful checkpoint publication.
+    Pending(PendingCheckpoint),
+}
+
+/// The result of resolving one uncertain checkpoint publication.
+#[derive(Debug)]
+pub enum CheckpointResolution {
+    /// The exact checkpoint is durable and visible.
+    Published(View),
+    /// Retained evidence proves that the checkpoint did not publish.
+    NotPublished(View),
+    /// Storage is not available enough to determine the result.
+    StillPending(PendingCheckpoint),
+    /// Later head updates removed conclusive publication evidence.
+    Expired(View),
+}
+
+enum CheckpointEvidence {
+    Published(View),
+    NotPublished(View),
+    Expired(View),
+    Retry,
 }
 
 /// One decoded commit joined with its ordered head reference.
@@ -154,6 +204,7 @@ impl CommitRecord {
 pub struct Log {
     store: ScopedStore,
     options: Options,
+    incarnation: uuid::Uuid,
 }
 
 impl Log {
@@ -167,28 +218,23 @@ impl Log {
     /// cannot be created or read, or an existing head is invalid.
     pub async fn open(store: ScopedStore, options: Options) -> Result<Self, Error> {
         store.validate_backend().await?;
-        let log = Self { store, options };
-        let initial = Head::empty(log.store.log_id().clone());
+        let initial = Head::empty(store.log_id().clone(), uuid::Uuid::new_v4(), options);
         let initial_bytes = format::encode_head(&initial)?;
-        log.validate_encoded_head(&initial_bytes)?;
+        Self::validate_head_size(options, &initial_bytes)?;
 
-        match log
-            .store
-            .create(StoreKey::Head, initial_bytes.clone())
-            .await
-        {
-            Ok(CreateResult::Created { .. }) => {}
-            Ok(CreateResult::AlreadyExists) => {
-                log.load().await?;
-            }
-            Err(create_error) => match log.store.read(StoreKey::Head).await? {
-                Some(stored) => {
-                    log.view_from_stored(stored)?;
-                }
+        let incarnation = match store.create(StoreKey::Head, initial_bytes).await {
+            Ok(CreateResult::Created { .. }) => initial.incarnation,
+            Ok(CreateResult::AlreadyExists) => Self::load_incarnation(&store, options).await?,
+            Err(create_error) => match store.read(StoreKey::Head, options.max_head_bytes).await? {
+                Some(stored) => Self::incarnation_from_stored(&store, options, &stored)?,
                 None => return Err(create_error),
             },
-        }
-        Ok(log)
+        };
+        Ok(Self {
+            store,
+            options,
+            incarnation,
+        })
     }
 
     /// Loads and verifies the current durable head.
@@ -198,10 +244,11 @@ impl Log {
     /// Returns an error when the head is missing, unreadable, corrupt, or
     /// belongs to a different log identity.
     pub async fn load(&self) -> Result<View, Error> {
-        let stored =
-            self.store.read(StoreKey::Head).await?.ok_or_else(|| {
-                Error::InvalidFormat("the opened log has no durable head".to_owned())
-            })?;
+        let stored = self
+            .store
+            .read(StoreKey::Head, self.options.max_head_bytes)
+            .await?
+            .ok_or_else(|| Error::InvalidFormat("the opened log has no durable head".to_owned()))?;
         self.view_from_stored(stored)
     }
 
@@ -215,7 +262,11 @@ impl Log {
         self.validate_cursor(cursor)?;
         match self
             .store
-            .read_if_changed(StoreKey::Head, cursor.storage_version())
+            .read_if_changed(
+                StoreKey::Head,
+                cursor.storage_version(),
+                self.options.max_head_bytes,
+            )
             .await?
         {
             ConditionalRead::NotModified => Ok(Refresh::NotModified),
@@ -237,6 +288,9 @@ impl Log {
     /// Returns an error when the byte length cannot be represented, the
     /// backend fails, or different bytes already exist at the digest key.
     pub async fn put_object(&self, bytes: Bytes) -> Result<ObjectRef, Error> {
+        if bytes.len() > self.options.max_object_bytes {
+            return Err(Error::LimitExceeded("object bytes"));
+        }
         let len =
             u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("object byte length"))?;
         let object = ObjectRef {
@@ -256,9 +310,14 @@ impl Log {
     /// Returns an error when the object is absent, corrupt, has the wrong
     /// length, or cannot be read.
     pub async fn read_object(&self, object: &ObjectRef) -> Result<Bytes, Error> {
+        let declared_len =
+            usize::try_from(object.len).map_err(|_| Error::LimitExceeded("object byte length"))?;
+        if declared_len > self.options.max_object_bytes {
+            return Err(Error::LimitExceeded("object bytes"));
+        }
         let stored = self
             .store
-            .read(Self::object_key(object))
+            .read(Self::object_key(object), declared_len)
             .await?
             .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))?;
         Self::verify_object(object, &stored.bytes)?;
@@ -343,7 +402,31 @@ impl Log {
                     version,
                 },
             })),
-            Ok(UpdateResult::PreconditionFailed) => Ok(CommitStatus::Conflict(self.load().await?)),
+            Ok(UpdateResult::PreconditionFailed) => {
+                let pending = PendingCommit {
+                    prepared,
+                    commit_ref,
+                };
+                let current = match self.load().await {
+                    Ok(view) => view,
+                    Err(Error::Store(_)) => return Ok(CommitStatus::Pending(pending)),
+                    Err(error) => return Err(error),
+                };
+                match Self::classify_resolution(&pending, current)? {
+                    Some(Resolution::Committed(view)) => {
+                        match self.verify_published_commit(&pending.commit_ref).await {
+                            Ok(()) => Ok(CommitStatus::Committed(view)),
+                            Err(Error::Store(_)) => Ok(CommitStatus::Pending(pending)),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Some(Resolution::NotCommitted(view)) => Ok(CommitStatus::Conflict(view)),
+                    Some(Resolution::Expired(_)) | None => Ok(CommitStatus::Pending(pending)),
+                    Some(Resolution::StillPending(_)) => Err(Error::InvalidFormat(
+                        "an in-memory classification returned pending evidence".to_owned(),
+                    )),
+                }
+            }
             Err(Error::Store(_)) => Ok(CommitStatus::Pending(PendingCommit {
                 prepared,
                 commit_ref,
@@ -387,7 +470,7 @@ impl Log {
         }
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
         match self
-            .verify_immutable(StoreKey::Commit(pending.commit_ref.digest), &commit_bytes)
+            .create_immutable(StoreKey::Commit(pending.commit_ref.digest), commit_bytes)
             .await
         {
             Ok(()) => {}
@@ -429,6 +512,26 @@ impl Log {
         }
     }
 
+    /// Resumes one exact candidate from a token persisted before publication.
+    ///
+    /// This can stage a missing immutable entry and retry only the original
+    /// conditional index update. It never rebases the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the token is invalid, belongs to another log, or
+    /// names corrupt durable data.
+    pub async fn resume(&self, token: &[u8]) -> Result<Resolution, Error> {
+        let prepared = format::decode_recovery_token(token)?;
+        self.validate_cursor(&prepared.cursor)?;
+        let (commit_ref, _) = self.encode_prepared(&prepared)?;
+        self.resolve(PendingCommit {
+            prepared,
+            commit_ref,
+        })
+        .await
+    }
+
     /// Reads and verifies every commit in the active tail.
     ///
     /// Object reads run concurrently. The returned records remain in sequence
@@ -440,11 +543,13 @@ impl Log {
     /// mismatched reference, or a broken parent chain.
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
         self.validate_cursor(view.cursor())?;
-        let records = try_join_all(
+        let records = stream::iter(
             view.tail()
                 .iter()
                 .map(|reference| self.read_commit(reference)),
         )
+        .buffered(MAX_CONCURRENT_READS)
+        .try_collect::<Vec<_>>()
         .await?;
 
         let mut expected_tip = view
@@ -458,6 +563,16 @@ impl Log {
             }
             expected_tip = Some(record.reference.digest);
         }
+        stream::iter(
+            records
+                .iter()
+                .flat_map(|record| record.objects.iter())
+                .map(Ok::<_, Error>),
+        )
+        .try_for_each_concurrent(MAX_CONCURRENT_READS, |object| async move {
+            self.verify_object_durable(object).await
+        })
+        .await?;
         Ok(records)
     }
 
@@ -480,8 +595,10 @@ impl Log {
         snapshot: Bytes,
     ) -> Result<CheckpointStatus, Error> {
         self.validate_cursor(view.cursor())?;
+        self.read_tail(view).await?;
         let checkpoint = format::Checkpoint {
             log_id: self.store.log_id().clone(),
+            incarnation: self.incarnation,
             through_sequence: through.sequence,
             through_commit: through.digest,
             snapshot,
@@ -495,24 +612,151 @@ impl Log {
             digest: Digest::of(&bytes),
             len,
         };
-        let candidate = self.checkpoint_head(view, through, object.clone())?;
+        let candidate = Self::checkpoint_head(view, through, object.clone())?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
         self.create_immutable(StoreKey::Checkpoint(object.digest), bytes)
             .await?;
+        let pending = PendingCheckpoint {
+            view: view.clone(),
+            through: through.clone(),
+            checkpoint: CheckpointRef {
+                through_sequence: through.sequence,
+                through_commit: through.digest,
+                object,
+            },
+        };
 
         match self
             .store
             .update(StoreKey::Head, candidate_bytes, view.cursor.version.clone())
-            .await?
+            .await
         {
-            UpdateResult::Updated { version } => Ok(CheckpointStatus::Published(View {
+            Ok(UpdateResult::Updated { version }) => Ok(CheckpointStatus::Published(View {
                 cursor: Cursor {
                     head: candidate,
                     version,
                 },
             })),
-            UpdateResult::PreconditionFailed => Ok(CheckpointStatus::Conflict(self.load().await?)),
+            Ok(UpdateResult::PreconditionFailed) => {
+                let current = match self.load().await {
+                    Ok(view) => view,
+                    Err(Error::Store(_)) => return Ok(CheckpointStatus::Pending(pending)),
+                    Err(error) => return Err(error),
+                };
+                match Self::classify_checkpoint(&pending, current)? {
+                    CheckpointEvidence::Published(view) => {
+                        match self.verify_checkpoint(&pending.checkpoint).await {
+                            Ok(()) => Ok(CheckpointStatus::Published(view)),
+                            Err(Error::Store(_)) => Ok(CheckpointStatus::Pending(pending)),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    CheckpointEvidence::NotPublished(view) => Ok(CheckpointStatus::Conflict(view)),
+                    CheckpointEvidence::Expired(_) | CheckpointEvidence::Retry => {
+                        Ok(CheckpointStatus::Pending(pending))
+                    }
+                }
+            }
+            Err(Error::Store(_)) => Ok(CheckpointStatus::Pending(pending)),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolves or safely retries one uncertain checkpoint publication.
+    ///
+    /// It retries only the original conditional index update. It never applies
+    /// the snapshot to a different log prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the evidence or durable checkpoint is invalid.
+    pub async fn resolve_checkpoint(
+        &self,
+        pending: PendingCheckpoint,
+    ) -> Result<CheckpointResolution, Error> {
+        self.validate_cursor(pending.view.cursor())?;
+        let candidate = Self::checkpoint_head(
+            &pending.view,
+            &pending.through,
+            pending.checkpoint.object.clone(),
+        )?;
+        if candidate.checkpoint.as_ref() != Some(&pending.checkpoint) {
+            return Err(Error::InvalidFormat(
+                "pending checkpoint evidence does not match its candidate".to_owned(),
+            ));
+        }
+
+        let current = match self.load().await {
+            Ok(view) => view,
+            Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
+            Err(error) => return Err(error),
+        };
+        match Self::classify_checkpoint(&pending, current)? {
+            CheckpointEvidence::Published(view) => {
+                return match self.verify_checkpoint(&pending.checkpoint).await {
+                    Ok(()) => Ok(CheckpointResolution::Published(view)),
+                    Err(Error::Store(_)) => Ok(CheckpointResolution::StillPending(pending)),
+                    Err(error) => Err(error),
+                };
+            }
+            CheckpointEvidence::NotPublished(view) => {
+                return Ok(CheckpointResolution::NotPublished(view));
+            }
+            CheckpointEvidence::Expired(view) => {
+                return Ok(CheckpointResolution::Expired(view));
+            }
+            CheckpointEvidence::Retry => {}
+        }
+
+        match self.read_tail(&pending.view).await {
+            Ok(_) => {}
+            Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
+            Err(error) => return Err(error),
+        }
+        match self.verify_checkpoint(&pending.checkpoint).await {
+            Ok(()) => {}
+            Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
+            Err(error) => return Err(error),
+        }
+        let candidate_bytes = format::encode_head(&candidate)?;
+        self.validate_encoded_head(&candidate_bytes)?;
+        match self
+            .store
+            .update(
+                StoreKey::Head,
+                candidate_bytes,
+                pending.view.cursor.version.clone(),
+            )
+            .await
+        {
+            Ok(UpdateResult::Updated { version }) => Ok(CheckpointResolution::Published(View {
+                cursor: Cursor {
+                    head: candidate,
+                    version,
+                },
+            })),
+            Err(Error::Store(_)) => Ok(CheckpointResolution::StillPending(pending)),
+            Err(error) => Err(error),
+            Ok(UpdateResult::PreconditionFailed) => {
+                let current = match self.load().await {
+                    Ok(view) => view,
+                    Err(Error::Store(_)) => {
+                        return Ok(CheckpointResolution::StillPending(pending));
+                    }
+                    Err(error) => return Err(error),
+                };
+                match Self::classify_checkpoint(&pending, current)? {
+                    CheckpointEvidence::Published(view) => {
+                        Ok(CheckpointResolution::Published(view))
+                    }
+                    CheckpointEvidence::NotPublished(view) => {
+                        Ok(CheckpointResolution::NotPublished(view))
+                    }
+                    CheckpointEvidence::Expired(view) => Ok(CheckpointResolution::Expired(view)),
+                    CheckpointEvidence::Retry => Ok(CheckpointResolution::StillPending(pending)),
+                }
+            }
         }
     }
 
@@ -530,9 +774,21 @@ impl Log {
         let declared_len = usize::try_from(reference.object.len)
             .map_err(|_| Error::LimitExceeded("checkpoint byte length"))?;
         self.validate_checkpoint_bytes(declared_len)?;
+        Ok(Some(self.load_checkpoint(reference).await?.snapshot))
+    }
+
+    async fn verify_checkpoint(&self, reference: &CheckpointRef) -> Result<(), Error> {
+        self.load_checkpoint(reference).await.map(|_| ())
+    }
+
+    async fn load_checkpoint(
+        &self,
+        reference: &CheckpointRef,
+    ) -> Result<format::Checkpoint, Error> {
         let bytes = self.read_object(&reference.object).await?;
         let checkpoint = format::decode_checkpoint(&bytes)?;
         if checkpoint.log_id != *self.store.log_id()
+            || checkpoint.incarnation != self.incarnation
             || checkpoint.through_sequence != reference.through_sequence
             || checkpoint.through_commit != reference.through_commit
         {
@@ -540,7 +796,7 @@ impl Log {
                 "a checkpoint does not match its index reference".to_owned(),
             ));
         }
-        Ok(Some(checkpoint.snapshot))
+        Ok(checkpoint)
     }
 
     fn view_from_stored(&self, stored: crate::store::StoredObject) -> Result<View, Error> {
@@ -550,6 +806,14 @@ impl Log {
             return Err(Error::InvalidFormat(
                 "the durable head belongs to another log".to_owned(),
             ));
+        }
+        if head.incarnation != self.incarnation {
+            return Err(Error::InvalidFormat(
+                "the durable head belongs to another log incarnation".to_owned(),
+            ));
+        }
+        if head.options != self.options {
+            return Err(Error::ConfigurationMismatch("options"));
         }
         Ok(View {
             cursor: Cursor {
@@ -563,6 +827,11 @@ impl Log {
         if cursor.head.log_id != *self.store.log_id() {
             return Err(Error::InvalidFormat(
                 "the cursor belongs to another log".to_owned(),
+            ));
+        }
+        if cursor.head.incarnation != self.incarnation {
+            return Err(Error::InvalidFormat(
+                "the cursor belongs to another log incarnation".to_owned(),
             ));
         }
         cursor.head.validate()
@@ -586,7 +855,11 @@ impl Log {
     }
 
     fn validate_encoded_head(&self, bytes: &Bytes) -> Result<(), Error> {
-        if bytes.len() > self.options.max_head_bytes {
+        Self::validate_head_size(self.options, bytes)
+    }
+
+    fn validate_head_size(options: Options, bytes: &Bytes) -> Result<(), Error> {
+        if bytes.len() > options.max_head_bytes {
             return Err(Error::LimitExceeded("encoded head bytes"));
         }
         Ok(())
@@ -595,6 +868,9 @@ impl Log {
     fn validate_checkpoint_bytes(&self, len: usize) -> Result<(), Error> {
         if len > self.options.max_checkpoint_bytes {
             return Err(Error::LimitExceeded("encoded checkpoint bytes"));
+        }
+        if len > self.options.max_object_bytes {
+            return Err(Error::LimitExceeded("object bytes"));
         }
         Ok(())
     }
@@ -606,19 +882,14 @@ impl Log {
         if prepared.cursor.head.tail.len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
-        try_join_all(
-            prepared
-                .objects
-                .iter()
-                .map(|object| self.read_object(object)),
-        )
-        .await?;
+        self.verify_objects(&prepared.objects).await?;
         Ok(())
     }
 
     fn encode_prepared(&self, prepared: &PreparedCommit) -> Result<(CommitRef, Bytes), Error> {
         let commit = format::Commit {
             log_id: self.store.log_id().clone(),
+            incarnation: self.incarnation,
             transaction_id: prepared.transaction_id,
             expected_generation: prepared.cursor.head.generation,
             expected_tip: prepared.cursor.head.tip(),
@@ -656,12 +927,7 @@ impl Log {
         Ok(head)
     }
 
-    fn checkpoint_head(
-        &self,
-        view: &View,
-        through: &CommitRef,
-        object: ObjectRef,
-    ) -> Result<Head, Error> {
+    fn checkpoint_head(view: &View, through: &CommitRef, object: ObjectRef) -> Result<Head, Error> {
         let mut head = view.cursor.head.clone();
         let through_index = head
             .tail
@@ -672,11 +938,9 @@ impl Log {
             })?;
         let removed = head.tail.drain(..=through_index).collect::<Vec<_>>();
         head.recent_outcomes.extend(removed);
-        if head.recent_outcomes.len() > self.options.resolution_window {
-            let excess = head
-                .recent_outcomes
-                .len()
-                .saturating_sub(self.options.resolution_window);
+        let resolution_window = head.options.resolution_window;
+        if head.recent_outcomes.len() > resolution_window {
+            let excess = head.recent_outcomes.len().saturating_sub(resolution_window);
             head.recent_outcomes.drain(..excess);
         }
         head.checkpoint = Some(CheckpointRef {
@@ -698,12 +962,7 @@ impl Log {
     ) -> Result<Option<Resolution>, Error> {
         let target = &pending.commit_ref;
         let head = &current.cursor.head;
-        if head
-            .tail
-            .iter()
-            .chain(&head.recent_outcomes)
-            .any(|entry| entry == target)
-        {
+        if Self::contains_commit(&current, target) {
             return Ok(Some(Resolution::Committed(current)));
         }
 
@@ -731,6 +990,43 @@ impl Log {
         Ok(Some(Resolution::NotCommitted(current)))
     }
 
+    fn contains_commit(view: &View, target: &CommitRef) -> bool {
+        view.cursor
+            .head
+            .tail
+            .iter()
+            .chain(&view.cursor.head.recent_outcomes)
+            .any(|entry| entry == target)
+    }
+
+    fn classify_checkpoint(
+        pending: &PendingCheckpoint,
+        current: View,
+    ) -> Result<CheckpointEvidence, Error> {
+        if current.checkpoint() == Some(&pending.checkpoint) {
+            return Ok(CheckpointEvidence::Published(current));
+        }
+        if current.cursor.head == pending.view.cursor.head
+            && current.cursor.version == pending.view.cursor.version
+        {
+            return Ok(CheckpointEvidence::Retry);
+        }
+        let next_generation = pending
+            .view
+            .cursor
+            .head
+            .generation
+            .checked_add(1)
+            .ok_or(Error::LimitExceeded("head generation"))?;
+        match current.cursor.head.generation.cmp(&next_generation) {
+            std::cmp::Ordering::Less => Err(Error::InvalidFormat(
+                "the head precedes pending checkpoint evidence".to_owned(),
+            )),
+            std::cmp::Ordering::Equal => Ok(CheckpointEvidence::NotPublished(current)),
+            std::cmp::Ordering::Greater => Ok(CheckpointEvidence::Expired(current)),
+        }
+    }
+
     fn validate_pending(&self, pending: &PendingCommit) -> Result<(), Error> {
         self.validate_cursor(&pending.prepared.cursor)?;
         let (expected_ref, _) = self.encode_prepared(&pending.prepared)?;
@@ -751,7 +1047,10 @@ impl Log {
         }
         let stored = self
             .store
-            .read(StoreKey::Commit(reference.digest))
+            .read(
+                StoreKey::Commit(reference.digest),
+                self.options.max_commit_bytes,
+            )
             .await?
             .ok_or_else(|| Error::InvalidFormat("a referenced commit is missing".to_owned()))?;
         let len = u64::try_from(stored.bytes.len())
@@ -761,6 +1060,7 @@ impl Log {
         }
         let commit = format::decode_commit(&stored.bytes)?;
         if commit.log_id != *self.store.log_id()
+            || commit.incarnation != self.incarnation
             || commit.transaction_id != reference.transaction_id
         {
             return Err(Error::InvalidFormat(
@@ -779,7 +1079,31 @@ impl Log {
 
     async fn verify_published_commit(&self, reference: &CommitRef) -> Result<(), Error> {
         let record = self.read_commit(reference).await?;
-        try_join_all(record.objects.iter().map(|object| self.read_object(object))).await?;
+        self.verify_objects(&record.objects).await
+    }
+
+    async fn verify_objects(&self, objects: &[ObjectRef]) -> Result<(), Error> {
+        stream::iter(objects.iter().map(Ok::<_, Error>))
+            .try_for_each_concurrent(MAX_CONCURRENT_READS, |object| async move {
+                self.verify_object_durable(object).await
+            })
+            .await
+    }
+
+    async fn verify_object_durable(&self, object: &ObjectRef) -> Result<(), Error> {
+        let declared_len =
+            usize::try_from(object.len).map_err(|_| Error::LimitExceeded("object byte length"))?;
+        if declared_len > self.options.max_object_bytes {
+            return Err(Error::LimitExceeded("object bytes"));
+        }
+        let (digest, len) = self
+            .store
+            .read_integrity(Self::object_key(object), declared_len)
+            .await?
+            .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))?;
+        if digest != object.digest || len != object.len {
+            return Err(Error::CorruptObject);
+        }
         Ok(())
     }
 
@@ -787,7 +1111,7 @@ impl Log {
         match self.store.create(key, bytes.clone()).await {
             Ok(CreateResult::Created { .. }) => Ok(()),
             Ok(CreateResult::AlreadyExists) => self.verify_immutable(key, &bytes).await,
-            Err(create_error) => match self.store.read(key).await? {
+            Err(create_error) => match self.store.read(key, bytes.len()).await? {
                 Some(stored) if stored.bytes == bytes => Ok(()),
                 Some(_) => Err(Error::CorruptObject),
                 None => Err(create_error),
@@ -798,7 +1122,7 @@ impl Log {
     async fn verify_immutable(&self, key: StoreKey, expected: &Bytes) -> Result<(), Error> {
         let stored = self
             .store
-            .read(key)
+            .read(key, expected.len())
             .await?
             .ok_or_else(|| Error::InvalidFormat("an immutable object is missing".to_owned()))?;
         if stored.bytes != *expected {
@@ -821,5 +1145,31 @@ impl Log {
             return Err(Error::CorruptObject);
         }
         Ok(())
+    }
+
+    async fn load_incarnation(store: &ScopedStore, options: Options) -> Result<uuid::Uuid, Error> {
+        let stored = store
+            .read(StoreKey::Head, options.max_head_bytes)
+            .await?
+            .ok_or_else(|| Error::InvalidFormat("the opened log has no durable head".to_owned()))?;
+        Self::incarnation_from_stored(store, options, &stored)
+    }
+
+    fn incarnation_from_stored(
+        store: &ScopedStore,
+        options: Options,
+        stored: &crate::store::StoredObject,
+    ) -> Result<uuid::Uuid, Error> {
+        Self::validate_head_size(options, &stored.bytes)?;
+        let head = format::decode_head(&stored.bytes)?;
+        if head.log_id != *store.log_id() {
+            return Err(Error::InvalidFormat(
+                "the durable head belongs to another log".to_owned(),
+            ));
+        }
+        if head.options != options {
+            return Err(Error::ConfigurationMismatch("options"));
+        }
+        Ok(head.incarnation)
     }
 }

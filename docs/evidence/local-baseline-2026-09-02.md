@@ -33,6 +33,10 @@ The batch cases encode one opaque byte array with `batch_size × 32` bytes. The
 reported logical throughput shows protocol overhead amortization. It does not
 yet parse or execute that number of application operations.
 
+Each append iteration creates a fresh log and measures its first commit at tail
+length zero. These values do not measure steady-state head growth, refresh, or
+checkpoint cost.
+
 ## Recovery results
 
 Recovery loads the index and verifies all active WAL entries in parallel.
@@ -70,5 +74,5 @@ retry the rejected logical operations.
   conditional read, lost successful update response, pending resolution,
   checkpoint publication, process reopen, base recovery, and container cleanup
 
-The MinIO run is a compatibility test. It is not a latency or throughput
-measurement.
+The MinIO run is one compatibility flow. It is not the full conformance or
+protocol suite. It is not a latency or throughput measurement.

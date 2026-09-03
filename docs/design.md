@@ -28,7 +28,10 @@ reject non-canonical bytes, unknown fields, and unsupported versions. Any
 schema change requires a new format version. The first release does not support
 mixed-version writers. This strict rule replaces Micelio's unknown-field
 preservation rule because the selected CBOR codec does not retain unknown
-fields during an index rewrite.
+fields during an index rewrite. The current `0.1.0` format is pre-release. It
+rejects older development data and has no compatibility guarantee. After the
+first tagged durable-format release, every incompatible schema change must use
+a new format version.
 
 ## Head
 
@@ -37,12 +40,22 @@ The durable head contains these logical fields:
 ```text
 format_version
 log_identity
+incarnation_id
+options
 generation
 base_checkpoint
 tail[]
 recent_outcomes[]
 integrity_digest
 ```
+
+`incarnation_id` is random and durable. It prevents a cursor from one deleted
+or independent log from authorizing writes to another log with the same text
+identifier. It is only a namespace salt. WAL entries, payloads, and bases use
+deterministic BLAKE3 content identities within that namespace.
+
+`options` records all limits that affect durable validation. Every writer must
+open the log with the same options.
 
 `generation` increases for every head update, including maintenance updates.
 `tail` is ordered. Each element contains a sequence, transaction ID, entry
@@ -64,6 +77,7 @@ A commit contains:
 ```text
 format_version
 log_identity
+incarnation_id
 transaction_id
 expected_generation
 expected_tip
@@ -73,14 +87,20 @@ object_refs[]
 integrity_digest
 ```
 
-The operation and result have configured size limits. Large data belongs in a
-staged blob. The digest covers the canonical encoded bytes. Object-store ETags
-are concurrency tokens and are not content-integrity hashes.
+The operation, result, encoded commit, object count, and referenced objects
+have configured limits. Large data belongs in a blob that the caller stages
+before it prepares the commit. The digest covers the canonical encoded bytes.
+Object-store ETags are concurrency tokens and are not content-integrity hashes.
 
 ## Open and refresh
 
 `open` validates the backend contract and namespace. It creates the initial
 index when needed. It does not load all log data.
+
+The current capability probe writes and deletes one private object on every
+open. Backend credentials therefore need delete permission for the probe even
+though the log protocol does not delete durable log data. Moving this probe to
+an explicit provisioning result is an operability follow-on.
 
 `load` reads and validates only the index. `read_checkpoint` reads its base.
 `read_tail` fetches active WAL entries concurrently because the index contains
@@ -96,7 +116,7 @@ tail that the view names.
 The caller prepares one candidate against one cursor.
 
 1. Validate all sizes, references, log identities, and the expected cursor.
-2. Create each missing immutable blob.
+2. Verify that every referenced blob is already durable and valid.
 3. Create the immutable commit object.
 4. Build a new head that appends the commit reference.
 5. Conditionally replace the observed head version.
@@ -125,18 +145,30 @@ Resolution reads the current head:
 - Store unavailability returns `StillPending`.
 
 An implementation must not report `NotCommitted` when history movement makes
-the evidence incomplete.
+the evidence incomplete. `Expired` is indeterminate. It does not prove that the
+operation failed. An application must not submit a non-idempotent operation as
+new work after this result.
+
+`PreparedCommit::recovery_token` encodes the exact source cursor, operation,
+result, object references, and transaction ID. The caller must persist this
+token before publication if process-loss recovery is required. `Log::resume`
+can stage the missing WAL object and retry only the original conditional head
+update.
 
 ## Checkpoint
 
 A checkpoint contains opaque snapshot bytes and the exact covered tail
 position. Its digest binds both.
 
-Publication validates that the covered commit is in the supplied view. The new
-index replaces the base checkpoint, removes the covered tail prefix, preserves
-the suffix, preserves the resolution window, and increments the generation. A
-CAS conflict returns the current view. The caller must rebuild and revalidate a
-snapshot before another publication attempt.
+Publication validates every WAL entry and referenced blob in the supplied view.
+It also validates that the covered commit is in that view. The new index
+replaces the base checkpoint, removes the covered tail prefix, preserves the
+suffix, preserves the resolution window, and increments the generation.
+
+A definite CAS failure returns `Conflict`. An uncertain update returns a
+`PendingCheckpoint`. `resolve_checkpoint` retries only the exact original
+checkpoint against its exact source view. Later head movement can make the
+outcome `Expired`.
 
 The core treats snapshot bytes as opaque. It proves which log prefix the bytes
 claim to cover. The materializer must prove that the snapshot is the correct

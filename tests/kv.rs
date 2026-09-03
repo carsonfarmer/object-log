@@ -243,7 +243,10 @@ async fn execute(
             CommitStatus::Conflict(_) => {}
             CommitStatus::Pending(pending) => match log.resolve(pending).await? {
                 Resolution::Committed(_) => return Ok(result),
-                Resolution::NotCommitted(_) | Resolution::Expired(_) => {}
+                Resolution::NotCommitted(_) => {}
+                Resolution::Expired(_) => {
+                    return Err("key-value commit evidence expired before resolution".into());
+                }
                 Resolution::StillPending(_) => {
                     return Err("key-value commit outcome is still pending".into());
                 }

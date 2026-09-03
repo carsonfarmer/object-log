@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use object_log::log::{CommitStatus, Refresh, Resolution};
-use object_log::{Log, LogId, Options, ScopedStore, TransactionId};
+use object_log::{
+    CommitStatus, Log, LogId, Options, Refresh, Resolution, ScopedStore, TransactionId,
+};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
 const FAIL_NONE: u8 = 0;
@@ -35,15 +36,18 @@ async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it(
     let first_view = first.load().await?;
     let second_view = second.load().await?;
     assert_eq!(first_view.cursor().generation(), 0);
-    assert_eq!(
-        first_view.cursor().storage_version(),
-        second_view.cursor().storage_version()
-    );
+    assert!(matches!(
+        first.refresh(second_view.cursor()).await?,
+        Refresh::NotModified
+    ));
 
-    let before = first_view.cursor().storage_version().clone();
     let third_store = ScopedStore::new(backend, Path::from("protocol-tests"), &log_id);
     let third = Log::open(third_store, Options::default()).await?;
-    assert_eq!(third.load().await?.cursor().storage_version(), &before);
+    assert_eq!(third.load().await?.cursor().generation(), 0);
+    assert!(matches!(
+        first.refresh(first_view.cursor()).await?,
+        Refresh::NotModified
+    ));
     Ok(())
 }
 
@@ -77,6 +81,22 @@ async fn refresh_distinguishes_current_and_changed_heads() -> Result<(), Box<dyn
         first.refresh(updated.cursor()).await?,
         Refresh::NotModified
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_probe_rejects_false_not_modified_responses()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = Arc::new(InstrumentedStore::new());
+    backend.lie_about_conditional_reads();
+    let store: Arc<dyn ObjectStore> = backend;
+    let scoped = ScopedStore::new(
+        store,
+        Path::from("protocol-tests"),
+        &LogId::new("lying-conditional-read")?,
+    );
+    let capabilities = scoped.probe_capabilities().await?;
+    assert!(!capabilities.supports(object_log::BackendCapability::ConditionalRead));
     Ok(())
 }
 
@@ -173,7 +193,70 @@ async fn two_writers_publish_one_order_and_require_explicit_reprepare()
     let tail = first.read_tail(&after_retry).await?;
     assert_eq!(tail.len(), 2);
     assert_eq!(tail[1].operation(), &losing_operation);
-    assert_eq!(tail[1].expected_tip(), Some(tail[0].reference().digest));
+    assert_eq!(tail[1].expected_tip(), Some(tail[0].reference().digest()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_exact_candidates_both_report_committed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let log = open(backend, "duplicate-candidate").await?;
+    let view = log.load().await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        TransactionId::new(),
+        Bytes::from_static(b"same candidate"),
+        Bytes::from_static(b"same result"),
+        Vec::new(),
+    )?;
+
+    let (first, second) = tokio::join!(log.commit(prepared.clone()), log.commit(prepared));
+    assert!(matches!(first?, CommitStatus::Committed(_)));
+    assert!(matches!(second?, CommitStatus::Committed(_)));
+    assert_eq!(log.read_tail(&log.load().await?).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cursor_is_bound_to_one_durable_log_incarnation() -> Result<(), Box<dyn std::error::Error>>
+{
+    let first_backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let second_backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let first = open(first_backend, "same-name").await?;
+    let second = open(second_backend, "same-name").await?;
+    let foreign = first.load().await?;
+
+    assert!(matches!(
+        second.prepare(
+            foreign.cursor(),
+            TransactionId::new(),
+            Bytes::from_static(b"must not cross stores"),
+            Bytes::new(),
+            Vec::new(),
+        ),
+        Err(object_log::Error::InvalidFormat(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_rejects_options_that_differ_from_the_durable_contract()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let first = open(Arc::clone(&backend), "durable-options").await?;
+    let log_id = LogId::new("durable-options")?;
+    let scoped = ScopedStore::new(backend, Path::from("protocol-tests"), &log_id);
+    let changed = Options {
+        resolution_window: 0,
+        ..Options::default()
+    };
+
+    assert!(matches!(
+        Log::open(scoped, changed).await,
+        Err(object_log::Error::ConfigurationMismatch("options"))
+    ));
+    assert!(first.load().await?.tail().is_empty());
     Ok(())
 }
 
@@ -242,6 +325,71 @@ async fn referenced_objects_are_durable_before_head_publication()
 }
 
 #[tokio::test]
+async fn recovery_rejects_a_missing_referenced_object() -> Result<(), Box<dyn std::error::Error>> {
+    let backend = Arc::new(InMemory::new());
+    let erased: Arc<dyn ObjectStore> = backend.clone();
+    let log = open(erased, "missing-object").await?;
+    let object = log.put_object(Bytes::from_static(b"payload")).await?;
+    let view = log.load().await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        TransactionId::new(),
+        Bytes::from_static(b"operation"),
+        Bytes::new(),
+        vec![object.clone()],
+    )?;
+    let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
+        return Err("object commit did not publish".into());
+    };
+    backend
+        .delete(&Path::from(format!(
+            "protocol-tests/v1/logs/missing-object/objects/{}",
+            object.digest()
+        )))
+        .await?;
+
+    assert!(matches!(
+        log.read_tail(&committed).await,
+        Err(object_log::Error::InvalidFormat(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_rejects_a_changed_referenced_object() -> Result<(), Box<dyn std::error::Error>> {
+    let backend = Arc::new(InMemory::new());
+    let erased: Arc<dyn ObjectStore> = backend.clone();
+    let log = open(erased, "changed-object").await?;
+    let object = log.put_object(Bytes::from_static(b"payload")).await?;
+    let view = log.load().await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        TransactionId::new(),
+        Bytes::from_static(b"operation"),
+        Bytes::new(),
+        vec![object.clone()],
+    )?;
+    let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
+        return Err("object commit did not publish".into());
+    };
+    backend
+        .put(
+            &Path::from(format!(
+                "protocol-tests/v1/logs/changed-object/objects/{}",
+                object.digest()
+            )),
+            Bytes::from_static(b"changed").into(),
+        )
+        .await?;
+
+    assert!(matches!(
+        log.read_tail(&committed).await,
+        Err(object_log::Error::CorruptObject)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn lost_success_response_resolves_to_the_original_commit()
 -> Result<(), Box<dyn std::error::Error>> {
     let observed = Arc::new(InstrumentedStore::new());
@@ -261,7 +409,7 @@ async fn lost_success_response_resolves_to_the_original_commit()
     let CommitStatus::Pending(pending) = log.commit(prepared).await? else {
         return Err("a lost success response was not classified as pending".into());
     };
-    assert_eq!(pending.commit_ref().transaction_id, transaction_id);
+    assert_eq!(pending.transaction_id(), transaction_id);
     let Resolution::Committed(resolved) = log.resolve(pending).await? else {
         return Err("the pending commit did not resolve as committed".into());
     };
@@ -324,6 +472,7 @@ struct InstrumentedStore {
     order_check_armed: AtomicBool,
     object_created: AtomicBool,
     object_before_update: AtomicBool,
+    lie_conditional_read: AtomicBool,
 }
 
 impl InstrumentedStore {
@@ -334,6 +483,7 @@ impl InstrumentedStore {
             order_check_armed: AtomicBool::new(false),
             object_created: AtomicBool::new(false),
             object_before_update: AtomicBool::new(false),
+            lie_conditional_read: AtomicBool::new(false),
         }
     }
 
@@ -360,6 +510,10 @@ impl InstrumentedStore {
             store: "instrumented",
             source: Box::new(std::io::Error::other("injected lost acknowledgement")),
         }
+    }
+
+    fn lie_about_conditional_reads(&self) {
+        self.lie_conditional_read.store(true, Ordering::SeqCst);
     }
 }
 
@@ -431,6 +585,12 @@ impl ObjectStore for InstrumentedStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if options.if_none_match.is_some() && self.lie_conditional_read.load(Ordering::SeqCst) {
+            return Err(object_store::Error::NotModified {
+                path: location.to_string(),
+                source: "injected false not-modified response".into(),
+            });
+        }
         self.inner.get_opts(location, options).await
     }
 

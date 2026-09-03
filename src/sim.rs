@@ -20,17 +20,29 @@ const FAULT_STORE_NAME: &str = "object-log-fault-store";
 /// One object-store operation measured by [`FaultStore`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Operation {
+    /// A single-part object write.
     Put,
+    /// Multipart upload creation.
     MultipartCreate,
+    /// One multipart upload part.
     MultipartPart,
+    /// Multipart upload completion.
     MultipartComplete,
+    /// Multipart upload abort.
     MultipartAbort,
+    /// One object read.
     Get,
+    /// One ranged object read request.
     GetRanges,
+    /// One object deletion.
     Delete,
+    /// One recursive list request.
     List,
+    /// One delimiter-based list request.
     ListWithDelimiter,
+    /// One object copy.
     Copy,
+    /// One object rename.
     Rename,
 }
 
@@ -48,59 +60,84 @@ pub enum FailurePhase {
 /// A deterministic one-shot fault on one operation occurrence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Failure {
+    /// Operation that will fail.
     pub operation: Operation,
     /// The one-based occurrence of this operation after the last metric reset.
     pub occurrence: u64,
+    /// Whether failure occurs before or after the wrapped operation.
     pub phase: FailurePhase,
 }
 
 /// The result recorded for one completed request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestOutcome {
+    /// The wrapped request succeeded.
     Succeeded,
+    /// The wrapped backend returned an error.
     BackendError,
+    /// The wrapper failed before the backend request.
     InjectedBefore,
+    /// The wrapper hid a successful backend response.
     InjectedAfter,
 }
 
 /// One request in the exact order in which the wrapper accepted it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestEvent {
+    /// Monotonic request order within this wrapper.
     pub sequence: u64,
+    /// Operation type.
     pub operation: Operation,
+    /// One-based count for this operation type.
     pub occurrence: u64,
+    /// Object path.
     pub path: String,
+    /// Bytes sent to the backend.
     pub uploaded_bytes: u64,
+    /// Bytes received from the backend.
     pub downloaded_bytes: u64,
+    /// Observed request result.
     pub outcome: RequestOutcome,
 }
 
 /// Per-operation counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OperationMetrics {
+    /// Total accepted requests.
     pub requests: u64,
+    /// Requests for which the caller received success.
     pub succeeded: u64,
+    /// Mutations that became visible in the wrapped backend.
     pub visible_mutations: u64,
+    /// Errors returned by the wrapped backend.
     pub backend_errors: u64,
+    /// Failures injected before the wrapped request.
     pub injected_before: u64,
+    /// Failures injected after a successful wrapped request.
     pub injected_after: u64,
+    /// Total uploaded bytes.
     pub uploaded_bytes: u64,
+    /// Total downloaded bytes.
     pub downloaded_bytes: u64,
 }
 
 /// A consistent snapshot of all wrapper metrics and completed request events.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Metrics {
+    /// Counters grouped by operation type.
     pub operations: BTreeMap<Operation, OperationMetrics>,
+    /// Ordered request events when event recording is enabled.
     pub events: Vec<RequestEvent>,
 }
 
 impl Metrics {
+    /// Returns counters for one operation type.
     #[must_use]
     pub fn operation(&self, operation: Operation) -> OperationMetrics {
         self.operations.get(&operation).copied().unwrap_or_default()
     }
 
+    /// Returns the total request count.
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.operations
@@ -109,6 +146,7 @@ impl Metrics {
             .sum()
     }
 
+    /// Returns total bytes sent to the backend.
     #[must_use]
     pub fn uploaded_bytes(&self) -> u64 {
         self.operations
@@ -117,6 +155,7 @@ impl Metrics {
             .sum()
     }
 
+    /// Returns total bytes received from the backend.
     #[must_use]
     pub fn downloaded_bytes(&self) -> u64 {
         self.operations
@@ -164,11 +203,13 @@ pub struct FaultStore {
 }
 
 impl FaultStore {
+    /// Wraps one owned object store.
     #[must_use]
     pub fn new(store: impl ObjectStore) -> Self {
         Self::from_arc(Arc::new(store))
     }
 
+    /// Wraps one shared object store.
     #[must_use]
     pub fn from_arc(store: Arc<dyn ObjectStore>) -> Self {
         Self {

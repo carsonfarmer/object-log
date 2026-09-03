@@ -45,6 +45,8 @@ Required value types:
 - `PreparedCommit`: expected cursor, transaction ID, operation bytes, result
   bytes, and staged object references.
 - `PendingCommit`: enough evidence to resolve or retry one exact publication.
+- `PendingCheckpoint`: enough evidence to resolve one exact maintenance
+  publication.
 - `CheckpointRef`: covered sequence, covered commit, and snapshot object.
 
 Required operations:
@@ -57,8 +59,10 @@ put_object(bytes) -> ObjectRef
 prepare(cursor, transaction_id, operation, result, objects) -> PreparedCommit
 commit(prepared) -> CommitStatus
 resolve(pending) -> Resolution
+resume(recovery_token) -> Resolution
 read_tail(view) -> ordered commit records
 publish_checkpoint(view, checkpoint) -> CheckpointStatus
+resolve_checkpoint(pending) -> CheckpointResolution
 ```
 
 Required result distinctions:
@@ -66,11 +70,17 @@ Required result distinctions:
 ```rust
 CommitStatus = Committed | Conflict | Pending
 Resolution   = Committed | NotCommitted | StillPending | Expired
+CheckpointStatus = Published | Conflict | Pending
+CheckpointResolution = Published | NotPublished | StillPending | Expired
 ```
 
 `Conflict` is a definite CAS rejection. `Pending` means that a storage error
 can hide a successful CAS. No API can convert `Pending` to `Conflict` without
 new evidence.
+
+`Expired` means that retained evidence cannot determine the outcome. It does
+not mean `NotCommitted`. A caller must not retry non-idempotent work as a new
+operation after expiry.
 
 ## Invariants
 
@@ -88,6 +98,8 @@ new evidence.
 11. One log cannot read or publish objects from another log namespace.
 12. Head bytes cannot repeat across updates. A monotonic generation prevents
     ETag ABA when an object store derives ETags from content.
+13. A durable random incarnation binds every cursor, WAL entry, and checkpoint
+    to one log lifetime. Content digests remain deterministic within it.
 
 ## Work streams
 
@@ -107,7 +119,8 @@ Exit evidence:
 
 Implement the minimum operations needed from `object_store`. Add namespace
 validation and a capability probe for conditional create, conditional update,
-conditional read, strong read-after-write behavior, and listing.
+conditional read, and strong read-after-write behavior. Listing belongs to the
+garbage-collection follow-on.
 
 Backends in this stream:
 
@@ -148,6 +161,11 @@ Exit evidence:
   classification after every action.
 - Benchmarks report operation counts, bytes, latency distribution, logical
   operations per second, and durable commits per second.
+
+Current status: partial. The seeded scenario covers two writers, one reader,
+commit, resolve, refresh, reload, reopen, and read actions. It does not yet have
+an independent history oracle, checkpoint worker, prepare-only action,
+stage-only action, or explicit crash action.
 
 ### 5. Checkpoints — root agent
 
@@ -193,6 +211,10 @@ No fixed performance claim exists until a baseline is measured. After the
 baseline, retain a machine-readable comparison and fail only on large,
 repeatable regressions.
 
+Current status: partial. The in-memory Criterion suite covers batch payload
+size, inline size, contention, and tail recovery. It does not yet cover the
+full matrix above.
+
 ### 8. MinIO local qualification — backend agent and root agent
 
 Add an opt-in test command that starts a pinned MinIO container, creates an
@@ -205,6 +227,11 @@ Exit evidence:
 - The exact MinIO image is pinned.
 - Conditional writes and ambiguous-response recovery are exercised.
 - Repeated runs start from empty isolated prefixes.
+
+Current status: partial. One local MinIO compatibility flow covers capability
+probing, one ambiguous commit, resolution, checkpoint publication, reopen, and
+recovery. The complete backend and protocol suites do not yet run against
+MinIO.
 
 ### 9. Independent review and reduction — review agent
 

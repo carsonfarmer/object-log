@@ -9,18 +9,16 @@ license = "Apache-2.0"
 [dependencies]
 async-trait = "0.1"
 blake3 = "1.8"
-bytes = { version = "1.10", features = ["serde"] }
+bytes = "1.10"
 futures = "0.3"
 hex = "0.4"
 minicbor = { version = "2.3", features = ["derive", "std"] }
 object_store = "0.14"
-serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
-uuid = { version = "1.18", features = ["serde", "v4"] }
+uuid = { version = "1.18", features = ["v4"] }
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["async_tokio"] }
-proptest = "1.7"
 tempfile = "3.20"
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
 

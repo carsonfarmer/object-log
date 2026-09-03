@@ -14,7 +14,21 @@ index = {
   4: uint,                         ; next sequence
   ? 5: checkpoint-ref,
   6: [* entry-pointer],            ; active ordered tail
-  7: [* entry-pointer]             ; bounded outcome window
+  7: [* entry-pointer],            ; bounded outcome window
+  8: incarnation-id,               ; random durable log incarnation
+  9: options                       ; durable log contract
+}
+
+options = {
+  1: uint,                         ; maximum active tail entries
+  2: uint,                         ; outcome resolution window
+  3: uint,                         ; maximum inline operation bytes
+  4: uint,                         ; maximum inline result bytes
+  5: uint,                         ; maximum object references per entry
+  6: uint,                         ; maximum encoded entry bytes
+  7: uint,                         ; maximum encoded index bytes
+  8: uint,                         ; maximum encoded base bytes
+  9: uint                          ; maximum immutable object bytes
 }
 
 ; An entry has no assigned sequence. The index entry-pointer assigns it.
@@ -26,7 +40,8 @@ entry = {
   ? 5: digest,                     ; expected prior tip
   6: bstr,                         ; opaque operation
   7: bstr,                         ; opaque recorded result
-  8: [* object-ref]
+  8: [* object-ref],
+  9: incarnation-id                ; durable log incarnation
 }
 
 base = {
@@ -34,7 +49,20 @@ base = {
   2: log-id,
   3: uint,                         ; covered sequence
   4: digest,                       ; covered entry digest
-  5: bstr                          ; opaque snapshot
+  5: bstr,                         ; opaque snapshot
+  6: incarnation-id                ; durable log incarnation
+}
+
+; Caller-owned recovery token. Persist before attempting publication.
+recovery-token = {
+  1: 1,                            ; format version
+  2: bstr,                         ; canonical encoded source index
+  ? 3: tstr,                       ; source ETag
+  ? 4: tstr,                       ; source storage version
+  5: transaction-id,
+  6: bstr,                         ; opaque operation
+  7: bstr,                         ; opaque recorded result
+  8: [* object-ref]
 }
 
 entry-pointer = {
@@ -59,4 +87,5 @@ object-ref = {
 object-kind = 1 / 2                ; payload / base
 digest = bstr .size 32
 transaction-id = bstr .size 16
+incarnation-id = bstr .size 16
 log-id = tstr .size (1..128)

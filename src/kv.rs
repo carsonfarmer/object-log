@@ -16,16 +16,19 @@ pub struct KvState {
 }
 
 impl KvState {
+    /// Returns a stored value without copying it.
     #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
         self.entries.get(key).map(Vec::as_slice)
     }
 
+    /// Returns the number of keys.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Reports whether the state has no keys.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -35,20 +38,32 @@ impl KvState {
 /// One key-value command evaluated against an exact materialized state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KvCommand {
+    /// Sets one key and returns its prior value.
     Set {
+        /// Key bytes.
         key: Bytes,
+        /// New value bytes.
         value: Bytes,
     },
+    /// Deletes one key and returns its prior value.
     Delete {
+        /// Key bytes.
         key: Bytes,
     },
+    /// Adds a signed delta to one big-endian `i64` value.
     Increment {
+        /// Key bytes.
         key: Bytes,
+        /// Signed value to add.
         delta: i64,
     },
+    /// Replaces one value only when its current value matches.
     CompareAndSwap {
+        /// Key bytes.
         key: Bytes,
+        /// Required current value. `None` means that the key must be absent.
         expected: Option<Bytes>,
+        /// New value. `None` deletes the key.
         value: Option<Bytes>,
     },
 }
@@ -56,18 +71,26 @@ pub enum KvCommand {
 /// The typed result recorded for one key-value command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KvResult {
+    /// The prior value for a set or delete command.
     Previous(Option<Bytes>),
+    /// The value after an increment command.
     Integer(i64),
+    /// Whether a compare-and-swap matched.
     Swapped(bool),
 }
 
 /// The result of evaluating a command before log publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KvDecision {
+    /// The command has a result but needs no durable mutation.
     NoChange(KvResult),
+    /// The command needs one durable mutation.
     Commit {
+        /// Canonical operation bytes for the WAL entry.
         operation: Bytes,
+        /// Canonical result bytes for the WAL entry.
         result_bytes: Bytes,
+        /// Typed result returned after successful publication.
         result: KvResult,
     },
 }
@@ -247,12 +270,16 @@ impl Materializer for KvMachine {
 /// Invalid key-value operation, result, or snapshot data.
 #[derive(Debug, thiserror::Error)]
 pub enum KvError {
+    /// Bytes do not use the current canonical key-value format.
     #[error("invalid key-value encoding: {0}")]
     InvalidEncoding(String),
+    /// A stored value cannot decode as a big-endian `i64`.
     #[error("stored value is not a signed 64-bit integer")]
     NotInteger,
+    /// Signed increment arithmetic overflowed.
     #[error("signed 64-bit integer overflow")]
     IntegerOverflow,
+    /// Replay found a different prior value than the committed operation.
     #[error("key-value replay does not match its expected prior value")]
     StateDiverged,
 }

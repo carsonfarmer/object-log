@@ -6,9 +6,12 @@ use crate::{Error, Log, View};
 
 /// Applies opaque log data to one application state type.
 pub trait Materializer {
+    /// The reconstructed application state.
     type State;
+    /// A domain-specific decode or state-transition error.
     type Error: StdError + 'static;
 
+    /// Creates the state before the first committed operation.
     fn empty(&self) -> Self::State;
 
     /// Restores one application snapshot.
@@ -46,16 +49,19 @@ pub struct Materialized<S> {
 }
 
 impl<S> Materialized<S> {
+    /// Returns the exact durable view used for reconstruction.
     #[must_use]
     pub const fn view(&self) -> &View {
         &self.view
     }
 
+    /// Returns the reconstructed state.
     #[must_use]
     pub const fn state(&self) -> &S {
         &self.state
     }
 
+    /// Separates the durable view and reconstructed state.
     #[must_use]
     pub fn into_parts(self) -> (View, S) {
         (self.view, self.state)
@@ -65,8 +71,10 @@ impl<S> Materialized<S> {
 /// Failure while reconstructing one application state.
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError<E: StdError + 'static> {
+    /// Durable log loading or verification failed.
     #[error(transparent)]
     Log(#[from] Error),
+    /// Application snapshot or operation processing failed.
     #[error("state materialization failed: {0}")]
     State(E),
 }
@@ -93,7 +101,11 @@ where
     };
     for record in log.read_tail(&view).await? {
         materializer
-            .apply(&mut state, record.reference().sequence, record.operation())
+            .apply(
+                &mut state,
+                record.reference().sequence(),
+                record.operation(),
+            )
             .map_err(MaterializeError::State)?;
     }
     Ok(Materialized { view, state })

@@ -9,7 +9,7 @@ Run tests in this order:
 3. Temporary filesystem backend conformance.
 4. Deterministic fault and concurrency tests.
 5. Materializer and key-value tests.
-6. Local MinIO conformance and protocol tests.
+6. Local MinIO compatibility test.
 7. Benchmarks.
 
 No cloud backend is part of this stage.
@@ -27,12 +27,9 @@ Every backend must prove:
 - Conditional update succeeds only for the observed version.
 - A stale version cannot update the object.
 - A conditional read distinguishes changed and unchanged objects.
-- A successful write is visible to the next read and list.
-- Listing is complete for an isolated prefix.
-- Delete of a missing test object is idempotent, although protocol deletion is
-  not used in the first release.
+- A successful write is visible to the next read.
 - Stored bytes are returned without truncation or substitution.
-- A capability probe cleans up only its own random prefix.
+- A capability probe cleans up only its own object.
 
 ## Protocol cases
 
@@ -95,13 +92,11 @@ be misreported as committed.
 - One opened log cannot request another log's head, blob, or checkpoint key.
 - Invalid separators, traversal elements, empty IDs, and overlong IDs fail.
 
-## Deterministic model
+## Current deterministic scenario
 
-The generated model has at least two writers, one reader, and one checkpoint
-worker. Actions include open, prepare, stage, publish, refresh, resolve,
-checkpoint, crash, and reopen.
-
-After every action, the oracle checks:
+The seeded scenario has two writers and one reader. It selects commit, resolve,
+refresh, reload, reopen, and read actions. It records the seed and action trace
+on failure. It currently checks:
 
 - The committed history only grows before checkpoint projection.
 - Every visible view equals a prefix of the canonical history.
@@ -109,10 +104,12 @@ After every action, the oracle checks:
 - Every conflict candidate occurs zero times.
 - Every pending result remains consistent with at least one allowed store
   history until it resolves.
-- Every installed checkpoint equals its covered prefix.
 - Every referenced object passes integrity verification.
 
-Record the seed and action trace on failure.
+This is not yet an independent model. It derives prior history from the
+implementation output. The remaining qualification work must add an
+independent canonical history, a checkpoint worker, checkpoint and object
+oracles, and separate prepare, stage, checkpoint, and crash actions.
 
 ## Benchmark contract
 
