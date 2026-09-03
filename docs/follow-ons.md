@@ -13,6 +13,9 @@ expiry, and best-effort plan-object cleanup. Current qualification is local.
 
 ## 1. SQLite storage
 
+The selected demonstration contract and implementation gates are in
+[`SQLITE_PLAN.md`](../SQLITE_PLAN.md). Implementation is the current goal.
+
 ### Required contract
 
 - One log owns one SQLite database history.
@@ -30,8 +33,8 @@ expiry, and best-effort plan-object cleanup. Current qualification is local.
 - Benchmarks report commit latency, write amplification, cold recovery, warm
   queries, and object-store requests.
 
-The first design study must compare page objects, SQLite sessions changesets,
-and a VFS-level journal before it selects one current contract.
+The plan selects a raw SQLite WAL and snapshot design. Its first gate compares
+two ways to read the committed WAL range before implementation starts.
 
 ## 2. WASI filesystem storage
 

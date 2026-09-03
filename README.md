@@ -19,9 +19,9 @@ The durable model is small:
 The project is independent from Spin. The first consumer is a small key-value
 state machine. The log, checkpoints, object graph, Cursor-style bounded garbage
 collection, local benchmarks, and `MinIO` compatibility flow are complete for
-local use. `SQLite` storage is next. See [PLAN.md](PLAN.md),
-[GC_PLAN.md](GC_PLAN.md), and [docs/design.md](docs/design.md) for the current
-contract.
+local use. The [`SQLite` demonstration plan](SQLITE_PLAN.md) is complete and
+implementation is next. See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
+[docs/design.md](docs/design.md) for the current core contract.
 
 See [docs/follow-ons.md](docs/follow-ons.md) for the ordered `SQLite`, WASI
 filesystem, and live AWS qualification goals.
