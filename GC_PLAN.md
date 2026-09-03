@@ -117,7 +117,7 @@ lease, mutable deletion bitmap, Bloom filter, or provider-specific branch.
 - [ ] Add physical storage identity to durable references and keys.
 - [ ] Add the collection epoch, active-plan reference, and retention IDs.
 - [ ] Add canonical collection-plan encoding and strict limits.
-- [ ] Add namespace-safe list and immutable-only batch delete.
+- [x] Add namespace-safe list and immutable-only batch delete.
 - [ ] Add retention acquisition and release.
 - [ ] Add bounded live-graph marking and positive plan creation.
 - [ ] Add fenced publication, repeatable deletion, and plan clearing.
