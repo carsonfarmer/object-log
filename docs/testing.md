@@ -16,9 +16,9 @@ Run tests in this order:
 
 No cloud backend is part of this stage.
 
-At revision `455c86dfcbaa9fe3cb11f2101122537acd4b9fa6`, the local
-all-feature gate passes 187 regular tests. It also compiles six ignored,
-opt-in tests. The focused garbage-collection suite has 27 tests. The memory and
+At revision `03d4327b5d865912cfad6549faa619adc222e9c3`, the local
+all-feature gate passes 189 regular tests. It also compiles six ignored,
+opt-in tests. The focused garbage-collection suite has 28 tests. The memory and
 temporary-filesystem tests prove repeatable immutable deletion. The opt-in
 MinIO flow proves 1,001 candidates across the 1,000-key bulk-delete boundary.
 The large acceptance target proves timely and exact cleanup of 100,000

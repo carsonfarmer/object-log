@@ -23,16 +23,26 @@ without a compatibility reader.
 - Public storage contract: `59bf73debe97507d57dfd87d4b5358711c0ab00f`.
 - Repeatable accounting target: `582f2bb62a6c5fd4d79e8ebe162151bae97ddff1`.
 - Recovery regressions: `455c86dfcbaa9fe3cb11f2101122537acd4b9fa6`.
-- Documentation state used for this record:
+- Transitive recovery correction:
+  `7610f904378c05a8cffc8a8e42aea6c3926a1b3e`.
+- Nested collection-fence regression:
+  `7ce187b26c5fdb23327158dee51d721ea04e88cc`.
+- Head-publication assertion correction:
+  `1040cd241cae5b941ffce76adb91fd3dc21f1897`.
+- Initial documentation update:
   `35fe1bed47b302f09645392d1409a604d5eb1537`.
 - Date: 2026-09-03, America/Vancouver.
 - Host: Apple `Mac16,8`, 14 logical CPUs, 48 GiB memory.
 - Operating system: macOS 27.0, build 26A5421a.
 - Rust: 1.97.1, aarch64-apple-darwin.
-- Backend: `object_store::memory::InMemory` with request accounting.
+- Accounting backend: `object_store::memory::InMemory`.
+- Compatibility backend:
+  `minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`
+  on an ephemeral loopback port.
 
-These results measure one local process. They do not measure MinIO, disk,
-network, or remote S3 performance.
+The request and byte results measure one local process. The MinIO runs check
+compatibility, not service latency. Nothing here measures remote S3
+performance.
 
 ## Repeatable request accounting
 
@@ -91,6 +101,11 @@ The regular model suite covers these cases:
   GET and before any head PUT.
 - Changed recovery bytes return `CorruptObject` after one blob GET and before
   any head PUT.
+- Decoded commit recovery and reopened checkpoint resolution traverse a
+  node-to-blob graph. A missing or changed descendant fails before any head
+  PUT.
+- A collection race cannot stage a new root whose child appears in the active
+  positive deletion plan.
 
 The public API prevents callers from constructing `StagedObject` values. The
 proof binds the object reference to one open-log domain and collection epoch.
@@ -110,14 +125,14 @@ namespace and disable conflicting lifecycle rules.
 
 ## Line count
 
-At `35fe1be`, before this evidence file, the repository contains:
+At `7ce187b`, before the separate CI change, the repository contains:
 
 | Category | Lines | Change from `104b609` |
 |---|---:|---:|
-| Product | 6,498 | +127 |
-| Test and support | 10,146 | +534 |
+| Product | 6,494 | +123 |
+| Test and support | 10,247 | +635 |
 | Benchmark | 868 | +14 |
-| Documentation | 2,766 | +97 |
+| Documentation | 2,923 | +254 |
 | Schema | 184 | 0 |
 | Operator and infrastructure | 232 | +3 |
 
@@ -127,11 +142,16 @@ branches, and optional proof state. It kept one opaque domain token.
 
 ## Local gates
 
-- `make check` passed 187 regular tests. Six opt-in tests remained ignored.
+- `make check` passed 189 regular tests. Six opt-in tests remained ignored.
 - `make staged-performance-acceptance` passed the two measured workloads.
+- The core and SQLite loopback MinIO flows passed. Their test binaries reported
+  2.54 seconds and 0.25 seconds.
+- The 100,000-object memory GC acceptance completed its timed work in 1.83
+  seconds. The 10,001-object MinIO case completed its timed work in 1.62
+  seconds. No test container remained.
 - Rust documentation built with warnings denied.
 - All five benchmark executables compiled in the optimized profile.
-- No MinIO or cloud test ran for this change.
+- No cloud test ran for this change.
 
 ## Limits
 
