@@ -10,18 +10,21 @@ Run tests in this order:
 4. Deterministic fault and concurrency tests.
 5. Materializer and key-value tests.
 6. Local MinIO compatibility test.
-7. Large local garbage-collection acceptance test.
-8. Benchmarks.
+7. Staged-object request accounting.
+8. Large local garbage-collection acceptance test.
+9. Benchmarks.
 
 No cloud backend is part of this stage.
 
-At revision `576093b7b94177e7f12bab7bf5e16e13c6d9213f`, the local
-all-feature gate passes 136 regular tests. It also compiles three ignored,
+At revision `455c86dfcbaa9fe3cb11f2101122537acd4b9fa6`, the local
+all-feature gate passes 187 regular tests. It also compiles six ignored,
 opt-in tests. The focused garbage-collection suite has 27 tests. The memory and
 temporary-filesystem tests prove repeatable immutable deletion. The opt-in
 MinIO flow proves 1,001 candidates across the 1,000-key bulk-delete boundary.
 The large acceptance target proves timely and exact cleanup of 100,000
-memory-backed candidates and 10,001 local MinIO candidates.
+memory-backed candidates and 10,001 local MinIO candidates. The staged-object
+accounting target proves the request shape for 1 MiB update and 100 MiB
+checkpoint workloads.
 
 Format tests include one hexadecimal encoding assertion for an empty head.
 Golden values test the current canonical encoding. They do not promise
@@ -173,7 +176,8 @@ on failure. It currently checks:
 - Every conflict candidate occurs zero times.
 - Every pending result remains consistent with at least one allowed store
   history until it resolves.
-- Every referenced object passes integrity verification before publication.
+- Every referenced object has a current staged proof or passes full integrity
+  verification before publication.
 
 The current model derives prior history from the implementation output, so it
 is not independent. The remaining qualification work must add an

@@ -57,9 +57,10 @@ This fast path requires exact immutable bytes to remain at their physical key
 until object-log garbage collection deletes them. External lifecycle expiry,
 deletion, or overwrite violates the storage contract.
 
-The API is implemented locally.
-[Issue #1](https://github.com/carsonfarmer/object-log/issues/1) tracks its
-remaining evidence and closure. The Git example uses this API.
+The API and its local acceptance evidence are complete. The
+[staged-object evidence](evidence/staged-objects-local-2026-09-03.md) records
+request counts, transferred bytes, recovery checks, and limits. The Git
+example uses this API.
 
 [Issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes all
 current limitations and follow-on work. The linked issues define separate
