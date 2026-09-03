@@ -5,11 +5,14 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
+use futures::stream::{self, BoxStream};
 use object_store::path::Path;
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersion};
 use uuid::Uuid;
 
 use crate::{Digest, Error, LogId};
+
+pub(crate) const MAX_DELETE_BATCH: usize = 1_000;
 
 /// One backend behavior required by the publication protocol.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -105,6 +108,100 @@ pub(crate) enum StoreKey {
     Blob(Digest),
     Node(Digest),
     Checkpoint(Digest),
+}
+
+/// The role of one immutable physical object.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the GC protocol integration")
+)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ImmutableKind {
+    Commit,
+    Blob,
+    Node,
+    Checkpoint,
+    CollectionPlan,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the GC protocol integration")
+)]
+impl ImmutableKind {
+    const fn segment(self) -> &'static str {
+        match self {
+            Self::Commit => "commits",
+            Self::Blob => "blobs",
+            Self::Node => "nodes",
+            Self::Checkpoint => "checkpoints",
+            Self::CollectionPlan => "collection-plans",
+        }
+    }
+
+    fn from_segment(segment: &str) -> Option<Self> {
+        match segment {
+            "commits" => Some(Self::Commit),
+            "blobs" => Some(Self::Blob),
+            "nodes" => Some(Self::Node),
+            "checkpoints" => Some(Self::Checkpoint),
+            "collection-plans" => Some(Self::CollectionPlan),
+            _ => None,
+        }
+    }
+}
+
+/// One immutable physical key that cannot address the mutable head.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the GC protocol integration")
+)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ImmutableKey {
+    pub(crate) incarnation: Uuid,
+    pub(crate) kind: ImmutableKind,
+    pub(crate) storage_id: Uuid,
+    pub(crate) digest: Digest,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the GC protocol integration")
+)]
+impl ImmutableKey {
+    pub(crate) fn new(incarnation: Uuid, kind: ImmutableKind, digest: Digest) -> Self {
+        Self {
+            incarnation,
+            kind,
+            storage_id: Uuid::new_v4(),
+            digest,
+        }
+    }
+
+    pub(crate) const fn from_parts(
+        incarnation: Uuid,
+        kind: ImmutableKind,
+        storage_id: Uuid,
+        digest: Digest,
+    ) -> Self {
+        Self {
+            incarnation,
+            kind,
+            storage_id,
+            digest,
+        }
+    }
+}
+
+/// One emitted entry from a scoped object listing.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the GC protocol integration")
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ListedObject {
+    pub(crate) immutable_key: Option<ImmutableKey>,
+    pub(crate) size: u64,
 }
 
 /// Bytes and the opaque storage version observed with them.
@@ -299,6 +396,84 @@ impl ScopedStore {
         }
     }
 
+    /// Lists every object in this log scope without exposing its physical path.
+    ///
+    /// Only exact canonical immutable paths have an [`ImmutableKey`]. Callers
+    /// must still count unclassified entries when they enforce scan limits.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the GC protocol integration")
+    )]
+    pub(crate) fn list_scoped(&self) -> BoxStream<'static, Result<ListedObject, Error>> {
+        let scope = self.scope.clone();
+        self.store
+            .list(Some(&scope))
+            .map(move |result| {
+                result
+                    .map(|metadata| ListedObject {
+                        immutable_key: classify_immutable(&scope, &metadata.location),
+                        size: metadata.size,
+                    })
+                    .map_err(Error::from)
+            })
+            .boxed()
+    }
+
+    /// Deletes one bounded batch of immutable physical keys.
+    ///
+    /// The method drains every backend result. A missing key is a successful
+    /// delete. Any other error makes the complete batch result uncertain, and
+    /// this method does not retry it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the GC protocol integration")
+    )]
+    pub(crate) async fn delete_immutable_batch(&self, keys: &[ImmutableKey]) -> Result<(), Error> {
+        if keys.len() > MAX_DELETE_BATCH {
+            return Err(Error::LimitExceeded("immutable delete batch"));
+        }
+        if keys.iter().collect::<BTreeSet<_>>().len() != keys.len() {
+            return Err(Error::InvalidFormat(
+                "an immutable delete batch contains duplicate keys".to_owned(),
+            ));
+        }
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let expected = keys
+            .iter()
+            .map(|key| self.immutable_location(*key))
+            .collect::<Vec<_>>();
+        let input = stream::iter(expected.clone().into_iter().map(Ok)).boxed();
+        let results = self.store.delete_stream(input).collect::<Vec<_>>().await;
+        let result_count = results.len();
+
+        let mut first_error = None;
+        for (expected, result) in expected.iter().zip(results) {
+            match result {
+                Ok(actual) if actual == *expected => {}
+                Ok(_) => {
+                    return Err(Error::InvalidFormat(
+                        "the backend returned a different deleted path".to_owned(),
+                    ));
+                }
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error.into());
+        }
+        if result_count != expected.len() {
+            return Err(Error::InvalidFormat(
+                "the backend returned the wrong delete result count".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Probes backend behavior below a fresh private prefix and cleans up its
     /// own object before returning.
     ///
@@ -344,6 +519,20 @@ impl ScopedStore {
                 .join("bases")
                 .join(format!("{digest}.cbor")),
         }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by the GC protocol integration")
+    )]
+    fn immutable_location(&self, key: ImmutableKey) -> Path {
+        self.scope
+            .clone()
+            .join("data")
+            .join(key.incarnation.simple().to_string())
+            .join(key.kind.segment())
+            .join(key.storage_id.simple().to_string())
+            .join(key.digest.to_string())
     }
 
     async fn run_probe(&self, location: &Path) -> Result<BackendCapabilities, Error> {
@@ -506,6 +695,40 @@ impl ScopedStore {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the GC protocol integration")
+)]
+fn classify_immutable(scope: &Path, location: &Path) -> Option<ImmutableKey> {
+    let mut parts = location.prefix_match(scope)?;
+    if parts.next()?.as_ref() != "data" {
+        return None;
+    }
+    let incarnation = parse_simple_uuid(parts.next()?.as_ref())?;
+    let kind = ImmutableKind::from_segment(parts.next()?.as_ref())?;
+    let storage_id = parse_simple_uuid(parts.next()?.as_ref())?;
+    let digest_text = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let digest = digest_text.as_ref().parse::<Digest>().ok()?;
+    (digest.to_string() == digest_text.as_ref()).then_some(ImmutableKey::from_parts(
+        incarnation,
+        kind,
+        storage_id,
+        digest,
+    ))
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the GC protocol integration")
+)]
+fn parse_simple_uuid(value: &str) -> Option<Uuid> {
+    let uuid = Uuid::parse_str(value).ok()?;
+    (uuid.simple().to_string() == value).then_some(uuid)
+}
+
 async fn collect_object(
     result: object_store::GetResult,
     max_bytes: usize,
@@ -542,4 +765,294 @@ fn is_unsupported(error: &object_store::Error) -> bool {
         error,
         object_store::Error::NotSupported { .. } | object_store::Error::NotImplemented { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as StdError;
+
+    use futures::TryStreamExt;
+    use object_store::local::LocalFileSystem;
+    use object_store::memory::InMemory;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
+
+    type TestResult = Result<(), Box<dyn StdError>>;
+
+    #[test]
+    fn new_immutable_keys_get_distinct_physical_ids() {
+        let incarnation = Uuid::new_v4();
+        let digest = Digest::of(b"same content");
+        let first = ImmutableKey::new(incarnation, ImmutableKind::Blob, digest);
+        let second = ImmutableKey::new(incarnation, ImmutableKind::Blob, digest);
+
+        assert_eq!(first.incarnation, second.incarnation);
+        assert_eq!(first.digest, second.digest);
+        assert_ne!(first.storage_id, second.storage_id);
+    }
+
+    #[tokio::test]
+    async fn scoped_listing_classifies_only_canonical_immutable_paths() -> TestResult {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let scoped = test_scope(Arc::clone(&store), "tenant")?;
+        let incarnation = Uuid::parse_str("00112233-4455-4677-8899-aabbccddeeff")?;
+        let digest = Digest::of(b"classified");
+        let kinds = [
+            ImmutableKind::Commit,
+            ImmutableKind::Blob,
+            ImmutableKind::Node,
+            ImmutableKind::Checkpoint,
+            ImmutableKind::CollectionPlan,
+        ];
+        let mut expected = BTreeSet::new();
+        for (index, kind) in kinds.into_iter().enumerate() {
+            let key = ImmutableKey::from_parts(
+                incarnation,
+                kind,
+                Uuid::from_u128(u128::try_from(index)?.saturating_add(1)),
+                digest,
+            );
+            put_raw(&store, scoped.immutable_location(key), index + 1).await?;
+            expected.insert(key);
+        }
+
+        let malformed = [
+            scoped.scope.clone().join("wal").join(digest.to_string()),
+            scoped
+                .scope
+                .clone()
+                .join("data")
+                .join(incarnation.to_string())
+                .join("blobs")
+                .join(Uuid::new_v4().simple().to_string())
+                .join(digest.to_string()),
+            scoped
+                .scope
+                .clone()
+                .join("data")
+                .join(incarnation.simple().to_string())
+                .join("unknown")
+                .join(Uuid::new_v4().simple().to_string())
+                .join(digest.to_string()),
+            scoped
+                .scope
+                .clone()
+                .join("data")
+                .join(incarnation.simple().to_string())
+                .join("blobs")
+                .join(Uuid::new_v4().simple().to_string())
+                .join(digest.to_string().to_uppercase()),
+            scoped
+                .scope
+                .clone()
+                .join("data")
+                .join(incarnation.simple().to_string())
+                .join("blobs")
+                .join(Uuid::new_v4().simple().to_string())
+                .join(digest.to_string())
+                .join("extra"),
+        ];
+        for location in malformed {
+            put_raw(&store, location, 7).await?;
+        }
+
+        let listed = scoped.list_scoped().try_collect::<Vec<_>>().await?;
+        assert_eq!(listed.len(), 10);
+        assert_eq!(listed.iter().map(|item| item.size).sum::<u64>(), 50);
+        assert_eq!(
+            listed
+                .iter()
+                .filter_map(|item| item.immutable_key)
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|item| item.immutable_key.is_none())
+                .count(),
+            5
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scoped_listing_does_not_cross_log_segments() -> TestResult {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let first = test_scope(Arc::clone(&store), "tenant")?;
+        let second = test_scope(Arc::clone(&store), "tenant-other")?;
+        let digest = Digest::of(b"tenant isolation");
+        let incarnation = Uuid::new_v4();
+        let first_key = ImmutableKey::new(incarnation, ImmutableKind::Blob, digest);
+        let second_key = ImmutableKey::new(incarnation, ImmutableKind::Blob, digest);
+        put_raw(&store, first.immutable_location(first_key), 1).await?;
+        put_raw(&store, second.immutable_location(second_key), 2).await?;
+
+        let listed = first.list_scoped().try_collect::<Vec<_>>().await?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].immutable_key, Some(first_key));
+        assert_eq!(listed[0].size, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_batch_rejects_duplicates_and_excess_before_io() -> TestResult {
+        let faults = FaultStore::new(InMemory::new());
+        let scoped = test_scope(Arc::new(faults.clone()), "limits")?;
+        let incarnation = Uuid::new_v4();
+        let digest = Digest::of(b"delete limits");
+        let duplicate = ImmutableKey::new(incarnation, ImmutableKind::Blob, digest);
+
+        assert!(matches!(
+            scoped.delete_immutable_batch(&[duplicate, duplicate]).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        let excessive = (0_u128..1_001)
+            .map(|storage_id| {
+                ImmutableKey::from_parts(
+                    incarnation,
+                    ImmutableKind::Blob,
+                    Uuid::from_u128(storage_id),
+                    digest,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            scoped.delete_immutable_batch(&excessive).await,
+            Err(Error::LimitExceeded("immutable delete batch"))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_batch_accepts_exact_limit() -> TestResult {
+        let faults = FaultStore::new(InMemory::new());
+        let scoped = test_scope(Arc::new(faults.clone()), "limit-boundary")?;
+        let incarnation = Uuid::new_v4();
+        let digest = Digest::of(b"delete boundary");
+        let keys = (0_u128..1_000)
+            .map(|storage_id| {
+                ImmutableKey::from_parts(
+                    incarnation,
+                    ImmutableKind::Blob,
+                    Uuid::from_u128(storage_id),
+                    digest,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        scoped.delete_immutable_batch(&keys).await?;
+        assert_eq!(
+            faults.metrics().operation(Operation::Delete).requests,
+            1_000
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn immutable_delete_is_repeatable_in_memory_and_filesystem() -> TestResult {
+        repeatable_delete(Arc::new(InMemory::new()), "memory").await?;
+
+        let directory = TempDir::new()?;
+        let filesystem = LocalFileSystem::new_with_prefix(directory.path())?;
+        repeatable_delete(Arc::new(filesystem), "filesystem").await
+    }
+
+    #[tokio::test]
+    async fn delete_batch_drains_partial_failures_before_retry() -> TestResult {
+        for phase in [FailurePhase::Before, FailurePhase::After] {
+            let faults = FaultStore::new(InMemory::new());
+            let store: Arc<dyn ObjectStore> = Arc::new(faults.clone());
+            let scoped = test_scope(Arc::clone(&store), "partial")?;
+            let incarnation = Uuid::new_v4();
+            let keys = (1_u128..=3)
+                .map(|storage_id| {
+                    ImmutableKey::from_parts(
+                        incarnation,
+                        ImmutableKind::Blob,
+                        Uuid::from_u128(storage_id),
+                        Digest::of(&storage_id.to_be_bytes()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for key in &keys {
+                put_raw(&store, scoped.immutable_location(*key), 1).await?;
+            }
+            faults.reset();
+            faults.schedule(Failure {
+                operation: Operation::Delete,
+                occurrence: 2,
+                phase,
+            });
+
+            let error = scoped
+                .delete_immutable_batch(&keys)
+                .await
+                .err()
+                .ok_or("a partial delete returned success")?;
+            assert!(matches!(
+                &error,
+                Error::Store(error) if FaultStore::is_injected(error)
+            ));
+            assert_eq!(faults.metrics().operation(Operation::Delete).requests, 3);
+            assert!(is_missing(&store, &scoped.immutable_location(keys[0])).await);
+            assert_eq!(
+                is_missing(&store, &scoped.immutable_location(keys[1])).await,
+                phase == FailurePhase::After
+            );
+            assert!(is_missing(&store, &scoped.immutable_location(keys[2])).await);
+
+            scoped.delete_immutable_batch(&keys).await?;
+            for key in keys {
+                assert!(is_missing(&store, &scoped.immutable_location(key)).await);
+            }
+        }
+        Ok(())
+    }
+
+    fn test_scope(store: Arc<dyn ObjectStore>, log_id: &str) -> Result<ScopedStore, Error> {
+        Ok(ScopedStore::unvalidated(
+            store,
+            Path::from("gc-tests"),
+            &LogId::new(log_id)?,
+        ))
+    }
+
+    async fn put_raw(
+        store: &Arc<dyn ObjectStore>,
+        location: Path,
+        size: usize,
+    ) -> Result<(), object_store::Error> {
+        store
+            .put(&location, Bytes::from(vec![0_u8; size]).into())
+            .await?;
+        Ok(())
+    }
+
+    async fn is_missing(store: &Arc<dyn ObjectStore>, location: &Path) -> bool {
+        matches!(
+            store.get(location).await,
+            Err(object_store::Error::NotFound { .. })
+        )
+    }
+
+    async fn repeatable_delete(store: Arc<dyn ObjectStore>, log_id: &str) -> TestResult {
+        let scoped = test_scope(Arc::clone(&store), log_id)?;
+        let key = ImmutableKey::new(
+            Uuid::new_v4(),
+            ImmutableKind::Checkpoint,
+            Digest::of(log_id.as_bytes()),
+        );
+        let location = scoped.immutable_location(key);
+        put_raw(&store, location.clone(), 4).await?;
+
+        scoped.delete_immutable_batch(&[key]).await?;
+        assert!(is_missing(&store, &location).await);
+        scoped.delete_immutable_batch(&[key]).await?;
+        assert!(is_missing(&store, &location).await);
+        Ok(())
+    }
 }
