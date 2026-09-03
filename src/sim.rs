@@ -296,6 +296,18 @@ impl FaultStore {
         self.pause_at(Operation::Put, occurrence, phase)
     }
 
+    /// Pauses the next object read at `phase`.
+    pub fn pause_next_get(&self, phase: FailurePhase) -> PauseControl {
+        self.pause_next(Operation::Get, phase)
+    }
+
+    /// Pauses one object read occurrence at `phase`.
+    ///
+    /// `occurrence` is one-based and relative to the last call to [`Self::reset`].
+    pub fn pause_get_at(&self, occurrence: u64, phase: FailurePhase) -> PauseControl {
+        self.pause_at(Operation::Get, occurrence, phase)
+    }
+
     /// Pauses the next object deletion at `phase`.
     pub fn pause_next_delete(&self, phase: FailurePhase) -> PauseControl {
         self.pause_next(Operation::Delete, phase)
@@ -609,12 +621,17 @@ impl ObjectStore for FaultStore {
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
         let ticket = self.start(Operation::Get, 0);
         let returns_body = !options.head;
+        self.enter_pause(ticket, FailurePhase::Before).await;
         if self.take_failure(ticket, FailurePhase::Before) {
             self.finish(ticket, location, 0, RequestOutcome::InjectedBefore);
             return Err(Self::injected_error(ticket, FailurePhase::Before, location));
         }
         let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.get_opts(location, options).await {
+        let result = self.inner.get_opts(location, options).await;
+        if result.is_ok() {
+            self.enter_pause(ticket, FailurePhase::After).await;
+        }
+        match result {
             Ok(result) if fail_after => {
                 let bytes = if returns_body {
                     result.range.end.saturating_sub(result.range.start)
