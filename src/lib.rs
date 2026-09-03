@@ -155,26 +155,24 @@ pub struct CheckpointRef {
 /// An opaque observed position used for conditional publication.
 #[derive(Clone, Debug)]
 pub struct Cursor {
-    pub(crate) generation: u64,
-    pub(crate) next_sequence: u64,
-    pub(crate) tip: Option<Digest>,
+    pub(crate) head: format::Head,
     pub(crate) version: UpdateVersion,
 }
 
 impl Cursor {
     #[must_use]
     pub const fn generation(&self) -> u64 {
-        self.generation
+        self.head.generation
     }
 
     #[must_use]
     pub const fn next_sequence(&self) -> u64 {
-        self.next_sequence
+        self.head.next_sequence
     }
 
     #[must_use]
-    pub const fn tip(&self) -> Option<Digest> {
-        self.tip
+    pub fn tip(&self) -> Option<Digest> {
+        self.head.tip()
     }
 
     #[must_use]

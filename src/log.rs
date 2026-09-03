@@ -36,7 +36,7 @@ impl View {
 #[derive(Debug)]
 pub enum Refresh {
     NotModified,
-    Updated(View),
+    Updated(Box<View>),
 }
 
 #[derive(Debug)]

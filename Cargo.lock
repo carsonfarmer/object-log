@@ -1124,6 +1124,7 @@ dependencies = [
 name = "object-log"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "bytes",
  "criterion",
