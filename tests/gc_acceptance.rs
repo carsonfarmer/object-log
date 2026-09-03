@@ -80,12 +80,19 @@ async fn run(
         },
     )
     .await?;
-    let leaf = log.put_object(Bytes::from_static(b"live")).await?;
+    let initial = log.load().await?;
+    let leaf = log
+        .put_object(initial.cursor(), Bytes::from_static(b"live"))
+        .await?;
     let node = log
-        .put_node(Bytes::from_static(b"root"), vec![leaf.clone()])
+        .put_node(
+            initial.cursor(),
+            Bytes::from_static(b"root"),
+            vec![leaf.clone()],
+        )
         .await?;
     let prepared = log.prepare(
-        log.load().await?.cursor(),
+        initial.cursor(),
         TransactionId::new(),
         Bytes::from_static(b"live graph"),
         Bytes::new(),
@@ -114,11 +121,11 @@ async fn run(
 
     assert_eq!(log.read_tail(&current).await?.len(), 1);
     assert_eq!(
-        log.read_node(&current, &node).await?.children(),
-        std::slice::from_ref(&leaf)
+        log.read_node(&current, node.reference()).await?.children(),
+        std::slice::from_ref(leaf.reference())
     );
     assert_eq!(
-        log.read_object(&current, &leaf).await?,
+        log.read_object(&current, leaf.reference()).await?,
         Bytes::from_static(b"live")
     );
 
@@ -145,8 +152,9 @@ async fn run(
 }
 
 async fn put_unreachable(log: &Log, count: usize, concurrency: usize) -> TestResult {
+    let cursor = log.load().await?.cursor().clone();
     stream::iter(0..count)
-        .map(|_| log.put_object(Bytes::from_static(b"x")))
+        .map(|_| log.put_object(&cursor, Bytes::from_static(b"x")))
         .buffer_unordered(concurrency)
         .try_for_each(|_| future::ready(Ok(())))
         .await?;

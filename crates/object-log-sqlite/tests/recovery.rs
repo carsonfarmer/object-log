@@ -183,8 +183,11 @@ async fn corrupt_descriptors_and_referenced_blobs_fail_closed() -> TestResult {
 
     for (id, corrupt) in [("missing-blob", false), ("corrupt-blob", true)] {
         let (raw, log) = open_log(id, Options::default()).await?;
-        let object = log.put_object(Bytes::from(vec![0; 4_096])).await?;
-        let path = object_path(&raw, id, object.digest()).await?;
+        let view = log.load().await?;
+        let object = log
+            .put_object(view.cursor(), Bytes::from(vec![0; 4_096]))
+            .await?;
+        let path = object_path(&raw, id, object.reference().digest()).await?;
         commit_record(&log, snapshot_record()?, vec![object]).await?;
         if corrupt {
             raw.put(&path, Bytes::from(vec![1; 4_096]).into()).await?;
@@ -309,7 +312,7 @@ async fn commit_sql(database: &mut Database, sql: &str) -> TestResult {
 async fn commit_record(
     log: &Log,
     operation: Bytes,
-    objects: Vec<object_log::ObjectRef>,
+    objects: Vec<object_log::StagedObject>,
 ) -> TestResult {
     let view = log.load().await?;
     let prepared = log.prepare(

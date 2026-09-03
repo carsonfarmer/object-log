@@ -7,7 +7,8 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
 use object_log::{
     CheckpointResolution, CheckpointStatus, CommitStatus, Error as LogError, Log, ObjectKind,
-    ObjectRef, PendingCheckpoint, PreparedCommit, Refresh, Resolution, TransactionId, View,
+    ObjectRef, PendingCheckpoint, PreparedCommit, Refresh, Resolution, StagedObject, TransactionId,
+    View,
 };
 use rusqlite::{Connection, MAIN_DB};
 use uuid::Uuid;
@@ -375,7 +376,10 @@ impl Database {
         Ok(())
     }
 
-    async fn stage_snapshot(&self, payload: Bytes) -> Result<(Bytes, Vec<ObjectRef>), SqliteError> {
+    async fn stage_snapshot(
+        &self,
+        payload: Bytes,
+    ) -> Result<(Bytes, Vec<StagedObject>), SqliteError> {
         self.stage_payload(payload, PAGE_SIZE as usize, Record::snapshot)
             .await
     }
@@ -386,7 +390,7 @@ impl Database {
         header: [u8; WAL_HEADER_BYTES],
         prior: u32,
         current: u32,
-    ) -> Result<(Bytes, Vec<ObjectRef>), SqliteError> {
+    ) -> Result<(Bytes, Vec<StagedObject>), SqliteError> {
         self.stage_payload(payload, WAL_FRAME_BYTES, |len, inline, chunks| {
             Record::wal(len, inline, chunks, header, prior, current)
         })
@@ -398,7 +402,7 @@ impl Database {
         payload: Bytes,
         unit: usize,
         record: F,
-    ) -> Result<(Bytes, Vec<ObjectRef>), SqliteError>
+    ) -> Result<(Bytes, Vec<StagedObject>), SqliteError>
     where
         F: Fn(usize, Option<Bytes>, usize) -> Result<Record, SqliteError>,
     {
@@ -422,7 +426,8 @@ impl Database {
             .map_err(|_| SqliteError::PayloadLimit)?;
         let uploads = (0..payload_len).step_by(chunk_size).map(|offset| {
             let end = offset.saturating_add(chunk_size).min(payload_len);
-            self.log.put_object(payload.slice(offset..end))
+            self.log
+                .put_object(self.view.cursor(), payload.slice(offset..end))
         });
         let objects = stream::iter(uploads)
             .buffered(MAX_CONCURRENT_OBJECTS)

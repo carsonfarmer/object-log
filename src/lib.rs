@@ -25,6 +25,7 @@ use bytes::Bytes;
 use object_store::UpdateVersion;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 use uuid::Uuid;
 
 const DIGEST_LEN: usize = 32;
@@ -302,6 +303,30 @@ impl CheckpointRef {
 pub struct Cursor {
     pub(crate) head: format::Head,
     pub(crate) version: UpdateVersion,
+    pub(crate) staging_domain: Option<Arc<StagingDomain>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StagingDomain;
+
+/// Proof that one immutable object graph is ready for publication.
+///
+/// A staged object is valid only for its source [`Log`] handle and collection
+/// epoch. Clones of that handle share the proof. Use [`Log::stage_objects`] to
+/// use durable [`ObjectRef`] values in new work.
+#[derive(Clone, Debug)]
+pub struct StagedObject {
+    pub(crate) object: ObjectRef,
+    pub(crate) domain: Arc<StagingDomain>,
+    pub(crate) collection_epoch: u64,
+}
+
+impl StagedObject {
+    /// Returns the durable object reference carried by this proof.
+    #[must_use]
+    pub const fn reference(&self) -> &ObjectRef {
+        &self.object
+    }
 }
 
 impl Cursor {
@@ -435,6 +460,9 @@ pub enum Error {
     /// A read used a view from before the durable collection epoch advanced.
     #[error("the supplied view predates the current collection epoch")]
     ViewExpired,
+    /// Staged object proof belongs to another log handle or collection epoch.
+    #[error("staged object proof does not match the target log and collection epoch")]
+    InvalidStagedObject,
     /// An active collection plan contains data required by a publication.
     #[error("an active collection plan fences required immutable data")]
     CollectionFence,

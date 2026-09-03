@@ -212,8 +212,11 @@ async fn checkpoint_root_limit_fails_before_index_publication() -> TestResult {
         },
     )
     .await?;
-    let object = log.put_object(Bytes::from_static(b"page")).await?;
-    let one = append(&log, &log.load().await?, b"one").await?;
+    let initial = log.load().await?;
+    let object = log
+        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .await?;
+    let one = append(&log, &initial, b"one").await?;
     let through = one.tail()[0].clone();
 
     assert!(matches!(
@@ -235,8 +238,11 @@ async fn checkpoint_declares_live_objects_for_lazy_restore() -> TestResult {
     let backend = Arc::new(InMemory::new());
     let store: Arc<dyn ObjectStore> = backend.clone();
     let log = open(store, "checkpoint-objects", Options::default()).await?;
-    let object = log.put_object(Bytes::from_static(b"page")).await?;
-    let one = append(&log, &log.load().await?, b"one").await?;
+    let initial = log.load().await?;
+    let object = log
+        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .await?;
+    let one = append(&log, &initial, b"one").await?;
     let through = one.tail()[0].clone();
     let CheckpointStatus::Published(compacted) = log
         .publish_checkpoint(
@@ -252,16 +258,25 @@ async fn checkpoint_declares_live_objects_for_lazy_restore() -> TestResult {
 
     backend
         .delete(
-            &immutable_location(&backend, "checkpoint-objects", "blobs", object.digest()).await?,
+            &immutable_location(
+                &backend,
+                "checkpoint-objects",
+                "blobs",
+                object.reference().digest(),
+            )
+            .await?,
         )
         .await?;
     let checkpoint = log
         .read_checkpoint(&compacted)
         .await?
         .ok_or("checkpoint is missing")?;
-    assert_eq!(checkpoint.objects(), std::slice::from_ref(&object));
+    assert_eq!(
+        checkpoint.objects(),
+        std::slice::from_ref(object.reference())
+    );
     assert!(matches!(
-        log.read_object(&compacted, &object).await,
+        log.read_object(&compacted, object.reference()).await,
         Err(object_log::Error::CorruptObject)
     ));
     Ok(())
@@ -275,16 +290,27 @@ async fn checkpoint_can_root_a_traversable_object_tree() -> TestResult {
         Options::default(),
     )
     .await?;
-    let page = log.put_object(Bytes::from_static(b"page")).await?;
+    let initial = log.load().await?;
+    let page = log
+        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .await?;
     let node = log
-        .put_node(Bytes::from_static(b"page map"), vec![page.clone()])
+        .put_node(
+            initial.cursor(),
+            Bytes::from_static(b"page map"),
+            vec![page.clone()],
+        )
         .await?;
     let same = log
-        .put_node(Bytes::from_static(b"page map"), vec![page.clone()])
+        .put_node(
+            initial.cursor(),
+            Bytes::from_static(b"page map"),
+            vec![page.clone()],
+        )
         .await?;
-    assert_ne!(same, node);
-    assert_eq!(same.digest(), node.digest());
-    let one = append(&log, &log.load().await?, b"one").await?;
+    assert_ne!(same.reference(), node.reference());
+    assert_eq!(same.reference().digest(), node.reference().digest());
+    let one = append(&log, &initial, b"one").await?;
     let through = one.tail()[0].clone();
     let CheckpointStatus::Published(compacted) = log
         .publish_checkpoint(
@@ -302,71 +328,86 @@ async fn checkpoint_can_root_a_traversable_object_tree() -> TestResult {
         .read_checkpoint(&compacted)
         .await?
         .ok_or("checkpoint is missing")?;
-    assert_eq!(checkpoint.objects(), std::slice::from_ref(&node));
-    let restored = log.read_node(&compacted, &node).await?;
+    assert_eq!(checkpoint.objects(), std::slice::from_ref(node.reference()));
+    let restored = log.read_node(&compacted, node.reference()).await?;
     assert_eq!(restored.payload(), b"page map".as_slice());
-    assert_eq!(restored.children(), &[page]);
+    assert_eq!(restored.children(), std::slice::from_ref(page.reference()));
     Ok(())
 }
 
 #[tokio::test]
-async fn reference_node_rejects_missing_and_corrupt_children() -> TestResult {
+async fn staging_rejects_missing_and_corrupt_existing_objects() -> TestResult {
     let backend = Arc::new(InMemory::new());
     let store: Arc<dyn ObjectStore> = backend.clone();
     let log = open(store, "invalid-node-child", Options::default()).await?;
-    let missing = log.put_object(Bytes::from_static(b"missing")).await?;
+    let view = log.load().await?;
+    let missing = log
+        .put_object(view.cursor(), Bytes::from_static(b"missing"))
+        .await?;
     backend
         .delete(
-            &immutable_location(&backend, "invalid-node-child", "blobs", missing.digest()).await?,
+            &immutable_location(
+                &backend,
+                "invalid-node-child",
+                "blobs",
+                missing.reference().digest(),
+            )
+            .await?,
         )
         .await?;
     assert!(matches!(
-        log.put_node(Bytes::new(), vec![missing]).await,
+        log.stage_objects(view.cursor(), vec![missing.reference().clone()])
+            .await,
         Err(object_log::Error::InvalidFormat(_))
     ));
 
-    let corrupt = log.put_object(Bytes::from_static(b"correct")).await?;
+    let corrupt = log
+        .put_object(view.cursor(), Bytes::from_static(b"correct"))
+        .await?;
     backend
         .put(
-            &immutable_location(&backend, "invalid-node-child", "blobs", corrupt.digest()).await?,
+            &immutable_location(
+                &backend,
+                "invalid-node-child",
+                "blobs",
+                corrupt.reference().digest(),
+            )
+            .await?,
             Bytes::from_static(b"changed").into(),
         )
         .await?;
     assert!(matches!(
-        log.put_node(Bytes::new(), vec![corrupt]).await,
+        log.stage_objects(view.cursor(), vec![corrupt.reference().clone()])
+            .await,
         Err(object_log::Error::CorruptObject)
     ));
     Ok(())
 }
 
 #[tokio::test]
-async fn checkpoint_rejects_missing_declared_object_before_publication() -> TestResult {
+async fn checkpoint_staging_rejects_missing_declared_object() -> TestResult {
     let backend = Arc::new(InMemory::new());
     let store: Arc<dyn ObjectStore> = backend.clone();
     let log = open(store, "checkpoint-missing-object", Options::default()).await?;
-    let object = log.put_object(Bytes::from_static(b"page")).await?;
-    let one = append(&log, &log.load().await?, b"one").await?;
-    let through = one.tail()[0].clone();
+    let initial = log.load().await?;
+    let object = log
+        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .await?;
     backend
         .delete(
             &immutable_location(
                 &backend,
                 "checkpoint-missing-object",
                 "blobs",
-                object.digest(),
+                object.reference().digest(),
             )
             .await?,
         )
         .await?;
 
     assert!(matches!(
-        log.publish_checkpoint(
-            &one,
-            &through,
-            Bytes::from_static(b"page map"),
-            vec![object],
-        )
-        .await,
+        log.stage_objects(initial.cursor(), vec![object.reference().clone()])
+            .await,
         Err(object_log::Error::InvalidFormat(_))
     ));
     assert!(log.load().await?.checkpoint().is_none());
@@ -374,20 +415,21 @@ async fn checkpoint_rejects_missing_declared_object_before_publication() -> Test
 }
 
 #[tokio::test]
-async fn checkpoint_rejects_corrupt_declared_object_before_publication() -> TestResult {
+async fn checkpoint_staging_rejects_corrupt_declared_object() -> TestResult {
     let backend = Arc::new(InMemory::new());
     let store: Arc<dyn ObjectStore> = backend.clone();
     let log = open(store, "checkpoint-corrupt-object", Options::default()).await?;
-    let object = log.put_object(Bytes::from_static(b"page")).await?;
-    let one = append(&log, &log.load().await?, b"one").await?;
-    let through = one.tail()[0].clone();
+    let initial = log.load().await?;
+    let object = log
+        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .await?;
     backend
         .put(
             &immutable_location(
                 &backend,
                 "checkpoint-corrupt-object",
                 "blobs",
-                object.digest(),
+                object.reference().digest(),
             )
             .await?,
             Bytes::from_static(b"bad!").into(),
@@ -395,13 +437,8 @@ async fn checkpoint_rejects_corrupt_declared_object_before_publication() -> Test
         .await?;
 
     assert!(matches!(
-        log.publish_checkpoint(
-            &one,
-            &through,
-            Bytes::from_static(b"page map"),
-            vec![object],
-        )
-        .await,
+        log.stage_objects(initial.cursor(), vec![object.reference().clone()])
+            .await,
         Err(object_log::Error::CorruptObject)
     ));
     assert!(log.load().await?.checkpoint().is_none());
@@ -483,7 +520,7 @@ async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
 
 #[tokio::test]
 #[cfg(feature = "test-util")]
-async fn pending_checkpoint_rejects_a_lost_root() -> TestResult {
+async fn reopened_checkpoint_resolution_rejects_a_lost_root() -> TestResult {
     let backend = Arc::new(InMemory::new());
     let faults = FaultStore::new(backend.clone());
     let log = open(
@@ -492,8 +529,11 @@ async fn pending_checkpoint_rejects_a_lost_root() -> TestResult {
         Options::default(),
     )
     .await?;
-    let object = log.put_object(Bytes::from_static(b"page")).await?;
-    let one = append(&log, &log.load().await?, b"one").await?;
+    let initial = log.load().await?;
+    let object = log
+        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .await?;
+    let one = append(&log, &initial, b"one").await?;
     let through = one.tail()[0].clone();
     faults.reset();
     faults.schedule(Failure {
@@ -515,20 +555,34 @@ async fn pending_checkpoint_rejects_a_lost_root() -> TestResult {
             return Err("lost checkpoint response did not remain pending".into());
         }
     };
+    faults.reset();
+    assert!(matches!(
+        log.resolve_checkpoint(pending.clone()).await?,
+        CheckpointResolution::Published(_)
+    ));
+    assert_eq!(segment_gets(&faults, "blobs"), 0);
+    assert_eq!(segment_gets(&faults, "checkpoints"), 0);
     backend
         .delete(
             &immutable_location(
                 &backend,
                 "checkpoint-pending-lost-root",
                 "blobs",
-                object.digest(),
+                object.reference().digest(),
             )
             .await?,
         )
         .await?;
 
+    faults.reset();
+    let reopened = open(
+        Arc::new(faults),
+        "checkpoint-pending-lost-root",
+        Options::default(),
+    )
+    .await?;
     assert!(matches!(
-        log.resolve_checkpoint(pending).await,
+        reopened.resolve_checkpoint(pending).await,
         Err(object_log::Error::InvalidFormat(_))
     ));
     Ok(())
@@ -843,4 +897,15 @@ async fn append_with_lost_response(
             Err("lost response did not leave pending evidence".into())
         }
     }
+}
+
+#[cfg(feature = "test-util")]
+fn segment_gets(store: &FaultStore, segment: &str) -> usize {
+    let marker = format!("/{segment}/");
+    store
+        .metrics()
+        .events
+        .iter()
+        .filter(|event| event.operation == Operation::Get && event.path.contains(&marker))
+        .count()
 }

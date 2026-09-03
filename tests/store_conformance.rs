@@ -44,21 +44,34 @@ async fn log_namespaces_are_isolated() -> Result<(), Box<dyn StdError>> {
     let second = Log::open(backend.scope(&LogId::new("tenant-b")?), Options::default()).await?;
 
     let bytes = Bytes::from_static(b"same logical object");
-    let first_object = first.put_object(bytes.clone()).await?;
-    let second_object = second.put_object(bytes.clone()).await?;
-    assert_ne!(first_object, second_object);
-    assert_eq!(first_object.kind(), second_object.kind());
-    assert_eq!(first_object.digest(), second_object.digest());
-    assert_eq!(first_object.len(), second_object.len());
+    let first_view = first.load().await?;
+    let second_view = second.load().await?;
+    let first_object = first.put_object(first_view.cursor(), bytes.clone()).await?;
+    let second_object = second
+        .put_object(second_view.cursor(), bytes.clone())
+        .await?;
+    assert_ne!(first_object.reference(), second_object.reference());
+    assert_eq!(
+        first_object.reference().kind(),
+        second_object.reference().kind()
+    );
+    assert_eq!(
+        first_object.reference().digest(),
+        second_object.reference().digest()
+    );
+    assert_eq!(
+        first_object.reference().len(),
+        second_object.reference().len()
+    );
     assert_eq!(
         first
-            .read_object(&first.load().await?, &first_object)
+            .read_object(&first.load().await?, first_object.reference())
             .await?,
         bytes
     );
     assert_eq!(
         second
-            .read_object(&second.load().await?, &second_object)
+            .read_object(&second.load().await?, second_object.reference())
             .await?,
         bytes
     );

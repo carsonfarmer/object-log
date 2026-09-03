@@ -699,6 +699,7 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
                 e_tag: wire.e_tag,
                 version: wire.storage_version,
             },
+            staging_domain: None,
         },
         transaction_id: transaction_id(&wire.transaction_id)?,
         storage_id: storage_id(&wire.storage_id)?,
@@ -1399,6 +1400,7 @@ mod tests {
                     e_tag: Some("etag".to_owned()),
                     version: Some("version".to_owned()),
                 },
+                staging_domain: None,
             },
             transaction_id: crate::TransactionId::new(),
             storage_id: storage_id(),
@@ -1423,6 +1425,37 @@ mod tests {
         assert_eq!(decoded.operation, prepared.operation);
         assert_eq!(decoded.result, prepared.result);
         assert_eq!(decoded.objects, prepared.objects);
+    }
+
+    #[test]
+    fn recovery_token_excludes_staging_proof() {
+        let mut prepared = crate::PreparedCommit {
+            cursor: crate::Cursor {
+                head: Head::empty(log_id(), incarnation(), Options::default()),
+                version: object_store::UpdateVersion {
+                    e_tag: Some("etag".to_owned()),
+                    version: Some("version".to_owned()),
+                },
+                staging_domain: None,
+            },
+            transaction_id: crate::TransactionId::from_uuid(uuid::Uuid::from_u128(3)),
+            storage_id: storage_id(),
+            operation: Bytes::from_static(b"operation"),
+            result: Bytes::from_static(b"result"),
+            objects: vec![ObjectRef {
+                kind: ObjectKind::Blob,
+                storage_id: crate::StorageId::from_uuid(uuid::Uuid::from_u128(4)),
+                digest: Digest::of(b"blob"),
+                len: 4,
+            }],
+        };
+        let without_proof = encode_recovery_token(&prepared)
+            .unwrap_or_else(|error| panic!("encode failed: {error}"));
+        prepared.cursor.staging_domain = Some(std::sync::Arc::new(crate::StagingDomain));
+        let with_proof = encode_recovery_token(&prepared)
+            .unwrap_or_else(|error| panic!("encode failed: {error}"));
+
+        assert_eq!(with_proof, without_proof);
     }
 
     #[tokio::test]

@@ -347,13 +347,13 @@ async fn recovery_token_can_stage_and_publish_after_process_loss() -> TestResult
 }
 
 #[tokio::test]
-async fn pending_evidence_survives_failed_referenced_object_validation() -> TestResult {
+async fn recovery_token_survives_failed_referenced_object_validation() -> TestResult {
     let (store, log, _) = open_model_log(12).await?;
     store.reset();
-    let object = log
-        .put_object(Bytes::from_static(b"referenced object"))
-        .await?;
     let view = log.load().await?;
+    let object = log
+        .put_object(view.cursor(), Bytes::from_static(b"referenced object"))
+        .await?;
     let prepared = log.prepare(
         view.cursor(),
         transaction_id(12, 1),
@@ -361,13 +361,14 @@ async fn pending_evidence_survives_failed_referenced_object_validation() -> Test
         Bytes::new(),
         vec![object],
     )?;
+    let token = prepared.recovery_token()?;
     schedule_head_fault(&store, FailurePhase::Before);
-    let pending = match log.commit(prepared).await? {
-        CommitStatus::Pending(pending) => pending,
+    match log.commit(prepared).await? {
+        CommitStatus::Pending(_) => {}
         CommitStatus::Committed(_) | CommitStatus::Conflict(_) => {
             return Err(test_error("failed publication did not remain pending").into());
         }
-    };
+    }
 
     store.reset();
     store.schedule(Failure {
@@ -375,23 +376,200 @@ async fn pending_evidence_survives_failed_referenced_object_validation() -> Test
         occurrence: 2,
         phase: FailurePhase::Before,
     });
-    let pending = match log.resolve(pending).await? {
-        Resolution::StillPending(pending) => pending,
+    match log.resume(&token).await? {
+        Resolution::StillPending(_) => {}
         Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
             return Err(test_error("failed object validation discarded pending evidence").into());
         }
-    };
+    }
 
     assert!(matches!(
-        log.resolve(pending).await?,
+        log.resume(&token).await?,
         Resolution::Committed(_)
     ));
     Ok(())
 }
 
 #[tokio::test]
+async fn staged_blob_and_node_publish_without_dependency_reads() -> TestResult {
+    let (store, log, _) = open_model_log(120).await?;
+    let view = log.load().await?;
+    let child = log
+        .put_object(view.cursor(), Bytes::from_static(b"child"))
+        .await?;
+
+    store.reset();
+    let node = log
+        .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+        .await?;
+    assert_eq!(store.metrics().operation(Operation::Get).requests, 0);
+
+    store.reset();
+    let prepared = log.prepare(
+        view.cursor(),
+        transaction_id(120, 1),
+        Bytes::new(),
+        Bytes::new(),
+        vec![node],
+    )?;
+    assert!(matches!(
+        log.commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
+    assert_eq!(store.metrics().operation(Operation::Get).requests, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_token_discards_staging_proof_and_verifies_the_blob() -> TestResult {
+    let (store, log, _) = open_model_log(121).await?;
+    let view = log.load().await?;
+    let object = log
+        .put_object(view.cursor(), Bytes::from_static(b"recover me"))
+        .await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        transaction_id(121, 1),
+        Bytes::new(),
+        Bytes::new(),
+        vec![object],
+    )?;
+    let token = prepared.recovery_token()?;
+
+    store.reset();
+    assert!(matches!(
+        log.resume(&token).await?,
+        Resolution::Committed(_)
+    ));
+    assert_eq!(segment_gets(&store, "blobs"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn batched_existing_staging_deduplicates_the_object_graph() -> TestResult {
+    let (store, log, _) = open_model_log(122).await?;
+    let view = log.load().await?;
+    let child = log
+        .put_object(view.cursor(), Bytes::from_static(b"child"))
+        .await?;
+    let node = log
+        .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+        .await?;
+
+    store.reset();
+    let staged = log
+        .stage_objects(
+            view.cursor(),
+            vec![node.reference().clone(), node.reference().clone()],
+        )
+        .await?;
+    assert_eq!(staged.len(), 2);
+    assert_eq!(segment_gets(&store, "nodes"), 1);
+    assert_eq!(segment_gets(&store, "blobs"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn separately_opened_handle_rejects_new_work_with_foreign_proof() -> TestResult {
+    let (store, first, log_id) = open_model_log(123).await?;
+    let first_view = first.load().await?;
+    let object = first
+        .put_object(first_view.cursor(), Bytes::from_static(b"isolated proof"))
+        .await?;
+    let second = reopen_model_log(&store, &log_id).await?;
+    let second_view = second.load().await?;
+
+    assert!(matches!(
+        second.prepare(
+            second_view.cursor(),
+            transaction_id(123, 1),
+            Bytes::new(),
+            Bytes::new(),
+            vec![object],
+        ),
+        Err(object_log::Error::InvalidStagedObject)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn separately_opened_handle_verifies_prepared_and_pending_work() -> TestResult {
+    let (store, first, log_id) = open_model_log(124).await?;
+    let view = first.load().await?;
+    let object = first
+        .put_object(view.cursor(), Bytes::from_static(b"verify on reopen"))
+        .await?;
+    let prepared = first.prepare(
+        view.cursor(),
+        transaction_id(124, 1),
+        Bytes::new(),
+        Bytes::new(),
+        vec![object],
+    )?;
+    let reopened = reopen_model_log(&store, &log_id).await?;
+
+    store.reset();
+    assert!(matches!(
+        reopened.commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
+    assert_eq!(segment_gets(&store, "blobs"), 1);
+
+    let next = reopened.load().await?;
+    let object = reopened
+        .put_object(next.cursor(), Bytes::from_static(b"pending verify"))
+        .await?;
+    let prepared = reopened.prepare(
+        next.cursor(),
+        transaction_id(124, 2),
+        Bytes::new(),
+        Bytes::new(),
+        vec![object],
+    )?;
+    store.reset();
+    schedule_head_fault(&store, FailurePhase::Before);
+    let CommitStatus::Pending(pending) = reopened.commit(prepared).await? else {
+        return Err(test_error("failed update did not return pending").into());
+    };
+    let third = reopen_model_log(&store, &log_id).await?;
+    store.reset();
+    assert!(matches!(
+        third.resolve(pending).await?,
+        Resolution::Committed(_)
+    ));
+    assert_eq!(segment_gets(&store, "blobs"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_handle_pending_resolution_keeps_staging_proof() -> TestResult {
+    let (store, log, _) = open_model_log(125).await?;
+    let view = log.load().await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        transaction_id(125, 1),
+        Bytes::new(),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    store.reset();
+    schedule_head_fault(&store, FailurePhase::Before);
+    let CommitStatus::Pending(pending) = log.commit(prepared).await? else {
+        return Err(test_error("failed update did not return pending").into());
+    };
+
+    store.reset();
+    assert!(matches!(
+        log.resolve(pending).await?,
+        Resolution::Committed(_)
+    ));
+    assert_eq!(segment_gets(&store, "commits"), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn pending_evidence_survives_failed_published_commit_verification() -> TestResult {
-    let (store, log, _) = open_model_log(13).await?;
+    let (store, log, log_id) = open_model_log(13).await?;
     store.reset();
     let view = log.load().await?;
     let prepared = log.prepare(
@@ -408,6 +586,7 @@ async fn pending_evidence_survives_failed_published_commit_verification() -> Tes
             return Err(test_error("lost response did not remain pending").into());
         }
     };
+    let reopened = reopen_model_log(&store, &log_id).await?;
 
     store.reset();
     store.schedule(Failure {
@@ -415,7 +594,7 @@ async fn pending_evidence_survives_failed_published_commit_verification() -> Tes
         occurrence: 2,
         phase: FailurePhase::Before,
     });
-    let pending = match log.resolve(pending).await? {
+    let pending = match reopened.resolve(pending).await? {
         Resolution::StillPending(pending) => pending,
         Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
             return Err(test_error("failed commit verification discarded pending evidence").into());
@@ -423,7 +602,7 @@ async fn pending_evidence_survives_failed_published_commit_verification() -> Tes
     };
 
     assert!(matches!(
-        log.resolve(pending).await?,
+        reopened.resolve(pending).await?,
         Resolution::Committed(_)
     ));
     Ok(())
@@ -746,6 +925,16 @@ fn schedule_head_fault(store: &FaultStore, phase: FailurePhase) {
         occurrence,
         phase,
     });
+}
+
+fn segment_gets(store: &FaultStore, segment: &str) -> usize {
+    let marker = format!("/{segment}/");
+    store
+        .metrics()
+        .events
+        .iter()
+        .filter(|event| event.operation == Operation::Get && event.path.contains(&marker))
+        .count()
 }
 
 fn transaction_id(seed: u64, number: u64) -> TransactionId {

@@ -332,9 +332,9 @@ async fn referenced_objects_are_durable_before_head_publication()
     observed.arm_order_check();
 
     let payload = Bytes::from_static(b"immutable payload");
-    let object = log.put_object(payload.clone()).await?;
     let before = log.load().await?;
-    assert_eq!(log.read_object(&before, &object).await?, payload);
+    let object = log.put_object(before.cursor(), payload.clone()).await?;
+    assert_eq!(log.read_object(&before, object.reference()).await?, payload);
     assert!(before.tail().is_empty());
 
     let prepared = log.prepare(
@@ -349,7 +349,7 @@ async fn referenced_objects_are_durable_before_head_publication()
     };
     assert!(observed.object_existed_before_update());
     let tail = log.read_tail(&after).await?;
-    assert_eq!(tail[0].objects(), &[object]);
+    assert_eq!(tail[0].objects(), std::slice::from_ref(object.reference()));
     Ok(())
 }
 
@@ -358,8 +358,10 @@ async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std:
     let backend = Arc::new(InMemory::new());
     let erased: Arc<dyn ObjectStore> = backend.clone();
     let log = open(erased, "missing-object").await?;
-    let object = log.put_object(Bytes::from_static(b"payload")).await?;
     let view = log.load().await?;
+    let object = log
+        .put_object(view.cursor(), Bytes::from_static(b"payload"))
+        .await?;
     let prepared = log.prepare(
         view.cursor(),
         TransactionId::new(),
@@ -371,13 +373,21 @@ async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std:
         return Err("object commit did not publish".into());
     };
     backend
-        .delete(&immutable_location(&backend, "missing-object", "blobs", object.digest()).await?)
+        .delete(
+            &immutable_location(
+                &backend,
+                "missing-object",
+                "blobs",
+                object.reference().digest(),
+            )
+            .await?,
+        )
         .await?;
 
     let tail = log.read_tail(&committed).await?;
-    assert_eq!(tail[0].objects(), std::slice::from_ref(&object));
+    assert_eq!(tail[0].objects(), std::slice::from_ref(object.reference()));
     assert!(matches!(
-        log.read_object(&committed, &object).await,
+        log.read_object(&committed, object.reference()).await,
         Err(object_log::Error::CorruptObject)
     ));
     Ok(())
@@ -389,8 +399,10 @@ async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn
     let backend = Arc::new(InMemory::new());
     let erased: Arc<dyn ObjectStore> = backend.clone();
     let log = open(erased, "changed-object").await?;
-    let object = log.put_object(Bytes::from_static(b"payload")).await?;
     let view = log.load().await?;
+    let object = log
+        .put_object(view.cursor(), Bytes::from_static(b"payload"))
+        .await?;
     let prepared = log.prepare(
         view.cursor(),
         TransactionId::new(),
@@ -403,17 +415,23 @@ async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn
     };
     backend
         .put(
-            &immutable_location(&backend, "changed-object", "blobs", object.digest()).await?,
+            &immutable_location(
+                &backend,
+                "changed-object",
+                "blobs",
+                object.reference().digest(),
+            )
+            .await?,
             Bytes::from_static(b"changed").into(),
         )
         .await?;
 
     assert_eq!(
         log.read_tail(&committed).await?[0].objects(),
-        std::slice::from_ref(&object)
+        std::slice::from_ref(object.reference())
     );
     assert!(matches!(
-        log.read_object(&committed, &object).await,
+        log.read_object(&committed, object.reference()).await,
         Err(object_log::Error::CorruptObject)
     ));
     Ok(())

@@ -577,9 +577,11 @@ async fn open_rejects_options_that_cannot_hold_one_wal_frame() -> TestResult {
 #[tokio::test]
 async fn declared_payload_length_is_checked_before_allocation() -> TestResult {
     let log = open_log("sqlite-malicious-length").await?;
-    let object = log.put_object(Bytes::from(vec![0; 4_096])).await?;
-    assert_eq!(object.kind(), ObjectKind::Blob);
     let view = log.load().await?;
+    let object = log
+        .put_object(view.cursor(), Bytes::from(vec![0; 4_096]))
+        .await?;
+    assert_eq!(object.reference().kind(), ObjectKind::Blob);
     let operation = malicious_snapshot_record(u64::MAX - 4_095)?;
     let prepared = log.prepare(
         view.cursor(),

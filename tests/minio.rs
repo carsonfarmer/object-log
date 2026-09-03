@@ -97,7 +97,9 @@ async fn minio_passes_recovery_checkpoint_and_gc_flow() -> TestResult {
     let gc_log = Log::open(gc_backend.scope(&gc_id), Options::default()).await?;
     let source = gc_log.load().await?;
     for _ in 0..1_001 {
-        gc_log.put_object(Bytes::from_static(b"x")).await?;
+        gc_log
+            .put_object(source.cursor(), Bytes::from_static(b"x"))
+            .await?;
     }
     let CollectionStart::Installed(fenced, start) = gc_log.start_collection(&source).await? else {
         return Err("MinIO collection did not install".into());

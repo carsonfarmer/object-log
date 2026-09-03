@@ -111,7 +111,7 @@ async fn collection_deletes_only_unreachable_data_and_classifies_missing_reads()
     let old = fixture.log.load().await?;
     let orphan = fixture
         .log
-        .put_object(Bytes::from_static(b"unreachable"))
+        .put_object(old.cursor(), Bytes::from_static(b"unreachable"))
         .await?;
 
     let CollectionStart::Installed(fenced, start_report) =
@@ -133,11 +133,11 @@ async fn collection_deletes_only_unreachable_data_and_classifies_missing_reads()
     assert_eq!(finish_report.candidate_bytes(), 11);
     assert_eq!(finish_report.delete_attempts(), 1);
     assert!(matches!(
-        fixture.log.read_object(&old, &orphan).await,
+        fixture.log.read_object(&old, orphan.reference()).await,
         Err(Error::ViewExpired)
     ));
     assert!(matches!(
-        fixture.log.read_object(&current, &orphan).await,
+        fixture.log.read_object(&current, orphan.reference()).await,
         Err(Error::CorruptObject)
     ));
     assert!(matches!(
@@ -172,7 +172,10 @@ async fn empty_collection_does_not_write_or_advance_the_head() -> TestResult {
 async fn append_and_collection_have_one_cas_winner_and_preserve_the_fence() -> TestResult {
     let first = Fixture::new("append-start-first", Options::default()).await?;
     let source = first.log.load().await?;
-    first.log.put_object(Bytes::from_static(b"orphan")).await?;
+    first
+        .log
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
+        .await?;
     let prepared = first.log.prepare(
         source.cursor(),
         TransactionId::new(),
@@ -200,7 +203,10 @@ async fn append_and_collection_have_one_cas_winner_and_preserve_the_fence() -> T
 
     let second = Fixture::new("append-start-second", Options::default()).await?;
     let stale = second.log.load().await?;
-    second.log.put_object(Bytes::from_static(b"orphan")).await?;
+    second
+        .log
+        .put_object(stale.cursor(), Bytes::from_static(b"orphan"))
+        .await?;
     let _ = append(&second.log, &stale, b"winner").await?;
     assert!(matches!(
         second.log.start_collection(&stale).await?,
@@ -213,7 +219,10 @@ async fn append_and_collection_have_one_cas_winner_and_preserve_the_fence() -> T
 async fn checkpoint_and_collection_have_one_cas_winner() -> TestResult {
     let first = Fixture::new("checkpoint-start-first", Options::default()).await?;
     let one = append(&first.log, &first.log.load().await?, b"one").await?;
-    first.log.put_object(Bytes::from_static(b"orphan")).await?;
+    first
+        .log
+        .put_object(one.cursor(), Bytes::from_static(b"orphan"))
+        .await?;
     let through = one.tail()[0].clone();
     let fenced = install_collection(&first.log, &one).await?;
     assert!(matches!(
@@ -246,7 +255,10 @@ async fn checkpoint_and_collection_have_one_cas_winner() -> TestResult {
 
     let second = Fixture::new("checkpoint-start-second", Options::default()).await?;
     let one = append(&second.log, &second.log.load().await?, b"one").await?;
-    second.log.put_object(Bytes::from_static(b"orphan")).await?;
+    second
+        .log
+        .put_object(one.cursor(), Bytes::from_static(b"orphan"))
+        .await?;
     let through = one.tail()[0].clone();
     assert!(matches!(
         second
@@ -265,12 +277,19 @@ async fn checkpoint_and_collection_have_one_cas_winner() -> TestResult {
 #[tokio::test]
 async fn collection_preserves_the_checkpoint_tail_and_nested_live_graph() -> TestResult {
     let fixture = Fixture::new("live-graph", Options::default()).await?;
-    let leaf = fixture.log.put_object(Bytes::from_static(b"leaf")).await?;
+    let source = fixture.log.load().await?;
+    let leaf = fixture
+        .log
+        .put_object(source.cursor(), Bytes::from_static(b"leaf"))
+        .await?;
     let node = fixture
         .log
-        .put_node(Bytes::from_static(b"node"), vec![leaf.clone()])
+        .put_node(
+            source.cursor(),
+            Bytes::from_static(b"node"),
+            vec![leaf.clone()],
+        )
         .await?;
-    let source = fixture.log.load().await?;
     let prepared = fixture.log.prepare(
         source.cursor(),
         TransactionId::new(),
@@ -281,12 +300,11 @@ async fn collection_preserves_the_checkpoint_tail_and_nested_live_graph() -> Tes
     let CommitStatus::Committed(base) = fixture.log.commit(prepared).await? else {
         return Err("base commit failed".into());
     };
-    let through = base.tail()[0].clone();
     let CheckpointStatus::Published(checkpointed) = fixture
         .log
         .publish_checkpoint(
             &base,
-            &through,
+            &base.tail()[0],
             Bytes::from_static(b"checkpoint"),
             vec![node.clone()],
         )
@@ -296,7 +314,7 @@ async fn collection_preserves_the_checkpoint_tail_and_nested_live_graph() -> Tes
     };
     let tail_object = fixture
         .log
-        .put_object(Bytes::from_static(b"tail object"))
+        .put_object(checkpointed.cursor(), Bytes::from_static(b"tail object"))
         .await?;
     let prepared = fixture.log.prepare(
         checkpointed.cursor(),
@@ -310,7 +328,7 @@ async fn collection_preserves_the_checkpoint_tail_and_nested_live_graph() -> Tes
     };
     let orphan = fixture
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(live_view.cursor(), Bytes::from_static(b"orphan"))
         .await?;
 
     let CollectionStart::Installed(fenced, report) =
@@ -336,19 +354,26 @@ async fn collection_preserves_the_checkpoint_tail_and_nested_live_graph() -> Tes
         &Bytes::from_static(b"checkpoint")
     );
     assert_eq!(
-        fixture.log.read_node(&current, &node).await?.children(),
-        std::slice::from_ref(&leaf)
+        fixture
+            .log
+            .read_node(&current, node.reference())
+            .await?
+            .children(),
+        std::slice::from_ref(leaf.reference())
     );
     assert_eq!(
-        fixture.log.read_object(&current, &leaf).await?,
+        fixture.log.read_object(&current, leaf.reference()).await?,
         Bytes::from_static(b"leaf")
     );
     assert_eq!(
-        fixture.log.read_object(&current, &tail_object).await?,
+        fixture
+            .log
+            .read_object(&current, tail_object.reference())
+            .await?,
         Bytes::from_static(b"tail object")
     );
     assert!(matches!(
-        fixture.log.read_object(&current, &orphan).await,
+        fixture.log.read_object(&current, orphan.reference()).await,
         Err(Error::CorruptObject)
     ));
     Ok(())
@@ -402,25 +427,30 @@ async fn compacted_commit_resolves_after_collection_removes_its_body() -> TestRe
 }
 
 #[tokio::test]
-async fn collection_fence_rejects_direct_and_nested_dependencies() -> TestResult {
+async fn collection_fence_rejects_stale_and_planned_dependencies() -> TestResult {
     let fixture = Fixture::new("publication-fence", Options::default()).await?;
     let source = append(&fixture.log, &fixture.log.load().await?, b"base").await?;
-    let through = source.tail()[0].clone();
     let planned = fixture
         .log
-        .put_object(Bytes::from_static(b"planned"))
+        .put_object(source.cursor(), Bytes::from_static(b"planned"))
         .await?;
     let fenced = install_collection(&fixture.log, &source).await?;
 
-    let direct = fixture.log.prepare(
-        fenced.cursor(),
-        TransactionId::new(),
-        Bytes::from_static(b"direct"),
-        Bytes::new(),
-        vec![planned.clone()],
-    )?;
     assert!(matches!(
-        fixture.log.commit(direct).await,
+        fixture.log.prepare(
+            fenced.cursor(),
+            TransactionId::new(),
+            Bytes::from_static(b"stale proof"),
+            Bytes::new(),
+            vec![planned.clone()],
+        ),
+        Err(Error::InvalidStagedObject)
+    ));
+    assert!(matches!(
+        fixture
+            .log
+            .stage_objects(fenced.cursor(), vec![planned.reference().clone()])
+            .await,
         Err(Error::CollectionFence)
     ));
     assert!(matches!(
@@ -428,40 +458,12 @@ async fn collection_fence_rejects_direct_and_nested_dependencies() -> TestResult
             .log
             .publish_checkpoint(
                 &fenced,
-                &through,
-                Bytes::from_static(b"direct checkpoint"),
+                &source.tail()[0],
+                Bytes::from_static(b"stale checkpoint proof"),
                 vec![planned.clone()],
             )
             .await,
-        Err(Error::CollectionFence)
-    ));
-
-    let node = fixture
-        .log
-        .put_node(Bytes::from_static(b"new node"), vec![planned])
-        .await?;
-    let nested = fixture.log.prepare(
-        fenced.cursor(),
-        TransactionId::new(),
-        Bytes::from_static(b"nested"),
-        Bytes::new(),
-        vec![node.clone()],
-    )?;
-    assert!(matches!(
-        fixture.log.commit(nested).await,
-        Err(Error::CollectionFence)
-    ));
-    assert!(matches!(
-        fixture
-            .log
-            .publish_checkpoint(
-                &fenced,
-                &through,
-                Bytes::from_static(b"nested checkpoint"),
-                vec![node.clone()],
-            )
-            .await,
-        Err(Error::CollectionFence)
+        Err(Error::InvalidStagedObject)
     ));
     assert!(matches!(
         fixture
@@ -474,15 +476,11 @@ async fn collection_fence_rejects_direct_and_nested_dependencies() -> TestResult
     else {
         return Err("collection did not clear".into());
     };
-    let broken = fixture.log.prepare(
-        cleared.cursor(),
-        TransactionId::new(),
-        Bytes::from_static(b"old node"),
-        Bytes::new(),
-        vec![node],
-    )?;
     assert!(matches!(
-        fixture.log.commit(broken).await,
+        fixture
+            .log
+            .stage_objects(cleared.cursor(), vec![planned.reference().clone()])
+            .await,
         Err(Error::InvalidFormat(_))
     ));
     Ok(())
@@ -513,7 +511,10 @@ async fn retention_and_collection_have_one_winner_and_release_is_idempotent() ->
 
     let second = Fixture::new("collect-first", Options::default()).await?;
     let source = second.log.load().await?;
-    second.log.put_object(Bytes::from_static(b"orphan")).await?;
+    second
+        .log
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
+        .await?;
     let fenced = install_collection(&second.log, &source).await?;
     assert!(matches!(
         second.log.retain(&fenced, RetentionId::new()).await?,
@@ -568,7 +569,7 @@ async fn collection_recovers_lost_fence_and_clear_responses() -> TestResult {
     let source = fixture.log.load().await?;
     fixture
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
         .await?;
     fixture.store.reset();
     fixture.store.schedule(Failure {
@@ -610,7 +611,7 @@ async fn failed_plan_cleanup_is_collected_by_the_next_run() -> TestResult {
     let source = fixture.log.load().await?;
     fixture
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
         .await?;
     let fenced = install_collection(&fixture.log, &source).await?;
     fixture.store.reset();
@@ -645,11 +646,11 @@ async fn failed_plan_cleanup_is_collected_by_the_next_run() -> TestResult {
 #[tokio::test]
 async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() -> TestResult {
     let missing = Fixture::new("missing-live", Options::default()).await?;
+    let source = missing.log.load().await?;
     let object = missing
         .log
-        .put_object(Bytes::from_static(b"required"))
+        .put_object(source.cursor(), Bytes::from_static(b"required"))
         .await?;
-    let source = missing.log.load().await?;
     let prepared = missing.log.prepare(
         source.cursor(),
         TransactionId::new(),
@@ -660,7 +661,7 @@ async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() ->
     let CommitStatus::Committed(live_view) = missing.log.commit(prepared).await? else {
         return Err("live reference did not commit".into());
     };
-    let path = missing.object_path(object.digest()).await?;
+    let path = missing.object_path(object.reference().digest()).await?;
     missing.raw.delete(&path).await?;
     missing.store.reset();
     assert!(matches!(
@@ -677,11 +678,11 @@ async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() ->
         },
     )
     .await?;
+    let source = bounded.log.load().await?;
     let object = bounded
         .log
-        .put_object(Bytes::from_static(b"required"))
+        .put_object(source.cursor(), Bytes::from_static(b"required"))
         .await?;
-    let source = bounded.log.load().await?;
     let prepared = bounded.log.prepare(
         source.cursor(),
         TransactionId::new(),
@@ -704,11 +705,11 @@ async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() ->
 #[tokio::test]
 async fn corrupt_live_blob_fails_before_collection_io() -> TestResult {
     let corrupt = Fixture::new("corrupt-live", Options::default()).await?;
+    let source = corrupt.log.load().await?;
     let object = corrupt
         .log
-        .put_object(Bytes::from_static(b"required"))
+        .put_object(source.cursor(), Bytes::from_static(b"required"))
         .await?;
-    let source = corrupt.log.load().await?;
     let prepared = corrupt.log.prepare(
         source.cursor(),
         TransactionId::new(),
@@ -722,7 +723,7 @@ async fn corrupt_live_blob_fails_before_collection_io() -> TestResult {
     corrupt
         .raw
         .put(
-            &corrupt.object_path(object.digest()).await?,
+            &corrupt.object_path(object.reference().digest()).await?,
             Bytes::from_static(b"requirEd").into(),
         )
         .await?;
@@ -738,15 +739,15 @@ async fn corrupt_live_blob_fails_before_collection_io() -> TestResult {
 #[tokio::test]
 async fn corrupt_live_node_fails_before_collection_io() -> TestResult {
     let corrupt_node = Fixture::new("corrupt-live-node", Options::default()).await?;
+    let source = corrupt_node.log.load().await?;
     let child = corrupt_node
         .log
-        .put_object(Bytes::from_static(b"child"))
+        .put_object(source.cursor(), Bytes::from_static(b"child"))
         .await?;
     let node = corrupt_node
         .log
-        .put_node(Bytes::from_static(b"node"), vec![child])
+        .put_node(source.cursor(), Bytes::from_static(b"node"), vec![child])
         .await?;
-    let source = corrupt_node.log.load().await?;
     let prepared = corrupt_node.log.prepare(
         source.cursor(),
         TransactionId::new(),
@@ -760,8 +761,8 @@ async fn corrupt_live_node_fails_before_collection_io() -> TestResult {
     corrupt_node
         .raw
         .put(
-            &corrupt_node.object_path(node.digest()).await?,
-            Bytes::from(vec![0; usize::try_from(node.len())?]).into(),
+            &corrupt_node.object_path(node.reference().digest()).await?,
+            Bytes::from(vec![0; usize::try_from(node.reference().len())?]).into(),
         )
         .await?;
     corrupt_node.store.reset();
@@ -779,7 +780,7 @@ async fn invalid_collection_plans_fail_before_delete_or_clear() -> TestResult {
     let source = corrupt.log.load().await?;
     corrupt
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
         .await?;
     let fenced = install_collection(&corrupt.log, &source).await?;
     let path = corrupt.segment_path("collection-plans").await?;
@@ -799,7 +800,7 @@ async fn invalid_collection_plans_fail_before_delete_or_clear() -> TestResult {
     let source = oversized.log.load().await?;
     oversized
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
         .await?;
     let fenced = install_collection(&oversized.log, &source).await?;
     let path = oversized.segment_path("collection-plans").await?;
@@ -830,7 +831,7 @@ async fn resume_propagates_a_read_failure_before_any_delete() -> TestResult {
     let source = fixture.log.load().await?;
     fixture
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
         .await?;
     let fenced = install_collection(&fixture.log, &source).await?;
     fixture.store.reset();
@@ -893,11 +894,11 @@ async fn partial_delete_failures_leave_the_plan_and_repeat_the_complete_set() ->
         let source = fixture.log.load().await?;
         fixture
             .log
-            .put_object(Bytes::from_static(b"orphan-one"))
+            .put_object(source.cursor(), Bytes::from_static(b"orphan-one"))
             .await?;
         fixture
             .log
-            .put_object(Bytes::from_static(b"orphan-two"))
+            .put_object(source.cursor(), Bytes::from_static(b"orphan-two"))
             .await?;
         let fenced = install_collection(&fixture.log, &source).await?;
         fixture.store.reset();
@@ -938,7 +939,7 @@ async fn append_after_resume_loads_the_fence_wins_the_clear_cas() -> TestResult 
     let source = fixture.log.load().await?;
     fixture
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
         .await?;
     let fenced = install_collection(&fixture.log, &source).await?;
     fixture.store.reset();
@@ -993,7 +994,10 @@ async fn stale_retention_no_ops_are_resolved_from_the_current_head() -> TestResu
 async fn cancellation_before_and_after_fence_installation_is_restart_safe() -> TestResult {
     let before = Fixture::new("cancel-before-fence", Options::default()).await?;
     let source = before.log.load().await?;
-    before.log.put_object(Bytes::from_static(b"orphan")).await?;
+    before
+        .log
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
+        .await?;
     before.store.reset();
     let mut pause = before.store.pause_next_put(FailurePhase::Before);
     let task = tokio::spawn({
@@ -1009,7 +1013,10 @@ async fn cancellation_before_and_after_fence_installation_is_restart_safe() -> T
 
     let after = Fixture::new("cancel-after-fence", Options::default()).await?;
     let source = after.log.load().await?;
-    after.log.put_object(Bytes::from_static(b"orphan")).await?;
+    after
+        .log
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
+        .await?;
     after.store.reset();
     let mut head_pause = after.store.pause_put_at(2, FailurePhase::After);
     let task = tokio::spawn({
@@ -1040,7 +1047,7 @@ async fn cancelled_deletes_repeat_safely_before_and_after_visibility() -> TestRe
         let source = fixture.log.load().await?;
         fixture
             .log
-            .put_object(Bytes::from_static(b"orphan"))
+            .put_object(source.cursor(), Bytes::from_static(b"orphan"))
             .await?;
         let fenced = install_collection(&fixture.log, &source).await?;
         fixture.store.reset();
@@ -1070,7 +1077,7 @@ async fn two_collectors_clear_only_the_exact_plan_and_delayed_delete_is_isolated
     let source = fixture.log.load().await?;
     let old = fixture
         .log
-        .put_object(Bytes::from_static(b"same content"))
+        .put_object(source.cursor(), Bytes::from_static(b"same content"))
         .await?;
     let fenced = install_collection(&fixture.log, &source).await?;
     fixture.store.reset();
@@ -1088,14 +1095,14 @@ async fn two_collectors_clear_only_the_exact_plan_and_delayed_delete_is_isolated
     };
     let new = fixture
         .log
-        .put_object(Bytes::from_static(b"same content"))
+        .put_object(cleared.cursor(), Bytes::from_static(b"same content"))
         .await?;
-    assert_ne!(old, new);
-    assert_eq!(old.digest(), new.digest());
+    assert_ne!(old.reference(), new.reference());
+    assert_eq!(old.reference().digest(), new.reference().digest());
     assert!(pause.release());
     assert!(matches!(delayed.await??, CollectionFinish::Complete(_, _)));
     assert_eq!(
-        fixture.log.read_object(&cleared, &new).await?,
+        fixture.log.read_object(&cleared, new.reference()).await?,
         Bytes::from_static(b"same content")
     );
     Ok(())
@@ -1107,7 +1114,7 @@ async fn released_then_reacquired_id_does_not_make_an_old_view_retained() -> Tes
     let source = fixture.log.load().await?;
     let object = fixture
         .log
-        .put_object(Bytes::from_static(b"orphan"))
+        .put_object(source.cursor(), Bytes::from_static(b"orphan"))
         .await?;
     let id = RetentionId::new();
     let RetentionStatus::Applied(retained) = fixture.log.retain(&source, id).await? else {
@@ -1127,7 +1134,7 @@ async fn released_then_reacquired_id_does_not_make_an_old_view_retained() -> Tes
     };
 
     assert!(matches!(
-        fixture.log.read_object(&retained, &object).await,
+        fixture.log.read_object(&retained, object.reference()).await,
         Err(Error::ViewExpired)
     ));
     Ok(())
@@ -1139,7 +1146,7 @@ async fn a_missing_object_in_a_retained_view_is_corruption() -> TestResult {
     let source = fixture.log.load().await?;
     let object = fixture
         .log
-        .put_object(Bytes::from_static(b"retained"))
+        .put_object(source.cursor(), Bytes::from_static(b"retained"))
         .await?;
     let RetentionStatus::Applied(retained) =
         fixture.log.retain(&source, RetentionId::new()).await?
@@ -1148,11 +1155,11 @@ async fn a_missing_object_in_a_retained_view_is_corruption() -> TestResult {
     };
     fixture
         .raw
-        .delete(&fixture.object_path(object.digest()).await?)
+        .delete(&fixture.object_path(object.reference().digest()).await?)
         .await?;
 
     assert!(matches!(
-        fixture.log.read_object(&retained, &object).await,
+        fixture.log.read_object(&retained, object.reference()).await,
         Err(Error::CorruptObject)
     ));
     Ok(())
@@ -1210,8 +1217,11 @@ async fn per_record_reference_limit_is_not_a_whole_graph_limit() -> TestResult {
         },
     )
     .await?;
-    let first_object = fixture.log.put_object(Bytes::from_static(b"first")).await?;
     let source = fixture.log.load().await?;
+    let first_object = fixture
+        .log
+        .put_object(source.cursor(), Bytes::from_static(b"first"))
+        .await?;
     let prepared = fixture.log.prepare(
         source.cursor(),
         TransactionId::new(),
@@ -1224,7 +1234,7 @@ async fn per_record_reference_limit_is_not_a_whole_graph_limit() -> TestResult {
     };
     let second_object = fixture
         .log
-        .put_object(Bytes::from_static(b"second"))
+        .put_object(first.cursor(), Bytes::from_static(b"second"))
         .await?;
     let prepared = fixture.log.prepare(
         first.cursor(),

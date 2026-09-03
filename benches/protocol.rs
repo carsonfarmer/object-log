@@ -4,7 +4,7 @@ use futures::future::join_all;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 use object_log::{
     CollectionFinish, CollectionStart, CommitStatus, Error, Log, LogId, ObjectRef, Options,
-    TransactionId, ValidatedBackend, View,
+    StagedObject, TransactionId, ValidatedBackend, View,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -153,7 +153,8 @@ fn benchmark_staged_bytes(criterion: &mut Criterion) {
                     },
                     |(mut state, payload)| {
                         runtime.block_on(async move {
-                            let object = require(state.log.put_object(payload).await);
+                            let object =
+                                require(state.log.put_object(state.view.cursor(), payload).await);
                             let prepared = require(state.log.prepare(
                                 state.view.cursor(),
                                 TransactionId::new(),
@@ -257,18 +258,15 @@ fn benchmark_collection(criterion: &mut Criterion) {
     }
 
     let (state, blocked) = runtime.block_on(fenced_dead_state(100_000));
-    let prepared = require(state.log.prepare(
-        state.view.cursor(),
-        TransactionId::new(),
-        Bytes::new(),
-        Bytes::new(),
-        vec![blocked],
-    ));
     group.throughput(Throughput::Elements(100_000));
     group.bench_function("fence_lookup/planned_ref_100k", |bencher| {
         bencher.iter(|| {
             if !matches!(
-                runtime.block_on(state.log.commit(prepared.clone())),
+                runtime.block_on(
+                    state
+                        .log
+                        .stage_objects(state.view.cursor(), vec![blocked.clone()]),
+                ),
                 Err(Error::CollectionFence)
             ) {
                 std::process::abort();
@@ -309,28 +307,41 @@ async fn collection_state(shape: CollectionShape) -> BenchLog {
     .await;
     match shape {
         CollectionShape::FlatLive => {
-            let objects = put_blobs(&state.log, 998).await;
+            let objects = put_blobs(&state.log, &state.view, 998).await;
             append_objects(&mut state, objects).await;
         }
         CollectionShape::DeepLive => {
-            let mut root = require(state.log.put_object(Bytes::from_static(b"x")).await);
+            let mut root = require(
+                state
+                    .log
+                    .put_object(state.view.cursor(), Bytes::from_static(b"x"))
+                    .await,
+            );
             for _ in 1..998 {
-                root = require(state.log.put_node(Bytes::new(), vec![root]).await);
+                root = require(
+                    state
+                        .log
+                        .put_node(state.view.cursor(), Bytes::new(), vec![root])
+                        .await,
+                );
             }
             append_objects(&mut state, vec![root]).await;
         }
         CollectionShape::HalfLiveWide => {
-            let leaves = put_blobs(&state.log, 4_993).await;
+            let leaves = put_blobs(&state.log, &state.view, 4_993).await;
             let mut roots = Vec::with_capacity(5);
             for children in leaves.chunks(1_000) {
                 roots.push(require(
-                    state.log.put_node(Bytes::new(), children.to_vec()).await,
+                    state
+                        .log
+                        .put_node(state.view.cursor(), Bytes::new(), children.to_vec())
+                        .await,
                 ));
             }
             append_objects(&mut state, roots).await;
-            put_blobs(&state.log, 5_000).await;
+            put_blobs(&state.log, &state.view, 5_000).await;
         }
-        CollectionShape::Dead => drop(put_blobs(&state.log, 99_999).await),
+        CollectionShape::Dead => drop(put_blobs(&state.log, &state.view, 99_999).await),
     }
     state
 }
@@ -341,8 +352,8 @@ async fn fenced_dead_state(count: usize) -> (BenchLog, ObjectRef) {
         ..Options::default()
     })
     .await;
-    let mut objects = put_blobs(&state.log, count).await;
-    let blocked = objects.swap_remove(0);
+    let mut objects = put_blobs(&state.log, &state.view, count).await;
+    let blocked = objects.swap_remove(0).reference().clone();
     let CollectionStart::Installed(view, report) =
         require(state.log.start_collection(&state.view).await)
     else {
@@ -375,15 +386,18 @@ async fn collection_ready(count: usize, partial: bool) -> BenchLog {
     state
 }
 
-async fn put_blobs(log: &Log, count: usize) -> Vec<ObjectRef> {
+async fn put_blobs(log: &Log, view: &View, count: usize) -> Vec<StagedObject> {
     let mut objects = Vec::with_capacity(count);
     for _ in 0..count {
-        objects.push(require(log.put_object(Bytes::from_static(b"x")).await));
+        objects.push(require(
+            log.put_object(view.cursor(), Bytes::from_static(b"x"))
+                .await,
+        ));
     }
     objects
 }
 
-async fn append_objects(state: &mut BenchLog, objects: Vec<ObjectRef>) {
+async fn append_objects(state: &mut BenchLog, objects: Vec<StagedObject>) {
     let prepared = require(state.log.prepare(
         state.view.cursor(),
         TransactionId::new(),
