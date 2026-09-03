@@ -7,15 +7,16 @@ canonical v1 snapshot record for the first changed transaction and canonical
 v1 WAL records for later changed transactions. A local SQLite file is a
 disposable cache. Cold open rebuilds it from the object log.
 
-The final regular suite has 43 tests: 6 unit, 4 allocation-bound, 16 database,
-11 fault, 1 garbage-collection, 1 collection-race, and 4 recovery and policy
-tests. The separate acceptance target runs an exact 1,000-record recovery
-case. The MinIO test also stays outside regular runs.
+At `bc1e814`, the regular suite has 43 tests: 6 unit, 4 allocation-bound, 16
+database, 11 fault, 1 garbage-collection, 1 collection-race, and 4 recovery
+and policy tests. The separate acceptance target runs an exact 1,000-record
+recovery case. The MinIO test also stays outside regular runs.
 
 Relevant revisions:
 
-- Product and final regular test count:
-  `1cbde302f01cc249efaf7da31051c092a8a318c2`.
+- Final product code: `1cbde302f01cc249efaf7da31051c092a8a318c2`.
+- Final regular and acceptance-test layout:
+  `bc1e814f195acfbee654e3d1ae981c453e670379`.
 - Retained base Criterion run: `626311062b46cb8acae8982773bc12bb54318a46`.
   The chunked WAL result is from `d36b987`, and the final conditional-read
   result is from `1cbde30`.
@@ -83,7 +84,7 @@ network storage.
 
 ## Loopback MinIO
 
-`make sqlite-minio-test` passed. The final test binary reported 0.28 seconds. The
+`make sqlite-minio-test` passed. The test binary reported 0.28 seconds. The
 script used this pinned image:
 
 ```text
@@ -119,10 +120,9 @@ interval.
 | 1 MiB checkpoint | 2.382 ms | 2.318-2.473 ms |
 | 100 MiB checkpoint | 230.326 ms | 213.866-261.499 ms |
 
-The seven groups contain all 11 IDs shown above. Conditional refresh made the
-unchanged read 61.7% faster and reduced its head transfer to zero bytes. The
-small direct transaction
-had 2 high severe outliers among its 10 samples. The 100 MiB checkpoint had 3
+Conditional refresh made the unchanged read 61.7% faster and reduced its head
+transfer to zero bytes. Criterion classified 2 of the 10 small direct
+transaction samples as high severe outliers. The 100 MiB checkpoint had 3
 outliers and measured 434.17 MiB/s, with a 382.41-467.58 MiB/s interval. The
 [machine-readable intervals](sqlite-criterion-2026-09-03.tsv) retain the
 reported nanosecond values.
@@ -161,29 +161,28 @@ views, repeated status state, a second WAL checksum scan, redundant record and
 object checks, and per-callback policy clones. It retained the boxed prepared
 commit because direct storage made the public result enum at least 664 bytes.
 
-At the final code revision, the SQLite adapter contains 1,507 product lines,
-2,584 test lines, and 390 benchmark lines. The final review also removed 52
-lines from a policy test that the broader policy matrix superseded. It found no
-additional helper, layer, or comment that could be removed without weakening a
-required boundary.
+At `bc1e814`, the SQLite adapter contains 1,507 product lines, 2,585 test lines,
+and 390 benchmark lines. The broader policy matrix superseded a 52-line policy
+test, which the review removed. The review found no additional helper, layer,
+or comment that it could remove without weakening a required boundary.
 
-The line snapshot at `1cbde302f01cc249efaf7da31051c092a8a318c2`
-excludes `Cargo.lock`, `.gitignore`, and this documentation change:
+The line snapshot at `bc1e814f195acfbee654e3d1ae981c453e670379`
+excludes `Cargo.lock` and `.gitignore`:
 
 | Category | Lines |
 |---|---:|
 | Product | 6,371 |
-| Test and support | 9,611 |
+| Test and support | 9,612 |
 | Benchmark | 854 |
-| Documentation | 2,334 |
+| Documentation | 2,671 |
 | Schema | 184 |
-| Operator and infrastructure | 226 |
+| Operator and infrastructure | 229 |
 
 The count treats `src/sim.rs` as test support. It moves each source file's
 `#[cfg(test)]` suffix from product to test. This command reproduces the table:
 
 ```sh
-revision=1cbde302f01cc249efaf7da31051c092a8a318c2
+revision=bc1e814f195acfbee654e3d1ae981c453e670379
 git ls-tree -r --name-only "$revision" | while IFS= read -r file; do
   case "$file" in
     benches/*.rs|crates/*/benches/*.rs)
@@ -203,15 +202,16 @@ git ls-tree -r --name-only "$revision" | while IFS= read -r file; do
 done | sort | uniq -c
 ```
 
-This documentation commit changes only the documentation count. Record a
-revision before comparing later counts.
+The table stays fixed to that revision. Record a code revision before comparing
+later counts.
 
 ## Limits
 
 - No live AWS test has run.
 - No Windows or custom-VFS proof has run.
 - No native sanitizer or Miri result exists for this adapter.
-- MinIO tests compatibility and cleanup on loopback. It does not qualify S3.
+- The MinIO test checks compatibility and cleanup on loopback. It does not
+  qualify S3.
 - The Criterion results do not predict remote object-store performance.
 - Recovery bounds each record, but it does not bound the aggregate retained
   WAL tail. The 32-operation transfer limit is also a count limit, not a byte
