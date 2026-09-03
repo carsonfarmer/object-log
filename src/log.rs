@@ -23,7 +23,7 @@ pub struct Options {
     pub max_inline_operation_bytes: usize,
     /// Maximum inline result bytes in one commit.
     pub max_inline_result_bytes: usize,
-    /// Maximum immutable object references in one commit or checkpoint.
+    /// Maximum immutable references in one commit, checkpoint, or node.
     pub max_object_refs: usize,
     /// Maximum bytes in one immutable object.
     pub max_object_bytes: usize,

@@ -24,7 +24,7 @@ options = {
   2: uint,                         ; outcome resolution window
   3: uint,                         ; maximum inline operation bytes
   4: uint,                         ; maximum inline result bytes
-  5: uint,                         ; maximum object references per entry or base
+  5: uint,                         ; maximum refs per entry, base, or node
   6: uint,                         ; maximum encoded entry bytes
   7: uint,                         ; maximum encoded index bytes
   8: uint,                         ; maximum encoded base bytes
