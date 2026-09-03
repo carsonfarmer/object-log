@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
+use futures::{StreamExt, TryStreamExt, stream};
 use object_log::{
     CheckpointResolution, CheckpointStatus, CommitStatus, Error as LogError, Log, ObjectKind,
     ObjectRef, PendingCheckpoint, PreparedCommit, Resolution, TransactionId, View,
@@ -18,6 +19,7 @@ use crate::wal::{self, WAL_FRAME_HEADER_BYTES, WAL_HEADER_BYTES, WalCapture, Wal
 use crate::{PAGE_SIZE, SqliteError};
 
 const WAL_FRAME_BYTES: usize = PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES;
+const MAX_CONCURRENT_OBJECTS: usize = 32;
 
 #[derive(Debug)]
 enum CacheState {
@@ -394,7 +396,7 @@ impl Database {
 
     async fn stage_payload<F>(
         &self,
-        mut payload: Bytes,
+        payload: Bytes,
         unit: usize,
         record: F,
     ) -> Result<(Bytes, Vec<ObjectRef>), SqliteError>
@@ -419,10 +421,17 @@ impl Database {
         objects
             .try_reserve_exact(chunks)
             .map_err(|_| SqliteError::PayloadLimit)?;
-        while !payload.is_empty() {
-            let len = payload.len().min(chunk_size);
-            objects.push(self.log.put_object(payload.split_to(len)).await?);
-        }
+        let uploads = (0..payload_len).step_by(chunk_size).map(|offset| {
+            let end = offset.saturating_add(chunk_size).min(payload_len);
+            self.log.put_object(payload.slice(offset..end))
+        });
+        let objects = stream::iter(uploads)
+            .buffered(MAX_CONCURRENT_OBJECTS)
+            .try_fold(objects, |mut objects, object| async move {
+                objects.push(object);
+                Ok(objects)
+            })
+            .await?;
         let descriptor = record(payload_len, None, objects.len())?.encode()?;
         Ok((descriptor, objects))
     }
@@ -585,10 +594,14 @@ async fn load_payload(
     payload
         .try_reserve_exact(record.payload_len())
         .map_err(|_| SqliteError::PayloadLimit)?;
-    for object in objects {
-        let chunk = log.read_object(view, object).await?;
-        payload.extend_from_slice(&chunk);
-    }
+    let payload = stream::iter(objects)
+        .map(|object| log.read_object(view, object))
+        .buffered(MAX_CONCURRENT_OBJECTS)
+        .try_fold(payload, |mut payload, chunk| async move {
+            payload.extend_from_slice(&chunk);
+            Ok(payload)
+        })
+        .await?;
     Ok(Bytes::from(payload))
 }
 
