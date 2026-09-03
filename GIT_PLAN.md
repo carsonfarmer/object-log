@@ -2,121 +2,132 @@
 
 ## Outcome
 
-Build `object-log-git` as a separate demonstration crate. It must show how one
-serverless request can open a repository, fetch or push Git data, publish one
-atomic update, and discard all local state. The crate must use only the public
+Build `object-log-git` as a separate demonstration crate. One serverless
+request can recover a repository, run a standard Git fetch or push, publish one
+atomic update, and discard all local files. The crate uses only the public
 `object-log` API.
 
-This goal follows the completed local SQLite demonstration and precedes the
-WASI filesystem adapter.
+This goal follows the local SQLite demonstration. The cross-example API review
+in issue #13 follows this goal.
+
+## Git boundary
+
+Use the installed upstream Git implementation as the Git engine. Do not
+implement pack validation, object connectivity, ancestry, ref transactions, or
+smart HTTP framing in this crate. Do not add `gix` or `git2` for the first
+version. `gix` has no complete repository verification or receive-pack server.
+`git2` adds a C FFI boundary and also has no receive-pack server.
+
+The local HTTP example runs `git http-backend` once for each request. A fetch
+uses a fresh recovered bare repository. A push also uses a fresh repository,
+but the handler holds Git's response until object-log confirms the index CAS.
+A conflict or unresolved result cannot return Git's success response.
+
+The executable Git dependency is explicit. A cloud image must contain the
+tested Git version and disposable local storage. This is not a direct WASI
+component.
 
 ## Storage model
 
 - One object log owns one Git repository.
-- Git objects stay in standard immutable pack files. Do not invent another
-  object encoding.
-- Each changed push stores zero or more packs as `StagedObject` values and
-  publishes one ordered ref transaction. The transaction contains each ref
-  name, expected old object ID, and new object ID.
-- The object-log head is the only mutable authority. Do not create mutable Git
-  ref objects, a second manifest, a lease service, or a background coordinator.
-- A checkpoint contains the complete direct-ref map and references the pack set
-  required to serve it. Later commits contain incremental packs and ref
-  transactions.
-- A fetch or rebuild confirms the current head, retains the selected view,
-  loads or materializes every pack that the view requires, and then releases
-  retention. Garbage collection removes packs only after no current or retained
-  view references them.
-- A local bare repository, pack index, and object cache are disposable. A cold
-  invocation can recover from the checkpoint and ordered tail.
+- Git objects stay in standard immutable pack files.
+- A large pack is a reference node over fixed-size blob chunks.
+- A commit contains one ordered ref transaction and its new pack roots.
+- The object-log index is the only mutable authority.
+- A checkpoint contains the complete direct-ref map and the selected live pack
+  descriptors. Its object roots align with those descriptors.
+- A cold request rebuilds pack indexes and refs in a new bare repository.
+- Local Git configuration, indexes, hooks, reflogs, and temporary files are not
+  durable state.
 
-The pack store must preserve the exact bytes at each immutable physical key
-until object-log garbage collection deletes them. External lifecycle expiry,
-deletion, or overwrite violates this contract. When a cold invocation reuses
-pack references, it calls `stage_objects` to verify their graphs before
-publication.
+Configure receive-pack to retain non-empty pushes as packs, check received
+objects, reject non-fast-forward branch updates, permit deletes, disable hooks,
+disable automatic maintenance, and avoid reflogs. Git repairs thin network
+packs before the adapter reads the stored pack.
 
-This example uses Cursor's immutable WAL plus CAS publication model. It omits
-Cursor's warm-owner routing, replication, batching, and physical pack
-compaction. Checkpoints bound ref-log replay. Pack count and cold-recovery bytes
-can grow without a fixed limit until a later pack-compaction stage.
+The pack store must keep the exact bytes at each immutable physical key until
+object-log collection deletes that key. External expiry, deletion, or
+overwrite violates this contract. A reopened handle verifies existing object
+graphs before it republishes their references.
 
-## Minimal public API
+This design follows Cursor's immutable WAL plus CAS publication model. It does
+not include Cursor's warm-owner routing, replication, batching, or physical
+pack compaction. Checkpoints bound ref-log replay. Live pack count and recovery
+bytes can still grow until a later pack-compaction stage.
+
+## Public API target
 
 ```text
-Repository::open(log) -> Repository
+Repository::open(log, cache_path, config) -> Repository
+Repository::path() -> Path
 Repository::refs() -> RefSnapshot
-Repository::materialize(path) -> MaterializedRepository
-Repository::stage_push(transaction_id, commands, pack) -> PushStage
-Repository::publish(staged) -> PushStatus
-Repository::resume(recovery_token) -> PushResolution
+Repository::stage_push(transaction_id) -> StageStatus
+StagedPush::publish() -> CommitStatus
+Repository::resume(recovery_token) -> Resolution
 Repository::checkpoint() -> GitCheckpointStatus
 ```
 
-`stage_push` validates the pack, object IDs, ref names, expected old values,
-object availability, and configured fast-forward policy before it stages any
-publication. New pack writes return process-local proofs for publication.
-`publish` never reruns validation after a conflict. The caller can refresh,
-check the commands against the new ref state, and stage a new logical attempt.
+`open` includes cold materialization. The HTTP adapter lets upstream Git change
+the disposable repository, then calls `stage_push`. Staging checks the complete
+repository, compares refs and packs with the materialized state, and stages one
+candidate. The borrow-bound staged value prevents publication through another
+repository instance.
 
-The first crate supports direct refs under `refs/heads/` and `refs/tags/`. It
-keeps `HEAD` as one configured symbolic ref. It rejects other symbolic refs,
-replace refs, shallow state, alternates, hooks, and partial-clone promises until
-their behavior is explicit.
+The first crate supports SHA-1 and SHA-256 repositories, direct refs under
+`refs/heads/` and `refs/tags/`, and one configured symbolic `HEAD`. It rejects
+other symbolic refs, loose objects after receive, replace refs, shallow state,
+alternates, hooks, and partial-clone state.
 
-## Serverless example
+## Checkpoints and collection
 
-Provide one small HTTP example after the storage crate is stable. It can use
-Git's standard stateless RPC boundary or a proven Git protocol library. The
-handler must keep authentication and repository routing outside
-`object-log-git`.
+A checkpoint keeps each pack that contains at least one object reachable from
+the current refs. It can omit a pack that contains no reachable object. The
+selected pack set must cover every reachable object before publication.
 
-Each request must:
-
-1. Derive one validated tenant and repository log ID.
-2. Load or materialize the requested repository view.
-3. Serve a fetch, or validate and stage one push.
-4. Publish the push with object-log compare-and-swap.
-5. Return success only after a definite commit result.
-
-An uncertain publication returns a stable recovery token. A retry resolves the
-same push. It must not accept the pack again as a new transaction.
+This is conservative pack selection. It is not pack rewriting. It can collect
+a feature-only pack after all refs to that feature are deleted. It cannot
+remove unreachable bytes from a pack that also contains live objects.
 
 ## Required evidence
 
-- Empty repository creation and cold recovery need no retained local files.
-- Clone, fetch, branch creation, tag creation, fast-forward push, and ref delete
-  work with an unmodified Git client.
-- Invalid packs, missing objects, invalid ref names, non-fast-forward updates,
-  and wrong expected object IDs fail before publication.
-- Two pushes from one view have one object-log order. A conflict never changes
-  refs and never publishes a rejected pack reference.
-- Lost publication responses resolve to the original push.
-- A checkpoint plus tail produces the same refs and reachable Git object IDs as
+- Empty creation and cold recovery need no retained local files.
+- An unmodified client can clone, fetch, create a branch and tag, push a
+  fast-forward update, and delete refs through loopback smart HTTP.
+- Git rejects invalid packs, missing objects, invalid refs, and non-fast-forward
+  branch updates before object-log publication.
+- Two pushes from one view produce one winner. The loser changes no durable
+  refs and publishes no pack reference.
+- A lost publication response resolves the original transaction without
+  another pack upload.
+- A checkpoint plus tail produces the same refs and reachable object IDs as
   full replay.
-- Collection preserves packs used by the current or a retained view and removes
-  unreachable incremental packs.
-- Tests cover SHA-1 and SHA-256 repositories if the selected Git library
-  supports both. Otherwise the crate rejects the unsupported object format.
+- Collection preserves current and retained packs and removes an
+  unreachable-only pack after checkpoint publication.
+- The same lifecycle runs for SHA-1 and SHA-256.
 - Benchmarks report cold clone, warm fetch, small push, large pack push,
-  checkpoint, recovery, object-store request count, and byte amplification.
+  checkpoint, recovery, object-store requests, bytes, and disk use.
 - One opt-in local MinIO flow uses a disposable bucket and leaves no process or
   container behind.
 
-## Tasks
+## Fixed tranche
 
-1. Select the smallest maintained Git pack and protocol library.
-2. Define canonical ref-transaction and checkpoint records.
-3. Add strict codec and pack-validation tests.
-4. Implement stage, publish, recovery, and explicit conflict handling.
-5. Implement cold materialization and checkpoint recovery.
-6. Add the minimal standard Git client example.
-7. Add race, failure, collection, and MinIO acceptance tests.
-8. Add benchmarks and complete a correctness and deletion review.
+1. Define strict ref, object-ID, pack, transaction, and checkpoint records.
+2. Implement materialization with standard packs and rebuilt indexes.
+3. Implement repository inspection and strict upstream Git validation.
+4. Implement pack chunk staging and atomic ref publication.
+5. Implement pending resolution without another pack upload.
+6. Implement live-pack checkpoint selection.
+7. Add focused state, corruption, race, and collection tests.
+8. Add the loopback smart HTTP lifecycle test.
+9. Add SHA-1 and SHA-256 coverage.
+10. Add adapter benchmarks and request and byte accounting.
+11. Add one opt-in pinned MinIO lifecycle.
+12. Record local evidence and run an independent correctness and deletion
+    review.
 
 ## Limits
 
-Keep Git policy outside the generic log. Start with one repository per log and
-one push per publication. Do not add pack rewriting, global deduplication,
-cross-repository transactions, a preferred owner, or provider-specific storage
-behavior in this example.
+Keep Git policy outside the generic log. Start with one repository for each log
+and one push for each publication. Do not add pack rewriting, global
+deduplication, cross-repository transactions, a preferred owner,
+provider-specific behavior, Spin integration, or live AWS work.
