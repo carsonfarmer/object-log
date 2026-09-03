@@ -366,6 +366,12 @@ impl Log {
         })
     }
 
+    /// Returns the limits fixed when this log was opened.
+    #[must_use]
+    pub const fn options(&self) -> Options {
+        self.options
+    }
+
     /// Loads and verifies the current durable head.
     ///
     /// # Errors

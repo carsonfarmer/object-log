@@ -276,6 +276,20 @@ async fn open_rejects_options_that_differ_from_the_durable_contract()
 }
 
 #[tokio::test]
+async fn log_exposes_its_durable_options() -> Result<(), Box<dyn std::error::Error>> {
+    let options = Options {
+        max_object_bytes: 8 * 1024 * 1024,
+        ..Options::default()
+    };
+    let backend =
+        ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("protocol-tests")).await?;
+    let log = Log::open(backend.scope(&LogId::new("options-getter")?), options).await?;
+
+    assert_eq!(log.options(), options);
+    Ok(())
+}
+
+#[tokio::test]
 async fn stale_cursor_is_rejected_without_publishing_its_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
