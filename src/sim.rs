@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::channel::oneshot;
 use futures::stream::{BoxStream, StreamExt};
 use object_store::path::Path;
 use object_store::{
@@ -46,14 +47,14 @@ pub enum Operation {
     Rename,
 }
 
-/// The position of an injected failure relative to a storage mutation.
+/// The position of an injected control relative to a storage mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailurePhase {
-    /// Return an error without calling the wrapped operation.
+    /// Act without calling the wrapped operation.
     Before,
-    /// Call the wrapped operation, then hide its successful response.
+    /// Act after the wrapped operation succeeds.
     ///
-    /// A mutation is visible when this failure occurs.
+    /// A mutation is visible when this phase occurs.
     After,
 }
 
@@ -66,6 +67,31 @@ pub struct Failure {
     pub occurrence: u64,
     /// Whether failure occurs before or after the wrapped operation.
     pub phase: FailurePhase,
+}
+
+/// Control for one paused simulator operation.
+#[derive(Debug)]
+#[must_use = "wait for the pause and release it"]
+pub struct PauseControl {
+    entered: oneshot::Receiver<()>,
+    release: oneshot::Sender<()>,
+}
+
+impl PauseControl {
+    /// Waits until the selected operation enters the pause.
+    ///
+    /// Returns `false` if the store resets before the operation enters.
+    pub async fn wait_until_entered(&mut self) -> bool {
+        (&mut self.entered).await.is_ok()
+    }
+
+    /// Releases the paused operation.
+    ///
+    /// Returns `false` if the operation was cancelled while paused.
+    #[must_use]
+    pub fn release(self) -> bool {
+        self.release.send(()).is_ok()
+    }
 }
 
 /// The result recorded for one completed request.
@@ -170,6 +196,7 @@ struct State {
     next_sequence: u64,
     metrics: Metrics,
     failures: Vec<Failure>,
+    pause: Option<ScheduledPause>,
     record_events: bool,
 }
 
@@ -179,9 +206,19 @@ impl Default for State {
             next_sequence: 0,
             metrics: Metrics::default(),
             failures: Vec::new(),
+            pause: None,
             record_events: true,
         }
     }
+}
+
+#[derive(Debug)]
+struct ScheduledPause {
+    operation: Operation,
+    occurrence: u64,
+    phase: FailurePhase,
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -247,6 +284,16 @@ impl FaultStore {
         });
     }
 
+    /// Pauses the next single-part object write at `phase`.
+    pub fn pause_next_put(&self, phase: FailurePhase) -> PauseControl {
+        self.pause_next(Operation::Put, phase)
+    }
+
+    /// Pauses the next object deletion at `phase`.
+    pub fn pause_next_delete(&self, phase: FailurePhase) -> PauseControl {
+        self.pause_next(Operation::Delete, phase)
+    }
+
     /// Removes faults that have not fired. Existing metrics remain unchanged.
     pub fn clear_failures(&self) {
         lock(&self.state).failures.clear();
@@ -274,7 +321,7 @@ impl FaultStore {
         lock(&self.state).record_events = enabled;
     }
 
-    /// Clears metrics and pending faults.
+    /// Clears metrics, pending faults, and pending pauses.
     pub fn reset(&self) {
         *lock(&self.state) = State::default();
     }
@@ -310,6 +357,44 @@ impl FaultStore {
         };
         state.failures.remove(index);
         true
+    }
+
+    fn pause_next(&self, operation: Operation, phase: FailurePhase) -> PauseControl {
+        let mut state = lock(&self.state);
+        let occurrence = state
+            .metrics
+            .operation(operation)
+            .requests
+            .saturating_add(1);
+        let (entered, wait_for_entered) = oneshot::channel();
+        let (release, wait_for_release) = oneshot::channel();
+        state.pause = Some(ScheduledPause {
+            operation,
+            occurrence,
+            phase,
+            entered,
+            release: wait_for_release,
+        });
+        PauseControl {
+            entered: wait_for_entered,
+            release,
+        }
+    }
+
+    async fn enter_pause(&self, ticket: RequestTicket, phase: FailurePhase) {
+        let pause = {
+            let mut state = lock(&self.state);
+            let Some(pause) = state.pause.take_if(|pause| {
+                pause.operation == ticket.operation
+                    && pause.occurrence == ticket.occurrence
+                    && pause.phase == phase
+            }) else {
+                return;
+            };
+            pause
+        };
+        let _ = pause.entered.send(());
+        let _ = pause.release.await;
     }
 
     fn finish(
@@ -379,6 +464,7 @@ impl FaultStore {
 
     async fn delete_one(&self, location: Path) -> Result<Path> {
         let ticket = self.start(Operation::Delete, 0);
+        self.enter_pause(ticket, FailurePhase::Before).await;
         if self.take_failure(ticket, FailurePhase::Before) {
             self.finish(ticket, &location, 0, RequestOutcome::InjectedBefore);
             return Err(Self::injected_error(
@@ -389,7 +475,11 @@ impl FaultStore {
         }
 
         let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.delete(&location).await {
+        let result = self.inner.delete(&location).await;
+        if result.is_ok() {
+            self.enter_pause(ticket, FailurePhase::After).await;
+        }
+        match result {
             Ok(()) if fail_after => {
                 self.finish(ticket, &location, 0, RequestOutcome::InjectedAfter);
                 Err(Self::injected_error(ticket, FailurePhase::After, &location))
@@ -431,13 +521,18 @@ impl ObjectStore for FaultStore {
         options: PutOptions,
     ) -> Result<PutResult> {
         let ticket = self.start(Operation::Put, usize_to_u64(payload.content_length()));
+        self.enter_pause(ticket, FailurePhase::Before).await;
         if self.take_failure(ticket, FailurePhase::Before) {
             self.finish(ticket, location, 0, RequestOutcome::InjectedBefore);
             return Err(Self::injected_error(ticket, FailurePhase::Before, location));
         }
 
         let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.put_opts(location, payload, options).await {
+        let result = self.inner.put_opts(location, payload, options).await;
+        if result.is_ok() {
+            self.enter_pause(ticket, FailurePhase::After).await;
+        }
+        match result {
             Ok(_) if fail_after => {
                 self.finish(ticket, location, 0, RequestOutcome::InjectedAfter);
                 Err(Self::injected_error(ticket, FailurePhase::After, location))
@@ -832,4 +927,124 @@ const fn is_mutation(operation: Operation) -> bool {
             | Operation::Copy
             | Operation::Rename
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::memory::InMemory;
+    use std::time::Duration;
+
+    type TestResult = std::result::Result<(), Box<dyn StdError>>;
+
+    #[tokio::test]
+    async fn put_pause_before_blocks_visibility_and_releases_once() -> TestResult {
+        let store = FaultStore::new(InMemory::new());
+        let path = Path::from("pause/put-before");
+        let write_store = store.clone();
+        let write_path = path.clone();
+        let mut pause = store.pause_next_put(FailurePhase::Before);
+        let write = tokio::spawn(async move {
+            write_store
+                .put(&write_path, Bytes::from_static(b"first").into())
+                .await
+        });
+
+        assert!(pause.wait_until_entered().await);
+        assert!(matches!(
+            store.get(&path).await,
+            Err(Error::NotFound { .. })
+        ));
+        assert!(pause.release());
+        write.await??;
+        assert_eq!(
+            store.get(&path).await?.bytes().await?,
+            Bytes::from_static(b"first")
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            store.put(
+                &Path::from("pause/put-second"),
+                Bytes::from_static(b"second").into(),
+            ),
+        )
+        .await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_pause_after_stops_after_visibility() -> TestResult {
+        let store = FaultStore::new(InMemory::new());
+        let path = Path::from("pause/put-after");
+        let write_store = store.clone();
+        let write_path = path.clone();
+        let mut pause = store.pause_next_put(FailurePhase::After);
+        let write = tokio::spawn(async move {
+            write_store
+                .put(&write_path, Bytes::from_static(b"visible").into())
+                .await
+        });
+
+        assert!(pause.wait_until_entered().await);
+        assert_eq!(
+            store.get(&path).await?.bytes().await?,
+            Bytes::from_static(b"visible")
+        );
+        assert!(pause.release());
+        write.await??;
+        assert_eq!(store.metrics().operation(Operation::Put).succeeded, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_pause_before_preserves_visibility_until_release() -> TestResult {
+        let store = FaultStore::new(InMemory::new());
+        let path = Path::from("pause/delete-before");
+        store
+            .put(&path, Bytes::from_static(b"present").into())
+            .await?;
+        store.reset();
+        let delete_store = store.clone();
+        let delete_path = path.clone();
+        let mut pause = store.pause_next_delete(FailurePhase::Before);
+        let delete = tokio::spawn(async move { delete_store.delete(&delete_path).await });
+
+        assert!(pause.wait_until_entered().await);
+        assert_eq!(
+            store.get(&path).await?.bytes().await?,
+            Bytes::from_static(b"present")
+        );
+        assert!(pause.release());
+        delete.await??;
+        assert!(matches!(
+            store.get(&path).await,
+            Err(Error::NotFound { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_pause_after_stops_after_visible_delete() -> TestResult {
+        let store = FaultStore::new(InMemory::new());
+        let path = Path::from("pause/delete-after");
+        store
+            .put(&path, Bytes::from_static(b"present").into())
+            .await?;
+        store.reset();
+        let delete_store = store.clone();
+        let delete_path = path.clone();
+        let mut pause = store.pause_next_delete(FailurePhase::After);
+        let delete = tokio::spawn(async move { delete_store.delete(&delete_path).await });
+
+        assert!(pause.wait_until_entered().await);
+        assert!(matches!(
+            store.get(&path).await,
+            Err(Error::NotFound { .. })
+        ));
+        assert!(pause.release());
+        delete.await??;
+        assert_eq!(store.metrics().operation(Operation::Delete).succeeded, 1);
+        Ok(())
+    }
 }
