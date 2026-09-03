@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 
 mod format;
+pub mod kv;
 pub mod log;
+pub mod materialize;
 pub mod store;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -11,6 +13,7 @@ pub mod sim;
 pub use log::{
     CheckpointStatus, CommitRecord, CommitStatus, Log, Options, Refresh, Resolution, View,
 };
+pub use materialize::{MaterializeError, Materialized, Materializer, materialize};
 pub use store::{BackendCapabilities, BackendCapability, ScopedStore};
 
 /// Current durable object-log format version.

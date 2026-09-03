@@ -1,0 +1,363 @@
+//! Small key-value state machine used to prove the generic log contract.
+
+use std::collections::BTreeMap;
+
+use bytes::Bytes;
+use minicbor::{Decode, Encode};
+
+use crate::materialize::Materializer;
+
+const KV_FORMAT_VERSION: u32 = 1;
+
+/// The complete logical key-value state at one log position.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct KvState {
+    entries: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+impl KvState {
+    #[must_use]
+    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+        self.entries.get(key).map(Vec::as_slice)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// One key-value command evaluated against an exact materialized state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KvCommand {
+    Set {
+        key: Bytes,
+        value: Bytes,
+    },
+    Delete {
+        key: Bytes,
+    },
+    Increment {
+        key: Bytes,
+        delta: i64,
+    },
+    CompareAndSwap {
+        key: Bytes,
+        expected: Option<Bytes>,
+        value: Option<Bytes>,
+    },
+}
+
+/// The typed result recorded for one key-value command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KvResult {
+    Previous(Option<Bytes>),
+    Integer(i64),
+    Swapped(bool),
+}
+
+/// The result of evaluating a command before log publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KvDecision {
+    NoChange(KvResult),
+    Commit {
+        operation: Bytes,
+        result_bytes: Bytes,
+        result: KvResult,
+    },
+}
+
+/// A deterministic key-value materializer and command evaluator.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KvMachine;
+
+impl KvMachine {
+    /// Evaluates one command against `state` without changing it.
+    ///
+    /// A caller publishes [`KvDecision::Commit`] against the same durable view.
+    /// After a log conflict, it must materialize the winning view and evaluate
+    /// the command again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid integer data, arithmetic overflow, or a
+    /// value that cannot be encoded.
+    pub fn evaluate(&self, state: &KvState, command: &KvCommand) -> Result<KvDecision, KvError> {
+        let (mutation, result) = match command {
+            KvCommand::Set { key, value } => {
+                let previous = state.get(key).map(Bytes::copy_from_slice);
+                if previous.as_ref().is_some_and(|stored| stored == value) {
+                    return Ok(KvDecision::NoChange(KvResult::Previous(previous)));
+                }
+                (
+                    MutationWire::unconditional(key, Some(value)),
+                    KvResult::Previous(previous),
+                )
+            }
+            KvCommand::Delete { key } => {
+                let previous = state.get(key).map(Bytes::copy_from_slice);
+                let Some(stored) = previous else {
+                    return Ok(KvDecision::NoChange(KvResult::Previous(None)));
+                };
+                (
+                    MutationWire::unconditional(key, None),
+                    KvResult::Previous(Some(stored)),
+                )
+            }
+            KvCommand::Increment { key, delta } => {
+                let prior = state.get(key);
+                let current = prior.map(decode_integer).transpose()?.unwrap_or(0);
+                let next = current
+                    .checked_add(*delta)
+                    .ok_or(KvError::IntegerOverflow)?;
+                if next == current {
+                    return Ok(KvDecision::NoChange(KvResult::Integer(current)));
+                }
+                let next_bytes = next.to_be_bytes();
+                (
+                    MutationWire::conditional(key, prior, Some(next_bytes.as_slice())),
+                    KvResult::Integer(next),
+                )
+            }
+            KvCommand::CompareAndSwap {
+                key,
+                expected,
+                value,
+            } => {
+                if state.get(key) != expected.as_deref() {
+                    return Ok(KvDecision::NoChange(KvResult::Swapped(false)));
+                }
+                if expected == value {
+                    return Ok(KvDecision::NoChange(KvResult::Swapped(true)));
+                }
+                (
+                    MutationWire::conditional(key, expected.as_deref(), value.as_deref()),
+                    KvResult::Swapped(true),
+                )
+            }
+        };
+
+        Ok(KvDecision::Commit {
+            operation: encode(&mutation)?,
+            result_bytes: encode(&ResultWire::from(&result))?,
+            result,
+        })
+    }
+}
+
+impl Materializer for KvMachine {
+    type State = KvState;
+    type Error = KvError;
+
+    fn empty(&self) -> Self::State {
+        KvState::default()
+    }
+
+    fn restore(&self, checkpoint: &[u8]) -> Result<Self::State, Self::Error> {
+        let snapshot: SnapshotWire = decode(checkpoint)?;
+        require_version(snapshot.version)?;
+        let mut entries = BTreeMap::new();
+        for entry in snapshot.entries {
+            if entries.insert(entry.key, entry.value).is_some() {
+                return Err(KvError::InvalidEncoding(
+                    "snapshot contains a duplicate key".to_owned(),
+                ));
+            }
+        }
+        Ok(KvState { entries })
+    }
+
+    fn apply(
+        &self,
+        state: &mut Self::State,
+        _sequence: u64,
+        operation: &[u8],
+    ) -> Result<(), Self::Error> {
+        let mutation: MutationWire = decode(operation)?;
+        require_version(mutation.version)?;
+        if mutation.check_expected && state.get(&mutation.key) != mutation.expected.as_deref() {
+            return Err(KvError::StateDiverged);
+        }
+        match mutation.value {
+            Some(value) => {
+                state.entries.insert(mutation.key, value);
+            }
+            None => {
+                state.entries.remove(&mutation.key);
+            }
+        }
+        Ok(())
+    }
+
+    fn checkpoint(&self, state: &Self::State) -> Result<Vec<u8>, Self::Error> {
+        let snapshot = SnapshotWire {
+            version: KV_FORMAT_VERSION,
+            entries: state
+                .entries
+                .iter()
+                .map(|(key, value)| EntryWire {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        };
+        Ok(encode(&snapshot)?.to_vec())
+    }
+}
+
+/// Invalid key-value operation, result, or snapshot data.
+#[derive(Debug, thiserror::Error)]
+pub enum KvError {
+    #[error("invalid key-value encoding: {0}")]
+    InvalidEncoding(String),
+    #[error("stored value is not a signed 64-bit integer")]
+    NotInteger,
+    #[error("signed 64-bit integer overflow")]
+    IntegerOverflow,
+    #[error("key-value replay does not match its expected prior value")]
+    StateDiverged,
+}
+
+#[derive(Clone, Debug, Decode, Encode)]
+#[cbor(map)]
+struct MutationWire {
+    #[n(1)]
+    version: u32,
+    #[cbor(n(2), with = "minicbor::bytes")]
+    key: Vec<u8>,
+    #[n(3)]
+    check_expected: bool,
+    #[cbor(n(4), with = "minicbor::bytes")]
+    expected: Option<Vec<u8>>,
+    #[cbor(n(5), with = "minicbor::bytes")]
+    value: Option<Vec<u8>>,
+}
+
+impl MutationWire {
+    fn unconditional(key: &[u8], value: Option<&[u8]>) -> Self {
+        Self {
+            version: KV_FORMAT_VERSION,
+            key: key.to_vec(),
+            check_expected: false,
+            expected: None,
+            value: value.map(<[u8]>::to_vec),
+        }
+    }
+
+    fn conditional(key: &[u8], expected: Option<&[u8]>, value: Option<&[u8]>) -> Self {
+        Self {
+            version: KV_FORMAT_VERSION,
+            key: key.to_vec(),
+            check_expected: true,
+            expected: expected.map(<[u8]>::to_vec),
+            value: value.map(<[u8]>::to_vec),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Decode, Encode)]
+#[cbor(map)]
+struct SnapshotWire {
+    #[n(1)]
+    version: u32,
+    #[n(2)]
+    entries: Vec<EntryWire>,
+}
+
+#[derive(Clone, Debug, Decode, Encode)]
+#[cbor(map)]
+struct EntryWire {
+    #[cbor(n(1), with = "minicbor::bytes")]
+    key: Vec<u8>,
+    #[cbor(n(2), with = "minicbor::bytes")]
+    value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Decode, Encode)]
+#[cbor(map)]
+struct ResultWire {
+    #[n(1)]
+    version: u32,
+    #[n(2)]
+    kind: u8,
+    #[cbor(n(3), with = "minicbor::bytes")]
+    value: Option<Vec<u8>>,
+    #[n(4)]
+    integer: Option<i64>,
+    #[n(5)]
+    swapped: Option<bool>,
+}
+
+impl From<&KvResult> for ResultWire {
+    fn from(result: &KvResult) -> Self {
+        match result {
+            KvResult::Previous(value) => Self {
+                version: KV_FORMAT_VERSION,
+                kind: 1,
+                value: value.as_ref().map(|bytes| bytes.to_vec()),
+                integer: None,
+                swapped: None,
+            },
+            KvResult::Integer(value) => Self {
+                version: KV_FORMAT_VERSION,
+                kind: 2,
+                value: None,
+                integer: Some(*value),
+                swapped: None,
+            },
+            KvResult::Swapped(value) => Self {
+                version: KV_FORMAT_VERSION,
+                kind: 3,
+                value: None,
+                integer: None,
+                swapped: Some(*value),
+            },
+        }
+    }
+}
+
+fn encode(value: &impl Encode<()>) -> Result<Bytes, KvError> {
+    minicbor::to_vec(value)
+        .map(Bytes::from)
+        .map_err(|error| KvError::InvalidEncoding(error.to_string()))
+}
+
+fn decode<'bytes, T>(bytes: &'bytes [u8]) -> Result<T, KvError>
+where
+    T: Decode<'bytes, ()> + Encode<()>,
+{
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let value = decoder
+        .decode()
+        .map_err(|error| KvError::InvalidEncoding(error.to_string()))?;
+    if decoder.position() != bytes.len() {
+        return Err(KvError::InvalidEncoding(
+            "encoded value contains trailing bytes".to_owned(),
+        ));
+    }
+    if encode(&value)?.as_ref() != bytes {
+        return Err(KvError::InvalidEncoding(
+            "encoded value is not canonical key-value format version 1".to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+fn require_version(version: u32) -> Result<(), KvError> {
+    if version != KV_FORMAT_VERSION {
+        return Err(KvError::InvalidEncoding(format!(
+            "unsupported key-value format version {version}"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_integer(bytes: &[u8]) -> Result<i64, KvError> {
+    let encoded: [u8; size_of::<i64>()] = bytes.try_into().map_err(|_| KvError::NotInteger)?;
+    Ok(i64::from_be_bytes(encoded))
+}
