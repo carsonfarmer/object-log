@@ -114,7 +114,7 @@ After every action, the oracle checks:
 
 Record the seed and action trace on failure.
 
-## Benchmarks
+## Benchmark contract
 
 Use Criterion for process-local measurements. Add a separate executable for
 MinIO latency and throughput because network timing does not fit Criterion's
@@ -130,7 +130,7 @@ Report these metrics:
 - Head encoded size.
 - Peak live memory when practical.
 
-Benchmark matrices:
+The target benchmark matrix is:
 
 | Dimension | Values |
 |---|---|
@@ -146,5 +146,13 @@ state whether the operating-system page cache was cold or warm. MinIO results
 must record image version, container resources, filesystem, endpoint, and
 whether the client and server share one host.
 
-The first run creates a baseline. Later gates compare against it. Do not set a
-hard target that the first measured system has never met.
+The current process-local suite covers batch payload size, inline operation
+size, contending candidates, and active-tail recovery. The first measured
+baseline is in
+[`docs/evidence/local-baseline-2026-09-02.md`](evidence/local-baseline-2026-09-02.md).
+It states the cases that remain unmeasured. Add staged-payload, refresh,
+checkpoint, filesystem, and MinIO performance cases before making claims about
+those paths.
+
+Later gates can compare against a retained machine-readable baseline. Do not
+set a hard target that the system has not measured repeatedly.

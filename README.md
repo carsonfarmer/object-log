@@ -24,5 +24,14 @@ collection, `SQLite`, WASI filesystem, and live AWS qualification goals.
 make check
 ```
 
-`MinIO` qualification will use a separate opt-in local command. It will not use
-a cloud account.
+Run the opt-in `MinIO` compatibility test with:
+
+```sh
+make minio-test
+```
+
+This command starts a pinned `MinIO` container on a loopback port. It creates an
+empty test bucket and removes the container when the test ends. It does not use
+a cloud account. See the
+[local baseline](docs/evidence/local-baseline-2026-09-02.md) for measured
+in-memory results and the exact `MinIO` test evidence.

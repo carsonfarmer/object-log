@@ -300,6 +300,89 @@ async fn pending_evidence_survives_reopen_and_failed_resolution_read() -> TestRe
 }
 
 #[tokio::test]
+async fn pending_evidence_survives_failed_referenced_object_validation() -> TestResult {
+    let (store, log, _) = open_model_log(12).await?;
+    store.reset();
+    let object = log
+        .put_object(Bytes::from_static(b"referenced object"))
+        .await?;
+    let view = log.load().await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        transaction_id(12, 1),
+        Bytes::from_static(b"operation"),
+        Bytes::new(),
+        vec![object],
+    )?;
+    schedule_head_fault(&store, FailurePhase::Before);
+    let pending = match log.commit(prepared).await? {
+        CommitStatus::Pending(pending) => pending,
+        CommitStatus::Committed(_) | CommitStatus::Conflict(_) => {
+            return Err(test_error("failed publication did not remain pending").into());
+        }
+    };
+
+    store.reset();
+    store.schedule(Failure {
+        operation: Operation::Get,
+        occurrence: 2,
+        phase: FailurePhase::Before,
+    });
+    let pending = match log.resolve(pending).await? {
+        Resolution::StillPending(pending) => pending,
+        Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
+            return Err(test_error("failed object validation discarded pending evidence").into());
+        }
+    };
+
+    assert!(matches!(
+        log.resolve(pending).await?,
+        Resolution::Committed(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_evidence_survives_failed_published_commit_verification() -> TestResult {
+    let (store, log, _) = open_model_log(13).await?;
+    store.reset();
+    let view = log.load().await?;
+    let prepared = log.prepare(
+        view.cursor(),
+        transaction_id(13, 1),
+        Bytes::from_static(b"operation"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    schedule_head_fault(&store, FailurePhase::After);
+    let pending = match log.commit(prepared).await? {
+        CommitStatus::Pending(pending) => pending,
+        CommitStatus::Committed(_) | CommitStatus::Conflict(_) => {
+            return Err(test_error("lost response did not remain pending").into());
+        }
+    };
+
+    store.reset();
+    store.schedule(Failure {
+        operation: Operation::Get,
+        occurrence: 2,
+        phase: FailurePhase::Before,
+    });
+    let pending = match log.resolve(pending).await? {
+        Resolution::StillPending(pending) => pending,
+        Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
+            return Err(test_error("failed commit verification discarded pending evidence").into());
+        }
+    };
+
+    assert!(matches!(
+        log.resolve(pending).await?,
+        Resolution::Committed(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn seeded_model_covers_reopen_readers_writers_and_pending_resolution() -> TestResult {
     for seed in [
         0x1_u64,

@@ -79,16 +79,17 @@ are concurrency tokens and are not content-integrity hashes.
 
 ## Open and refresh
 
-`open` validates the backend contract and namespace. It does not load all log
-data.
+`open` validates the backend contract and namespace. It creates the initial
+index when needed. It does not load all log data.
 
-`load` reads `head`, then loads the checkpoint and commit tail. Tail objects can
-be fetched concurrently because the head contains their complete ordered
-references.
+`load` reads and validates only the index. `read_checkpoint` reads its base.
+`read_tail` fetches active WAL entries concurrently because the index contains
+their complete ordered references. The materializer uses these operations to
+restore the complete state.
 
-`refresh` uses a conditional read when the backend supports it. An unchanged
-head returns `NotModified`. A changed head returns the new view and the missing
-tail or a new checkpoint when the prior cursor has fallen behind the base.
+`refresh` uses a conditional read. An unchanged index returns `NotModified`. A
+changed index returns its new view. The caller then reads the base and active
+tail that the view names.
 
 ## Commit
 
@@ -131,11 +132,15 @@ the evidence incomplete.
 A checkpoint contains opaque snapshot bytes and the exact covered tail
 position. Its digest binds both.
 
-Publication reads the current head and verifies that the covered commit is in
-its history. The new head replaces the base checkpoint, removes the covered
-tail prefix, preserves the suffix, preserves the resolution window, and
-increments the generation. A CAS conflict causes revalidation against the new
-head. It does not make the snapshot valid for a different prefix.
+Publication validates that the covered commit is in the supplied view. The new
+index replaces the base checkpoint, removes the covered tail prefix, preserves
+the suffix, preserves the resolution window, and increments the generation. A
+CAS conflict returns the current view. The caller must rebuild and revalidate a
+snapshot before another publication attempt.
+
+The core treats snapshot bytes as opaque. It proves which log prefix the bytes
+claim to cover. The materializer must prove that the snapshot is the correct
+state for that prefix. This is the checkpoint trust boundary.
 
 The first release retains prior objects. A later garbage collector will need a
 durable reachability and grace-period protocol.

@@ -371,15 +371,29 @@ impl Log {
 
         if let Some(resolution) = Self::classify_resolution(&pending, current)? {
             if let Resolution::Committed(_) = &resolution {
-                self.verify_published_commit(&pending.commit_ref).await?;
+                match self.verify_published_commit(&pending.commit_ref).await {
+                    Ok(()) => {}
+                    Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+                    Err(error) => return Err(error),
+                }
             }
             return Ok(resolution);
         }
 
-        self.validate_prepared(&pending.prepared).await?;
+        match self.validate_prepared(&pending.prepared).await {
+            Ok(()) => {}
+            Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+            Err(error) => return Err(error),
+        }
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
-        self.verify_immutable(StoreKey::Commit(pending.commit_ref.digest), &commit_bytes)
-            .await?;
+        match self
+            .verify_immutable(StoreKey::Commit(pending.commit_ref.digest), &commit_bytes)
+            .await
+        {
+            Ok(()) => {}
+            Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+            Err(error) => return Err(error),
+        }
         let candidate = Self::candidate_head(&pending.prepared, &pending.commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
