@@ -4,10 +4,12 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::format::{self, Head};
-use crate::store::{ConditionalRead, CreateResult, ScopedStore, StoreKey, UpdateResult};
+use crate::store::{
+    ConditionalRead, CreateResult, ImmutableKey, ImmutableKind, ScopedStore, StoreKey, UpdateResult,
+};
 use crate::{
     CheckpointRef, CommitRef, Cursor, Digest, Error, LogId, ObjectKind, ObjectRef,
-    PendingCheckpoint, PendingCommit, PreparedCommit, TransactionId,
+    PendingCheckpoint, PendingCommit, PreparedCommit, StorageId, TransactionId,
 };
 
 const MAX_CONCURRENT_READS: usize = 32;
@@ -33,6 +35,12 @@ pub struct Options {
     pub max_head_bytes: usize,
     /// Maximum encoded bytes in one checkpoint.
     pub max_checkpoint_bytes: usize,
+    /// Maximum concurrent retention identities in the head.
+    pub max_retention_ids: usize,
+    /// Maximum objects in one collection scan, live graph, or deletion plan.
+    pub max_collection_objects: usize,
+    /// Maximum encoded bytes in one collection plan.
+    pub max_collection_plan_bytes: usize,
 }
 
 impl Default for Options {
@@ -47,6 +55,9 @@ impl Default for Options {
             max_commit_bytes: 1024 * 1024,
             max_head_bytes: 256 * 1024,
             max_checkpoint_bytes: 16 * 1024 * 1024,
+            max_retention_ids: 1_024,
+            max_collection_objects: 100_000,
+            max_collection_plan_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -80,6 +91,12 @@ impl View {
     #[must_use]
     pub fn tail(&self) -> &[CommitRef] {
         &self.cursor.head.tail
+    }
+
+    /// Returns the current garbage-collection epoch.
+    #[must_use]
+    pub const fn collection_epoch(&self) -> u64 {
+        self.cursor.head.collection_epoch
     }
 }
 
@@ -141,6 +158,75 @@ pub enum CheckpointResolution {
     StillPending(PendingCheckpoint),
     /// Later head updates removed conclusive publication evidence.
     Expired(View),
+}
+
+/// The result of one retention head update.
+#[derive(Debug)]
+pub enum RetentionStatus {
+    /// The requested retention state is durable.
+    Applied(View),
+    /// An active collection fence blocks a new retention.
+    ActiveCollection(View),
+    /// Another head update rejected the requested change.
+    Conflict(View),
+    /// A storage error can hide a successful head update.
+    Pending,
+}
+
+/// Counts reported for one collection operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CollectionReport {
+    candidate_count: usize,
+    candidate_bytes: u64,
+    delete_attempts: usize,
+}
+
+impl CollectionReport {
+    /// Returns the number of immutable deletion candidates.
+    #[must_use]
+    pub const fn candidate_count(&self) -> usize {
+        self.candidate_count
+    }
+
+    /// Returns the total listed bytes for all deletion candidates.
+    #[must_use]
+    pub const fn candidate_bytes(&self) -> u64 {
+        self.candidate_bytes
+    }
+
+    /// Returns the number of immutable delete requests issued.
+    #[must_use]
+    pub const fn delete_attempts(&self) -> usize {
+        self.delete_attempts
+    }
+}
+
+/// The result of creating or observing a collection fence.
+#[derive(Debug)]
+pub enum CollectionStart {
+    /// No immutable objects need deletion.
+    Empty(CollectionReport),
+    /// A positive deletion plan is durable and active.
+    Installed(View, CollectionReport),
+    /// The supplied view already has an active collection fence.
+    Active(View),
+    /// An active retention prevents fence installation.
+    Retained(View),
+    /// Another head update rejected fence installation.
+    Conflict(View),
+    /// A storage error can hide a successful fence update.
+    Pending,
+}
+
+/// The result of deleting and clearing one active collection plan.
+#[derive(Debug)]
+pub enum CollectionFinish {
+    /// Every candidate is absent and the exact fence is clear.
+    Complete(View, CollectionReport),
+    /// Another head update prevented the exact fence from being cleared.
+    Conflict(View, CollectionReport),
+    /// A delete or head error leaves completion uncertain.
+    Pending(CollectionReport),
 }
 
 enum CheckpointEvidence {
@@ -311,9 +397,7 @@ impl Log {
         }
     }
 
-    /// Stores one immutable content-addressed blob.
-    ///
-    /// Repeating this operation with the same bytes is idempotent.
+    /// Stores one immutable content-addressed blob with a fresh physical identity.
     ///
     /// # Errors
     ///
@@ -323,16 +407,7 @@ impl Log {
         if bytes.len() > self.options.max_object_bytes {
             return Err(Error::LimitExceeded("object bytes"));
         }
-        let len =
-            u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("object byte length"))?;
-        let object = ObjectRef {
-            kind: ObjectKind::Blob,
-            digest: Digest::of(&bytes),
-            len,
-        };
-        self.create_immutable(Self::object_key(&object), bytes)
-            .await?;
-        Ok(object)
+        self.create_fresh_object(ObjectKind::Blob, bytes).await
     }
 
     /// Stores one immutable reference node after its direct children exist.
@@ -357,16 +432,7 @@ impl Log {
             return Err(Error::LimitExceeded("object bytes"));
         }
         self.verify_objects(&node.children).await?;
-        let len =
-            u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("object byte length"))?;
-        let object = ObjectRef {
-            kind: ObjectKind::Node,
-            digest: Digest::of(&bytes),
-            len,
-        };
-        self.create_immutable(Self::object_key(&object), bytes)
-            .await?;
-        Ok(object)
+        self.create_fresh_object(ObjectKind::Node, bytes).await
     }
 
     /// Reads and verifies one object from this log namespace.
@@ -416,7 +482,7 @@ impl Log {
         }
         let stored = self
             .store
-            .read(Self::object_key(object), declared_len)
+            .read(self.object_key(object), declared_len)
             .await?
             .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))?;
         Self::verify_object(object, &stored.bytes)?;
@@ -460,6 +526,7 @@ impl Log {
         Ok(PreparedCommit {
             cursor: cursor.clone(),
             transaction_id,
+            storage_id: StorageId::new(),
             operation,
             result,
             objects,
@@ -480,7 +547,7 @@ impl Log {
     pub async fn commit(&self, prepared: PreparedCommit) -> Result<CommitStatus, Error> {
         self.validate_prepared(&prepared).await?;
         let (commit_ref, commit_bytes) = self.encode_prepared(&prepared)?;
-        self.create_immutable(StoreKey::Commit(commit_ref.digest), commit_bytes)
+        self.create_immutable(self.commit_key(&commit_ref), commit_bytes)
             .await?;
         let candidate = Self::candidate_head(&prepared, &commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
@@ -569,7 +636,7 @@ impl Log {
         }
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
         match self
-            .create_immutable(StoreKey::Commit(pending.commit_ref.digest), commit_bytes)
+            .create_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
             .await
         {
             Ok(()) => {}
@@ -698,18 +765,12 @@ impl Log {
         };
         let bytes = format::encode_checkpoint(&checkpoint)?;
         self.validate_checkpoint_bytes(bytes.len())?;
-        let len = u64::try_from(bytes.len())
-            .map_err(|_| Error::LimitExceeded("checkpoint byte length"))?;
-        let object = ObjectRef {
-            kind: ObjectKind::Checkpoint,
-            digest: Digest::of(&bytes),
-            len,
-        };
+        let object = self
+            .create_fresh_object(ObjectKind::Checkpoint, bytes)
+            .await?;
         let candidate = Self::checkpoint_head(view, through, object.clone())?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
-        self.create_immutable(StoreKey::Checkpoint(object.digest), bytes)
-            .await?;
         let pending = PendingCheckpoint {
             view: view.clone(),
             through: through.clone(),
@@ -1022,6 +1083,7 @@ impl Log {
         let reference = CommitRef {
             sequence: prepared.cursor.head.next_sequence,
             transaction_id: prepared.transaction_id,
+            storage_id: prepared.storage_id,
             digest: Digest::of(&bytes),
             len,
         };
@@ -1166,10 +1228,7 @@ impl Log {
         }
         let stored = self
             .store
-            .read(
-                StoreKey::Commit(reference.digest),
-                self.options.max_commit_bytes,
-            )
+            .read(self.commit_key(reference), self.options.max_commit_bytes)
             .await?
             .ok_or_else(|| Error::InvalidFormat("a referenced commit is missing".to_owned()))?;
         let len = u64::try_from(stored.bytes.len())
@@ -1218,7 +1277,7 @@ impl Log {
         }
         let (digest, len) = self
             .store
-            .read_integrity(Self::object_key(object), declared_len)
+            .read_integrity(self.object_key(object), declared_len)
             .await?
             .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))?;
         if digest != object.digest || len != object.len {
@@ -1239,6 +1298,43 @@ impl Log {
         }
     }
 
+    async fn create_fresh_object(
+        &self,
+        kind: ObjectKind,
+        bytes: Bytes,
+    ) -> Result<ObjectRef, Error> {
+        self.create_fresh_object_with(kind, bytes, StorageId::new)
+            .await
+    }
+
+    async fn create_fresh_object_with(
+        &self,
+        kind: ObjectKind,
+        bytes: Bytes,
+        mut new_storage_id: impl FnMut() -> StorageId,
+    ) -> Result<ObjectRef, Error> {
+        const MAX_ATTEMPTS: usize = 16;
+
+        let len =
+            u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("object byte length"))?;
+        let digest = Digest::of(&bytes);
+        for _ in 0..MAX_ATTEMPTS {
+            let object = ObjectRef {
+                kind,
+                storage_id: new_storage_id(),
+                digest,
+                len,
+            };
+            let key = self.object_key(&object);
+            match self.store.create(key, bytes.clone()).await {
+                Ok(CreateResult::Created { .. }) => return Ok(object),
+                Ok(CreateResult::AlreadyExists) => {}
+                Err(create_error) => return Err(create_error),
+            }
+        }
+        Err(Error::LimitExceeded("fresh physical storage identity"))
+    }
+
     async fn verify_immutable(&self, key: StoreKey, expected: &Bytes) -> Result<(), Error> {
         let stored = self
             .store
@@ -1251,12 +1347,27 @@ impl Log {
         Ok(())
     }
 
-    fn object_key(object: &ObjectRef) -> StoreKey {
-        match object.kind {
-            ObjectKind::Blob => StoreKey::Blob(object.digest),
-            ObjectKind::Node => StoreKey::Node(object.digest),
-            ObjectKind::Checkpoint => StoreKey::Checkpoint(object.digest),
-        }
+    fn object_key(&self, object: &ObjectRef) -> StoreKey {
+        let kind = match object.kind {
+            ObjectKind::Blob => ImmutableKind::Blob,
+            ObjectKind::Node => ImmutableKind::Node,
+            ObjectKind::Checkpoint => ImmutableKind::Checkpoint,
+        };
+        StoreKey::Immutable(ImmutableKey {
+            incarnation: self.incarnation,
+            kind,
+            storage_id: object.storage_id,
+            digest: object.digest,
+        })
+    }
+
+    fn commit_key(&self, reference: &CommitRef) -> StoreKey {
+        StoreKey::Immutable(ImmutableKey {
+            incarnation: self.incarnation,
+            kind: ImmutableKind::Commit,
+            storage_id: reference.storage_id,
+            digest: reference.digest,
+        })
     }
 
     fn verify_object(object: &ObjectRef, bytes: &Bytes) -> Result<(), Error> {
@@ -1299,10 +1410,100 @@ mod tests {
     use std::sync::Arc;
 
     use crate::ValidatedBackend;
+    use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
     use object_store::memory::InMemory;
     use object_store::path::Path;
 
     use super::*;
+
+    #[test]
+    fn collection_report_exposes_only_bounded_counts() {
+        let report = CollectionReport {
+            candidate_count: 3,
+            candidate_bytes: 30,
+            delete_attempts: 2,
+        };
+        assert_eq!(report.candidate_count(), 3);
+        assert_eq!(report.candidate_bytes(), 30);
+        assert_eq!(report.delete_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn initial_view_has_collection_epoch_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("initial-collection-epoch", Options::default()).await?;
+        assert_eq!(log.load().await?.collection_epoch(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_staging_reallocates_a_colliding_physical_id()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("storage-id-collision", Options::default()).await?;
+        let bytes = Bytes::from_static(b"same bytes");
+        let collision = StorageId::from_uuid(uuid::Uuid::from_u128(7));
+        let replacement = StorageId::from_uuid(uuid::Uuid::from_u128(8));
+        let occupied = ObjectRef {
+            kind: ObjectKind::Blob,
+            storage_id: collision,
+            digest: Digest::of(&bytes),
+            len: u64::try_from(bytes.len())?,
+        };
+        log.store
+            .create(log.object_key(&occupied), bytes.clone())
+            .await?;
+        let mut ids = [collision, replacement].into_iter();
+
+        let staged = log
+            .create_fresh_object_with(ObjectKind::Blob, bytes, || {
+                ids.next().unwrap_or(replacement)
+            })
+            .await?;
+
+        assert_eq!(staged.storage_id, replacement);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_staging_does_not_accept_a_collision_after_an_ambiguous_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend = ValidatedBackend::new(
+            Arc::new(faults.clone()),
+            Path::from("ambiguous-collision-tests"),
+        )
+        .await?;
+        let log = Log::open(
+            backend.scope(&LogId::new("ambiguous-storage-id-collision")?),
+            Options::default(),
+        )
+        .await?;
+        let bytes = Bytes::from_static(b"same bytes");
+        let collision = StorageId::from_uuid(uuid::Uuid::from_u128(7));
+        let occupied = ObjectRef {
+            kind: ObjectKind::Blob,
+            storage_id: collision,
+            digest: Digest::of(&bytes),
+            len: u64::try_from(bytes.len())?,
+        };
+        log.store
+            .create(log.object_key(&occupied), bytes.clone())
+            .await?;
+        faults.reset();
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 1,
+            phase: FailurePhase::Before,
+        });
+
+        let error = log
+            .create_fresh_object_with(ObjectKind::Blob, bytes, || collision)
+            .await
+            .err()
+            .ok_or("ambiguous fresh create returned its colliding ID")?;
+
+        assert!(matches!(&error, Error::Store(error) if FaultStore::is_injected(error)));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn recovery_rejects_a_commit_from_the_wrong_parent()
@@ -1395,13 +1596,12 @@ mod tests {
         let reference = CommitRef {
             sequence: 0,
             transaction_id: commit.transaction_id,
+            storage_id: StorageId::new(),
             digest: Digest::of(&bytes),
             len: u64::try_from(bytes.len())
                 .map_err(|_| Error::LimitExceeded("commit byte length"))?,
         };
-        log.store
-            .create(StoreKey::Commit(reference.digest), bytes)
-            .await?;
+        log.store.create(log.commit_key(&reference), bytes).await?;
         let mut head = source.cursor.head.clone();
         head.generation = 1;
         head.next_sequence = 1;

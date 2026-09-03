@@ -10,7 +10,7 @@ use object_store::path::Path;
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersion};
 use uuid::Uuid;
 
-use crate::{Digest, Error, LogId};
+use crate::{Digest, Error, LogId, StorageId};
 
 pub(crate) const MAX_DELETE_BATCH: usize = 1_000;
 
@@ -104,17 +104,10 @@ impl BackendCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StoreKey {
     Head,
-    Commit(Digest),
-    Blob(Digest),
-    Node(Digest),
-    Checkpoint(Digest),
+    Immutable(ImmutableKey),
 }
 
 /// The role of one immutable physical object.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ImmutableKind {
     Commit,
@@ -124,10 +117,6 @@ pub(crate) enum ImmutableKind {
     CollectionPlan,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 impl ImmutableKind {
     const fn segment(self) -> &'static str {
         match self {
@@ -152,28 +141,21 @@ impl ImmutableKind {
 }
 
 /// One immutable physical key that cannot address the mutable head.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ImmutableKey {
     pub(crate) incarnation: Uuid,
     pub(crate) kind: ImmutableKind,
-    pub(crate) storage_id: Uuid,
+    pub(crate) storage_id: StorageId,
     pub(crate) digest: Digest,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the GC protocol integration")
-)]
 impl ImmutableKey {
+    #[cfg(test)]
     pub(crate) fn new(incarnation: Uuid, kind: ImmutableKind, digest: Digest) -> Self {
         Self {
             incarnation,
             kind,
-            storage_id: Uuid::new_v4(),
+            storage_id: StorageId::new(),
             digest,
         }
     }
@@ -187,7 +169,7 @@ impl ImmutableKey {
         Self {
             incarnation,
             kind,
-            storage_id,
+            storage_id: StorageId::from_uuid(storage_id),
             digest,
         }
     }
@@ -502,36 +484,17 @@ impl ScopedStore {
     fn location(&self, key: StoreKey) -> Path {
         match key {
             StoreKey::Head => self.scope.clone().join("index.cbor"),
-            StoreKey::Commit(digest) => self
-                .scope
-                .clone()
-                .join("wal")
-                .join(format!("{digest}.cbor")),
-            StoreKey::Blob(digest) => self.scope.clone().join("objects").join(digest.to_string()),
-            StoreKey::Node(digest) => self
-                .scope
-                .clone()
-                .join("nodes")
-                .join(format!("{digest}.cbor")),
-            StoreKey::Checkpoint(digest) => self
-                .scope
-                .clone()
-                .join("bases")
-                .join(format!("{digest}.cbor")),
+            StoreKey::Immutable(key) => self.immutable_location(key),
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by the GC protocol integration")
-    )]
     fn immutable_location(&self, key: ImmutableKey) -> Path {
         self.scope
             .clone()
             .join("data")
             .join(key.incarnation.simple().to_string())
             .join(key.kind.segment())
-            .join(key.storage_id.simple().to_string())
+            .join(key.storage_id.as_uuid().simple().to_string())
             .join(key.digest.to_string())
     }
 

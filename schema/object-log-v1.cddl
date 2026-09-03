@@ -1,6 +1,6 @@
 ; object-log durable format version 1
 ; All top-level values are stored as an envelope. The envelope payload is the
-; canonical CBOR encoding of exactly one index, entry, base, or reference node.
+; canonical CBOR encoding of one index, entry, base, node, or collection plan.
 
 envelope = {
   1: bstr,                         ; encoded payload
@@ -16,7 +16,10 @@ index = {
   6: [* entry-pointer],            ; active ordered tail
   7: [* entry-pointer],            ; bounded outcome window
   8: incarnation-id,               ; random durable log incarnation
-  9: options                       ; durable log contract
+  9: options,                      ; durable log contract
+  10: uint,                        ; monotonic collection epoch
+  ? 11: collection-plan-ref,       ; active positive deletion plan
+  12: [* retention-id]             ; sorted conservative reader retentions
 }
 
 options = {
@@ -28,7 +31,10 @@ options = {
   6: uint,                         ; maximum encoded entry bytes
   7: uint,                         ; maximum encoded index bytes
   8: uint,                         ; maximum encoded base bytes
-  9: uint                          ; maximum immutable object bytes
+  9: uint,                         ; maximum immutable object bytes
+  10: uint,                        ; maximum retention IDs
+  11: uint,                        ; maximum collection objects
+  12: uint                         ; maximum encoded collection-plan bytes
 }
 
 ; An entry has no assigned sequence. The index entry-pointer assigns it.
@@ -68,14 +74,16 @@ recovery-token = {
   5: transaction-id,
   6: bstr,                         ; opaque operation
   7: bstr,                         ; opaque recorded result
-  8: [* object-ref]
+  8: [* object-ref],
+  9: storage-id                    ; exact entry physical identity
 }
 
 entry-pointer = {
   1: uint,                         ; assigned sequence
   2: transaction-id,
   3: digest,
-  4: uint                          ; encoded envelope length
+  4: uint,                         ; encoded envelope length
+  5: storage-id                    ; private physical identity
 }
 
 checkpoint-ref = {
@@ -87,11 +95,36 @@ checkpoint-ref = {
 object-ref = {
   1: object-kind,
   2: digest,
-  3: uint                          ; byte length
+  3: uint,                         ; byte length
+  4: storage-id                    ; private physical identity
+}
+
+collection-plan-ref = {
+  1: storage-id,
+  2: digest,
+  3: uint                          ; encoded envelope length
+}
+
+collection-plan = {
+  1: 1,                            ; format version
+  2: log-id,
+  3: uint,                         ; positive collection epoch
+  4: [+ collection-candidate]      ; strictly sorted positive deletion set
+}
+
+collection-candidate = {
+  1: incarnation-id,
+  2: immutable-kind,
+  3: storage-id,
+  4: digest,
+  5: uint                          ; listed object bytes
 }
 
 object-kind = 1 / 2 / 3            ; payload / base / reference node
+immutable-kind = 1 / 2 / 3 / 4 / 5 ; entry / payload / node / base / plan
 digest = bstr .size 32
 transaction-id = bstr .size 16
+retention-id = bstr .size 16
+storage-id = bstr .size 16
 incarnation-id = bstr .size 16
 log-id = tstr .size (1..128)

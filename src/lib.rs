@@ -12,8 +12,9 @@ mod store;
 pub mod sim;
 
 pub use log::{
-    CheckpointRecord, CheckpointResolution, CheckpointStatus, CommitRecord, CommitStatus, Log,
-    Options, ReferenceNode, Refresh, Resolution, View,
+    CheckpointRecord, CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionReport,
+    CollectionStart, CommitRecord, CommitStatus, Log, Options, ReferenceNode, Refresh, Resolution,
+    RetentionStatus, View,
 };
 pub use materialize::{MaterializeError, Materialized, Materializer, materialize};
 pub use store::{BackendCapabilities, BackendCapability, ScopedStore, ValidatedBackend};
@@ -137,6 +138,59 @@ impl fmt::Display for TransactionId {
     }
 }
 
+/// A stable identity for one conservative reader retention.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RetentionId(Uuid);
+
+impl RetentionId {
+    /// Creates a random retention identity.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Wraps a caller-supplied UUID as a retention identity.
+    #[must_use]
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    /// Returns the underlying UUID.
+    #[must_use]
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for RetentionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for RetentionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct StorageId(Uuid);
+
+impl StorageId {
+    pub(crate) fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub(crate) const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
 /// The role of an immutable object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectKind {
@@ -152,6 +206,7 @@ pub enum ObjectKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectRef {
     pub(crate) kind: ObjectKind,
+    pub(crate) storage_id: StorageId,
     pub(crate) digest: Digest,
     pub(crate) len: u64,
 }
@@ -187,6 +242,7 @@ impl ObjectRef {
 pub struct CommitRef {
     pub(crate) sequence: u64,
     pub(crate) transaction_id: TransactionId,
+    pub(crate) storage_id: StorageId,
     pub(crate) digest: Digest,
     pub(crate) len: u64,
 }
@@ -276,6 +332,7 @@ impl Cursor {
 pub struct PreparedCommit {
     pub(crate) cursor: Cursor,
     pub(crate) transaction_id: TransactionId,
+    pub(crate) storage_id: StorageId,
     pub(crate) operation: Bytes,
     pub(crate) result: Bytes,
     pub(crate) objects: Vec<ObjectRef>,

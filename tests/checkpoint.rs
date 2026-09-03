@@ -2,12 +2,13 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::TryStreamExt;
 #[cfg(feature = "test-util")]
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 #[cfg(feature = "test-util")]
 use object_log::{CheckpointResolution, PendingCommit};
 use object_log::{
-    CheckpointStatus, CommitStatus, Log, LogId, Options, Resolution, TransactionId,
+    CheckpointStatus, CommitStatus, Digest, Log, LogId, Options, Resolution, TransactionId,
     ValidatedBackend, View,
 };
 use object_store::memory::InMemory;
@@ -250,10 +251,9 @@ async fn checkpoint_declares_live_objects_for_lazy_restore() -> TestResult {
     };
 
     backend
-        .delete(&Path::from(format!(
-            "checkpoint-tests/v1/logs/checkpoint-objects/objects/{}",
-            object.digest()
-        )))
+        .delete(
+            &immutable_location(&backend, "checkpoint-objects", "blobs", object.digest()).await?,
+        )
         .await?;
     let checkpoint = log
         .read_checkpoint(&compacted)
@@ -282,7 +282,8 @@ async fn checkpoint_can_root_a_traversable_object_tree() -> TestResult {
     let same = log
         .put_node(Bytes::from_static(b"page map"), vec![page.clone()])
         .await?;
-    assert_eq!(same, node);
+    assert_ne!(same, node);
+    assert_eq!(same.digest(), node.digest());
     let one = append(&log, &log.load().await?, b"one").await?;
     let through = one.tail()[0].clone();
     let CheckpointStatus::Published(compacted) = log
@@ -315,10 +316,9 @@ async fn reference_node_rejects_missing_and_corrupt_children() -> TestResult {
     let log = open(store, "invalid-node-child", Options::default()).await?;
     let missing = log.put_object(Bytes::from_static(b"missing")).await?;
     backend
-        .delete(&Path::from(format!(
-            "checkpoint-tests/v1/logs/invalid-node-child/objects/{}",
-            missing.digest()
-        )))
+        .delete(
+            &immutable_location(&backend, "invalid-node-child", "blobs", missing.digest()).await?,
+        )
         .await?;
     assert!(matches!(
         log.put_node(Bytes::new(), vec![missing]).await,
@@ -328,10 +328,7 @@ async fn reference_node_rejects_missing_and_corrupt_children() -> TestResult {
     let corrupt = log.put_object(Bytes::from_static(b"correct")).await?;
     backend
         .put(
-            &Path::from(format!(
-                "checkpoint-tests/v1/logs/invalid-node-child/objects/{}",
-                corrupt.digest()
-            )),
+            &immutable_location(&backend, "invalid-node-child", "blobs", corrupt.digest()).await?,
             Bytes::from_static(b"changed").into(),
         )
         .await?;
@@ -351,10 +348,15 @@ async fn checkpoint_rejects_missing_declared_object_before_publication() -> Test
     let one = append(&log, &log.load().await?, b"one").await?;
     let through = one.tail()[0].clone();
     backend
-        .delete(&Path::from(format!(
-            "checkpoint-tests/v1/logs/checkpoint-missing-object/objects/{}",
-            object.digest()
-        )))
+        .delete(
+            &immutable_location(
+                &backend,
+                "checkpoint-missing-object",
+                "blobs",
+                object.digest(),
+            )
+            .await?,
+        )
         .await?;
 
     assert!(matches!(
@@ -381,10 +383,13 @@ async fn checkpoint_rejects_corrupt_declared_object_before_publication() -> Test
     let through = one.tail()[0].clone();
     backend
         .put(
-            &Path::from(format!(
-                "checkpoint-tests/v1/logs/checkpoint-corrupt-object/objects/{}",
-                object.digest()
-            )),
+            &immutable_location(
+                &backend,
+                "checkpoint-corrupt-object",
+                "blobs",
+                object.digest(),
+            )
+            .await?,
             Bytes::from_static(b"bad!").into(),
         )
         .await?;
@@ -417,10 +422,13 @@ async fn checkpoint_read_rejects_missing_and_corrupt_roots() -> TestResult {
         return Err("checkpoint did not publish".into());
     };
     let reference = compacted.checkpoint().ok_or("checkpoint is missing")?;
-    let location = Path::from(format!(
-        "checkpoint-tests/v1/logs/missing-checkpoint/bases/{}.cbor",
-        reference.object().digest()
-    ));
+    let location = immutable_location(
+        &backend,
+        "missing-checkpoint",
+        "checkpoints",
+        reference.object().digest(),
+    )
+    .await?;
     backend.delete(&location).await?;
     assert!(matches!(
         log.read_checkpoint(&compacted).await,
@@ -508,10 +516,15 @@ async fn pending_checkpoint_rejects_a_lost_root() -> TestResult {
         }
     };
     backend
-        .delete(&Path::from(format!(
-            "checkpoint-tests/v1/logs/checkpoint-pending-lost-root/objects/{}",
-            object.digest()
-        )))
+        .delete(
+            &immutable_location(
+                &backend,
+                "checkpoint-pending-lost-root",
+                "blobs",
+                object.digest(),
+            )
+            .await?,
+        )
         .await?;
 
     assert!(matches!(
@@ -731,10 +744,13 @@ async fn checkpoint_rejects_missing_source_history_before_publication() -> TestR
     .await?;
     let committed = append(&log, &log.load().await?, b"one").await?;
     let through = committed.tail()[0].clone();
-    let location = Path::from(format!(
-        "checkpoint-tests/v1/logs/checkpoint-missing-history/wal/{}.cbor",
-        through.digest()
-    ));
+    let location = immutable_location(
+        &backend,
+        "checkpoint-missing-history",
+        "commits",
+        through.digest(),
+    )
+    .await?;
     backend.delete(&location).await?;
 
     assert!(matches!(
@@ -762,6 +778,27 @@ async fn open(
     let backend = ValidatedBackend::new(store, Path::from("checkpoint-tests")).await?;
     let scoped = backend.scope(&log_id);
     Log::open(scoped, options).await
+}
+
+async fn immutable_location<S: ObjectStore + ?Sized>(
+    store: &Arc<S>,
+    log_id: &str,
+    kind: &str,
+    digest: Digest,
+) -> Result<Path, Box<dyn StdError>> {
+    let prefix = Path::from(format!("checkpoint-tests/v1/logs/{log_id}/data"));
+    let kind = format!("/{kind}/");
+    let digest = digest.to_string();
+    store
+        .list(Some(&prefix))
+        .try_filter(|object| {
+            let path = object.location.to_string();
+            std::future::ready(path.contains(&kind) && path.ends_with(&digest))
+        })
+        .map_ok(|object| object.location)
+        .try_next()
+        .await?
+        .ok_or_else(|| "immutable test object is missing".into())
 }
 
 async fn append(

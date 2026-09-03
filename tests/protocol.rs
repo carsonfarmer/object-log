@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use object_log::{
-    CommitStatus, Log, LogId, Options, Refresh, Resolution, TransactionId, ValidatedBackend,
+    CommitStatus, Digest, Log, LogId, Options, Refresh, Resolution, TransactionId, ValidatedBackend,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -351,10 +352,7 @@ async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std:
         return Err("object commit did not publish".into());
     };
     backend
-        .delete(&Path::from(format!(
-            "protocol-tests/v1/logs/missing-object/objects/{}",
-            object.digest()
-        )))
+        .delete(&immutable_location(&backend, "missing-object", "blobs", object.digest()).await?)
         .await?;
 
     let tail = log.read_tail(&committed).await?;
@@ -386,10 +384,7 @@ async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn
     };
     backend
         .put(
-            &Path::from(format!(
-                "protocol-tests/v1/logs/changed-object/objects/{}",
-                object.digest()
-            )),
+            &immutable_location(&backend, "changed-object", "blobs", object.digest()).await?,
             Bytes::from_static(b"changed").into(),
         )
         .await?;
@@ -591,6 +586,27 @@ async fn open(store: Arc<dyn ObjectStore>, id: &str) -> Result<Log, object_log::
     Log::open(scoped, Options::default()).await
 }
 
+async fn immutable_location<S: ObjectStore + ?Sized>(
+    store: &Arc<S>,
+    log_id: &str,
+    kind: &str,
+    digest: Digest,
+) -> Result<Path, Box<dyn std::error::Error>> {
+    let prefix = Path::from(format!("protocol-tests/v1/logs/{log_id}/data"));
+    let kind = format!("/{kind}/");
+    let digest = digest.to_string();
+    store
+        .list(Some(&prefix))
+        .try_filter(|object| {
+            let path = object.location.to_string();
+            std::future::ready(path.contains(&kind) && path.ends_with(&digest))
+        })
+        .map_ok(|object| object.location)
+        .try_next()
+        .await?
+        .ok_or_else(|| "immutable test object is missing".into())
+}
+
 #[derive(Debug)]
 struct InstrumentedStore {
     inner: Arc<InMemory>,
@@ -687,7 +703,7 @@ impl ObjectStore for InstrumentedStore {
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
         let is_update = matches!(&options.mode, object_store::PutMode::Update(_));
-        let is_object = location.to_string().contains("/objects/");
+        let is_object = location.to_string().contains("/blobs/");
         if is_update && self.order_check_armed.load(Ordering::SeqCst) {
             self.object_before_update
                 .store(self.object_created.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -744,7 +760,9 @@ impl ObjectStore for InstrumentedStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        if location.to_string().contains("/wal/") && self.reorder_wal_reads.load(Ordering::SeqCst) {
+        if location.to_string().contains("/commits/")
+            && self.reorder_wal_reads.load(Ordering::SeqCst)
+        {
             match self.wal_read_count.fetch_add(1, Ordering::SeqCst) {
                 0 => {
                     self.second_wal_read.notified().await;
