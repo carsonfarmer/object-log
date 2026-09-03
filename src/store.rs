@@ -33,7 +33,11 @@ pub struct BackendCapabilities {
     supported: BTreeSet<BackendCapability>,
 }
 
-/// One object-store root whose protocol capabilities were verified once.
+/// One object-store root whose observable protocol capabilities were verified.
+///
+/// The probe cannot prove long-term object retention. The operator must prevent
+/// lifecycle expiry, overwrite, and deletion of protocol objects outside
+/// object-log garbage collection.
 #[derive(Clone, Debug)]
 pub struct ValidatedBackend {
     store: Arc<dyn ObjectStore>,
@@ -43,6 +47,10 @@ pub struct ValidatedBackend {
 
 impl ValidatedBackend {
     /// Probes and validates one object-store root for many logical logs.
+    ///
+    /// The probe checks immediate request behavior. It cannot prove that a
+    /// created immutable object will remain unchanged. The caller must provide
+    /// that storage contract.
     ///
     /// # Errors
     ///

@@ -313,7 +313,10 @@ pub(crate) struct StagingDomain;
 ///
 /// A staged object is valid only for its source [`Log`] handle and collection
 /// epoch. Clones of that handle share the proof. Use [`Log::stage_objects`] to
-/// use durable [`ObjectRef`] values in new work.
+/// use durable [`ObjectRef`] values in new work. The proof is process-local and
+/// is not part of a recovery token. It relies on the backend keeping the exact
+/// created bytes until object-log garbage collection deletes their physical
+/// key.
 #[derive(Clone, Debug)]
 pub struct StagedObject {
     pub(crate) object: ObjectRef,

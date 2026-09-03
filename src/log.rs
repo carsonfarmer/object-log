@@ -713,7 +713,9 @@ impl Log {
     /// Stores one immutable content-addressed blob for an observed collection epoch.
     ///
     /// Clones of this log handle can use the returned proof. A separately
-    /// opened handle must verify the durable reference again.
+    /// opened handle must verify the durable reference again. The backend must
+    /// keep the exact created bytes until object-log garbage collection deletes
+    /// their physical key.
     ///
     /// # Errors
     ///
@@ -911,6 +913,8 @@ impl Log {
     /// A definite precondition failure returns [`CommitStatus::Conflict`] when
     /// the winning view can also be read. [`CommitStatus::Pending`] preserves
     /// the candidate when the safe final view or classification is unavailable.
+    /// Same-process staged proofs avoid immutable dependency reads. Reopened or
+    /// decoded recovery evidence verifies its complete dependency graph.
     ///
     /// # Errors
     ///
@@ -1126,6 +1130,8 @@ impl Log {
     /// The base object becomes durable before the index update. A concurrent
     /// index update returns [`CheckpointStatus::Conflict`] and preserves the
     /// current durable history.
+    /// Same-process staged proofs avoid immutable dependency reads. Reopened
+    /// pending evidence verifies its complete dependency graph.
     ///
     /// # Errors
     ///
