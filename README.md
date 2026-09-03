@@ -14,11 +14,13 @@ The durable model is small:
 - One validated backend handle serves many isolated tenant logs.
 
 The project is independent from Spin. The first consumer is a small key-value
-state machine. See [PLAN.md](PLAN.md) and [docs/design.md](docs/design.md) for
-the accepted scope and protocol.
+state machine. The log, checkpoints, object graph, local benchmarks, and `MinIO`
+compatibility flow are complete. Safe garbage collection is the current
+implementation tranche. See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
+[docs/design.md](docs/design.md) for the accepted scope and protocol.
 
-See [docs/follow-ons.md](docs/follow-ons.md) for the ordered garbage
-collection, `SQLite`, WASI filesystem, and live AWS qualification goals.
+See [docs/follow-ons.md](docs/follow-ons.md) for the ordered `SQLite`, WASI
+filesystem, and live AWS qualification goals that follow garbage collection.
 
 ## Local checks
 

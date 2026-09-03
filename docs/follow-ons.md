@@ -6,6 +6,9 @@ durable authority.
 
 ## 1. Garbage collection
 
+The implementation contract and current task record are in
+[`GC_PLAN.md`](../GC_PLAN.md).
+
 ### Required contract
 
 - Collection operates on one log namespace.
