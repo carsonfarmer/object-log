@@ -1,0 +1,33 @@
+[package]
+name = "object-log-sqlite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "SQLite demonstration for object-log"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+bytes = "1.10"
+minicbor = { version = "2.3", features = ["derive", "std"] }
+object-log = { path = "../.." }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled", "hooks", "modern_sqlite"] }
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["v4"] }
+
+[dev-dependencies]
+hex = "0.4"
+object-log = { path = "../..", features = ["test-util"] }
+object_store = "0.14"
+tempfile = "3.20"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
