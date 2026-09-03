@@ -1,6 +1,4 @@
 //! Versioned durable encoding.
-//!
-//! The publication module consumes this API in the next integration commit.
 
 use crate::log::Options;
 use crate::{
@@ -114,6 +112,15 @@ impl Head {
                         "head does not retain the required outcome suffix".into(),
                     ));
                 }
+                if self
+                    .recent_outcomes
+                    .last()
+                    .is_some_and(|commit| commit.digest != checkpoint.through_commit)
+                {
+                    return Err(Error::InvalidFormat(
+                        "head outcome suffix does not match its checkpoint".into(),
+                    ));
+                }
                 Some(available - retained)
             }
         };
@@ -157,7 +164,6 @@ pub(crate) struct Commit {
     pub log_id: LogId,
     pub incarnation: Uuid,
     pub transaction_id: TransactionId,
-    pub expected_generation: u64,
     pub expected_tip: Option<Digest>,
     pub operation: Bytes,
     pub result: Bytes,
@@ -237,17 +243,15 @@ struct CommitWire {
     log_id: String,
     #[cbor(n(3), with = "minicbor::bytes")]
     transaction_id: Vec<u8>,
-    #[n(4)]
-    expected_generation: u64,
-    #[cbor(n(5), with = "minicbor::bytes")]
+    #[cbor(n(4), with = "minicbor::bytes")]
     expected_tip: Option<Vec<u8>>,
-    #[cbor(n(6), with = "minicbor::bytes")]
+    #[cbor(n(5), with = "minicbor::bytes")]
     operation: Vec<u8>,
-    #[cbor(n(7), with = "minicbor::bytes")]
+    #[cbor(n(6), with = "minicbor::bytes")]
     result: Vec<u8>,
-    #[n(8)]
+    #[n(7)]
     objects: Vec<ObjectRefWire>,
-    #[cbor(n(9), with = "minicbor::bytes")]
+    #[cbor(n(8), with = "minicbor::bytes")]
     incarnation: Vec<u8>,
 }
 
@@ -381,7 +385,6 @@ pub(crate) fn encode_commit(commit: &Commit) -> Result<Bytes, Error> {
         format_version: FORMAT_VERSION,
         log_id: commit.log_id.to_string(),
         transaction_id: commit.transaction_id.as_uuid().as_bytes().to_vec(),
-        expected_generation: commit.expected_generation,
         expected_tip: commit.expected_tip.map(|digest| digest.as_bytes().to_vec()),
         operation: commit.operation.to_vec(),
         result: commit.result.to_vec(),
@@ -397,7 +400,6 @@ pub(crate) fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
         log_id: LogId::new(wire.log_id)?,
         incarnation: uuid(&wire.incarnation, "log incarnation")?,
         transaction_id: transaction_id(&wire.transaction_id)?,
-        expected_generation: wire.expected_generation,
         expected_tip: wire.expected_tip.map(|value| digest(&value)).transpose()?,
         operation: Bytes::from(wire.operation),
         result: Bytes::from(wire.result),
@@ -714,7 +716,6 @@ mod tests {
 
     #[test]
     fn head_round_trip_preserves_order_and_base() {
-        let base_commit = Digest::of(b"base");
         let checkpoint_object = ObjectRef {
             kind: ObjectKind::Checkpoint,
             digest: Digest::of(b"checkpoint"),
@@ -735,7 +736,7 @@ mod tests {
             next_sequence: 6,
             checkpoint: Some(CheckpointRef {
                 through_sequence: 3,
-                through_commit: base_commit,
+                through_commit: compacted_second.digest,
                 object: checkpoint_object,
             }),
             tail: vec![first.clone(), second.clone()],
@@ -755,7 +756,6 @@ mod tests {
             log_id: log_id(),
             incarnation: incarnation(),
             transaction_id: crate::TransactionId::new(),
-            expected_generation: 2,
             expected_tip: Some(Digest::of(b"prior")),
             operation: Bytes::from_static(b"operation"),
             result: Bytes::from_static(b"result"),
@@ -822,13 +822,55 @@ mod tests {
         assert_eq!(decoded.objects, prepared.objects);
     }
 
+    #[tokio::test]
+    async fn recovery_token_cannot_change_the_durable_options() {
+        use std::sync::Arc;
+
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+
+        let id = log_id();
+        let log = crate::Log::open(
+            crate::ScopedStore::new(Arc::new(InMemory::new()), Path::from("format-tests"), &id),
+            Options::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("open failed: {error}"));
+        let view = log
+            .load()
+            .await
+            .unwrap_or_else(|error| panic!("load failed: {error}"));
+        let prepared = log
+            .prepare(
+                view.cursor(),
+                crate::TransactionId::new(),
+                Bytes::from_static(b"operation"),
+                Bytes::new(),
+                Vec::new(),
+            )
+            .unwrap_or_else(|error| panic!("prepare failed: {error}"));
+        let mut tampered = decode_recovery_token(
+            &prepared
+                .recovery_token()
+                .unwrap_or_else(|error| panic!("token failed: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("decode failed: {error}"));
+        tampered.cursor.head.options.max_tail_entries = 1;
+        let token = encode_recovery_token(&tampered)
+            .unwrap_or_else(|error| panic!("encode failed: {error}"));
+
+        assert!(matches!(
+            log.resume(&token).await,
+            Err(Error::ConfigurationMismatch("options"))
+        ));
+    }
+
     #[test]
     fn changed_envelope_is_corrupt() {
         let mut encoded = encode_commit(&Commit {
             log_id: log_id(),
             incarnation: incarnation(),
             transaction_id: crate::TransactionId::new(),
-            expected_generation: 0,
             expected_tip: None,
             operation: Bytes::from_static(b"operation"),
             result: Bytes::new(),
@@ -967,6 +1009,15 @@ mod tests {
         let mut generation_behind = head;
         generation_behind.generation = 1;
         assert!(generation_behind.validate().is_err());
+
+        let mut mismatched_anchor = generation_behind;
+        mismatched_anchor.generation = 2;
+        mismatched_anchor
+            .checkpoint
+            .as_mut()
+            .unwrap_or_else(|| panic!("test checkpoint is missing"))
+            .through_commit = Digest::of(b"different commit");
+        assert!(mismatched_anchor.validate().is_err());
     }
 
     #[test]

@@ -36,12 +36,11 @@ entry = {
   1: 1,                            ; format version
   2: log-id,
   3: transaction-id,
-  4: uint,                         ; expected generation
-  ? 5: digest,                     ; expected prior tip
-  6: bstr,                         ; opaque operation
-  7: bstr,                         ; opaque recorded result
-  8: [* object-ref],
-  9: incarnation-id                ; durable log incarnation
+  ? 4: digest,                     ; expected prior tip
+  5: bstr,                         ; opaque operation
+  6: bstr,                         ; opaque recorded result
+  7: [* object-ref],
+  8: incarnation-id                ; durable log incarnation
 }
 
 base = {

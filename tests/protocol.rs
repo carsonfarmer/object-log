@@ -19,6 +19,15 @@ const FAIL_NONE: u8 = 0;
 const FAIL_BEFORE_UPDATE: u8 = 1;
 const FAIL_AFTER_UPDATE: u8 = 2;
 
+#[test]
+fn log_ids_reject_unsafe_namespace_forms() {
+    for invalid in ["", ".", "..", "a/b", "a\\b", "white space", "🦀"] {
+        assert!(LogId::new(invalid).is_err(), "accepted {invalid:?}");
+    }
+    assert!(LogId::new("a".repeat(129)).is_err());
+    assert!(LogId::new("tenant.A_1-2").is_ok());
+}
+
 #[tokio::test]
 async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -459,6 +468,44 @@ async fn pending_candidate_resolves_not_committed_after_another_writer_wins()
     Ok(())
 }
 
+#[tokio::test]
+async fn rejected_candidate_remains_pending_when_the_winner_read_fails()
+-> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new());
+    let backend: Arc<dyn ObjectStore> = observed.clone();
+    let first = open(Arc::clone(&backend), "rejected-without-view").await?;
+    let second = open(backend, "rejected-without-view").await?;
+    let source = first.load().await?;
+    let loser = first.prepare(
+        source.cursor(),
+        TransactionId::new(),
+        Bytes::from_static(b"loser"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    let winner = second.prepare(
+        source.cursor(),
+        TransactionId::new(),
+        Bytes::from_static(b"winner"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    assert!(matches!(
+        second.commit(winner).await?,
+        CommitStatus::Committed(_)
+    ));
+
+    observed.fail_next_head_get();
+    let CommitStatus::Pending(pending) = first.commit(loser).await? else {
+        return Err("a rejected candidate without its winning view was not pending".into());
+    };
+    assert!(matches!(
+        first.resolve(pending).await?,
+        Resolution::NotCommitted(_)
+    ));
+    Ok(())
+}
+
 async fn open(store: Arc<dyn ObjectStore>, id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
     let scoped = ScopedStore::new(store, Path::from("protocol-tests"), &log_id);
@@ -473,6 +520,7 @@ struct InstrumentedStore {
     object_created: AtomicBool,
     object_before_update: AtomicBool,
     lie_conditional_read: AtomicBool,
+    fail_head_get: AtomicBool,
 }
 
 impl InstrumentedStore {
@@ -484,6 +532,7 @@ impl InstrumentedStore {
             object_created: AtomicBool::new(false),
             object_before_update: AtomicBool::new(false),
             lie_conditional_read: AtomicBool::new(false),
+            fail_head_get: AtomicBool::new(false),
         }
     }
 
@@ -514,6 +563,10 @@ impl InstrumentedStore {
 
     fn lie_about_conditional_reads(&self) {
         self.lie_conditional_read.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_next_head_get(&self) {
+        self.fail_head_get.store(true, Ordering::SeqCst);
     }
 }
 
@@ -585,6 +638,11 @@ impl ObjectStore for InstrumentedStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if location.to_string().ends_with("/index.cbor")
+            && self.fail_head_get.swap(false, Ordering::SeqCst)
+        {
+            return Err(Self::lost_ack_error());
+        }
         if options.if_none_match.is_some() && self.lie_conditional_read.load(Ordering::SeqCst) {
             return Err(object_store::Error::NotModified {
                 path: location.to_string(),

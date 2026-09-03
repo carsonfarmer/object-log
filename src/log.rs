@@ -99,7 +99,7 @@ pub enum CommitStatus {
     Committed(View),
     /// Another head update definitely rejected this candidate.
     Conflict(View),
-    /// A storage error can hide a successful publication.
+    /// The safe final view or classification is not available yet.
     Pending(PendingCommit),
 }
 
@@ -126,7 +126,7 @@ pub enum CheckpointStatus {
     Published(View),
     /// Another head update definitely rejected this checkpoint.
     Conflict(View),
-    /// A storage error can hide a successful checkpoint publication.
+    /// The safe final view or classification is not available yet.
     Pending(PendingCheckpoint),
 }
 
@@ -154,7 +154,6 @@ enum CheckpointEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitRecord {
     reference: CommitRef,
-    expected_generation: u64,
     expected_tip: Option<Digest>,
     operation: Bytes,
     result: Bytes,
@@ -166,12 +165,6 @@ impl CommitRecord {
     #[must_use]
     pub const fn reference(&self) -> &CommitRef {
         &self.reference
-    }
-
-    /// Returns the head generation on which this commit was prepared.
-    #[must_use]
-    pub const fn expected_generation(&self) -> u64 {
-        self.expected_generation
     }
 
     /// Returns the prior commit digest on which this commit was prepared.
@@ -369,9 +362,9 @@ impl Log {
 
     /// Stages and conditionally publishes one exact prepared commit.
     ///
-    /// A definite precondition failure returns [`CommitStatus::Conflict`]. A
-    /// storage error during the head update returns [`CommitStatus::Pending`]
-    /// because that error can hide a successful publication.
+    /// A definite precondition failure returns [`CommitStatus::Conflict`] when
+    /// the winning view can also be read. [`CommitStatus::Pending`] preserves
+    /// the candidate when the safe final view or classification is unavailable.
     ///
     /// # Errors
     ///
@@ -463,7 +456,7 @@ impl Log {
             return Ok(resolution);
         }
 
-        match self.validate_prepared(&pending.prepared).await {
+        match self.verify_objects(&pending.prepared.objects).await {
             Ok(()) => {}
             Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
             Err(error) => return Err(error),
@@ -523,7 +516,6 @@ impl Log {
     /// names corrupt durable data.
     pub async fn resume(&self, token: &[u8]) -> Result<Resolution, Error> {
         let prepared = format::decode_recovery_token(token)?;
-        self.validate_cursor(&prepared.cursor)?;
         let (commit_ref, _) = self.encode_prepared(&prepared)?;
         self.resolve(PendingCommit {
             prepared,
@@ -594,7 +586,6 @@ impl Log {
         through: &CommitRef,
         snapshot: Bytes,
     ) -> Result<CheckpointStatus, Error> {
-        self.validate_cursor(view.cursor())?;
         self.read_tail(view).await?;
         let checkpoint = format::Checkpoint {
             log_id: self.store.log_id().clone(),
@@ -800,7 +791,6 @@ impl Log {
     }
 
     fn view_from_stored(&self, stored: crate::store::StoredObject) -> Result<View, Error> {
-        self.validate_encoded_head(&stored.bytes)?;
         let head = format::decode_head(&stored.bytes)?;
         if head.log_id != *self.store.log_id() {
             return Err(Error::InvalidFormat(
@@ -833,6 +823,9 @@ impl Log {
             return Err(Error::InvalidFormat(
                 "the cursor belongs to another log incarnation".to_owned(),
             ));
+        }
+        if cursor.head.options != self.options {
+            return Err(Error::ConfigurationMismatch("options"));
         }
         cursor.head.validate()
     }
@@ -891,7 +884,6 @@ impl Log {
             log_id: self.store.log_id().clone(),
             incarnation: self.incarnation,
             transaction_id: prepared.transaction_id,
-            expected_generation: prepared.cursor.head.generation,
             expected_tip: prepared.cursor.head.tip(),
             operation: prepared.operation.clone(),
             result: prepared.result.clone(),
@@ -923,7 +915,6 @@ impl Log {
             .checked_add(1)
             .ok_or(Error::LimitExceeded("commit sequence"))?;
         head.tail.push(commit_ref.clone());
-        head.validate()?;
         Ok(head)
     }
 
@@ -952,7 +943,6 @@ impl Log {
             .generation
             .checked_add(1)
             .ok_or(Error::LimitExceeded("head generation"))?;
-        head.validate()?;
         Ok(head)
     }
 
@@ -1029,6 +1019,11 @@ impl Log {
 
     fn validate_pending(&self, pending: &PendingCommit) -> Result<(), Error> {
         self.validate_cursor(&pending.prepared.cursor)?;
+        self.validate_prepared_sizes(&pending.prepared.operation, &pending.prepared.result)?;
+        self.validate_object_count(&pending.prepared.objects)?;
+        if pending.prepared.cursor.head.tail.len() >= self.options.max_tail_entries {
+            return Err(Error::LimitExceeded("active tail entries"));
+        }
         let (expected_ref, _) = self.encode_prepared(&pending.prepared)?;
         if expected_ref != pending.commit_ref {
             return Err(Error::InvalidFormat(
@@ -1059,6 +1054,8 @@ impl Log {
             return Err(Error::CorruptObject);
         }
         let commit = format::decode_commit(&stored.bytes)?;
+        self.validate_prepared_sizes(&commit.operation, &commit.result)?;
+        self.validate_object_count(&commit.objects)?;
         if commit.log_id != *self.store.log_id()
             || commit.incarnation != self.incarnation
             || commit.transaction_id != reference.transaction_id
@@ -1069,7 +1066,6 @@ impl Log {
         }
         Ok(CommitRecord {
             reference: reference.clone(),
-            expected_generation: commit.expected_generation,
             expected_tip: commit.expected_tip,
             operation: commit.operation,
             result: commit.result,
@@ -1160,7 +1156,6 @@ impl Log {
         options: Options,
         stored: &crate::store::StoredObject,
     ) -> Result<uuid::Uuid, Error> {
-        Self::validate_head_size(options, &stored.bytes)?;
         let head = format::decode_head(&stored.bytes)?;
         if head.log_id != *store.log_id() {
             return Err(Error::InvalidFormat(
@@ -1171,5 +1166,126 @@ impl Log {
             return Err(Error::ConfigurationMismatch("options"));
         }
         Ok(head.incarnation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn recovery_rejects_a_commit_from_the_wrong_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("wrong-parent", Options::default()).await?;
+        let view = install_commit(
+            &log,
+            format::Commit {
+                log_id: log.store.log_id().clone(),
+                incarnation: log.incarnation,
+                transaction_id: TransactionId::new(),
+                expected_tip: Some(Digest::of(b"wrong parent")),
+                operation: Bytes::new(),
+                result: Bytes::new(),
+                objects: Vec::new(),
+            },
+        )
+        .await?;
+
+        assert!(matches!(
+            log.read_tail(&view).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_applies_durable_inline_limits() -> Result<(), Box<dyn std::error::Error>> {
+        let options = Options {
+            max_inline_operation_bytes: 1,
+            ..Options::default()
+        };
+        let log = test_log("inline-limit", options).await?;
+        let view = install_commit(
+            &log,
+            format::Commit {
+                log_id: log.store.log_id().clone(),
+                incarnation: log.incarnation,
+                transaction_id: TransactionId::new(),
+                expected_tip: None,
+                operation: Bytes::from_static(b"too large"),
+                result: Bytes::new(),
+                objects: Vec::new(),
+            },
+        )
+        .await?;
+
+        assert!(matches!(
+            log.read_tail(&view).await,
+            Err(Error::LimitExceeded("inline operation bytes"))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_a_commit_from_another_log() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let log = test_log("local-log", Options::default()).await?;
+        let view = install_commit(
+            &log,
+            format::Commit {
+                log_id: LogId::new("foreign-log")?,
+                incarnation: log.incarnation,
+                transaction_id: TransactionId::new(),
+                expected_tip: None,
+                operation: Bytes::new(),
+                result: Bytes::new(),
+                objects: Vec::new(),
+            },
+        )
+        .await?;
+
+        assert!(matches!(
+            log.read_tail(&view).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        Ok(())
+    }
+
+    async fn test_log(id: &str, options: Options) -> Result<Log, Error> {
+        let store = ScopedStore::new(
+            Arc::new(InMemory::new()),
+            Path::from("log-tests"),
+            &LogId::new(id)?,
+        );
+        Log::open(store, options).await
+    }
+
+    async fn install_commit(log: &Log, commit: format::Commit) -> Result<View, Error> {
+        let source = log.load().await?;
+        let bytes = format::encode_commit(&commit)?;
+        let reference = CommitRef {
+            sequence: 0,
+            transaction_id: commit.transaction_id,
+            digest: Digest::of(&bytes),
+            len: u64::try_from(bytes.len())
+                .map_err(|_| Error::LimitExceeded("commit byte length"))?,
+        };
+        log.store
+            .create(StoreKey::Commit(reference.digest), bytes)
+            .await?;
+        let mut head = source.cursor.head.clone();
+        head.generation = 1;
+        head.next_sequence = 1;
+        head.tail.push(reference);
+        let encoded = format::encode_head(&head)?;
+        log.store
+            .update(StoreKey::Head, encoded, source.cursor.version)
+            .await?;
+        log.load().await
     }
 }

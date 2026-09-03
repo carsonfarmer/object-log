@@ -79,7 +79,6 @@ format_version
 log_identity
 incarnation_id
 transaction_id
-expected_generation
 expected_tip
 operation_bytes
 result_bytes
@@ -124,8 +123,10 @@ The caller prepares one candidate against one cursor.
 The result is:
 
 - `Committed` when the conditional update returns success.
-- `Conflict` when the store returns a definite precondition failure.
-- `Pending` when a timeout or transport failure can hide success.
+- `Conflict` when the store rejects the update and the winner can be read.
+- `Pending` when the safe final view or classification is not available. This
+  includes an ambiguous update result and a rejected update followed by a
+  failed read of the winner.
 
 The core never retries a candidate against a newer cursor. The application must
 read the winning operations, validate its intent again, and prepare a new

@@ -14,10 +14,12 @@ Run tests in this order:
 
 No cloud backend is part of this stage.
 
-Format tests also compare encoded bytes with checked-in CBOR fixtures. The CDDL
-file defines the published schema. Tests reject trailing data, wrong digests,
-unsupported versions, and unknown fields. Protocol tests reject objects above
-configured limits.
+Format tests include one stable hexadecimal encoding assertion for an empty
+head. A complete set of checked-in golden values for commits, checkpoints, and
+recovery tokens remains qualification work. The CDDL file defines the
+published schema. Tests reject trailing data, wrong digests, unsupported
+versions, and unknown fields. Protocol tests reject objects above configured
+limits.
 
 ## Backend conformance cases
 
@@ -32,6 +34,9 @@ Every backend must prove:
 - A capability probe cleans up only its own object.
 
 ## Protocol cases
+
+This section defines the target protocol matrix. The current local gate does
+not yet prove every listed case. Current gaps appear below the matrix.
 
 ### Initialization
 
@@ -52,7 +57,7 @@ Every backend must prove:
 
 ### Ambiguous outcomes
 
-Inject a failure:
+The target fault matrix injects a failure:
 
 - Before immutable blob creation.
 - After blob creation but before its response.
@@ -65,6 +70,10 @@ Inject a failure:
 For each point, assert the exact classification. A response lost after the head
 mutation must resolve as committed. A failure before the head mutation must not
 be misreported as committed.
+
+Current tests cover head mutation before/after failures, resolution reads, raw
+object-store puts, and referenced-object verification. Full log-level coverage
+of blob and commit creation before/after failures remains qualification work.
 
 ### Recovery
 
@@ -91,6 +100,12 @@ be misreported as committed.
   log identities.
 - One opened log cannot request another log's head, blob, or checkpoint key.
 - Invalid separators, traversal elements, empty IDs, and overlong IDs fail.
+
+### Current matrix gaps
+
+- Prove ordered replay when commit reads complete out of order.
+- Complete the blob-create and commit-create fault points listed above.
+- Add checked-in golden values for commits, checkpoints, and recovery tokens.
 
 ## Current deterministic scenario
 

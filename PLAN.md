@@ -41,7 +41,8 @@ Required value types:
 - `Cursor`: an opaque observed head position and storage version.
 - `TransactionId`: a caller-supplied stable operation identity.
 - `ObjectRef`: digest, byte length, and object kind.
-- `CommitRef`: sequence, transaction ID, digest, and encoded byte length.
+- `CommitRef`: public sequence, transaction ID, and digest. The durable value
+  also carries an encoded byte length for internal integrity checks.
 - `PreparedCommit`: expected cursor, transaction ID, operation bytes, result
   bytes, and staged object references.
 - `PendingCommit`: enough evidence to resolve or retry one exact publication.
@@ -74,9 +75,10 @@ CheckpointStatus = Published | Conflict | Pending
 CheckpointResolution = Published | NotPublished | StillPending | Expired
 ```
 
-`Conflict` is a definite CAS rejection. `Pending` means that a storage error
-can hide a successful CAS. No API can convert `Pending` to `Conflict` without
-new evidence.
+`Conflict` is a definite CAS rejection with its winning view. `Pending` means
+that the safe final view or classification is not available. This includes an
+ambiguous CAS result and a definite rejection followed by a failed read of the
+winning view. No API can convert `Pending` to `Conflict` without that evidence.
 
 `Expired` means that retained evidence cannot determine the outcome. It does
 not mean `NotCommitted`. A caller must not retry non-idempotent work as a new
