@@ -7,6 +7,10 @@ description = "SQLite demonstration for object-log"
 license = "Apache-2.0"
 publish = false
 
+[features]
+default = []
+aws = ["object_store/aws"]
+
 [dependencies]
 bytes = "1.10"
 minicbor = { version = "2.3", features = ["derive", "std"] }
