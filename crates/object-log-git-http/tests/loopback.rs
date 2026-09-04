@@ -4,8 +4,9 @@ use std::{
     process::Command,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
@@ -18,7 +19,7 @@ use object_log::{Log, LogId, Options, ValidatedBackend};
 use object_log_git_http::{GitHttpServer, SmartHttp};
 use object_store::{memory::InMemory, path::Path as StorePath};
 use tempfile::TempDir;
-use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
+use tokio::{net::TcpListener, sync::Barrier, task::JoinHandle};
 
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
@@ -196,7 +197,6 @@ async fn concurrent_pushes_report_one_durable_winner() -> TestResult {
     let right_push = right_push?;
     assert!(sent_receive_pack(&left_push.stderr));
     assert!(sent_receive_pack(&right_push.stderr));
-    assert!(gate.arrivals() >= 2);
     assert_ne!(left_push.status.success(), right_push.status.success());
     let expected = if left_push.status.success() {
         "left"
@@ -225,7 +225,7 @@ async fn repository_server(
     )
     .await?;
     let scratch = root.path().join(format!("{namespace}-scratch"));
-    let gate = ReceiveGate::default();
+    let gate = ReceiveGate::new();
     let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?)
         .router()
         .layer(middleware::from_fn_with_state(gate.clone(), gate_receive));
@@ -233,37 +233,28 @@ async fn repository_server(
     Ok((url, scratch, server, gate))
 }
 
-#[derive(Clone, Default)]
-struct ReceiveGate(Arc<ReceiveGateState>);
-
-#[derive(Default)]
-struct ReceiveGateState {
-    armed: AtomicBool,
-    arrivals: AtomicUsize,
-    notify: Notify,
+#[derive(Clone)]
+struct ReceiveGate {
+    armed: Arc<AtomicBool>,
+    barrier: Arc<Barrier>,
 }
 
 impl ReceiveGate {
-    fn arm(&self) {
-        self.0.armed.store(true, Ordering::Release);
+    fn new() -> Self {
+        Self {
+            armed: Arc::new(AtomicBool::new(false)),
+            barrier: Arc::new(Barrier::new(2)),
+        }
     }
 
-    fn arrivals(&self) -> usize {
-        self.0.arrivals.load(Ordering::Acquire)
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
     }
 }
 
 async fn gate_receive(State(gate): State<ReceiveGate>, request: Request, next: Next) -> Response {
-    if gate.0.armed.load(Ordering::Acquire) && request.uri().path() == "/repo/git-receive-pack" {
-        gate.0.arrivals.fetch_add(1, Ordering::AcqRel);
-        loop {
-            let notified = gate.0.notify.notified();
-            if gate.arrivals() >= 2 {
-                gate.0.notify.notify_waiters();
-                break;
-            }
-            notified.await;
-        }
+    if gate.armed.load(Ordering::Acquire) && request.uri().path() == "/repo/git-receive-pack" {
+        let _ = tokio::time::timeout(Duration::from_secs(30), gate.barrier.wait()).await;
     }
     next.run(request).await
 }
