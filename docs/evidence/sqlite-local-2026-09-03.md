@@ -159,10 +159,14 @@ the read-back without accepting forged or missing object references.
 
 ## Simplification and line counts
 
-The Rust-skills pass removed 44 net product lines. It removed copied source
-views, repeated status state, a second WAL checksum scan, redundant record and
-object checks, and per-callback policy clones. It retained the boxed prepared
-commit because direct storage made the public result enum at least 664 bytes.
+The first Rust review removed copied source views, repeated status state, a
+second WAL checksum scan, redundant record and object checks, and per-callback
+policy clones. It retained the boxed prepared commit because direct storage
+made the public result enum at least 664 bytes. The later record-format pass
+reduced SQLite product code from 1,512 to 1,476 lines and the WAL boundary from
+22 to 12 unsafe lines. See the
+[API simplification evidence](api-simplification-local-2026-09-03.md) for that
+comparison.
 
 At `bc1e814`, the SQLite adapter contains 1,507 product lines, 2,585 test lines,
 and 390 benchmark lines. The broader policy matrix superseded a 52-line policy

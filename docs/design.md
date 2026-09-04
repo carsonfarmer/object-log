@@ -29,18 +29,15 @@ Micelio's split between one index, ordered entry pointers, content-addressed
 WAL entries, payload objects, and bases. The Rust type `Head` is the decoded
 index. The Rust type `Commit` is one WAL entry.
 
-The durable encoding is CBOR, not Protobuf. Each structure is a CBOR map with
-positive integer keys. The current schema is in
-`schema/object-log-v1.cddl`. Encoders write keys in ascending order. Decoders
-reject non-canonical bytes, unknown fields, and unsupported versions. Before
-the first tagged release, the schema and byte layout can change while the
-version remains 1. A smaller or better layout replaces the prior development
-layout. The project does not add a compatibility reader for it.
-The first release will not support mixed-version writers. This rule replaces
-Micelio's unknown-field preservation rule because the selected CBOR codec does
-not retain unknown fields during an index rewrite. The current `0.1.0` format
-is pre-release. After the first tagged durable-format release, every
-incompatible schema change must use a new format version.
+The durable encoding is canonical CBOR, not Protobuf. Each structure is a map
+with positive integer keys. `schema/object-log-v1.cddl` defines the current
+schema. Decoders reject non-canonical bytes, unknown fields, and unsupported
+versions. Before the first tagged release, a smaller or better layout can
+replace the current layout while the version remains 1. The project does not
+preserve earlier development layouts. The selected CBOR codec also cannot
+preserve unknown fields when it rewrites the index, so mixed-version writers
+are not supported. After the first durable-format release, an incompatible
+schema change must use a new format version.
 
 ## Head
 

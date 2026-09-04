@@ -66,6 +66,8 @@ The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
 [`StagedObject` evidence](docs/evidence/staged-objects-local-2026-09-03.md)
 records request counts, transferred bytes, and recovery checks. The
+[`API simplification` evidence](docs/evidence/api-simplification-local-2026-09-03.md)
+records allocation, encoding, line-count, and API changes. The
 [`SQLite` evidence](docs/evidence/sqlite-local-2026-09-03.md) records tests,
 local measurements, and remaining qualification work. The
 [`Git` evidence](docs/evidence/git-local-2026-09-03.md) records storage

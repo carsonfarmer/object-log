@@ -229,10 +229,13 @@ do not measure remote latency.
 ## Limits and stop gates
 
 The original 700 product-line, 1,100 test-line, and 200 benchmark-line targets
-triggered independent correctness and deletion reviews. The Rust-skills pass
-removed 44 net product lines. The WAL boundary uses 22 of the 50 approved
-unsafe lines. See the local evidence for the current repository counts and the
-count command.
+triggered independent correctness and deletion reviews. The final format pass
+reduced SQLite product code from 1,512 to 1,476 lines. The WAL boundary uses 12
+of the 50 approved unsafe lines. See the
+[API simplification evidence](docs/evidence/api-simplification-local-2026-09-03.md)
+for the measured changes and the
+[SQLite evidence](docs/evidence/sqlite-local-2026-09-03.md) for the broader
+line-count method.
 
 Stop for owner approval before another core API, a custom VFS, another durable
 authority, untrusted Rust callbacks, callback replay, or multiple local
