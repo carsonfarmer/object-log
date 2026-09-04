@@ -51,9 +51,11 @@ an opt-in loopback `MinIO` test.
 The Git proof implements strict refs and records, SHA-1 and SHA-256 pack
 normalization, thin-pack normalization, bounded chunk storage, reachable-object
 validation, atomic ref publication, lost-response recovery, and cold recovery
-into a standard bare repository. Git checkpoints and collection, benchmarks,
-`MinIO` qualification, a local evidence record, and smart HTTP remain
-incomplete.
+into a standard bare repository. Its checkpoint keeps each pack that contains a
+live object. Its collection test removes more than 100 dead physical objects,
+then cold-recovers the live repository and passes strict Git validation.
+Benchmarks, `MinIO` qualification, a local evidence record, and smart HTTP
+remain incomplete.
 
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the

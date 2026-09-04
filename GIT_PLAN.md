@@ -87,30 +87,34 @@ violates this contract. A reopened handle verifies existing object graphs before
 it republishes their references.
 
 The layout follows Cursor's immutable WAL and CAS publication model. Git
-checkpoints and physical pack compaction are not implemented. Live pack count,
-replay work, and recovery bytes can grow.
+checkpoints remove dead packs from durable state. They do not rewrite mixed
+live and dead packs. Live pack count and recovery bytes can still grow until a
+later pack-compaction feature rewrites those packs.
 
 Durable Object behavior, tenancy, routing, and actor or service ownership are
 out of scope. This proof does not add them to the WAL.
 
 ## Smart HTTP phase
 
-Build smart HTTP only after phase 1 proves the storage API. Keep it in a separate
-crate. The adapter parses packet lines, capabilities, ref commands, and pack
-input. It passes parsed commands and pack bytes to `object-log-git`.
+Build smart HTTP in a separate proof crate. It parses packet lines,
+capabilities, ref commands, and pack input. It passes parsed commands and a pack
+file to `object-log-git`.
 
 Authentication, routing, and HTTP server policy are out of scope. A push
 response waits for object-log to confirm publication. A conflict or unresolved
 result returns a protocol error.
 
-The HTTP phase must prove clone, fetch, and push with an unmodified Git client.
+The first HTTP tranche implements protocol v0 for the four smart HTTP routes. It
+must prove clone, fetch, push, and ref deletion with an unmodified Git client.
 It can use a native loopback server. It must not use an installed Git executable
 to implement server behavior. The test client can use the standard Git program.
 
-Current Rust Git server crates are not dependencies. They combine HTTP,
-authentication, repository discovery, protocol, and process policy. Their small
-release history does not justify that trust or scope. Re-evaluate them only for
-focused protocol code after the storage adapter works.
+No reviewed Rust Git server crate exposes the required publication boundary.
+The available crates update local refs before they return success, require a Git
+process, support only SHA-1, or include a much larger server policy surface. The
+HTTP proof uses `gix-packetline` for framing and the existing `gix` and
+`gix-pack` crates for Git data. Re-evaluate server libraries when one can return
+a parsed receive plan without publishing refs.
 
 ## Checkpoints and collection
 
@@ -153,18 +157,21 @@ unreachable bytes from a pack that also contains live objects.
 The native proof implements strict records, pure-Rust pack validation and
 normalization, chunk storage, atomic ref publication, lost-response recovery,
 bare-repository recovery, graph and pack provenance checks, conflict tests, and
-SHA-1 and SHA-256 tests.
+SHA-1 and SHA-256 tests. Checkpoints retain live packs. The collection test
+removes a dead pack, preserves the live pack, and passes cold Git validation.
 
-The remaining work is live-pack checkpoint selection, collection tests,
-benchmarks and request accounting, one pinned MinIO lifecycle, and a local
-evidence record. Smart HTTP starts after this storage proof is complete.
+The remaining storage work is benchmarks and request accounting, one pinned
+MinIO lifecycle, and a local evidence record. Smart HTTP is the next product
+tranche.
 
 ## Limits
 
 Keep Git policy outside the generic log. Start with one repository for each log
 and one push for each publication. Defer pack rewriting, global deduplication,
 cross-repository transactions, provider-specific behavior, Spin integration,
-live AWS work, and a WASI Git adapter.
+live AWS work, and a WASI Git adapter. A Spin guest is not the first server
+proof. The current Git object database and pack writer do not support its WASI
+path, and the guest has no object-storage backend for this API.
 
 Durable Object behavior, tenancy, routing, and actor or service ownership are
 not goals for this project.

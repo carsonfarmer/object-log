@@ -86,19 +86,25 @@ open rebuilds a standard bare repository from object storage. The proof uses
 [`GIT_PLAN.md`](../GIT_PLAN.md) and the
 [library review](evidence/git-library-selection-2026-09-03.md).
 
-Checkpoint selection, collection tests, benchmarks, MinIO qualification, a
-local evidence record, and smart HTTP remain incomplete.
+Checkpoint selection and collection acceptance are implemented. A checkpoint
+retains each pack that contains a live object. The acceptance test removes more
+than 100 dead physical objects, preserves the live pack, cold-recovers the
+repository, and passes strict Git validation. Benchmarks, MinIO qualification,
+a local evidence record, and smart HTTP remain incomplete.
 
-Smart HTTP is a later, separate adapter. The core WAL does not depend on Git
-protocol code or Git libraries. The eventual HTTP test still uses an unmodified
-client for clone, fetch, and push. The storage and HTTP evidence must cover
-SHA-1 and SHA-256, collection, MinIO, and the planned benchmarks.
+Smart HTTP is a separate proof crate. The core WAL does not depend on Git
+protocol code or Git libraries. The first HTTP tranche uses protocol v0 and all
+four smart HTTP routes. Its test uses an unmodified client for clone, fetch,
+push, and ref deletion. The storage and HTTP evidence must cover SHA-1 and
+SHA-256, collection, MinIO, and the planned benchmarks before the Git proof is
+complete.
 
 The native adapter can run in Linux serverless functions and containers with
 disposable local storage. Current `gix` pack storage cannot run as a WASI guest
 because it uses unsupported memory maps, and its `wasm` feature removes the
-high-level pack writer. A later WASI adapter can use lower-level streaming pack
-APIs if its added code and trust cost are justified.
+high-level pack writer. A Spin guest also needs an object-storage bridge. A
+later native Spin factor or different Git object database requires a separate
+architecture review.
 
 ## 2. WASI filesystem storage
 
