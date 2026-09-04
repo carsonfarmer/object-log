@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs, unsafe_code)]
 
+mod server;
+
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -8,6 +10,8 @@ use gix_packetline::{PacketLineRef, decode};
 use object_log::{CommitStatus, Log, Resolution, TransactionId};
 use object_log_git::{ObjectFormat, ObjectId, RefUpdate, Repository};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+pub use server::GitHttpServer;
 
 const MAX_COMMANDS: usize = 1_024;
 const MAX_HAVES: usize = 65_536;

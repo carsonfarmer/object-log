@@ -8,18 +8,27 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+async-compression = { version = "0.4", features = ["gzip", "tokio"] }
+axum = "0.8"
 bytes = "1.10"
+futures = "0.3"
 gix-packetline = { version = "0.22.2", default-features = false }
+http-body-util = "0.1"
 object-log = { path = "../.." }
 object-log-git = { path = "../object-log-git" }
+object_store = { version = "0.14", features = ["aws"] }
 tempfile = "3.20"
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["fs", "io-util"] }
+tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6", features = ["limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
 
 [dev-dependencies]
 object-log = { path = "../..", features = ["test-util"] }
-object_store = "0.14"
-tokio = { version = "1.47", features = ["macros", "net", "process", "rt-multi-thread", "sync"] }
+tokio = { version = "1.47", features = ["process"] }
 
 [lints.rust]
 unsafe_code = "deny"
