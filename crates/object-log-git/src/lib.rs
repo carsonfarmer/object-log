@@ -8,6 +8,8 @@ mod format;
 mod git;
 #[allow(dead_code, reason = "used by the pending repository adapter")]
 mod state;
+#[allow(dead_code, reason = "used by the pending repository adapter")]
+mod storage;
 
 use std::{collections::BTreeMap, fmt};
 
