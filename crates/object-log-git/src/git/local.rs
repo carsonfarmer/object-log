@@ -9,7 +9,7 @@ use gix::{
     },
 };
 
-use super::{Error, ObjectSet};
+use super::{Error, ObjectKinds, ObjectSet};
 use crate::{ObjectFormat, RefSnapshot, RefUpdate};
 
 const HEAD: &str = "refs/heads/main";
@@ -156,7 +156,7 @@ pub(crate) fn validate_snapshot(
     repo: &gix::Repository,
     refs: &RefSnapshot,
     objects: &ObjectSet,
-) -> Result<(), Error> {
+) -> Result<ObjectKinds, Error> {
     let roots = refs
         .iter()
         .map(|(name, target)| {
@@ -228,7 +228,7 @@ fn verify_graph(
     repo: &gix::Repository,
     roots: Vec<(ObjectId, Option<gix::objs::Kind>)>,
     objects: &ObjectSet,
-) -> Result<(), Error> {
+) -> Result<ObjectKinds, Error> {
     let mut pending = roots
         .into_iter()
         .map(|(id, kind)| (id, kind, 0))
@@ -294,7 +294,7 @@ fn verify_graph(
             gix::objs::ObjectRef::Blob(_) => {}
         }
     }
-    Ok(())
+    Ok(seen)
 }
 
 fn ref_name(value: &[u8]) -> Result<(FullName, RefKind), Error> {

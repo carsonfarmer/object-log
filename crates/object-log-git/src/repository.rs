@@ -1,16 +1,22 @@
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 use bytes::Bytes;
-use object_log::{CommitStatus, Log, PreparedCommit, TransactionId, View, materialize};
+use object_log::{
+    CheckpointStatus, CommitStatus, Log, ObjectRef, PreparedCommit, TransactionId, View,
+    materialize,
+};
 use tokio::{fs::File, task};
 
 use crate::{
-    Error, ObjectFormat, ObjectId, RefSnapshot, RefUpdate, format::PackDescriptor, git,
-    state::Machine, storage,
+    Error, ObjectFormat, ObjectId, RefSnapshot, RefUpdate,
+    format::{PackDescriptor, Record},
+    git,
+    state::Machine,
+    storage,
 };
 
 /// One disposable local Git cache backed by an object log.
@@ -21,8 +27,15 @@ pub struct Repository {
     format: ObjectFormat,
     view: View,
     refs: RefSnapshot,
-    packs: BTreeSet<ObjectId>,
+    packs: BTreeMap<ObjectId, Pack>,
     objects: git::ObjectSet,
+}
+
+#[derive(Debug)]
+struct Pack {
+    bytes: u64,
+    root: ObjectRef,
+    live: bool,
 }
 
 /// One validated Git update ready for conditional publication.
@@ -45,10 +58,11 @@ impl Repository {
     /// Returns an error for an unusable work directory, invalid durable state,
     /// pack recovery failure, or local Git failure.
     pub async fn open(
-        log: Log,
+        log: &Log,
         work_dir: impl AsRef<Path>,
         format: ObjectFormat,
     ) -> Result<Self, Error> {
+        let log = log.clone();
         let materialized = materialize(&log, &Machine::new(format))
             .await
             .map_err(|error| match error {
@@ -66,30 +80,37 @@ impl Repository {
         .await?;
 
         let mut objects = git::ObjectSet::new();
-        for (&id, &(bytes, ref root)) in &state.packs {
-            git::extend_objects(
-                &mut objects,
-                recover_pack(&log, &view, &path, id, bytes, root).await?,
-            )?;
+        let mut recovered = BTreeMap::new();
+        for (id, (bytes, root)) in state.packs {
+            let pack_objects = recover_pack(&log, &view, &path, id, bytes, &root).await?;
+            git::extend_objects(&mut objects, pack_objects.iter().copied())?;
+            recovered.insert(id, (bytes, root, pack_objects));
         }
         let materialize_path = path.clone();
         let desired = state.refs;
-        let (refs, objects) = blocking(move || {
+        let (refs, objects, reachable) = blocking(move || {
             let repo = git::open(&materialize_path, format)?;
-            git::validate_snapshot(&repo, &desired, &objects)?;
+            let reachable = git::validate_snapshot(&repo, &desired, &objects)?;
             git::materialize(&repo, &desired)?;
-            Ok((desired, objects))
+            Ok((desired, objects, reachable))
         })
         .await?;
+        let packs = recovered
+            .into_iter()
+            .map(|(id, (bytes, root, objects))| {
+                let live = objects.iter().any(|object| reachable.contains_key(object));
+                (id, Pack { bytes, root, live })
+            })
+            .collect();
 
         Ok(Self {
             log,
             path,
             format,
             view,
-            packs: state.packs.into_keys().collect(),
-            objects,
             refs,
+            packs,
+            objects,
         })
     }
 
@@ -147,7 +168,7 @@ impl Repository {
 
         let prepared = if let Some(pack) = normalized {
             let id = ObjectId::try_from(pack.id)?;
-            if self.packs.contains(&id) {
+            if self.packs.contains_key(&id) {
                 return Err(Error::InvalidRecord("pack is already present"));
             }
             let staged = storage::stage_pack(&self.log, &self.view, &pack.path, id).await?;
@@ -174,6 +195,41 @@ impl Repository {
             prepared,
             recovery_token,
         })
+    }
+
+    /// Publishes one checkpoint that retains all packs used by current refs.
+    /// An empty tail returns the current view without object-store I/O.
+    ///
+    /// This method consumes the cache. It returns the core checkpoint result
+    /// so the caller can resolve an uncertain publication with [`Log`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid durable objects, an invalid checkpoint, or
+    /// an object-store failure.
+    pub async fn checkpoint(self) -> Result<CheckpointStatus, Error> {
+        let Some(through) = self.view.tail().last().cloned() else {
+            return Ok(CheckpointStatus::Published(self.view));
+        };
+
+        let mut roots = Vec::new();
+        let mut packs = Vec::new();
+        for (id, pack) in self.packs {
+            if pack.live {
+                roots.push(pack.root);
+                packs.push(PackDescriptor {
+                    id,
+                    bytes: pack.bytes,
+                });
+            }
+        }
+
+        let snapshot = Record::snapshot(self.format, self.refs, packs)?.encode()?;
+        let objects = self.log.stage_objects(self.view.cursor(), roots).await?;
+        Ok(self
+            .log
+            .publish_checkpoint(&self.view, &through, snapshot, objects)
+            .await?)
     }
 }
 
@@ -269,7 +325,7 @@ mod tests {
     };
 
     use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
-    use object_log::{LogId, Options, ValidatedBackend};
+    use object_log::{CheckpointResolution, LogId, Options, ValidatedBackend};
     use object_store::{memory::InMemory, path::Path as StorePath};
     use tempfile::TempDir;
 
@@ -338,7 +394,7 @@ mod tests {
             let fixture = fixture(format, name.as_bytes())?;
             let (log, _, _) = test_log(name).await?;
             let cache = fixture.directory.path().join("cache");
-            let repository = Repository::open(log.clone(), &cache, format).await?;
+            let repository = Repository::open(&log, &cache, format).await?;
             let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
             let push = repository
                 .prepare_push(TransactionId::new(), vec![update], Some(&fixture.pack))
@@ -347,7 +403,7 @@ mod tests {
             assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
 
             fs::remove_dir_all(&cache)?;
-            let recovered = Repository::open(log.clone(), &cache, format).await?;
+            let recovered = Repository::open(&log, &cache, format).await?;
             assert_eq!(
                 recovered.refs().get(&b"refs/heads/main"[..]),
                 Some(&fixture.target)
@@ -369,9 +425,33 @@ mod tests {
                 .await?;
             assert!(matches!(reuse.publish().await?, CommitStatus::Committed(_)));
             fs::remove_dir_all(&cache)?;
-            let recovered = Repository::open(log, &cache, format).await?;
+            let recovered = Repository::open(&log, &cache, format).await?;
             assert_eq!(
                 recovered.refs().get(&b"refs/tags/existing"[..]),
+                Some(&fixture.target)
+            );
+            assert!(matches!(
+                recovered.checkpoint().await?,
+                CheckpointStatus::Published(view) if view.tail().is_empty()
+            ));
+            fs::remove_dir_all(&cache)?;
+            let tail = Repository::open(&log, &cache, format).await?;
+            let push = tail
+                .prepare_push(
+                    TransactionId::new(),
+                    vec![RefUpdate::new(
+                        "refs/tags/after-checkpoint",
+                        None,
+                        Some(fixture.target),
+                    )?],
+                    None,
+                )
+                .await?;
+            assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
+            fs::remove_dir_all(&cache)?;
+            let recovered = Repository::open(&log, &cache, format).await?;
+            assert_eq!(
+                recovered.refs().get(&b"refs/tags/after-checkpoint"[..]),
                 Some(&fixture.target)
             );
         }
@@ -383,7 +463,7 @@ mod tests {
         let fixture = fixture(ObjectFormat::Sha1, b"injected")?;
         let (log, _, _) = test_log("repository-loose-objects").await?;
         let cache = fixture.directory.path().join("cache");
-        let repository = Repository::open(log.clone(), &cache, ObjectFormat::Sha1).await?;
+        let repository = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
         let source = fixture.directory.path().join("source");
         for revision in ["HEAD", "HEAD^{tree}", "HEAD:file"] {
             let id = ObjectId::parse(
@@ -408,7 +488,7 @@ mod tests {
         ));
 
         fs::remove_dir_all(&cache)?;
-        let recovered = Repository::open(log, &cache, ObjectFormat::Sha1).await?;
+        let recovered = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
         assert!(recovered.refs().is_empty());
         Ok(())
     }
@@ -420,8 +500,8 @@ mod tests {
         let (log, faults, _) = test_log("repository-delete").await?;
         let first_path = fixture.directory.path().join("first");
         let second_path = fixture.directory.path().join("second");
-        let first = Repository::open(log.clone(), &first_path, ObjectFormat::Sha1).await?;
-        let second = Repository::open(log.clone(), &second_path, ObjectFormat::Sha1).await?;
+        let first = Repository::open(&log, &first_path, ObjectFormat::Sha1).await?;
+        let second = Repository::open(&log, &second_path, ObjectFormat::Sha1).await?;
         let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
         let first = first
             .prepare_push(
@@ -443,7 +523,7 @@ mod tests {
 
         fs::remove_dir_all(&first_path)?;
         let third_path = fixture.directory.path().join("third");
-        let winner = Repository::open(log.clone(), &third_path, ObjectFormat::Sha1).await?;
+        let winner = Repository::open(&log, &third_path, ObjectFormat::Sha1).await?;
         assert_eq!(
             winner.refs().get(&b"refs/heads/main"[..]),
             Some(&fixture.target)
@@ -452,7 +532,7 @@ mod tests {
             winner.refs().get(&b"refs/heads/main"[..]),
             Some(&competing.target)
         );
-        let current = Repository::open(log.clone(), &first_path, ObjectFormat::Sha1).await?;
+        let current = Repository::open(&log, &first_path, ObjectFormat::Sha1).await?;
         faults.reset();
         let deletion = RefUpdate::new("refs/heads/main", Some(fixture.target), None)?;
         let delete = current
@@ -472,7 +552,7 @@ mod tests {
         let (log, faults, scoped) = test_log("repository-resume").await?;
         faults.reset();
         let cache = fixture.directory.path().join("pending");
-        let repository = Repository::open(log, &cache, ObjectFormat::Sha1).await?;
+        let repository = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
         let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
         let push = repository
             .prepare_push(TransactionId::new(), vec![update], Some(&fixture.pack))
@@ -493,8 +573,90 @@ mod tests {
             reopened.resume(&token).await?,
             object_log::Resolution::Committed(_)
         ));
-        let _recovered = Repository::open(reopened, &cache, ObjectFormat::Sha1).await?;
+        let _recovered = Repository::open(&reopened, &cache, ObjectFormat::Sha1).await?;
         assert_eq!(pack_puts(&faults), staged_puts);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_preserves_conflict_and_pending_outcomes() -> TestResult {
+        let conflict_fixture = fixture(ObjectFormat::Sha1, b"checkpoint")?;
+        let (log, _, _) = test_log("repository-checkpoint-status").await?;
+        let initial_path = conflict_fixture.directory.path().join("initial");
+        let initial = Repository::open(&log, &initial_path, ObjectFormat::Sha1).await?;
+        let push = initial
+            .prepare_push(
+                TransactionId::new(),
+                vec![RefUpdate::new(
+                    "refs/heads/main",
+                    None,
+                    Some(conflict_fixture.target),
+                )?],
+                Some(&conflict_fixture.pack),
+            )
+            .await?;
+        assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
+
+        let first = Repository::open(
+            &log,
+            conflict_fixture.directory.path().join("checkpoint-first"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        let second = Repository::open(
+            &log,
+            conflict_fixture.directory.path().join("checkpoint-second"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        assert!(matches!(
+            first.checkpoint().await?,
+            CheckpointStatus::Published(_)
+        ));
+        assert!(matches!(
+            second.checkpoint().await?,
+            CheckpointStatus::Conflict(_)
+        ));
+
+        let second_fixture = fixture(ObjectFormat::Sha1, b"pending-checkpoint")?;
+        let (second_log, second_faults, _) = test_log("repository-checkpoint-pending").await?;
+        let initial = Repository::open(
+            &second_log,
+            second_fixture.directory.path().join("initial"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        let push = initial
+            .prepare_push(
+                TransactionId::new(),
+                vec![RefUpdate::new(
+                    "refs/heads/main",
+                    None,
+                    Some(second_fixture.target),
+                )?],
+                Some(&second_fixture.pack),
+            )
+            .await?;
+        assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
+        let checkpoint = Repository::open(
+            &second_log,
+            second_fixture.directory.path().join("checkpoint"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        second_faults.reset();
+        second_faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::After,
+        });
+        let CheckpointStatus::Pending(pending) = checkpoint.checkpoint().await? else {
+            return Err("checkpoint response was not lost".into());
+        };
+        assert!(matches!(
+            second_log.resolve_checkpoint(pending).await?,
+            CheckpointResolution::Published(_)
+        ));
         Ok(())
     }
 
@@ -506,7 +668,7 @@ mod tests {
         fs::write(cache.join("keep"), b"caller data")?;
         let (log, _, _) = test_log("repository-work-dir").await?;
         assert!(matches!(
-            Repository::open(log, &cache, ObjectFormat::Sha1).await,
+            Repository::open(&log, &cache, ObjectFormat::Sha1).await,
             Err(Error::WorkDirectoryNotEmpty)
         ));
         assert_eq!(fs::read(cache.join("keep"))?, b"caller data");

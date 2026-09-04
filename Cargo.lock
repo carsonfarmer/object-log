@@ -2077,6 +2077,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "criterion",
+ "futures",
  "gix",
  "gix-pack",
  "minicbor",

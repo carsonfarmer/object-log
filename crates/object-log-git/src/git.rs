@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     io::{BufReader, Read, Seek},
     path::{Path, PathBuf},
@@ -20,6 +20,7 @@ const MAX_OBJECT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_REPOSITORY_OBJECTS: u32 = 1_000_000;
 
 pub(crate) type ObjectSet = HashSet<ObjectId>;
+pub(crate) type ObjectKinds = BTreeMap<ObjectId, gix::objs::Kind>;
 
 impl TryFrom<Kind> for ObjectFormat {
     type Error = RecordError;

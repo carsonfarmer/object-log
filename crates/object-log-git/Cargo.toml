@@ -18,6 +18,7 @@ tokio = { version = "1.47", features = ["fs", "io-util"] }
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["async_tokio"] }
+futures = "0.3"
 object-log = { path = "../..", features = ["test-util"] }
 object_store = "0.14"
 tempfile = "3.20"
