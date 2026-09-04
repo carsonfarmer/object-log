@@ -24,6 +24,7 @@ const MAX_CACHE_BYTES: usize = 8 * CHUNK_BYTES;
 const MAX_TRANSFERS: usize = 8;
 
 type PackIndex = gix_pack::index::File<Bytes>;
+type PackEntry = gix_pack::data::Entry;
 type EntryHeader = gix_pack::data::entry::Header;
 
 pub(crate) async fn stage(
@@ -318,40 +319,40 @@ impl Pack {
         self.index.oid_at_index(index).as_bytes()
     }
 
-    fn crc(&self, index: u32) -> Result<u32, Error> {
+    #[allow(clippy::expect_used, reason = "validate_index requires v2")]
+    fn crc(&self, index: u32) -> u32 {
         self.index
             .crc32_at_index(index)
-            .ok_or_else(|| Error::InvalidPack("pack index CRC is missing".into()))
+            .expect("validated v2 index has CRCs")
     }
 
-    fn offset(&self, index: u32) -> Result<u32, Error> {
+    #[allow(clippy::expect_used, reason = "validate_index bounds every offset")]
+    fn offset(&self, index: u32) -> u32 {
         u32::try_from(self.index.pack_offset_at_index(index))
-            .map_err(|_| Error::InvalidPack("large pack offset is invalid".into()))
+            .expect("validated pack offsets fit u32")
     }
 
-    fn entry_range(&self, index: u32) -> Result<std::ops::Range<u32>, Error> {
-        let start = self.offset(index)?;
+    #[allow(clippy::expect_used, reason = "validate_index proves the range")]
+    fn entry_range(&self, index: u32) -> std::ops::Range<u32> {
+        let start = self.offset(index);
         let position = self
             .offsets
             .binary_search_by_key(&start, |entry| entry.offset)
-            .map_err(|_| Error::InvalidPack("pack offset is missing".into()))?;
-        let trailer = u32::try_from(self.id.as_bytes().len())
-            .map_err(|_| Error::InvalidPack("pack trailer length exceeds u32".into()))?;
+            .expect("validated pack offset is indexed");
+        let trailer = u32::try_from(self.id.as_bytes().len()).expect("Git digest length fits u32");
         let end = self
             .offsets
             .get(position + 1)
             .map_or(self.bytes - trailer, |entry| entry.offset);
-        (start < end)
-            .then_some(start..end)
-            .ok_or_else(|| Error::InvalidPack("pack entry range is empty".into()))
+        start..end
     }
 
-    fn base(&self, index: u32, header: EntryHeader) -> Result<Option<u32>, Error> {
-        match header {
+    fn base(&self, entry: &PackEntry) -> Result<Option<u32>, Error> {
+        match entry.header {
             EntryHeader::OfsDelta { base_distance } => {
-                let base = u64::from(self.offset(index)?)
-                    .checked_sub(base_distance)
-                    .and_then(|value| u32::try_from(value).ok())
+                let base = entry
+                    .checked_base_pack_offset(base_distance)
+                    .and_then(|offset| u32::try_from(offset).ok())
                     .and_then(|offset| {
                         self.offsets
                             .binary_search_by_key(&offset, |entry| entry.offset)
@@ -416,21 +417,21 @@ impl<'a> Reader<'a> {
                 return invalid("delta graph contains a cycle");
             }
             *slot = true;
-            let entry = self
+            let (entry, data) = self
                 .entry(location.pack, current, deltas.is_empty())
                 .await?;
-            if let Some(base) = pack.base(current, entry.header)? {
+            if let Some(base) = pack.base(&entry)? {
                 if deltas.len() == MAX_DELTA_DEPTH {
                     return invalid("delta graph is too deep");
                 }
                 current = base;
-                deltas.push(entry.data);
+                deltas.push(data);
             } else {
                 let kind = entry
                     .header
                     .as_kind()
                     .ok_or_else(|| Error::InvalidPack("pack object kind is invalid".into()))?;
-                break (kind, entry.data);
+                break (kind, data);
             }
         };
         while let Some(delta) = deltas.pop() {
@@ -444,15 +445,14 @@ impl<'a> Reader<'a> {
         Ok(Some(Object { kind, data }))
     }
 
+    #[allow(clippy::expect_used, reason = "fetch count is bounded by MAX_OBJECTS")]
     pub(crate) async fn fetch_pack(&mut self, ids: &[ObjectId]) -> Result<Bytes, Error> {
         let format = self.catalog.format;
         if ids.len() > MAX_OBJECTS as usize || ids.iter().any(|id| id.format() != format) {
             return invalid("fetch selection is invalid");
         }
-        let selected_bytes = ids
-            .len()
-            .checked_mul(size_of::<ObjectId>() + size_of::<(Location, ObjectId, u32)>())
-            .ok_or_else(|| Error::InvalidPack("fetch selection size overflowed".into()))?;
+        let selected_bytes =
+            ids.len() * (size_of::<ObjectId>() + size_of::<(Location, ObjectId, u32)>());
         let _selected_memory = self.catalog.operation.reserve(selected_bytes)?;
         let mut selected = ids.to_vec();
         selected.sort_unstable();
@@ -464,7 +464,7 @@ impl<'a> Reader<'a> {
                 .location(*id)
                 .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
             let pack = &self.catalog.packs[usize::from(location.pack)];
-            entries.push((location, *id, pack.offset(location.index)?));
+            entries.push((location, *id, pack.offset(location.index)));
         }
         entries.sort_unstable_by_key(|(location, id, offset)| {
             let pack = self.catalog.packs[usize::from(location.pack)].id;
@@ -473,6 +473,7 @@ impl<'a> Reader<'a> {
 
         let hash = object_hash(format);
         let hash_len = hash.len_in_bytes();
+        let count = u32::try_from(entries.len()).expect("MAX_OBJECTS fits u32");
         let output_memory = self.catalog.operation.reserve(MAX_FETCH_PACK_BYTES)?;
         let mut writer = gix_hash::io::Write::new(
             PackOutput {
@@ -482,57 +483,53 @@ impl<'a> Reader<'a> {
             },
             hash,
         );
-        {
-            writer
-                .write_all(&gix_pack::data::header::encode(
-                    gix_pack::data::Version::V2,
-                    u32::try_from(entries.len())
-                        .map_err(|_| Error::InvalidPack("fetch has too many objects".into()))?,
-                ))
-                .map_err(output_error)?;
-            for (location, id, _) in entries {
-                let stored = self.stored_entry(location.pack, location.index).await?;
-                let pack = &self.catalog.packs[usize::from(location.pack)];
-                let base = pack
-                    .base(location.index, stored.header)?
-                    .map(|index| ObjectId::from_bytes(format, pack.oid(index)))
-                    .transpose()?;
-                if base.is_some_and(|base| selected.binary_search(&base).is_err()) {
-                    drop(stored);
-                    let object = self
-                        .find(id)
-                        .await?
-                        .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
-                    let header = match object.kind {
-                        gix_object::Kind::Tree => EntryHeader::Tree,
-                        gix_object::Kind::Blob => EntryHeader::Blob,
-                        gix_object::Kind::Commit => EntryHeader::Commit,
-                        gix_object::Kind::Tag => EntryHeader::Tag,
-                    };
-                    header
-                        .write_to(object.data.len() as u64, &mut writer)
-                        .map_err(output_error)?;
-                    self.catalog.operation.work(object.data.len())?;
-                    let _compress_memory = self.catalog.operation.reserve(COMPRESS_BYTES)?;
-                    let mut compressor = gix_zlib::stream::deflate::Write::new(
-                        &mut writer,
-                        gix_zlib::Compression::DEFAULT,
-                    );
-                    let result = compressor
-                        .write_all(&object.data)
-                        .and_then(|()| compressor.flush());
-                    drop(compressor);
-                    result.map_err(output_error)?;
-                    continue;
-                }
-                let header = base.map_or(stored.header, |base| EntryHeader::RefDelta {
-                    base_id: gix_hash::ObjectId::from_bytes_or_panic(base.as_bytes()),
-                });
+        writer
+            .write_all(&gix_pack::data::header::encode(
+                gix_pack::data::Version::V2,
+                count,
+            ))
+            .map_err(output_error)?;
+        for (location, id, _) in entries {
+            let (entry, compressed) = self.stored_entry(location.pack, location.index).await?;
+            let pack = &self.catalog.packs[usize::from(location.pack)];
+            let base = pack
+                .base(&entry)?
+                .map(|index| ObjectId::from_bytes(format, pack.oid(index)))
+                .transpose()?;
+            if base.is_some_and(|base| selected.binary_search(&base).is_err()) {
+                drop((entry, compressed));
+                let object = self
+                    .find(id)
+                    .await?
+                    .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
+                let header = match object.kind {
+                    gix_object::Kind::Tree => EntryHeader::Tree,
+                    gix_object::Kind::Blob => EntryHeader::Blob,
+                    gix_object::Kind::Commit => EntryHeader::Commit,
+                    gix_object::Kind::Tag => EntryHeader::Tag,
+                };
                 header
-                    .write_to(stored.size, &mut writer)
+                    .write_to(object.data.len() as u64, &mut writer)
                     .map_err(output_error)?;
-                writer.write_all(&stored.compressed).map_err(output_error)?;
+                self.catalog.operation.work(object.data.len())?;
+                let _compress_memory = self.catalog.operation.reserve(COMPRESS_BYTES)?;
+                let mut compressor = gix_zlib::stream::deflate::Write::new(
+                    &mut writer,
+                    gix_zlib::Compression::DEFAULT,
+                );
+                compressor
+                    .write_all(&object.data)
+                    .and_then(|()| compressor.flush())
+                    .map_err(output_error)?;
+                continue;
             }
+            let header = base.map_or(entry.header, |base| EntryHeader::RefDelta {
+                base_id: gix_hash::ObjectId::from_bytes_or_panic(base.as_bytes()),
+            });
+            header
+                .write_to(entry.decompressed_size, &mut writer)
+                .map_err(output_error)?;
+            writer.write_all(&compressed).map_err(output_error)?;
         }
         let gix_hash::io::Write { hash, mut inner } = writer;
         let digest = hash.try_finalize().map_err(pack_error)?;
@@ -541,9 +538,14 @@ impl<'a> Reader<'a> {
         Ok(hold(Bytes::from(inner.bytes), output_memory))
     }
 
-    async fn entry(&mut self, pack: u16, index: u32, hash: bool) -> Result<DecodedEntry, Error> {
-        let entry = self.stored_entry(pack, index).await?;
-        let size = usize::try_from(entry.size)
+    async fn entry(
+        &mut self,
+        pack: u16,
+        index: u32,
+        hash: bool,
+    ) -> Result<(PackEntry, Bytes), Error> {
+        let (entry, compressed) = self.stored_entry(pack, index).await?;
+        let size = usize::try_from(entry.decompressed_size)
             .map_err(|_| Error::InvalidPack("pack entry size exceeds memory".into()))?;
         self.catalog
             .operation
@@ -552,31 +554,26 @@ impl<'a> Reader<'a> {
         let mut data = vec![0; size];
         let _inflate_memory = self.catalog.operation.reserve(INFLATE_BYTES)?;
         let (status, consumed, written) = gix_zlib::Inflate::default()
-            .once(&entry.compressed, &mut data)
+            .once(&compressed, &mut data)
             .map_err(pack_error)?;
-        if status != gix_zlib::Status::StreamEnd
-            || consumed != entry.compressed.len()
-            || written != size
+        if status != gix_zlib::Status::StreamEnd || consumed != compressed.len() || written != size
         {
             return invalid("pack entry zlib stream is not exact");
         }
-        Ok(DecodedEntry {
-            header: entry.header,
-            data: hold(Bytes::from(data), memory),
-        })
+        Ok((entry, hold(Bytes::from(data), memory)))
     }
 
-    async fn stored_entry(&mut self, pack: u16, index: u32) -> Result<StoredEntry, Error> {
+    async fn stored_entry(&mut self, pack: u16, index: u32) -> Result<(PackEntry, Bytes), Error> {
         let stored = &self.catalog.packs[usize::from(pack)];
-        let range = stored.entry_range(index)?;
+        let range = stored.entry_range(index);
+        let offset = u64::from(range.start);
         self.catalog
             .operation
             .work((range.end - range.start) as usize)?;
         let bytes = self.read_range(pack, range).await?;
-        if gix_features::hash::crc32(&bytes) != stored.crc(index)? {
+        if gix_features::hash::crc32(&bytes) != stored.crc(index) {
             return invalid("pack entry CRC does not match");
         }
-        let offset = u64::from(stored.offset(index)?);
         let entry =
             gix_pack::data::Entry::from_bytes(&bytes, offset, object_hash(stored.id.format()))
                 .map_err(pack_error)?;
@@ -588,11 +585,8 @@ impl<'a> Reader<'a> {
         if size > MAX_OBJECT_BYTES {
             return invalid("pack entry exceeds object byte limit");
         }
-        Ok(StoredEntry {
-            header: entry.header,
-            size: entry.decompressed_size,
-            compressed: bytes.slice(entry.header_size()..),
-        })
+        let compressed = bytes.slice(entry.header_size()..);
+        Ok((entry, compressed))
     }
 
     async fn read_range(&mut self, pack: u16, range: std::ops::Range<u32>) -> Result<Bytes, Error> {
@@ -660,17 +654,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-struct DecodedEntry {
-    header: EntryHeader,
-    data: Bytes,
-}
-
-struct StoredEntry {
-    header: EntryHeader,
-    size: u64,
-    compressed: Bytes,
-}
-
 struct PackOutput<'a> {
     bytes: Vec<u8>,
     limit: usize,
@@ -683,14 +666,13 @@ fn output_error(error: io::Error) -> Error {
 
 impl Write for PackOutput<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+        if bytes.len() > self.limit - self.bytes.len() {
             return Err(io::Error::other(pack_error(
                 "fetch pack exceeds byte limit",
             )));
         }
         self.operation
-            .work(bytes.len())
-            .and_then(|()| self.operation.work(bytes.len()))
+            .work(bytes.len() * 2)
             .map_err(io::Error::other)?;
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
@@ -1664,7 +1646,7 @@ mod tests {
         assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
         assert_eq!(operation.live_bytes(), baseline);
 
-        let range = catalog.packs[0].entry_range(0)?;
+        let range = catalog.packs[0].entry_range(0);
         let entry_work = usize::try_from(range.end - range.start)?;
         let used = operation.work_bytes();
         operation.work(crate::pack::budget::WORK_BYTES - used - entry_work - 23)?;
@@ -1793,7 +1775,7 @@ mod tests {
         drop(operation);
 
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
-        let range = catalog.packs[0].entry_range(0)?;
+        let range = catalog.packs[0].entry_range(0);
         let mut reader = Reader::new(&log, &view, &catalog);
         drop(reader.chunk(0, 0).await?);
         let required = (range.end - range.start) as usize + size * 2;
