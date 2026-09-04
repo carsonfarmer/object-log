@@ -1,31 +1,60 @@
 # object-log-git-http
 
-This crate is a verified protocol service proof for `object-log-git`, not a
-deployable HTTP server. It keeps web framework, routing, repository selection,
-and authentication outside the library.
+This crate provides Git smart HTTP protocol v0 and a runnable native server
+for one repository at `/repo`. It uses `object-log-git` for Git state and
+`object-log` for durable publication. Product code does not run Git or link to
+C Git. The acceptance tests use an unchanged Git client.
 
-`SmartHttp` implements these protocol operations:
+The server supports these routes:
 
-- upload-pack discovery
-- receive-pack discovery
-- upload-pack POST
-- receive-pack POST
+- `GET /repo/info/refs?service=git-upload-pack`
+- `GET /repo/info/refs?service=git-receive-pack`
+- `POST /repo/git-upload-pack`
+- `POST /repo/git-receive-pack`
 
-The crate supports Git protocol v0 and SHA-1 repositories. It uses
-`gix-packetline` for framing and `gix-pack` for pack output. Product code does
-not run a Git executable. The integration test uses an unmodified Git client
-as an external compatibility check.
+It accepts identity and gzip request bodies. Axum and Hyper handle fixed-length
+and chunked requests. Upload responses stream from an anonymous temporary file
+after pack generation succeeds. This prevents a false `200` response when pack
+generation fails. Discovery and receive reports stay below their protocol
+limits and use memory.
 
-Receive-pack delegates validation and publication to `object-log-git`. It does
-not report a successful ref update until the object-log commit is confirmed.
-Each request uses a new disposable local repository.
+Run the server with an existing S3 bucket:
 
-Upload-pack accepts direct advertised object IDs and peeled annotated-tag IDs.
-It currently ignores `have` lines and returns the complete reachable object
-set after the client sends `done`. Pack input and output are limited to 512
-MiB.
+```sh
+OBJECT_LOG_STORE_URL=s3://bucket/prefix \
+OBJECT_LOG_LISTEN=0.0.0.0:3000 \
+cargo run --release -p object-log-git-http
+```
 
-A host must map the four Git routes to the corresponding methods and apply the
-media types and cache policy from `Service`. It must also provide bounded gzip
-decoding, chunked transfer, HTTP error mapping, and service-level resource
-limits.
+The `object_store` S3 builder reads standard `AWS_*` settings. S3-compatible
+services can also set `AWS_ENDPOINT`, `AWS_ALLOW_HTTP`, and
+`AWS_VIRTUAL_HOSTED_STYLE_REQUEST`. `OBJECT_LOG_SCRATCH` selects disposable
+local storage. `OBJECT_LOG_CONCURRENCY` defaults to four active operations.
+The server probes conditional create, update, and read behavior before it
+listens.
+
+The repository uses SHA-1 and exposes `HEAD` as `refs/heads/main`. The fetch
+path sends the complete reachable object set. It accepts a requested object
+that was reachable in the current durable repository even when a concurrent
+push changed the advertised ref before the POST arrived.
+
+A receive result stays successful only after durable publication. A rejected
+push returns a Git protocol rejection with HTTP `200`. An uncertain or expired
+publication returns HTTP `503`. The client must fetch fresh refs before it
+decides whether its requested ref transaction became visible. The server does
+not retain the object-log recovery token. This loses exact historical attempt
+classification, but it does not report false success. Staged objects that did
+not publish remain eligible for object-log garbage collection.
+
+The host limits active Git work, encoded and decoded request data, packet-line
+counts, pack bytes, and idle body time. Active operations continue under a task
+tracker if the HTTP handler is canceled. Shutdown waits for those operations.
+An upload response keeps its concurrency permit and anonymous file until the
+client consumes or drops the body.
+
+Authentication, TLS, tenant routing, protocol v2, SHA-256 HTTP, and live AWS
+qualification remain deployment or follow-on work. Put this server behind a
+proxy that limits request header bytes. The application cannot prevent Hyper
+from allocating parsed headers before route middleware runs. Local filesystem
+storage does not pass object-log's conditional-update probe. Use local MinIO
+for persistent local tests.

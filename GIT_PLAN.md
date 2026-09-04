@@ -99,9 +99,10 @@ out of scope. This proof does not add them to the WAL.
 `object-log-git-http` parses packet lines, capabilities, ref commands, and pack
 input. It passes parsed commands and a pack file to `object-log-git`.
 
-Authentication, routing, and HTTP server policy are out of scope. A push
-response waits for object-log to confirm publication. A conflict or unresolved
-result returns a protocol error.
+The native Axum host maps one log to `/repo`. Authentication and tenant routing
+stay outside this proof. A push response waits for object-log to classify
+publication. A conflict returns a Git rejection. An uncertain result returns
+HTTP `503`, and the client must fetch current refs before it acts again.
 
 The current HTTP tranche implements protocol v0 for the four smart HTTP
 operations. Its native loopback test covers clone, fetch, push, branch and tag
@@ -159,16 +160,16 @@ checkpoint, collection, and local evidence are complete. The local protocol v0
 proof passes for SHA-1. Its unmodified-client loopback covers the accepted
 operations and passes strict Git validation.
 
-The next product tranche is the cross-example API and simplicity review in
-issue #13. Issue #14 tracks the deployable HTTP host.
+The native HTTP host is complete for the accepted local boundary. The next
+product tranche is the cross-example API and simplicity review in issue #13.
+Live provider qualification remains separate.
 
 ## Limits
 
 Keep Git policy outside the generic log. Use one repository for each log and one
-push for each publication. The HTTP crate is a verified protocol service proof,
-not a deployable server. Its host must provide routing, authentication,
-repository selection, bounded gzip decoding, chunked transfer, and HTTP error
-mapping.
+push for each publication. The current host has one fixed repository and does
+not provide authentication, TLS, or tenant routing. A front proxy must limit
+header bytes before Hyper parses them.
 
 The current fetch path ignores `have` lines and returns all reachable objects.
 Protocol v2, SHA-256 HTTP, pack rewriting, global deduplication,

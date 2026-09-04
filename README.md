@@ -56,13 +56,12 @@ live object. Its collection test removes more than 100 dead physical objects,
 then cold-recovers the live repository and passes strict Git validation. Its
 benchmarks, request audit, and pinned `MinIO` lifecycle are complete.
 
-The separate `object-log-git-http` crate implements the four Git smart HTTP
-protocol v0 operations for SHA-1 repositories. An unmodified Git client pushes,
-clones, fetches, creates and deletes branches and tags, rejects a
-non-fast-forward push, and passes `git fsck --strict` over its loopback server.
-This is a verified protocol service proof, not a deployable HTTP server. A host
-must provide routing, authentication, bounded gzip decoding, chunked transfer,
-and HTTP error mapping.
+The `object-log-git-http` crate implements the four Git smart HTTP protocol v0
+operations for SHA-1 repositories. Its native Axum server has one fixed `/repo`
+mapping, bounded gzip and identity request streams, chunked upload responses,
+explicit HTTP errors, and S3-compatible configuration. An unchanged Git client
+pushes, clones, fetches, creates and deletes branches and tags, rejects a
+non-fast-forward push, and passes `git fsck --strict`.
 
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the
@@ -74,7 +73,9 @@ tests, local measurements, and remaining qualification work. The
 [`Git` local evidence](docs/evidence/git-local-2026-09-03.md) records its
 storage measurements and `MinIO` lifecycle. The
 [`Git HTTP` evidence](docs/evidence/git-http-local-2026-09-03.md) records the
-protocol proof and its deployment limits.
+protocol proof. The
+[`Git server` evidence](docs/evidence/git-server-local-2026-09-03.md) records
+the native host tests and limits.
 
 See [docs/follow-ons.md](docs/follow-ons.md) for the ordered Git, WASI
 filesystem, and live AWS qualification goals. The
