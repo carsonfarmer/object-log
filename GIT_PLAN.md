@@ -14,22 +14,28 @@ The core `object-log` crate remains independent from Git.
 
 ## Current state
 
-Revision `2ee21742d7acf64e7ceb6ddb79c6407c0462bcf5` has three private,
-host-neutral foundations:
+Revision `8d28839b27c0d0f6122f981f13f79412ca11e233` completes task 1B with four
+private, host-neutral foundations:
 
 | Module | Product lines | State |
 | --- | ---: | --- |
-| Pack normalization | 500 | Complete locally |
-| Durable staging and sparse reads | 578 | Complete locally |
-| Git wire protocol | 606 | Complete locally |
-| Total | 1,684 | Complete locally |
+| Pack normalization | 617 | Accepted |
+| Durable staging and sparse reads | 610 | Accepted |
+| Git wire protocol | 616 | Accepted |
+| Operation budgets | 205 | Accepted |
+| Total | 2,048 | Accepted |
 
 The counts are raw Rust lines before each module's `#[cfg(test)]` section.
-The [pack](docs/evidence/git-wasi-pack-2026-09-04.md),
+The [architecture gate](docs/evidence/git-architecture-gate-2026-09-04.md)
+records task 1B acceptance and the current no-go decision. The
+[pack](docs/evidence/git-wasi-pack-2026-09-04.md),
 [durable reader](docs/evidence/git-wasi-durable-reader-2026-09-04.md), and
 [wire](docs/evidence/git-wasi-wire-2026-09-04.md) records contain the foundation
 behavior and local checks. The modules support SHA-1 and SHA-256 and pass
 native and WASIp2 checks without default features.
+
+The private modules are not connected through `Repository`. A real Git v2
+trial remains blocked until that connection exists.
 
 The native proof remains the client and storage oracle. It uses a disposable
 bare repository and high-level `gix` APIs. It supports atomic ref transactions,
@@ -127,8 +133,7 @@ evidence instead of adding product instrumentation.
 The engine must also record total calls, transferred bytes, and serial request
 depth. There is no smaller request-depth performance threshold yet.
 
-The first implementation task must replace the larger foundation defaults with
-these phase limits:
+Task 1 applies these phase limits:
 
 | Phase resource | Limit |
 | --- | ---: |
@@ -165,7 +170,8 @@ the response.
 
 ## Twelve sequential implementation tasks
 
-1. Centralize the process pool, operation counters, and reduced limits. Replace
+1. Complete at `8d28839`: centralize the process pool, operation counters, and
+   reduced limits. Replace
    `object_log::materialize` with `materialize(log, owned_view, materializer)`
    and add `CommitRef::len()`. This pre-release change lets the engine reserve
    exact checkpoint and tail bytes before concurrent reads and keeps one
@@ -191,14 +197,16 @@ the response.
 10. Change the native Axum host into a thin adapter and run unchanged-client
     parity against the native oracle. Keep the oracle available for comparison.
 11. Add the thin Spin WASIp2 adapter. Record imports and peak process memory,
-    then run all memory-store and filesystem-store acceptance and performance
-    cases.
+    then run all memory-store acceptance and performance cases.
 12. Run the same accepted cases against local MinIO. Delete the native oracle
     only after client and storage parity, all hard gates, and required owner
     reviews pass. Finish with Rust, adversarial, prose, and deletion reviews.
 
 Tasks are sequential because each task supplies the contract or evidence for
-the next task. Local memory and filesystem cases must pass before MinIO.
+the next task. Local memory cases must pass before MinIO. The generic
+`object_store::LocalFileSystem` backend lacks conditional compare-and-swap, so
+the log rejects it. Add a filesystem acceptance case only if a filesystem
+adapter supplies that operation.
 
 ## Functional acceptance
 
@@ -219,8 +227,9 @@ the host and all cache data are removed. Rejected and losing packs must become
 collectable.
 
 The same checkpoint, collection, and cold-clone lifecycle must pass with memory
-storage, filesystem storage, and then local MinIO. Live AWS qualification
-remains separate.
+storage and then local MinIO. A filesystem backend can join this sequence only
+if it supplies conditional compare-and-swap. Live AWS qualification remains
+separate.
 
 The build gates include:
 
@@ -280,16 +289,17 @@ Count product and test lines separately from revision `2ee2174`.
 
 | Tranche | Expected change | Stop gate |
 | --- | ---: | ---: |
-| Pack, durable, wire, and private budgets | Add 260–400; delete 80–160 | Retained product exceeds 2,050 |
+| Task 1: pack, durable, wire, and private budgets | Complete at 2,048 retained product lines | Retained product exceeds 2,050 |
 | Task 2 compressed-entry reuse | Add at most 160 net product lines and 450 test lines | Any new dependency, Cargo feature, public API, format-name change, or line-limit excess |
 | Repository, graph, hybrid fetch, and receive | Add 900–1,225 | Added product exceeds 1,275 |
 | Native HTTP and Spin adapters | Add 180–280 | Added product exceeds 300 |
 | Tests | Add 1,600–2,400 | Report separately |
 
-The current combined Git and HTTP implementation has 4,465 product lines. The
-native deletion target is 2,165 product lines. After that deletion, the
-expected Git, HTTP, and Spin total is 3,480–4,125 product lines. Stop if it
-exceeds 4,150.
+At revision `8d28839`, the combined Git and HTTP implementation has 4,960 raw
+product lines. This count includes each `src/**/*.rs` line before its top-level
+`#[cfg(test)] mod tests` section. The native deletion target is 2,165 product
+lines. After that deletion, the expected Git, HTTP, and Spin total is
+3,480–4,125 product lines. Stop if it exceeds 4,150.
 
 Do not continue past a missed intermediate gate because a later deletion might
 offset it. Reduce the current tranche before integration.

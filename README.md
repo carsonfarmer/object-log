@@ -76,13 +76,16 @@ API:
   protocol v2 for upload-pack discovery and fetch. Push remains standard
   receive-pack.
 
-At revision `2ee2174`, the private pack, durable-reader, and wire foundations
-contain 1,684 product lines. The next Git tranche connects them through the
-existing public `Repository` and `PreparedPush` surface. It adds no public
+At revision `8d28839`, the private pack, durable-reader, wire, and operation
+budget foundations contain 2,048 product lines. Task 1 is integrated. Task 2
+adds compressed-entry reuse. Later tasks connect the foundations through the
+existing public `Repository` and `PreparedPush` surface. They add no public
 `Engine`, `Service`, or `Outcome` type. One process-wide 88 MiB pool admits one
 active engine operation under the provisional 128 MiB WASI process model. The
 [Git proof plan](GIT_PLAN.md) defines the 12 tasks, reduced phase limits,
-performance gates, and source-size stop gates.
+performance gates, and source-size stop gates. The
+[architecture gate](docs/evidence/git-architecture-gate-2026-09-04.md) records
+what is ready and what remains disconnected.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
