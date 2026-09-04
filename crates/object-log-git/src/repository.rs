@@ -51,8 +51,9 @@ pub struct PreparedPush {
 impl Repository {
     /// Rebuilds one disposable bare Git repository from durable state.
     ///
-    /// `work_dir` must not exist or must be an empty directory. The adapter
-    /// never removes it or other caller data.
+    /// `work_dir` must not exist or must be an empty directory. If collection
+    /// expires the first durable view during recovery, the adapter removes its
+    /// partial cache and retries once from a new view.
     ///
     /// # Errors
     ///
@@ -63,18 +64,30 @@ impl Repository {
         work_dir: impl AsRef<Path>,
         format: ObjectFormat,
     ) -> Result<Self, Error> {
-        let log = log.clone();
-        let materialized = materialize(&log, &Machine::new(format))
+        let path = work_dir.as_ref().to_owned();
+        let init_path = path.clone();
+        blocking(move || require_empty(&init_path)).await?;
+
+        match Self::open_attempt(log, &path, format).await {
+            Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
+                let retry_path = path.clone();
+                blocking(move || clear_partial_cache(&retry_path)).await?;
+                Self::open_attempt(log, &path, format).await
+            }
+            result => result,
+        }
+    }
+
+    async fn open_attempt(log: &Log, path: &Path, format: ObjectFormat) -> Result<Self, Error> {
+        let materialized = materialize(log, &Machine::new(format))
             .await
             .map_err(|error| match error {
                 object_log::MaterializeError::Log(error) => Error::ObjectLog(error),
                 object_log::MaterializeError::State(error) => error,
             })?;
         let (view, state) = materialized.into_parts();
-        let path = work_dir.as_ref().to_owned();
-        let init_path = path.clone();
+        let init_path = path.to_owned();
         blocking(move || {
-            require_empty(&init_path)?;
             git::init(&init_path, format)?;
             Ok(())
         })
@@ -83,11 +96,11 @@ impl Repository {
         let mut objects = git::ObjectSet::new();
         let mut recovered = BTreeMap::new();
         for (id, (bytes, root)) in state.packs {
-            let pack_objects = recover_pack(&log, &view, &path, id, bytes, &root).await?;
+            let pack_objects = recover_pack(log, &view, path, id, bytes, &root).await?;
             git::extend_objects(&mut objects, pack_objects.iter().copied())?;
             recovered.insert(id, (bytes, root, pack_objects));
         }
-        let materialize_path = path.clone();
+        let materialize_path = path.to_owned();
         let desired = state.refs;
         let (refs, objects, reachable) = blocking(move || {
             let repo = git::open(&materialize_path, format)?;
@@ -105,8 +118,8 @@ impl Repository {
             .collect();
 
         Ok(Self {
-            log,
-            path,
+            log: log.clone(),
+            path: path.to_owned(),
             format,
             view,
             refs,
@@ -363,6 +376,18 @@ fn require_empty(path: &Path) -> Result<(), Error> {
         return Err(Error::WorkDirectoryNotEmpty);
     }
     Ok(())
+}
+
+fn clear_partial_cache(path: &Path) -> Result<(), Error> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(git::Error::Io {
+            path: path.to_owned(),
+            source,
+        }
+        .into()),
+    }
 }
 
 #[cfg(test)]
