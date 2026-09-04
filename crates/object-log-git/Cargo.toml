@@ -29,10 +29,10 @@ thiserror = "2.0"
 tokio = { version = "1.47", features = ["fs", "io-util"], optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-gix-pack = { version = "0.74.2", default-features = false, features = ["generate", "sha1", "sha256", "streaming-input"] }
+gix-pack = { version = "=0.74.2", default-features = false, features = ["generate", "sha1", "sha256", "streaming-input"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gix-pack = { version = "0.74.2", default-features = false, features = ["sha1", "sha256", "streaming-input", "wasm"] }
+gix-pack = { version = "=0.74.2", default-features = false, features = ["sha1", "sha256", "streaming-input", "wasm"] }
 
 [dev-dependencies]
 criterion = "0.7"

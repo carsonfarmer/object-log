@@ -1,10 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::Cursor,
-    mem::size_of,
-    path::PathBuf,
-    sync::atomic::AtomicBool,
-};
+use std::{io::Cursor, mem::size_of, path::PathBuf, sync::atomic::AtomicBool};
 
 use gix_pack::data::{Version, input::EntriesToBytesIter};
 
@@ -12,14 +6,14 @@ use crate::{Error, ObjectFormat, ObjectId};
 
 #[path = "budget.rs"]
 pub(super) mod budget;
-
 pub(super) const MAX_RECEIVE_PACK_BYTES: usize = 9 * 1024 * 1024;
 pub(super) const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_INDEX_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const MAX_OBJECTS: u32 = 32_768;
 pub(super) const MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_DELTA_DEPTH: usize = 256;
-
+const INFLATE_BYTES: usize = 48 * 1024;
+const COMPRESS_BYTES: usize = 416 * 1024;
 const DEFAULT_LIMITS: Limits = Limits {
     input_bytes: MAX_RECEIVE_PACK_BYTES,
     output_bytes: MAX_PACK_BYTES,
@@ -37,19 +31,55 @@ struct Limits {
     index_bytes: usize,
 }
 
+#[derive(Default)]
+struct Stats {
+    normalized: usize,
+    deltas: usize,
+    resolved: usize,
+    largest: usize,
+    instructions: usize,
+    has_ref: bool,
+}
+impl Stats {
+    fn record(&mut self, inflated: usize, result: usize, delta: bool) -> Result<(), Error> {
+        self.normalized = total([self.normalized, inflated])?;
+        self.resolved = total([self.resolved, result])?;
+        self.largest = self.largest.max(result);
+        if delta {
+            self.deltas = total([self.deltas, result])?;
+            self.instructions = self.instructions.max(inflated);
+        }
+        Ok(())
+    }
+}
+
+type InputEntry = gix_pack::data::input::Entry;
+type Base<'a> = (gix_hash::ObjectId, gix_object::Kind, &'a [u8]);
+type Memory = budget::Reservation;
+type Resolved = (Vec<InputEntry>, usize, Memory, Memory);
+fn checked<T>(value: Option<T>, message: &'static str) -> Result<T, Error> {
+    value.ok_or_else(|| Error::InvalidPack(message.into()))
+}
+fn total<const N: usize>(parts: [usize; N]) -> Result<usize, Error> {
+    parts.into_iter().try_fold(0_usize, |sum, part| {
+        checked(sum.checked_add(part), "pack size overflowed")
+    })
+}
+fn product(left: usize, right: usize) -> Result<usize, Error> {
+    checked(left.checked_mul(right), "pack size overflowed")
+}
+
 pub(crate) struct ExternalBase<'a> {
     pub(crate) id: ObjectId,
     pub(crate) kind: gix_object::Kind,
     pub(crate) data: &'a [u8],
 }
-
 pub(crate) struct Normalized {
     pub(crate) bytes: Vec<u8>,
     pub(crate) index: Vec<u8>,
     pub(crate) id: ObjectId,
     pub(crate) _memory: [budget::Reservation; 2],
 }
-
 pub(crate) fn normalize(
     operation: &budget::Operation,
     format: ObjectFormat,
@@ -58,7 +88,6 @@ pub(crate) fn normalize(
 ) -> Result<Normalized, Error> {
     normalize_with(operation, format, input, external_bases, DEFAULT_LIMITS)
 }
-
 fn normalize_with(
     operation: &budget::Operation,
     format: ObjectFormat,
@@ -70,12 +99,27 @@ fn normalize_with(
         return invalid("input exceeds byte limit");
     }
     let hash = object_hash(format);
-    let entries = scan(operation, input, hash, limits)?;
+    let (entries, mut stats, mut scan_memory) = scan(operation, input, hash, limits)?;
+    let input_metadata = product(entries.len(), size_of::<InputEntry>())?;
 
-    let bases = ExternalBases::new(operation, hash, external_bases, limits)?;
-    let (entries, output_bytes) = resolve_external(entries, &bases, limits, hash.len_in_bytes())?;
+    let (bases, base_memory) = bases(operation, hash, external_bases, limits, &mut stats)?;
+    let (entries, output_bytes, resolve_memory, compressed_memory) = resolve_external(
+        operation,
+        entries,
+        bases,
+        limits,
+        hash.len_in_bytes(),
+        &mut stats,
+    )?;
+    scan_memory.shrink(input_metadata)?;
+    drop(base_memory);
     let object_count = entries.len();
+    let _indexed_memory = operation.reserve(product(object_count, size_of::<InputEntry>())?)?;
     let entries = entries.into_iter().map(Ok);
+    operation.work(checked(
+        product(output_bytes, 2)?.checked_sub(hash.len_in_bytes()),
+        "pack rewrite work overflowed",
+    )?)?;
     let output_memory = operation.reserve(output_bytes)?;
     let mut output = Cursor::new(Vec::with_capacity(output_bytes));
     let indexed_entries = {
@@ -86,9 +130,17 @@ fn normalize_with(
         }
         indexed
     };
+    drop((scan_memory, resolve_memory, compressed_memory));
     let bytes = output.into_inner();
-    let (id, index, index_memory) =
-        index(operation, &bytes, format, hash, indexed_entries, limits)?;
+    let (id, index, index_memory) = index(
+        operation,
+        &bytes,
+        format,
+        hash,
+        indexed_entries,
+        limits,
+        &stats,
+    )?;
     Ok(Normalized {
         bytes,
         index,
@@ -96,45 +148,42 @@ fn normalize_with(
         _memory: [output_memory, index_memory],
     })
 }
-
-struct ExternalBases<'a> {
-    values: BTreeMap<gix_hash::ObjectId, (gix_object::Kind, &'a [u8])>,
-}
-
-impl<'a> ExternalBases<'a> {
-    fn new(
-        operation: &budget::Operation,
-        hash: gix_hash::Kind,
-        bases: &[ExternalBase<'a>],
-        limits: Limits,
-    ) -> Result<Self, Error> {
-        let mut values = BTreeMap::new();
-        for base in bases {
-            if base.data.len() > limits.object_bytes {
-                return invalid("external base exceeds object byte limit");
-            }
-            let id = gix_object::compute_hash(hash, base.kind, base.data).map_err(pack_error)?;
-            if id.as_slice() != base.id.as_bytes() {
-                return invalid("external base ID does not match its data");
-            }
-            if values.insert(id, (base.kind, base.data)).is_some() {
-                return invalid("external base is duplicated");
-            }
-            operation.work(base.data.len())?;
-            if values.len() > limits.objects as usize {
-                return invalid("external base count exceeds limit");
-            }
-        }
-        Ok(Self { values })
+fn bases<'a>(
+    operation: &budget::Operation,
+    hash: gix_hash::Kind,
+    source: &[ExternalBase<'a>],
+    limits: Limits,
+    stats: &mut Stats,
+) -> Result<(Vec<Base<'a>>, budget::Reservation), Error> {
+    if source.len() > limits.objects as usize {
+        return invalid("external base count exceeds limit");
     }
+    let memory = operation.reserve(product(source.len(), size_of::<Base<'_>>())?)?;
+    let mut bases = Vec::with_capacity(source.len());
+    for base in source {
+        if base.data.len() > limits.object_bytes {
+            return invalid("external base exceeds object byte limit");
+        }
+        operation.work(base.data.len())?;
+        let id = gix_object::compute_hash(hash, base.kind, base.data).map_err(pack_error)?;
+        if id.as_slice() != base.id.as_bytes() {
+            return invalid("external base ID does not match its data");
+        }
+        stats.record(base.data.len(), base.data.len(), false)?;
+        bases.push((id, base.kind, base.data));
+    }
+    bases.sort_unstable_by_key(|(id, _, _)| *id);
+    if bases.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return invalid("external base is duplicated");
+    }
+    Ok((bases, memory))
 }
-
 fn scan(
     operation: &budget::Operation,
     input: &[u8],
     hash: gix_hash::Kind,
     limits: Limits,
-) -> Result<Vec<gix_pack::data::input::Entry>, Error> {
+) -> Result<(Vec<InputEntry>, Stats, budget::Reservation), Error> {
     let pack = gix_pack::data::File::from_data(input, PathBuf::new(), hash)
         .map_err(pack_error)?
         .with_alloc_limit_bytes(Some(limits.object_bytes));
@@ -145,6 +194,7 @@ fn scan(
     if count > limits.objects {
         return invalid("object count exceeds limit");
     }
+    operation.work(input.len())?;
     pack.verify_checksum(
         &mut gix_features::progress::Discard,
         &AtomicBool::new(false),
@@ -152,22 +202,27 @@ fn scan(
     .map_err(pack_error)?;
 
     let mut offset = 12_u64;
-    let mut offsets = BTreeSet::new();
+    let mut memory = operation.reserve(product(count as usize, size_of::<InputEntry>())?)?;
+    let _offset_memory = operation.reserve(product(count as usize, size_of::<u64>())?)?;
+    let mut offsets = Vec::with_capacity(count as usize);
+    let mut inflated_memory = None;
     let mut inflated = Vec::new();
-    let mut _inflated_memory = None;
+    let _inflate_memory = operation.reserve(INFLATE_BYTES)?;
     let mut inflate = gix_zlib::Inflate::default();
     let mut entries = Vec::with_capacity(count as usize);
+    let mut stats = Stats::default();
     for position in 0..count {
         let entry = pack.entry(offset).map_err(pack_error)?;
         if entry.header_size() != entry.header.size(entry.decompressed_size) {
             return invalid("pack entry header is not canonical");
         }
-        offsets.insert(offset);
+        offsets.push(offset);
         if let gix_pack::data::entry::Header::OfsDelta { base_distance } = entry.header {
-            let base = entry
-                .checked_base_pack_offset(base_distance)
-                .ok_or_else(|| Error::InvalidPack("invalid OFS_DELTA base offset".into()))?;
-            if !offsets.contains(&base) {
+            let base = checked(
+                entry.checked_base_pack_offset(base_distance),
+                "invalid OFS_DELTA base offset",
+            )?;
+            if offsets.binary_search(&base).is_err() {
                 return invalid("OFS_DELTA base is not an earlier entry");
             }
         }
@@ -177,33 +232,32 @@ fn scan(
         if inflated_size > limits.object_bytes {
             return invalid("entry exceeds object byte limit");
         }
-        operation.work(inflated_size * (1 + usize::from(entry.header.is_delta())))?;
+        operation.work(inflated_size)?;
         if inflated_size > inflated.capacity() {
             let memory = operation.reserve(inflated_size)?;
-            let next = vec![0; inflated_size];
-            inflated = next;
-            _inflated_memory = Some(memory);
-        } else {
-            inflated.resize(inflated_size, 0);
+            inflated = vec![0; inflated_size];
+            drop(inflated_memory.replace(memory));
         }
+        inflated.resize(inflated_size, 0);
         let compressed = pack
             .decompress_entry(&entry, &mut inflate, &mut inflated)
             .map_err(pack_error)?;
         let result_size = if entry.header.is_delta() {
-            delta_result_size(&inflated)?
+            let (_, position) = delta_integer(&inflated)?;
+            delta_integer(&inflated[position..])?.0
         } else {
             inflated_size
         };
         if result_size > limits.object_bytes {
             return invalid("decoded object exceeds byte limit");
         }
-        operation.work(result_size)?;
-        let end = entry
-            .data_offset
-            .checked_add(u64::try_from(compressed).map_err(|_| {
-                Error::InvalidPack("compressed entry length does not fit in a pack".into())
-            })?)
-            .ok_or_else(|| Error::InvalidPack("pack entry offset overflowed".into()))?;
+        stats.record(inflated_size, result_size, entry.header.is_delta())?;
+        let compressed = u64::try_from(compressed)
+            .map_err(|_| Error::InvalidPack("compressed entry is too large".into()))?;
+        let end = checked(
+            entry.data_offset.checked_add(compressed),
+            "pack entry offset overflowed",
+        )?;
         let end_in_memory = usize::try_from(end)
             .map_err(|_| Error::InvalidPack("pack entry end does not fit in memory".into()))?;
         if end_in_memory > pack.pack_end() {
@@ -213,14 +267,14 @@ fn scan(
             .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
         let pack_offset = usize::try_from(offset)
             .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
-        entries.push(gix_pack::data::input::Entry {
+        memory.grow(end_in_memory - start)?;
+        entries.push(InputEntry {
             header: entry.header,
             header_size: u16::try_from(entry.header_size())
                 .map_err(|_| Error::InvalidPack("pack entry header is too large".into()))?,
             pack_offset: offset,
             compressed: Some(input[start..end_in_memory].to_vec()),
-            compressed_size: u64::try_from(compressed)
-                .map_err(|_| Error::InvalidPack("compressed entry is too large".into()))?,
+            compressed_size: compressed,
             crc32: Some(pack.entry_crc32(offset, end_in_memory - pack_offset)),
             decompressed_size: entry.decompressed_size,
             trailer: (position + 1 == count).then(|| pack.checksum()),
@@ -230,13 +284,7 @@ fn scan(
     if usize::try_from(offset).ok() != Some(pack.pack_end()) {
         return invalid("pack object count does not match its entries");
     }
-    Ok(entries)
-}
-
-fn delta_result_size(delta: &[u8]) -> Result<usize, Error> {
-    let (_, consumed) = delta_integer(delta)?;
-    let (size, _) = delta_integer(&delta[consumed..])?;
-    Ok(size)
+    Ok((entries, stats, memory))
 }
 
 pub(super) fn delta_integer(bytes: &[u8]) -> Result<(usize, usize), Error> {
@@ -251,51 +299,66 @@ pub(super) fn delta_integer(bytes: &[u8]) -> Result<(usize, usize), Error> {
         if byte & 0x80 == 0 {
             return Ok((size, index + 1));
         }
-        shift = shift
-            .checked_add(7)
-            .filter(|shift| *shift < usize::BITS)
-            .ok_or_else(|| Error::InvalidPack("delta size overflowed".into()))?;
+        shift = checked(
+            shift.checked_add(7).filter(|shift| *shift < usize::BITS),
+            "delta size overflowed",
+        )?;
     }
     invalid("delta size is truncated")
 }
 
 fn resolve_external(
-    entries: Vec<gix_pack::data::input::Entry>,
-    bases: &ExternalBases<'_>,
+    operation: &budget::Operation,
+    entries: Vec<InputEntry>,
+    bases: Vec<Base<'_>>,
     limits: Limits,
     trailer_bytes: usize,
-) -> Result<(Vec<gix_pack::data::input::Entry>, usize), Error> {
-    if 12_usize
-        .checked_add(trailer_bytes)
-        .is_none_or(|bytes| bytes > limits.output_bytes)
-    {
-        return invalid("normalized pack exceeds byte limit");
+    stats: &mut Stats,
+) -> Result<Resolved, Error> {
+    let input_count = entries.len();
+    let count = total([input_count, bases.len()])?;
+    if count > limits.objects as usize {
+        return invalid("object count exceeds limit after thin-pack resolution");
     }
-    let mut output = Vec::with_capacity(entries.len());
-    let mut translated = BTreeMap::new();
-    let mut inserted = BTreeMap::new();
+    let retained = product(count, size_of::<InputEntry>())?;
+    let temporary = total([
+        product(input_count, size_of::<(u64, u64)>())?,
+        product(bases.len(), size_of::<Option<u64>>())?,
+    ])?;
+    let metadata = total([retained, temporary])?;
+    let mut memory = operation.reserve(metadata)?;
+    let mut compression_memory = operation.reserve(0)?;
+    let mut output = Vec::with_capacity(count);
+    let mut translated = Vec::with_capacity(input_count);
+    let mut inserted = vec![None; bases.len()];
     let mut next_offset = 12_u64;
     for mut entry in entries {
         let original_offset = entry.pack_offset;
         match entry.header {
             gix_pack::data::entry::Header::OfsDelta { base_distance } => {
-                let original_base = original_offset
-                    .checked_sub(base_distance)
-                    .ok_or_else(|| Error::InvalidPack("invalid OFS_DELTA base offset".into()))?;
+                let original_base = checked(
+                    original_offset.checked_sub(base_distance),
+                    "invalid OFS_DELTA base offset",
+                )?;
                 let new_base = translated
-                    .get(&original_base)
-                    .copied()
+                    .binary_search_by_key(&original_base, |(old, _)| *old)
+                    .ok()
+                    .map(|index| translated[index].1)
                     .ok_or_else(|| Error::InvalidPack("OFS_DELTA base is missing".into()))?;
                 entry.header = gix_pack::data::entry::Header::OfsDelta {
                     base_distance: next_offset - new_base,
                 };
             }
             gix_pack::data::entry::Header::RefDelta { base_id } => {
-                if let Some(&(kind, data)) = bases.values.get(&base_id) {
-                    let base_offset = if let Some(offset) = inserted.get(&base_id).copied() {
+                if let Ok(base_index) = bases.binary_search_by_key(&base_id, |(id, _, _)| *id) {
+                    let (_, kind, data) = bases[base_index];
+                    let base_offset = if let Some(offset) = inserted[base_index] {
                         offset
                     } else {
-                        let base = gix_pack::data::input::Entry::from_data_obj(
+                        operation.work(data.len())?;
+                        let reserved = compression_memory_bound(data.len())?;
+                        compression_memory.grow(reserved)?;
+                        let base = InputEntry::from_data_obj(
                             &gix_object::Data {
                                 kind,
                                 object_hash: base_id.kind(),
@@ -305,10 +368,15 @@ fn resolve_external(
                             gix_zlib::Compression::default(),
                         )
                         .map_err(pack_error)?;
+                        let retained = base.compressed.as_ref().map_or(0, Vec::capacity);
+                        compression_memory.shrink(checked(
+                            reserved.checked_sub(retained),
+                            "compressed base exceeded memory bound",
+                        )?)?;
                         let offset = next_offset;
                         next_offset =
                             push_entry(&mut output, base, next_offset, limits, trailer_bytes)?;
-                        inserted.insert(base_id, offset);
+                        inserted[base_index] = Some(offset);
                         offset
                     };
                     entry.header = gix_pack::data::entry::Header::OfsDelta {
@@ -318,40 +386,62 @@ fn resolve_external(
             }
             _ => {}
         }
-        translated.insert(original_offset, next_offset);
+        translated.push((original_offset, next_offset));
         entry.pack_offset = next_offset;
         entry.header_size = u16::try_from(entry.header.size(entry.decompressed_size))
             .map_err(|_| Error::InvalidPack("pack entry header is too large".into()))?;
         entry.crc32 = Some(entry.compute_crc32());
+        stats.has_ref |= matches!(entry.header, gix_pack::data::entry::Header::RefDelta { .. });
         next_offset = push_entry(&mut output, entry, next_offset, limits, trailer_bytes)?;
     }
-    if inserted.len() != bases.values.len() {
+    if inserted.iter().any(Option::is_none) {
         return invalid("external base set is not exact");
     }
-    let output_bytes = usize::try_from(next_offset)
-        .ok()
-        .and_then(|bytes| bytes.checked_add(trailer_bytes))
-        .ok_or_else(|| Error::InvalidPack("normalized pack size overflowed".into()))?;
-    Ok((output, output_bytes))
+    let output_bytes = checked(
+        usize::try_from(next_offset)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(trailer_bytes)),
+        "normalized pack size overflowed",
+    )?;
+    if output_bytes > limits.output_bytes {
+        return invalid("normalized pack exceeds byte limit");
+    }
+    drop((translated, inserted, bases));
+    memory.shrink(temporary)?;
+    Ok((output, output_bytes, memory, compression_memory))
+}
+
+fn compression_memory_bound(bytes: usize) -> Result<usize, Error> {
+    let quick = total([bytes, 7])? / 8;
+    let bound = total([
+        bytes,
+        quick,
+        9,
+        usize::from(bytes == 0),
+        usize::from(bytes < 9),
+    ])?;
+    let capacity = checked(
+        bound.checked_next_power_of_two(),
+        "compression size overflowed",
+    )?
+    .max(8);
+    total([product(capacity, 2)?, COMPRESS_BYTES])
 }
 
 fn push_entry(
-    output: &mut Vec<gix_pack::data::input::Entry>,
-    entry: gix_pack::data::input::Entry,
+    output: &mut Vec<InputEntry>,
+    entry: InputEntry,
     offset: u64,
     limits: Limits,
     trailer_bytes: usize,
 ) -> Result<u64, Error> {
-    if output.len() >= limits.objects as usize {
-        return invalid("object count exceeds limit after thin-pack resolution");
-    }
-    let next = offset
-        .checked_add(entry.bytes_in_pack())
-        .ok_or_else(|| Error::InvalidPack("normalized pack offset overflowed".into()))?;
+    let next = checked(
+        offset.checked_add(entry.bytes_in_pack()),
+        "normalized pack offset overflowed",
+    )?;
     if usize::try_from(next)
         .ok()
-        .and_then(|bytes| bytes.checked_add(trailer_bytes))
-        .is_none_or(|bytes| bytes > limits.output_bytes)
+        .is_none_or(|bytes| bytes > limits.output_bytes.saturating_sub(trailer_bytes))
     {
         return invalid("normalized pack exceeds byte limit");
     }
@@ -364,25 +454,20 @@ fn index(
     pack: &[u8],
     format: ObjectFormat,
     hash: gix_hash::Kind,
-    entries: Vec<gix_pack::data::input::Entry>,
+    entries: Vec<InputEntry>,
     limits: Limits,
+    stats: &Stats,
 ) -> Result<(ObjectId, Vec<u8>, budget::Reservation), Error> {
     let object_count = entries.len();
     let graph_item_bytes = size_of::<(u64, gix_pack::data::entry::Header)>()
         + size_of::<Option<usize>>()
         + size_of::<Option<u16>>()
-        + size_of::<bool>()
         + size_of::<usize>();
-    let graph_bytes = object_count
-        .checked_mul(graph_item_bytes)
-        .ok_or_else(|| Error::InvalidPack("pack graph size overflowed".into()))?;
-    let _graph_memory = operation.reserve(graph_bytes)?;
-    let mut relationships = Vec::with_capacity(object_count);
-    relationships.extend(
-        entries
-            .iter()
-            .map(|entry| (entry.pack_offset, entry.header)),
-    );
+    let _graph_memory = operation.reserve(product(object_count, graph_item_bytes)?)?;
+    let relationships = entries
+        .iter()
+        .map(|entry| (entry.pack_offset, entry.header))
+        .collect::<Vec<_>>();
     let index_bytes = 8_usize
         .checked_add(256 * 4)
         .and_then(|bytes| bytes.checked_add((hash.len_in_bytes() + 8).checked_mul(object_count)?))
@@ -391,6 +476,25 @@ fn index(
     if index_bytes > limits.index_bytes {
         return invalid("pack index exceeds byte limit");
     }
+    operation.work(total([
+        stats.normalized,
+        stats.deltas,
+        stats.resolved,
+        usize::from(stats.has_ref) * stats.resolved,
+        checked(
+            index_bytes.checked_sub(hash.len_in_bytes()),
+            "pack index size underflowed",
+        )?,
+    ])?)?;
+    let _gix_memory = operation.reserve(total([
+        product(2, stats.resolved)?,
+        stats.largest,
+        product(3, stats.instructions)?,
+        4_096,
+        product(1_536, object_count)?,
+        INFLATE_BYTES,
+        32 * 1024,
+    ])?)?;
     let index_memory = operation.reserve(index_bytes)?;
     let mut progress = gix_features::progress::Discard;
     let mut index = Vec::with_capacity(index_bytes);
@@ -458,46 +562,37 @@ fn validate_delta_depth(
 
 fn validate_parent_depth(parents: &[Option<usize>]) -> Result<(), Error> {
     let mut depths = vec![None::<u16>; parents.len()];
-    let mut visiting = vec![false; parents.len()];
     let mut path = Vec::with_capacity(parents.len());
     for start in 0..parents.len() {
         path.clear();
         let mut current = start;
-        let known_depth = loop {
+        let mut depth = loop {
             if let Some(depth) = depths[current] {
+                if depth == u16::MAX {
+                    return invalid("delta graph contains a cycle");
+                }
                 break depth;
             }
-            if visiting[current] {
-                return invalid("delta graph contains a cycle");
-            }
-            visiting[current] = true;
+            depths[current] = Some(u16::MAX);
             path.push(current);
             match parents[current] {
                 Some(parent) => current = parent,
                 None => break 0_u16,
             }
         };
-        let mut depth = known_depth;
         while let Some(node) = path.pop() {
-            depth = if parents[node].is_some() {
-                depth + 1
-            } else {
-                0
-            };
+            depth = parents[node].map_or(0, |_| depth + 1);
             if usize::from(depth) > MAX_DELTA_DEPTH {
                 return invalid("delta depth exceeds limit");
             }
             depths[node] = Some(depth);
-            visiting[node] = false;
         }
     }
     Ok(())
 }
 
 fn entry_bytes<'a>(range: gix_pack::data::EntryRange, pack: &'a &[u8]) -> Option<&'a [u8]> {
-    let start = usize::try_from(range.start).ok()?;
-    let end = usize::try_from(range.end).ok()?;
-    pack.get(start..end)
+    pack.get(usize::try_from(range.start).ok()?..usize::try_from(range.end).ok()?)
 }
 
 pub(crate) const fn object_hash(format: ObjectFormat) -> gix_hash::Kind {
@@ -698,6 +793,68 @@ mod tests {
                 .is_err()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn thin_pack_work_has_an_exact_operation_boundary() -> Result<(), Box<dyn std::error::Error>> {
+        let format = ObjectFormat::Sha1;
+        let fixture = Fixture::new(format)?;
+        let (thin, base_id) = thin_ref_deltas(&fixture.pack(false)?, format)?;
+        let (id, data) = fixture
+            .blobs
+            .iter()
+            .find(|(id, _)| id.as_bytes() == base_id.as_slice())
+            .ok_or("generated REF_DELTA did not name a fixture blob")?;
+        let base = ExternalBase {
+            id: *id,
+            kind: gix_object::Kind::Blob,
+            data,
+        };
+        let inflated = entries(&thin, format)?
+            .into_iter()
+            .map(|(entry, _)| usize::try_from(entry.decompressed_size))
+            .sum::<Result<usize, _>>()?;
+        let resolved = fixture
+            .blobs
+            .iter()
+            .map(|(_, data)| data.len())
+            .sum::<usize>();
+        let deltas = resolved - data.len();
+        let hash_bytes = object_hash(format).len_in_bytes();
+        let index_bytes = 8 + 256 * 4 + fixture.blobs.len() * (hash_bytes + 8) + 2 * hash_bytes;
+
+        let probe = operation();
+        let normalized = super::normalize(&probe, format, &thin, std::slice::from_ref(&base))?;
+        let expected = thin.len()
+            + inflated
+            + 2 * data.len()
+            + (2 * normalized.bytes.len() - hash_bytes)
+            + inflated
+            + data.len()
+            + deltas
+            + resolved
+            + index_bytes
+            - hash_bytes;
+        assert_eq!(probe.work_bytes(), expected);
+        drop(normalized);
+
+        let exact = operation();
+        exact.work(budget::WORK_BYTES - expected)?;
+        drop(super::normalize(
+            &exact,
+            format,
+            &thin,
+            std::slice::from_ref(&base),
+        )?);
+        assert_eq!(exact.work_bytes(), budget::WORK_BYTES);
+
+        let over = operation();
+        over.work(budget::WORK_BYTES - expected + 1)?;
+        assert!(matches!(
+            super::normalize(&over, format, &thin, std::slice::from_ref(&base)),
+            Err(Error::InvalidPack(message)) if message == "Git work limit exceeded"
+        ));
         Ok(())
     }
 

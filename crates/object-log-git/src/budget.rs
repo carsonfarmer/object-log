@@ -13,6 +13,7 @@ pub(crate) const TRANSFER_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const WORK_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const THIN_ROUNDS: usize = 32;
 pub(crate) const RETRIES: usize = 1;
+const MEMORY_LIMIT: &str = "Git live-memory limit exceeded";
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
@@ -117,12 +118,7 @@ impl Operation {
     }
 
     pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation, Error> {
-        charge(
-            &self.0.pool.live,
-            bytes,
-            self.0.pool.limit,
-            "Git live-memory limit exceeded",
-        )?;
+        charge(&self.0.pool.live, bytes, self.0.pool.limit, MEMORY_LIMIT)?;
         Ok(Reservation {
             operation: self.0.clone(),
             bytes,
@@ -170,6 +166,28 @@ impl Drop for Reservation {
             .pool
             .live
             .fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+impl Reservation {
+    pub(crate) fn grow(&mut self, bytes: usize) -> Result<(), Error> {
+        let next = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| Error::InvalidPack("Git live-memory size overflowed".into()))?;
+        let pool = &self.operation.pool;
+        charge(&pool.live, bytes, pool.limit, MEMORY_LIMIT)?;
+        self.bytes = next;
+        Ok(())
+    }
+
+    pub(crate) fn shrink(&mut self, bytes: usize) -> Result<(), Error> {
+        self.bytes = self
+            .bytes
+            .checked_sub(bytes)
+            .ok_or_else(|| Error::InvalidPack("Git live-memory size underflowed".into()))?;
+        self.operation.pool.live.fetch_sub(bytes, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -233,6 +251,20 @@ mod tests {
         assert!(operation.thin_round().is_err());
         operation.retry()?;
         assert!(operation.retry().is_err());
+        let transfer = Pool::new(0).admit()?;
+        assert!(transfer.io(TRANSFER_BYTES + 1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn reservation_growth_and_shrink_have_exact_bounds() -> Result<(), Error> {
+        let operation = Pool::new(4).admit()?;
+        let mut memory = operation.reserve(1)?;
+        memory.grow(3)?;
+        assert!(memory.grow(1).is_err());
+        memory.shrink(3)?;
+        assert!(memory.shrink(2).is_err());
+        assert_eq!(operation.live_bytes(), 1);
         Ok(())
     }
 
