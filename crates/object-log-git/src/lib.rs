@@ -19,17 +19,14 @@ mod git;
     reason = "the next Git storage tranche consumes this internal module"
 )]
 mod pack;
-#[cfg(feature = "native-oracle")]
 mod repository;
-#[cfg(feature = "native-oracle")]
 mod state;
-#[cfg(feature = "native-oracle")]
-mod storage;
 #[allow(dead_code, reason = "the next Git engine tranche consumes this module")]
 mod wire;
 
 #[cfg(feature = "native-oracle")]
-pub use repository::{PreparedPush, Repository};
+pub use repository::PreparedPush;
+pub use repository::Repository;
 
 use std::{collections::BTreeMap, fmt};
 
@@ -253,17 +250,6 @@ impl From<git::Error> for Error {
             git::Error::InvalidObjectGraph(message) => Self::InvalidObjectGraph(message),
             git::Error::Repository(message) => Self::Git(message),
             git::Error::Io { path, source } => Self::Git(format!("{}: {source}", path.display())),
-        }
-    }
-}
-
-#[cfg(feature = "native-oracle")]
-impl From<storage::Error> for Error {
-    fn from(error: storage::Error) -> Self {
-        match error {
-            storage::Error::ObjectLog(error) => Self::ObjectLog(error),
-            storage::Error::InvalidPack(message) => Self::InvalidPack(message.to_owned()),
-            storage::Error::Io(error) => Self::PackStorage(error.to_string()),
         }
     }
 }

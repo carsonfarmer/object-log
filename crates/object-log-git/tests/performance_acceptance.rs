@@ -53,7 +53,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     let pack_bytes = source.pack_bytes;
 
     let active = directory.path().join("active");
-    let repository = Repository::open(&log, &active, ObjectFormat::Sha1).await?;
+    let repository = Repository::open_native(&log, &active, ObjectFormat::Sha1).await?;
     faults.reset();
     publish(
         repository,
@@ -78,7 +78,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     let durable_after_publication = stored_bytes(&inner, &root).await?;
 
     let checkpoint_cache = directory.path().join("checkpoint");
-    let repository = Repository::open(&log, &checkpoint_cache, ObjectFormat::Sha1).await?;
+    let repository = Repository::open_native(&log, &checkpoint_cache, ObjectFormat::Sha1).await?;
     faults.reset();
     let CheckpointStatus::Published(checkpoint_view) = repository.checkpoint().await? else {
         return Err("Git checkpoint did not publish".into());
@@ -94,7 +94,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
 
     let recovered_cache = directory.path().join("recovered");
     faults.reset();
-    let recovered = Repository::open(&log, &recovered_cache, ObjectFormat::Sha1).await?;
+    let recovered = Repository::open_native(&log, &recovered_cache, ObjectFormat::Sha1).await?;
     assert_eq!(
         recovered.refs().get(&b"refs/heads/main"[..]),
         Some(&source.target)

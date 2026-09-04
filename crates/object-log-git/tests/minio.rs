@@ -39,7 +39,8 @@ async fn minio_git_push_checkpoint_collection_and_cold_recovery() -> TestResult 
     let dead = fixture("dead", MIB, u64::try_from(MIB)?)?;
     assert!(dead.pack_bytes > live.pack_bytes);
 
-    let first = Repository::open(&log, directory.path().join("first"), ObjectFormat::Sha1).await?;
+    let first =
+        Repository::open_native(&log, directory.path().join("first"), ObjectFormat::Sha1).await?;
     publish(
         first,
         "refs/heads/main",
@@ -49,7 +50,7 @@ async fn minio_git_push_checkpoint_collection_and_cold_recovery() -> TestResult 
     )
     .await?;
     let second =
-        Repository::open(&log, directory.path().join("second"), ObjectFormat::Sha1).await?;
+        Repository::open_native(&log, directory.path().join("second"), ObjectFormat::Sha1).await?;
     publish(
         second,
         "refs/heads/dead",
@@ -58,10 +59,11 @@ async fn minio_git_push_checkpoint_collection_and_cold_recovery() -> TestResult 
         Some(&dead.pack),
     )
     .await?;
-    let third = Repository::open(&log, directory.path().join("third"), ObjectFormat::Sha1).await?;
+    let third =
+        Repository::open_native(&log, directory.path().join("third"), ObjectFormat::Sha1).await?;
     publish(third, "refs/heads/dead", Some(dead.target), None, None).await?;
 
-    let checkpoint = Repository::open(
+    let checkpoint = Repository::open_native(
         &log,
         directory.path().join("checkpoint"),
         ObjectFormat::Sha1,
@@ -84,7 +86,7 @@ async fn minio_git_push_checkpoint_collection_and_cold_recovery() -> TestResult 
     drop(log);
     let log = Log::open(&backend, &log_id, options).await?;
     let recovered_path = directory.path().join("recovered");
-    let recovered = Repository::open(&log, &recovered_path, ObjectFormat::Sha1).await?;
+    let recovered = Repository::open_native(&log, &recovered_path, ObjectFormat::Sha1).await?;
     assert_eq!(recovered.refs().len(), 1);
     assert_eq!(
         recovered.refs().get(&b"refs/heads/main"[..]),

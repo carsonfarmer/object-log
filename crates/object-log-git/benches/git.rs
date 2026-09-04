@@ -85,7 +85,7 @@ fn recovery_benchmarks(criterion: &mut Criterion) {
             bencher.iter_batched(
                 || require(tempfile::tempdir()),
                 |directory| {
-                    let repository = require(runtime.block_on(Repository::open(
+                    let repository = require(runtime.block_on(Repository::open_native(
                         log,
                         directory.path().join("cache"),
                         ObjectFormat::Sha1,
@@ -120,8 +120,9 @@ async fn fresh_repository(options: Options) -> RepositoryState {
     let id = require(LogId::new("repository"));
     let log = require(Log::open(&backend, &id, options).await);
     let directory = require(tempfile::tempdir());
-    let repository =
-        require(Repository::open(&log, directory.path().join("cache"), ObjectFormat::Sha1).await);
+    let repository = require(
+        Repository::open_native(&log, directory.path().join("cache"), ObjectFormat::Sha1).await,
+    );
     (log, directory, repository)
 }
 
@@ -138,7 +139,7 @@ async fn published_repository(options: Options, fixture: &Fixture) -> Repository
         .await,
     );
     let repository = require(
-        Repository::open(
+        Repository::open_native(
             &log,
             directory.path().join("checkpoint-cache"),
             ObjectFormat::Sha1,

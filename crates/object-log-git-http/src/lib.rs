@@ -128,7 +128,8 @@ impl SmartHttp {
     ) -> Result<(), Error> {
         let scratch = self.open_scratch().await?;
         let repo =
-            Repository::open(&self.log, scratch.path().join("repo"), ObjectFormat::Sha1).await?;
+            Repository::open_native(&self.log, scratch.path().join("repo"), ObjectFormat::Sha1)
+                .await?;
         write_packet(output, format!("# service={}\n", service.name()).as_bytes()).await?;
         write_flush(output).await?;
         write_advertisement(output, service, &repo).await?;
@@ -154,7 +155,8 @@ impl SmartHttp {
         }
         let scratch = self.open_scratch().await?;
         let repo =
-            Repository::open(&self.log, scratch.path().join("repo"), ObjectFormat::Sha1).await?;
+            Repository::open_native(&self.log, scratch.path().join("repo"), ObjectFormat::Sha1)
+                .await?;
         let pack = scratch.path().join("fetch.pack");
         repo.write_fetch_pack(&request.wants, &pack).await?;
         let mut pack = tokio::fs::File::open(pack).await?;
@@ -180,7 +182,8 @@ impl SmartHttp {
         let pack = scratch.path().join("receive.pack");
         let pack_bytes = spool_pack(input, &pack).await?;
         let repo =
-            Repository::open(&self.log, scratch.path().join("repo"), ObjectFormat::Sha1).await?;
+            Repository::open_native(&self.log, scratch.path().join("repo"), ObjectFormat::Sha1)
+                .await?;
         let prepared = match repo
             .prepare_push(
                 TransactionId::new(),

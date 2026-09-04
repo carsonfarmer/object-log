@@ -62,7 +62,7 @@ async fn cold_open_retries_from_an_empty_cache_after_its_view_expires() -> TestR
     store.reset();
     let mut pause = store.pause_get_at(12, FailurePhase::Before);
     let cache = directory.path().join("cold");
-    let mut opening = Box::pin(Repository::open(&log, &cache, ObjectFormat::Sha1));
+    let mut opening = Box::pin(Repository::open_native(&log, &cache, ObjectFormat::Sha1));
     let entered = tokio::select! {
         entered = pause.wait_until_entered() => entered,
         _ = &mut opening => return Err("cold open finished before the target GET".into()),
@@ -162,7 +162,8 @@ async fn cold_open_does_not_retry_current_epoch_corruption() -> TestResult {
     raw.delete(&blob.location).await?;
     store.reset();
 
-    let result = Repository::open(&log, directory.path().join("corrupt"), ObjectFormat::Sha1).await;
+    let result =
+        Repository::open_native(&log, directory.path().join("corrupt"), ObjectFormat::Sha1).await;
     assert!(matches!(
         result,
         Err(GitError::ObjectLog(LogError::CorruptObject))
@@ -286,7 +287,7 @@ async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestRes
 
 async fn assert_recovery(log: &Log, root: &Path, live: &Fixture) -> TestResult {
     let path = root.join("recovered");
-    let recovered = Repository::open(log, &path, ObjectFormat::Sha1).await?;
+    let recovered = Repository::open_native(log, &path, ObjectFormat::Sha1).await?;
     assert_eq!(
         recovered.refs().get(&b"refs/heads/main"[..]),
         Some(&live.target)
@@ -299,7 +300,7 @@ async fn assert_recovery(log: &Log, root: &Path, live: &Fixture) -> TestResult {
 }
 
 async fn repository(log: &Log, root: &Path, name: &str) -> TestResult<Repository> {
-    Ok(Repository::open(log, root.join(name), ObjectFormat::Sha1).await?)
+    Ok(Repository::open_native(log, root.join(name), ObjectFormat::Sha1).await?)
 }
 
 async fn collect(log: &Log, view: &View) -> TestResult<(View, usize)> {

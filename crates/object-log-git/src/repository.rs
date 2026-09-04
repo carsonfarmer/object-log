@@ -1,47 +1,67 @@
+use std::{fmt, mem::size_of};
+
+use object_log::{Log, ObjectRef, StagedObject, View, materialize};
+
+use crate::{
+    Error, ObjectFormat, RefSnapshot,
+    durable::{self, Catalog},
+    format::PackDescriptor,
+    pack::budget::{Operation, Pool, Reservation},
+    state::{Machine, State},
+};
+
+#[cfg(feature = "native-oracle")]
+use bytes::Bytes;
+#[cfg(feature = "native-oracle")]
+use object_log::{CheckpointStatus, CommitStatus, PreparedCommit, TransactionId};
+#[cfg(feature = "native-oracle")]
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
-
-use bytes::Bytes;
-use object_log::{
-    CheckpointStatus, CommitStatus, Log, PreparedCommit, StagedObject, TransactionId, View,
-    materialize,
-};
-use tokio::{fs::File, task};
-
-use crate::{
-    Error, ObjectFormat, ObjectId, RefSnapshot, RefUpdate,
-    format::{PackDescriptor, Record},
-    git,
-    state::Machine,
-    storage,
+#[cfg(feature = "native-oracle")]
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt},
+    task,
 };
 
-/// One disposable local Git cache backed by an object log.
-#[derive(Debug)]
+#[cfg(feature = "native-oracle")]
+use crate::{ObjectId, RefUpdate, format::Record, git};
+
+/// One exact Git repository view backed by an object log.
+#[cfg_attr(
+    not(feature = "native-oracle"),
+    allow(
+        dead_code,
+        reason = "later common Git operations consume retained state"
+    )
+)]
 pub struct Repository {
     log: Log,
-    path: PathBuf,
     format: ObjectFormat,
     view: View,
-    refs: RefSnapshot,
-    packs: BTreeMap<ObjectId, Pack>,
+    state: State,
+    catalog: Catalog,
+    operation: Operation,
+    _state_memory: Reservation,
+    #[cfg(feature = "native-oracle")]
+    native: Option<Native>,
+}
+
+#[cfg(feature = "native-oracle")]
+struct Native {
+    path: PathBuf,
     objects: git::ObjectSet,
     reachable: git::ObjectKinds,
+    live_packs: BTreeSet<ObjectId>,
 }
 
+#[cfg(feature = "native-oracle")]
 #[derive(Debug)]
-struct Pack {
-    bytes: u64,
-    root: StagedObject,
-    live: bool,
-}
-
-/// One validated Git update ready for conditional publication.
+/// One native-oracle update ready for conditional publication.
 #[must_use = "publish the update or retain its recovery token"]
-#[derive(Debug)]
 pub struct PreparedPush {
     log: Log,
     prepared: PreparedCommit,
@@ -49,17 +69,76 @@ pub struct PreparedPush {
 }
 
 impl Repository {
-    /// Rebuilds one disposable bare Git repository from durable state.
+    /// Loads one exact durable view and authenticates its Git pack indexes.
     ///
-    /// `work_dir` must not exist or must be an empty directory. If collection
-    /// expires the first durable view during recovery, the adapter removes its
-    /// partial cache and retries once from a new view.
+    /// # Errors
+    ///
+    /// Returns an error for invalid durable state, a resource limit, or object
+    /// storage failure. It retries once when collection expires the first view.
+    pub async fn open(log: &Log, format: ObjectFormat) -> Result<Self, Error> {
+        Self::open_with_pool(log, format, Pool::shared()).await
+    }
+
+    async fn open_with_pool(log: &Log, format: ObjectFormat, pool: &Pool) -> Result<Self, Error> {
+        let operation = pool.admit()?;
+        match Self::open_attempt(log, format, &operation).await {
+            Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
+                operation.retry()?;
+                Self::open_attempt(log, format, &operation).await
+            }
+            result => result,
+        }
+    }
+
+    async fn open_attempt(
+        log: &Log,
+        format: ObjectFormat,
+        operation: &Operation,
+    ) -> Result<Self, Error> {
+        operation.io(0)?;
+        let view = log.load().await?;
+        preflight_view(operation, &view)?;
+        let materialized = materialize(log, view, &Machine::new(format))
+            .await
+            .map_err(|error| match error {
+                object_log::MaterializeError::Log(error) => Error::ObjectLog(error),
+                object_log::MaterializeError::State(error) => error,
+            })?;
+        let (view, state) = materialized.into_parts();
+        let state_memory = operation.reserve(state_bytes(&state)?)?;
+        let roots = pack_roots(&state);
+        let catalog = durable::load(operation, log, &view, format, &roots).await?;
+
+        Ok(Self {
+            log: log.clone(),
+            format,
+            view,
+            state,
+            catalog,
+            operation: operation.clone(),
+            _state_memory: state_memory,
+            #[cfg(feature = "native-oracle")]
+            native: None,
+        })
+    }
+
+    /// Returns the refs from the exact durable view.
+    #[must_use]
+    pub const fn refs(&self) -> &RefSnapshot {
+        &self.state.refs
+    }
+
+    /// Rebuilds the temporary native oracle from one exact durable view.
+    ///
+    /// `work_dir` must not exist or must be empty. The method removes its
+    /// partial cache and retries once if collection expires its first view.
     ///
     /// # Errors
     ///
     /// Returns an error for an unusable work directory, invalid durable state,
-    /// pack recovery failure, or local Git failure.
-    pub async fn open(
+    /// pack recovery failure, a resource limit, or local Git failure.
+    #[cfg(feature = "native-oracle")]
+    pub async fn open_native(
         log: &Log,
         work_dir: impl AsRef<Path>,
         format: ObjectFormat,
@@ -67,25 +146,27 @@ impl Repository {
         let path = work_dir.as_ref().to_owned();
         let init_path = path.clone();
         blocking(move || require_empty(&init_path)).await?;
-
-        match Self::open_attempt(log, &path, format).await {
+        let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+        let operation = pool.admit()?;
+        match Self::open_native_attempt(log, &path, format, &operation).await {
             Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
+                operation.retry()?;
                 let retry_path = path.clone();
                 blocking(move || clear_partial_cache(&retry_path)).await?;
-                Self::open_attempt(log, &path, format).await
+                Self::open_native_attempt(log, &path, format, &operation).await
             }
             result => result,
         }
     }
 
-    async fn open_attempt(log: &Log, path: &Path, format: ObjectFormat) -> Result<Self, Error> {
-        let materialized = materialize(log, log.load().await?, &Machine::new(format))
-            .await
-            .map_err(|error| match error {
-                object_log::MaterializeError::Log(error) => Error::ObjectLog(error),
-                object_log::MaterializeError::State(error) => error,
-            })?;
-        let (view, state) = materialized.into_parts();
+    #[cfg(feature = "native-oracle")]
+    async fn open_native_attempt(
+        log: &Log,
+        path: &Path,
+        format: ObjectFormat,
+        operation: &Operation,
+    ) -> Result<Self, Error> {
+        let mut repository = Self::open_attempt(log, format, operation).await?;
         let init_path = path.to_owned();
         blocking(move || {
             git::init(&init_path, format)?;
@@ -95,44 +176,34 @@ impl Repository {
 
         let mut objects = git::ObjectSet::new();
         let mut recovered = BTreeMap::new();
-        for (id, (bytes, root)) in state.packs {
-            let pack_objects = recover_pack(log, &view, path, id, bytes, root.reference()).await?;
+        for &id in repository.state.packs.keys() {
+            let pack_objects = recover_pack(&repository, path, id).await?;
             git::extend_objects(&mut objects, pack_objects.iter().copied())?;
-            recovered.insert(id, (bytes, root, pack_objects));
+            recovered.insert(id, pack_objects);
         }
         let materialize_path = path.to_owned();
-        let desired = state.refs;
-        let (refs, objects, reachable) = blocking(move || {
+        let desired = repository.state.refs.clone();
+        let (objects, reachable) = blocking(move || {
             let repo = git::open(&materialize_path, format)?;
             let reachable = git::validate_snapshot(&repo, &desired, &objects)?;
             git::materialize(&repo, &desired)?;
-            Ok((desired, objects, reachable))
+            Ok((objects, reachable))
         })
         .await?;
-        let packs = recovered
+        let live_packs = recovered
             .into_iter()
-            .map(|(id, (bytes, root, objects))| {
+            .filter_map(|(id, objects)| {
                 let live = objects.iter().any(|object| reachable.contains_key(object));
-                (id, Pack { bytes, root, live })
+                live.then_some(id)
             })
             .collect();
-
-        Ok(Self {
-            log: log.clone(),
+        repository.native = Some(Native {
             path: path.to_owned(),
-            format,
-            view,
-            refs,
-            packs,
             objects,
             reachable,
-        })
-    }
-
-    /// Returns the exact durable ref snapshot in this cache.
-    #[must_use]
-    pub const fn refs(&self) -> &RefSnapshot {
-        &self.refs
+            live_packs,
+        });
+        Ok(repository)
     }
 
     /// Returns annotated tag refs mapped to fully peeled targets.
@@ -140,10 +211,12 @@ impl Repository {
     /// # Errors
     ///
     /// Returns an error if a durable tag cannot resolve.
+    #[cfg(feature = "native-oracle")]
     pub fn peeled_tags(&self) -> Result<RefSnapshot, Error> {
-        let repo = git::open(&self.path, self.format)?;
+        let native = self.native()?;
+        let repo = git::open(&native.path, self.format)?;
         let mut peeled = RefSnapshot::new();
-        for (name, &target) in &self.refs {
+        for (name, &target) in &self.state.refs {
             if let Some(target) = git::peel_tag(&repo, target)? {
                 peeled.insert(name.clone(), target);
             }
@@ -157,6 +230,7 @@ impl Repository {
     /// # Errors
     ///
     /// Returns an error for invalid wants, objects, or output.
+    #[cfg(feature = "native-oracle")]
     pub async fn write_fetch_pack(
         &self,
         wants: &[ObjectId],
@@ -165,15 +239,16 @@ impl Repository {
         if self.format != ObjectFormat::Sha1 || wants.is_empty() {
             return Err(Error::InvalidReference);
         }
+        let native = self.native()?;
         for &want in wants {
             let want = gix::hash::ObjectId::try_from(want)?;
-            if !self.reachable.contains_key(&want) {
+            if !native.reachable.contains_key(&want) {
                 return Err(Error::InvalidReference);
             }
         }
-        let path = self.path.clone();
+        let path = native.path.clone();
         let output = output.as_ref().to_owned();
-        let objects = self.reachable.keys().copied().collect();
+        let objects = native.reachable.keys().copied().collect();
         blocking(move || {
             git::write_fetch_pack(&path, objects, &output)?;
             Ok(())
@@ -194,6 +269,7 @@ impl Repository {
     ///
     /// Returns an error for invalid refs, an invalid or unreachable object
     /// graph, a duplicate pack, local Git failure, or object-log failure.
+    #[cfg(feature = "native-oracle")]
     pub async fn prepare_push(
         self,
         transaction_id: TransactionId,
@@ -202,9 +278,10 @@ impl Repository {
     ) -> Result<PreparedPush, Error> {
         self.log.preflight(&self.view, transaction_id)?;
 
-        let path = self.path.clone();
+        let native = self.native.ok_or(Error::UnsupportedRepository)?;
+        let path = native.path;
         let input = pack.map(Path::to_owned);
-        let current = self.refs;
+        let current = self.state.refs;
         let format = self.format;
         let (normalized, updates) = blocking(move || {
             let normalized = git::prepare_push(
@@ -212,7 +289,7 @@ impl Repository {
                 format,
                 &current,
                 &updates,
-                self.objects,
+                native.objects,
                 input.as_deref(),
             )?;
             Ok((normalized, updates))
@@ -222,15 +299,31 @@ impl Repository {
         let mut objects = Vec::new();
         let packs = if let Some(pack) = normalized {
             let id = ObjectId::try_from(pack.id)?;
-            if self.packs.contains_key(&id) {
+            if self.state.packs.contains_key(&id) {
                 return Err(Error::InvalidRecord("pack is already present"));
             }
-            let staged = storage::stage_pack(&self.log, &self.view, &pack.path, id).await?;
-            objects.push(staged.root);
-            vec![PackDescriptor {
-                id,
-                bytes: staged.bytes,
-            }]
+            let _input_memory = self
+                .operation
+                .reserve(crate::pack::MAX_RECEIVE_PACK_BYTES)?;
+            let file = File::open(&pack.path)
+                .await
+                .map_err(|error| Error::PackStorage(error.to_string()))?;
+            let mut bytes = Vec::with_capacity(crate::pack::MAX_RECEIVE_PACK_BYTES);
+            file.take((crate::pack::MAX_RECEIVE_PACK_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| Error::PackStorage(error.to_string()))?;
+            if bytes.len() > crate::pack::MAX_RECEIVE_PACK_BYTES {
+                return Err(Error::InvalidPack("native pack exceeds byte limit".into()));
+            }
+            let normalized = crate::pack::normalize(&self.operation, self.format, &bytes, &[])?;
+            if normalized.id != id {
+                return Err(Error::InvalidPack("native pack ID changed".into()));
+            }
+            let (descriptor, root) =
+                durable::stage(&self.operation, &self.log, &self.view, normalized).await?;
+            objects.push(root);
+            vec![descriptor]
         } else {
             Vec::new()
         };
@@ -256,6 +349,7 @@ impl Repository {
     ///
     /// Returns an error for invalid durable objects, an invalid checkpoint, or
     /// an object-store failure.
+    #[cfg(feature = "native-oracle")]
     pub async fn checkpoint(self) -> Result<CheckpointStatus, Error> {
         let Some(through) = self.view.tail().last().cloned() else {
             return Ok(CheckpointStatus::Published(self.view));
@@ -263,24 +357,82 @@ impl Repository {
 
         let mut roots = Vec::new();
         let mut packs = Vec::new();
-        for (id, pack) in self.packs {
-            if pack.live {
-                roots.push(pack.root);
-                packs.push(PackDescriptor {
-                    id,
-                    bytes: pack.bytes,
-                });
+        let live_packs = self.native.ok_or(Error::UnsupportedRepository)?.live_packs;
+        for (id, (bytes, root)) in self.state.packs {
+            if live_packs.contains(&id) {
+                roots.push(root);
+                packs.push(PackDescriptor { id, bytes });
             }
         }
 
-        let snapshot = Record::snapshot(self.format, self.refs, packs)?.encode()?;
+        let snapshot = Record::snapshot(self.format, self.state.refs, packs)?.encode()?;
         Ok(self
             .log
             .publish_checkpoint(&self.view, &through, snapshot, roots)
             .await?)
     }
+
+    #[cfg(feature = "native-oracle")]
+    fn native(&self) -> Result<&Native, Error> {
+        self.native.as_ref().ok_or(Error::UnsupportedRepository)
+    }
 }
 
+impl fmt::Debug for Repository {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Repository")
+            .field("format", &self.format)
+            .field("view", &self.view)
+            .field("refs", &self.state.refs)
+            .field("packs", &self.state.packs.len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn preflight_view(operation: &Operation, view: &View) -> Result<(), Error> {
+    let records = view
+        .checkpoint()
+        .into_iter()
+        .map(|checkpoint| checkpoint.object().len())
+        .chain(view.tail().iter().map(object_log::CommitRef::len));
+    for bytes in records {
+        let bytes = usize::try_from(bytes)
+            .map_err(|_| Error::InvalidPack("Git state exceeds memory".into()))?;
+        operation.io(bytes)?;
+        operation.work(bytes)?;
+    }
+    Ok(())
+}
+
+fn state_bytes(state: &State) -> Result<usize, Error> {
+    let refs = state.refs.iter().try_fold(0_usize, |total, (name, _)| {
+        total.checked_add(size_of::<(Vec<u8>, crate::ObjectId)>() + name.len())
+    });
+    refs.and_then(|bytes| {
+        bytes.checked_add(
+            state.packs.len()
+                * (size_of::<(crate::ObjectId, (u64, StagedObject))>()
+                    + size_of::<(PackDescriptor, ObjectRef)>()),
+        )
+    })
+    .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))
+}
+
+fn pack_roots(state: &State) -> Vec<(PackDescriptor, ObjectRef)> {
+    state
+        .packs
+        .iter()
+        .map(|(&id, (bytes, root))| {
+            (
+                PackDescriptor { id, bytes: *bytes },
+                root.reference().clone(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(feature = "native-oracle")]
 impl PreparedPush {
     /// Returns the token that identifies this exact publication attempt.
     #[must_use]
@@ -299,30 +451,30 @@ impl PreparedPush {
     }
 }
 
+#[cfg(feature = "native-oracle")]
 async fn recover_pack(
-    log: &Log,
-    view: &View,
+    repository: &Repository,
     work_dir: &Path,
     expected: ObjectId,
-    bytes: u64,
-    root: &object_log::ObjectRef,
 ) -> Result<Vec<gix::hash::ObjectId>, Error> {
     let path = work_dir.join("object-log-recovery.pack");
+    let bytes = repository
+        .catalog
+        .pack_bytes(&repository.log, &repository.view, expected)
+        .await?;
     let mut output = File::create(&path)
         .await
         .map_err(|error| Error::PackStorage(error.to_string()))?;
-    storage::write_pack(log, view, root, bytes, &mut output).await?;
+    output
+        .write_all(&bytes)
+        .await
+        .map_err(|error| Error::PackStorage(error.to_string()))?;
     drop(output);
     let install_path = work_dir.to_owned();
     let input = path.clone();
     let objects = blocking(move || {
         let repo = git::open(&install_path, expected.format())?;
         let installed = git::install_pack(&repo, &input)?;
-        if ObjectId::try_from(installed.id)? != expected {
-            return Err(Error::InvalidPack(
-                "installed pack ID does not match the durable record".into(),
-            ));
-        }
         Ok(installed.objects)
     })
     .await?;
@@ -332,6 +484,7 @@ async fn recover_pack(
     Ok(objects)
 }
 
+#[cfg(feature = "native-oracle")]
 async fn blocking<T>(
     operation: impl FnOnce() -> Result<T, Error> + Send + 'static,
 ) -> Result<T, Error>
@@ -343,6 +496,7 @@ where
         .map_err(|_| Error::BlockingTask)?
 }
 
+#[cfg(feature = "native-oracle")]
 fn require_empty(path: &Path) -> Result<(), Error> {
     if !path.exists() {
         return Ok(());
@@ -365,6 +519,7 @@ fn require_empty(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(feature = "native-oracle")]
 fn clear_partial_cache(path: &Path) -> Result<(), Error> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -444,6 +599,115 @@ mod tests {
         })
     }
 
+    async fn publish_durable_pack(
+        log: &Log,
+        fixture: &Fixture,
+        format: ObjectFormat,
+    ) -> TestResult<PackDescriptor> {
+        let view = log.load().await?;
+        let operation = Pool::new(crate::pack::budget::LIVE_BYTES).admit()?;
+        let normalized =
+            crate::pack::normalize(&operation, format, &fs::read(&fixture.pack)?, &[])?;
+        let (descriptor, root) = durable::stage(&operation, log, &view, normalized).await?;
+        let record = Machine::new(format).transaction(
+            vec![RefUpdate::new(
+                "refs/heads/main",
+                None,
+                Some(fixture.target),
+            )?],
+            vec![descriptor.clone()],
+        )?;
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            record,
+            Bytes::new(),
+            vec![root],
+        )?;
+        assert!(matches!(
+            log.commit(prepared).await?,
+            CommitStatus::Committed(_)
+        ));
+        Ok(descriptor)
+    }
+
+    #[tokio::test]
+    async fn common_repository_retains_one_authenticated_exact_view() -> TestResult {
+        let fixture = fixture(ObjectFormat::Sha1, b"common repository")?;
+        let (log, faults, _) = test_log("repository-common-view").await?;
+        publish_durable_pack(&log, &fixture, ObjectFormat::Sha1).await?;
+        faults.reset();
+        let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+        let repository = Repository::open_with_pool(&log, ObjectFormat::Sha1, &pool).await?;
+        assert_eq!(
+            repository.refs().get(&b"refs/heads/main"[..]),
+            Some(&fixture.target)
+        );
+        assert_eq!(repository.state.packs.len(), 1);
+        assert!(
+            faults.metrics().events.iter().any(|event| {
+                event.operation == Operation::Get && event.path.contains("/nodes/")
+            })
+        );
+        assert!(
+            faults.metrics().events.iter().all(|event| {
+                event.operation != Operation::Get || !event.path.contains("/blobs/")
+            })
+        );
+
+        let view = log.load().await?;
+        let record = Machine::new(ObjectFormat::Sha1).transaction(
+            vec![RefUpdate::new("refs/tags/v1", None, Some(fixture.target))?],
+            vec![],
+        )?;
+        let prepared = log.prepare(&view, TransactionId::new(), record, Bytes::new(), vec![])?;
+        assert!(matches!(
+            log.commit(prepared).await?,
+            CommitStatus::Committed(_)
+        ));
+        assert!(!repository.refs().contains_key(&b"refs/tags/v1"[..]));
+        assert!(pool.admit().is_err());
+        drop(repository);
+        assert!(pool.admit().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn common_repository_preflights_state_and_releases_cancelled_load() -> TestResult {
+        let fixture = fixture(ObjectFormat::Sha1, b"bounded repository")?;
+        let (log, faults, _) = test_log("repository-common-bounds").await?;
+        publish_durable_pack(&log, &fixture, ObjectFormat::Sha1).await?;
+
+        faults.reset();
+        let bounded = Pool::new(0);
+        assert!(
+            Repository::open_with_pool(&log, ObjectFormat::Sha1, &bounded)
+                .await
+                .is_err()
+        );
+        assert!(
+            faults.metrics().events.iter().all(|event| {
+                event.operation != Operation::Get || !event.path.contains("/nodes/")
+            })
+        );
+        assert!(bounded.admit().is_ok());
+
+        faults.reset();
+        let mut pause = faults.pause_get_at(3, FailurePhase::Before);
+        let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+        {
+            let opening = Repository::open_with_pool(&log, ObjectFormat::Sha1, &pool);
+            tokio::pin!(opening);
+            assert!(tokio::select! {
+                entered = pause.wait_until_entered() => entered,
+                _ = &mut opening => false,
+            });
+        }
+        assert!(!pause.release());
+        assert!(pool.admit().is_ok());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn publishes_and_cold_recovers_both_object_formats() -> TestResult {
         for (name, format) in [
@@ -453,7 +717,7 @@ mod tests {
             let fixture = fixture(format, name.as_bytes())?;
             let (log, _, _) = test_log(name).await?;
             let cache = fixture.directory.path().join("cache");
-            let repository = Repository::open(&log, &cache, format).await?;
+            let repository = Repository::open_native(&log, &cache, format).await?;
             let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
             let push = repository
                 .prepare_push(TransactionId::new(), vec![update], Some(&fixture.pack))
@@ -462,7 +726,7 @@ mod tests {
             assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
 
             fs::remove_dir_all(&cache)?;
-            let recovered = Repository::open(&log, &cache, format).await?;
+            let recovered = Repository::open_native(&log, &cache, format).await?;
             assert_eq!(
                 recovered.refs().get(&b"refs/heads/main"[..]),
                 Some(&fixture.target)
@@ -484,7 +748,7 @@ mod tests {
                 .await?;
             assert!(matches!(reuse.publish().await?, CommitStatus::Committed(_)));
             fs::remove_dir_all(&cache)?;
-            let recovered = Repository::open(&log, &cache, format).await?;
+            let recovered = Repository::open_native(&log, &cache, format).await?;
             assert_eq!(
                 recovered.refs().get(&b"refs/tags/existing"[..]),
                 Some(&fixture.target)
@@ -494,7 +758,7 @@ mod tests {
                 CheckpointStatus::Published(view) if view.tail().is_empty()
             ));
             fs::remove_dir_all(&cache)?;
-            let tail = Repository::open(&log, &cache, format).await?;
+            let tail = Repository::open_native(&log, &cache, format).await?;
             let push = tail
                 .prepare_push(
                     TransactionId::new(),
@@ -508,7 +772,7 @@ mod tests {
                 .await?;
             assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
             fs::remove_dir_all(&cache)?;
-            let recovered = Repository::open(&log, &cache, format).await?;
+            let recovered = Repository::open_native(&log, &cache, format).await?;
             assert_eq!(
                 recovered.refs().get(&b"refs/tags/after-checkpoint"[..]),
                 Some(&fixture.target)
@@ -521,7 +785,7 @@ mod tests {
     async fn checkpoint_reuses_materialized_pack_proofs_without_graph_reads() -> TestResult {
         let fixture = fixture(ObjectFormat::Sha1, b"checkpoint proof")?;
         let (log, faults, _) = test_log("repository-checkpoint-proof").await?;
-        let repository = Repository::open(
+        let repository = Repository::open_native(
             &log,
             fixture.directory.path().join("initial"),
             ObjectFormat::Sha1,
@@ -540,7 +804,7 @@ mod tests {
             .await?;
         assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
 
-        let checkpoint = Repository::open(
+        let checkpoint = Repository::open_native(
             &log,
             fixture.directory.path().join("checkpoint"),
             ObjectFormat::Sha1,
@@ -576,7 +840,7 @@ mod tests {
         let fixture = fixture(ObjectFormat::Sha1, b"injected")?;
         let (log, _, _) = test_log("repository-loose-objects").await?;
         let cache = fixture.directory.path().join("cache");
-        let repository = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
+        let repository = Repository::open_native(&log, &cache, ObjectFormat::Sha1).await?;
         let source = fixture.directory.path().join("source");
         for revision in ["HEAD", "HEAD^{tree}", "HEAD:file"] {
             let id = ObjectId::parse(
@@ -601,7 +865,7 @@ mod tests {
         ));
 
         fs::remove_dir_all(&cache)?;
-        let recovered = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
+        let recovered = Repository::open_native(&log, &cache, ObjectFormat::Sha1).await?;
         assert!(recovered.refs().is_empty());
         Ok(())
     }
@@ -613,8 +877,7 @@ mod tests {
         let (log, faults, _) = test_log("repository-delete").await?;
         let first_path = fixture.directory.path().join("first");
         let second_path = fixture.directory.path().join("second");
-        let first = Repository::open(&log, &first_path, ObjectFormat::Sha1).await?;
-        let second = Repository::open(&log, &second_path, ObjectFormat::Sha1).await?;
+        let first = Repository::open_native(&log, &first_path, ObjectFormat::Sha1).await?;
         let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
         let first = first
             .prepare_push(
@@ -623,6 +886,7 @@ mod tests {
                 Some(&fixture.pack),
             )
             .await?;
+        let second = Repository::open_native(&log, &second_path, ObjectFormat::Sha1).await?;
         let competing_update = RefUpdate::new("refs/heads/main", None, Some(competing.target))?;
         let second = second
             .prepare_push(
@@ -636,7 +900,7 @@ mod tests {
 
         fs::remove_dir_all(&first_path)?;
         let third_path = fixture.directory.path().join("third");
-        let winner = Repository::open(&log, &third_path, ObjectFormat::Sha1).await?;
+        let winner = Repository::open_native(&log, &third_path, ObjectFormat::Sha1).await?;
         assert_eq!(
             winner.refs().get(&b"refs/heads/main"[..]),
             Some(&fixture.target)
@@ -645,7 +909,8 @@ mod tests {
             winner.refs().get(&b"refs/heads/main"[..]),
             Some(&competing.target)
         );
-        let current = Repository::open(&log, &first_path, ObjectFormat::Sha1).await?;
+        drop(winner);
+        let current = Repository::open_native(&log, &first_path, ObjectFormat::Sha1).await?;
         faults.reset();
         let deletion = RefUpdate::new("refs/heads/main", Some(fixture.target), None)?;
         let delete = current
@@ -665,7 +930,7 @@ mod tests {
         let (log, _, _) = test_log("repository-stateless-fetch").await?;
         let old = fixture.target;
         let cache = fixture.directory.path().join("initial");
-        let repository = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
+        let repository = Repository::open_native(&log, &cache, ObjectFormat::Sha1).await?;
         let push = repository
             .prepare_push(
                 TransactionId::new(),
@@ -687,7 +952,7 @@ mod tests {
             &pack,
             command_output(Some(&source), &["pack-objects", "--all", "--stdout"])?.stdout,
         )?;
-        let repository = Repository::open(
+        let repository = Repository::open_native(
             &log,
             fixture.directory.path().join("update"),
             ObjectFormat::Sha1,
@@ -702,7 +967,7 @@ mod tests {
             .await?;
         assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
 
-        let repository = Repository::open(
+        let repository = Repository::open_native(
             &log,
             fixture.directory.path().join("fetch"),
             ObjectFormat::Sha1,
@@ -740,7 +1005,7 @@ mod tests {
         let (log, faults, backend) = test_log("repository-resume").await?;
         faults.reset();
         let cache = fixture.directory.path().join("pending");
-        let repository = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
+        let repository = Repository::open_native(&log, &cache, ObjectFormat::Sha1).await?;
         let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
         let push = repository
             .prepare_push(TransactionId::new(), vec![update], Some(&fixture.pack))
@@ -766,7 +1031,7 @@ mod tests {
             reopened.resume(&token).await?,
             object_log::Resolution::Committed(_)
         ));
-        let _recovered = Repository::open(&reopened, &cache, ObjectFormat::Sha1).await?;
+        let _recovered = Repository::open_native(&reopened, &cache, ObjectFormat::Sha1).await?;
         assert_eq!(pack_puts(&faults), staged_puts);
         Ok(())
     }
@@ -776,7 +1041,7 @@ mod tests {
         let conflict_fixture = fixture(ObjectFormat::Sha1, b"checkpoint")?;
         let (log, _, _) = test_log("repository-checkpoint-status").await?;
         let initial_path = conflict_fixture.directory.path().join("initial");
-        let initial = Repository::open(&log, &initial_path, ObjectFormat::Sha1).await?;
+        let initial = Repository::open_native(&log, &initial_path, ObjectFormat::Sha1).await?;
         let push = initial
             .prepare_push(
                 TransactionId::new(),
@@ -790,13 +1055,13 @@ mod tests {
             .await?;
         assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
 
-        let first = Repository::open(
+        let first = Repository::open_native(
             &log,
             conflict_fixture.directory.path().join("checkpoint-first"),
             ObjectFormat::Sha1,
         )
         .await?;
-        let second = Repository::open(
+        let second = Repository::open_native(
             &log,
             conflict_fixture.directory.path().join("checkpoint-second"),
             ObjectFormat::Sha1,
@@ -813,7 +1078,7 @@ mod tests {
 
         let second_fixture = fixture(ObjectFormat::Sha1, b"pending-checkpoint")?;
         let (second_log, second_faults, _) = test_log("repository-checkpoint-pending").await?;
-        let initial = Repository::open(
+        let initial = Repository::open_native(
             &second_log,
             second_fixture.directory.path().join("initial"),
             ObjectFormat::Sha1,
@@ -831,7 +1096,7 @@ mod tests {
             )
             .await?;
         assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
-        let checkpoint = Repository::open(
+        let checkpoint = Repository::open_native(
             &second_log,
             second_fixture.directory.path().join("checkpoint"),
             ObjectFormat::Sha1,
@@ -861,7 +1126,7 @@ mod tests {
         fs::write(cache.join("keep"), b"caller data")?;
         let (log, _, _) = test_log("repository-work-dir").await?;
         assert!(matches!(
-            Repository::open(&log, &cache, ObjectFormat::Sha1).await,
+            Repository::open_native(&log, &cache, ObjectFormat::Sha1).await,
             Err(Error::WorkDirectoryNotEmpty)
         ));
         assert_eq!(fs::read(cache.join("keep"))?, b"caller data");

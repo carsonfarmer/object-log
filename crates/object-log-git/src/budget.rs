@@ -37,7 +37,6 @@ impl Pool {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn new(limit: usize) -> Self {
         Self(Arc::new(PoolState {
             active: AtomicBool::new(false),

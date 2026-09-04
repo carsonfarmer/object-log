@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 
+#[cfg(feature = "native-oracle")]
 use bytes::Bytes;
 use object_log::{Materializer, StagedObject};
 
+#[cfg(feature = "native-oracle")]
+use crate::RefUpdate;
 use crate::format::{PackDescriptor, Record};
-use crate::{Error, ObjectFormat, ObjectId, RefSnapshot, RefUpdate};
+use crate::{Error, ObjectFormat, ObjectId, RefSnapshot};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct State {
@@ -20,6 +23,7 @@ impl Machine {
         Self(format)
     }
 
+    #[cfg(feature = "native-oracle")]
     pub(crate) fn transaction(
         self,
         updates: Vec<RefUpdate>,
