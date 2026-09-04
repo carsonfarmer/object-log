@@ -76,7 +76,7 @@ WAL reset, salt change, stale physical suffix, and truncation. Proceed with
 the journal-pointer design under its single-owner and built-in-filesystem-VFS
 limits. Keep the proof cases as adapter tests. See
 [`docs/evidence/sqlite-wal-prototype-2026-09-03.md`](docs/evidence/sqlite-wal-prototype-2026-09-03.md).
-The implemented private module has 22 lines inside its unsafe blocks. The
+The implemented private module has 12 lines inside its unsafe blocks. The
 approved limit is 50. Each block has a local safety statement, and the module
 does not retain the borrowed SQLite file pointer.
 
@@ -158,27 +158,25 @@ not receive this callback or SQLite handle.
 
 ## Durable SQLite record v1
 
-Operation bytes and checkpoint descriptors use one canonical CBOR map:
+Operation bytes and checkpoint descriptors use one of four canonical CBOR
+arrays:
 
-| Key | Field | Rule |
+| Tag | Form | Fields |
 |---:|---|---|
-| 0 | `version` | `1` |
-| 1 | `kind` | `0` snapshot; `1` WAL range |
-| 2 | `page_size` | `4096` |
-| 3 | `payload_len` | Exact reconstructed length |
-| 4 | `inline_payload` | Complete bytes for an inline payload; omitted for chunks |
-| 5 | `chunk_count` | Exact positive object count; omitted for inline payloads |
-| 6 | `wal_header` | Full 32-byte header for WAL; omitted for snapshots |
-| 7 | `prior_mx_frame` | Prior WAL boundary; omitted for snapshots |
-| 8 | `mx_frame` | New WAL boundary; omitted for snapshots |
+| 0 | snapshot inline | `[0, payload]` |
+| 1 | snapshot chunks | `[1, [payload_len, chunk_count]]` |
+| 2 | WAL inline | `[2, [payload, wal_header, prior_mx_frame, mx_frame]]` |
+| 3 | WAL chunks | `[3, [payload_len, chunk_count, wal_header, prior_mx_frame, mx_frame]]` |
 
-Keys 4 and 5 are mutually exclusive. Snapshot records omit keys 6 through 8.
-WAL records require all three keys. External chunks are the ordered `Blob`
-references in the enclosing commit or checkpoint. Snapshot chunks contain
-whole 4096-byte pages. WAL chunks contain whole 4120-byte frames. Reject
-options that cannot hold one frame and data that exceeds byte or reference
-limits. [`schema/object-log-sqlite-v1.cddl`](schema/object-log-sqlite-v1.cddl)
-defines the four exact map forms.
+These four tags define the current v1 record contract. The record does not
+repeat a version or page-size field. The adapter fixes pages at 4096 bytes and
+validates payload alignment, SQLite headers, and WAL boundaries. External
+chunks are the ordered `Blob` references in the enclosing commit or
+checkpoint. Snapshot chunks contain whole 4096-byte pages. WAL chunks contain
+whole 4120-byte frames. Reject options that cannot hold one frame and data that
+exceeds byte or reference limits.
+[`schema/object-log-sqlite-v1.cddl`](schema/object-log-sqlite-v1.cddl) defines
+the four exact forms.
 
 A WAL payload contains frames `prior_mx_frame + 1` through `mx_frame`. Its
 length is `(mx_frame - prior_mx_frame) * 4120`. Equal boundaries have no

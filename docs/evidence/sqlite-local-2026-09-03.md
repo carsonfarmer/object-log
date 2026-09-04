@@ -7,16 +7,14 @@ canonical v1 snapshot record for the first changed transaction and canonical
 v1 WAL records for later changed transactions. A local SQLite file is a
 disposable cache. Cold open rebuilds it from the object log.
 
-At `bc1e814`, the regular suite has 43 tests: 6 unit, 4 allocation-bound, 16
+At `3afdbd6`, the regular suite has 43 tests: 6 unit, 4 allocation-bound, 16
 database, 11 fault, 1 garbage-collection, 1 collection-race, and 4 recovery
 and policy tests. The separate acceptance target runs an exact 1,000-record
 recovery case. The MinIO test also stays outside regular runs.
 
 Relevant revisions:
 
-- Final product code: `1cbde302f01cc249efaf7da31051c092a8a318c2`.
-- Final regular and acceptance-test layout:
-  `bc1e814f195acfbee654e3d1ae981c453e670379`.
+- Current product and test code: `3afdbd6`.
 - Retained base Criterion run: `626311062b46cb8acae8982773bc12bb54318a46`.
   The chunked WAL result is from `d36b987`, and the final conditional-read
   result is from `1cbde30`.
@@ -27,10 +25,15 @@ Relevant revisions:
 
 [`schema/object-log-sqlite-v1.cddl`](../../schema/object-log-sqlite-v1.cddl)
 defines the four exact snapshot and WAL record forms. The decoder requires
-canonical CBOR, version 1, 4,096-byte pages, exact payload lengths, and one
-valid inline or external form. Recovery validates snapshot headers, WAL
-headers, frame salts, page numbers, commit markers, frame order, and the full
-rolling checksum chain.
+canonical CBOR, one current v1 variant, 4,096-byte page alignment, exact payload
+lengths, and one valid inline or external form. Recovery validates snapshot
+headers, WAL headers, frame salts, page numbers, commit markers, frame order,
+and the full rolling checksum chain.
+
+The derived four-variant record reduced product code from 1,512 to 1,476 lines.
+Snapshot descriptors fell from 15 to 7 bytes. WAL descriptors fell from 54 to
+43 bytes. A focused small-transaction benchmark found no statistically
+significant change.
 
 The adapter derives snapshot and WAL capacities from `Log::options()`. It
 rejects an oversized WAL range after the NOOP frame-count query and before the
@@ -56,7 +59,7 @@ write policy therefore cannot run later under read policy.
 The private WAL module obtains the committed frame count with
 `SQLITE_CHECKPOINT_NOOP`. It then reads the active WAL through
 `SQLITE_FCNTL_JOURNAL_POINTER` and the borrowed VFS methods. Its unsafe blocks
-contain 22 lines. The approved limit is 50. Each block has a local safety
+contain 12 lines. The approved limit is 50. Each block has a local safety
 statement, and no borrowed pointer leaves the `committed` function.
 
 This command reproduces the unsafe line count:

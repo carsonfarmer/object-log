@@ -1,54 +1,35 @@
 ; object-log-sqlite durable record version 1
 ; Store each record as canonical CBOR. CDDL does not express the alignment and
-; cross-field length checks listed after these four exact map forms.
+; cross-field length checks listed after these four exact array forms.
 
 sqlite-record = snapshot-inline / snapshot-chunked / wal-inline / wal-chunked
 
-snapshot-inline = {
-  0: 1,                            ; format version
-  1: 0,                            ; snapshot
-  2: 4096,                         ; SQLite page size
-  3: payload-length,
-  4: bstr                          ; complete snapshot
-}
+snapshot-inline = [0, bstr]        ; complete snapshot
 
-snapshot-chunked = {
-  0: 1,
-  1: 0,
-  2: 4096,
-  3: payload-length,
-  5: chunk-count
-}
+snapshot-chunked = [1, [payload-length, chunk-count]]
 
-wal-inline = {
-  0: 1,
-  1: 1,                            ; WAL range
-  2: 4096,
-  3: payload-length,
-  4: bstr,                         ; complete WAL frame range
-  6: bstr .size 32,                ; SQLite WAL header
-  7: frame-count,                  ; prior mxFrame
-  8: frame-count                   ; new mxFrame
-}
+wal-inline = [2, [
+  bstr,                            ; complete WAL frame range
+  bstr .size 32,                   ; SQLite WAL header
+  frame-count,                     ; prior mxFrame
+  frame-count                      ; new mxFrame
+]]
 
-wal-chunked = {
-  0: 1,
-  1: 1,
-  2: 4096,
-  3: payload-length,
-  5: chunk-count,
-  6: bstr .size 32,
-  7: frame-count,
-  8: frame-count
-}
+wal-chunked = [3, [
+  payload-length,
+  chunk-count,
+  bstr .size 32,
+  frame-count,
+  frame-count
+]]
 
 payload-length = uint .gt 0
 chunk-count = 1..4294967295
 frame-count = 0..4294967295
 
-; Snapshot payload length and each snapshot chunk are multiples of 4096.
-; WAL payload length and each WAL chunk are multiples of 4120.
-; An inline byte string has payload-length bytes and no object references.
+; Snapshot payload bytes and each snapshot chunk are multiples of 4096.
+; WAL payload bytes and each WAL chunk are multiples of 4120.
+; An inline byte string has no object references.
 ; A chunked record has chunk-count ordered object references.
 ; For WAL, mxFrame is greater than prior mxFrame and payload-length equals
 ; (mxFrame - prior mxFrame) * 4120.
