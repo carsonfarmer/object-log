@@ -134,6 +134,7 @@ async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> Test
         )?;
     }
     git(Some(&source), ["remote", "add", "origin", &url])?;
+    git(Some(&source), ["fsck", "--strict", "--no-dangling"])?;
     git(Some(&source), ["push", "--quiet", "-u", "origin", "main"])?;
 
     let clone = root.path().join("large-clone");
@@ -142,6 +143,7 @@ async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> Test
         Some(&source),
         ["commit", "--quiet", "--allow-empty", "-m", "tip"],
     )?;
+    git(Some(&source), ["fsck", "--strict", "--no-dangling"])?;
     git(Some(&source), ["push", "--quiet"])?;
     let expected_tip = git_stdout(Some(&source), ["rev-parse", "HEAD"])?;
     let output = git_trace(Some(&clone), ["fetch", "--quiet"])?;
@@ -373,8 +375,20 @@ fn sent_receive_pack(trace: &[u8]) -> bool {
 fn git_command<const N: usize>(directory: Option<&Path>, args: [&str; N]) -> Command {
     let mut command = Command::new("git");
     command
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+        ])
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
         .env("GIT_PROTOCOL", "version=2")
         .env("GIT_AUTHOR_NAME", "Object Log")
         .env("GIT_AUTHOR_EMAIL", "object-log@example.invalid")
