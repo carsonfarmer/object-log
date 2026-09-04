@@ -9,6 +9,8 @@ use gix::hash::{Kind, ObjectId};
 
 use crate::{Error as RecordError, ObjectFormat, ObjectId as RecordObjectId};
 
+mod local;
+
 const PACK_HEADER_LEN: usize = 12;
 const MAX_PACK_BYTES: usize = 512 * 1024 * 1024;
 const MAX_OBJECT_BYTES: usize = 256 * 1024 * 1024;
@@ -59,6 +61,16 @@ pub(crate) enum Error {
     Pack(String),
     #[error("repository must be bare")]
     NotBare,
+    #[error("repository state is unsupported")]
+    UnsupportedRepository,
+    #[error("invalid reference")]
+    InvalidReference,
+    #[error("reference changed")]
+    StaleReference,
+    #[error("branch update is not a fast-forward")]
+    NonFastForward,
+    #[error("repository operation failed: {0}")]
+    Repository(String),
     #[error("I/O failed for {path}: {source}")]
     Io {
         path: PathBuf,
