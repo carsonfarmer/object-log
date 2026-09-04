@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use minicbor::{Decode, Encode, encode::Write};
 
-use object_log::{Materializer, ObjectRef};
+use object_log::{Materializer, StagedObject};
 
 const KV_FORMAT_VERSION: u32 = 1;
 
@@ -224,7 +224,7 @@ impl Materializer for KvMachine {
     fn restore(
         &self,
         checkpoint: &[u8],
-        _objects: &[ObjectRef],
+        _objects: &[StagedObject],
     ) -> Result<Self::State, Self::Error> {
         let snapshot: SnapshotWire<'_> = decode(checkpoint)?;
         require_version(snapshot.version)?;
@@ -246,7 +246,7 @@ impl Materializer for KvMachine {
         &self,
         state: &mut Self::State,
         operation: &[u8],
-        _objects: &[ObjectRef],
+        _objects: &[StagedObject],
     ) -> Result<(), Self::Error> {
         let mutation: MutationWire<'_> = decode(operation)?;
         require_version(mutation.version)?;

@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation, RequestOutcome};
 use object_log::{
-    CommitRef, CommitStatus, Log, LogId, Options, PendingCommit, Resolution, TransactionId,
-    ValidatedBackend, View,
+    CheckpointStatus, CollectionStart, CommitRef, CommitStatus, Log, LogId, Materializer, Options,
+    PendingCommit, Resolution, StagedObject, TransactionId, ValidatedBackend, View, materialize,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -15,6 +15,35 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn StdError>>;
+
+struct ProofMachine;
+
+impl Materializer for ProofMachine {
+    type State = Vec<StagedObject>;
+    type Error = std::convert::Infallible;
+
+    fn empty(&self) -> Self::State {
+        Vec::new()
+    }
+
+    fn restore(
+        &self,
+        _checkpoint: &[u8],
+        objects: &[StagedObject],
+    ) -> Result<Self::State, Self::Error> {
+        Ok(objects.to_vec())
+    }
+
+    fn apply(
+        &self,
+        state: &mut Self::State,
+        _operation: &[u8],
+        objects: &[StagedObject],
+    ) -> Result<(), Self::Error> {
+        state.extend_from_slice(objects);
+        Ok(())
+    }
+}
 
 #[tokio::test]
 async fn validated_backend_opens_tenants_without_more_probes() -> TestResult {
@@ -564,6 +593,80 @@ async fn batched_existing_staging_deduplicates_the_object_graph() -> TestResult 
     assert_eq!(staged.len(), 2);
     assert_eq!(segment_gets(&store, "nodes"), 1);
     assert_eq!(segment_gets(&store, "blobs"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResult {
+    let (store, log, _) = open_model_log(126).await?;
+    let initial = log.load().await?;
+    let child = log
+        .put_object(&initial, Bytes::from_static(b"child"))
+        .await?;
+    let root = log
+        .put_node(&initial, Bytes::from_static(b"root"), vec![child])
+        .await?;
+    let prepared = log.prepare(
+        &initial,
+        transaction_id(126, 1),
+        Bytes::new(),
+        Bytes::new(),
+        vec![root.clone()],
+    )?;
+    assert!(matches!(
+        log.commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
+
+    store.reset();
+    let tail = materialize(&log, &ProofMachine).await?;
+    assert_eq!(tail.state().len(), 1);
+    assert_eq!(segment_gets(&store, "nodes"), 0);
+    assert_eq!(segment_gets(&store, "blobs"), 0);
+
+    let through = tail.view().tail()[0].clone();
+    store.reset();
+    let CheckpointStatus::Published(_) = log
+        .publish_checkpoint(tail.view(), &through, Bytes::new(), tail.state().clone())
+        .await?
+    else {
+        return Err(test_error("proof checkpoint did not publish").into());
+    };
+    assert_eq!(segment_gets(&store, "commits"), 1);
+    assert_eq!(segment_gets(&store, "nodes"), 0);
+    assert_eq!(segment_gets(&store, "blobs"), 0);
+
+    store.reset();
+    let checkpoint = materialize(&log, &ProofMachine).await?;
+    assert_eq!(checkpoint.state().len(), 1);
+    assert_eq!(segment_gets(&store, "nodes"), 0);
+    assert_eq!(segment_gets(&store, "blobs"), 0);
+
+    store.reset();
+    log.stage_objects(
+        checkpoint.view(),
+        vec![checkpoint.state()[0].reference().clone()],
+    )
+    .await?;
+    assert_eq!(segment_gets(&store, "nodes"), 1);
+    assert_eq!(segment_gets(&store, "blobs"), 1);
+
+    log.put_object(checkpoint.view(), Bytes::from_static(b"orphan"))
+        .await?;
+    let CollectionStart::Installed(fenced, _) = log.start_collection(checkpoint.view()).await?
+    else {
+        return Err(test_error("proof collection did not install").into());
+    };
+    assert!(matches!(
+        log.prepare(
+            &fenced,
+            transaction_id(126, 2),
+            Bytes::new(),
+            Bytes::new(),
+            checkpoint.state().clone(),
+        ),
+        Err(object_log::Error::InvalidStagedObject)
+    ));
     Ok(())
 }
 

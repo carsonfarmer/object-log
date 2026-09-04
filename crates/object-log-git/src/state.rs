@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use object_log::{Materializer, ObjectRef};
+use object_log::{Materializer, StagedObject};
 
 use crate::format::{PackDescriptor, Record};
 use crate::{Error, ObjectFormat, ObjectId, RefSnapshot, RefUpdate};
@@ -9,7 +9,7 @@ use crate::{Error, ObjectFormat, ObjectId, RefSnapshot, RefUpdate};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct State {
     pub(crate) refs: RefSnapshot,
-    pub(crate) packs: BTreeMap<ObjectId, (u64, ObjectRef)>,
+    pub(crate) packs: BTreeMap<ObjectId, (u64, StagedObject)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -40,7 +40,7 @@ impl Materializer for Machine {
     fn restore(
         &self,
         checkpoint: &[u8],
-        objects: &[ObjectRef],
+        objects: &[StagedObject],
     ) -> Result<Self::State, Self::Error> {
         let record = Record::decode(checkpoint, self.0, objects.len())?;
         if !record.checkpoint {
@@ -57,7 +57,7 @@ impl Materializer for Machine {
         &self,
         state: &mut Self::State,
         operation: &[u8],
-        objects: &[ObjectRef],
+        objects: &[StagedObject],
     ) -> Result<(), Self::Error> {
         let record = Record::decode(operation, self.0, objects.len())?;
         if record.checkpoint {
@@ -91,8 +91,8 @@ impl Materializer for Machine {
 
 fn zip(
     descriptors: Vec<PackDescriptor>,
-    objects: &[ObjectRef],
-) -> BTreeMap<ObjectId, (u64, ObjectRef)> {
+    objects: &[StagedObject],
+) -> BTreeMap<ObjectId, (u64, StagedObject)> {
     descriptors
         .into_iter()
         .zip(objects.iter().cloned())
@@ -190,11 +190,7 @@ mod tests {
                 .await?;
         let log = Log::open(&backend, &LogId::new("pack-alignment")?, Options::default()).await?;
         let view = log.load().await?;
-        let object = log
-            .put_object(&view, Bytes::from_static(b"PACK"))
-            .await?
-            .reference()
-            .clone();
+        let object = log.put_object(&view, Bytes::from_static(b"PACK")).await?;
         let descriptor = pack(4);
         let machine = Machine::new(ObjectFormat::Sha1);
         let mut state = machine.empty();
@@ -204,14 +200,19 @@ mod tests {
         )?;
         assert!(machine.apply(&mut state, &operation, &[]).is_err());
         machine.apply(&mut state, &operation, std::slice::from_ref(&object))?;
+        assert_eq!(state.packs[&descriptor.id].0, descriptor.bytes);
         assert_eq!(
-            state.packs[&descriptor.id],
-            (descriptor.bytes, object.clone())
+            state.packs[&descriptor.id].1.reference(),
+            object.reference()
         );
 
         let restored =
             machine.restore(&checkpoint(machine, &state)?, std::slice::from_ref(&object))?;
-        assert_eq!(restored.packs[&descriptor.id], (descriptor.bytes, object));
+        assert_eq!(restored.packs[&descriptor.id].0, descriptor.bytes);
+        assert_eq!(
+            restored.packs[&descriptor.id].1.reference(),
+            object.reference()
+        );
         Ok(())
     }
 }

@@ -2,7 +2,7 @@
 
 use std::error::Error as StdError;
 
-use crate::{Error, Log, ObjectRef, View};
+use crate::{Error, Log, ObjectRef, StagedObject, View};
 
 /// Applies opaque log data to one application state type.
 pub trait Materializer {
@@ -16,13 +16,23 @@ pub trait Materializer {
 
     /// Restores one application snapshot.
     ///
+    /// `objects` contains publication proofs for the snapshot's ordered object
+    /// references. State can retain these proofs for a checkpoint against the
+    /// returned [`Materialized::view`].
+    ///
     /// # Errors
     ///
     /// Returns a domain error when the snapshot is invalid.
-    fn restore(&self, checkpoint: &[u8], objects: &[ObjectRef])
-    -> Result<Self::State, Self::Error>;
+    fn restore(
+        &self,
+        checkpoint: &[u8],
+        objects: &[StagedObject],
+    ) -> Result<Self::State, Self::Error>;
 
     /// Applies one committed operation in sequence order.
+    ///
+    /// `objects` contains publication proofs for the operation's ordered
+    /// object references.
     ///
     /// # Errors
     ///
@@ -31,7 +41,7 @@ pub trait Materializer {
         &self,
         state: &mut Self::State,
         operation: &[u8],
-        objects: &[ObjectRef],
+        objects: &[StagedObject],
     ) -> Result<(), Self::Error>;
 }
 
@@ -88,15 +98,27 @@ where
 {
     let view = log.load().await?;
     let mut state = match log.read_checkpoint(&view).await? {
-        Some(checkpoint) => materializer
-            .restore(checkpoint.snapshot(), checkpoint.objects())
-            .map_err(MaterializeError::State)?,
+        Some(checkpoint) => {
+            let objects = record_proofs(log, &view, checkpoint.objects());
+            materializer
+                .restore(checkpoint.snapshot(), &objects)
+                .map_err(MaterializeError::State)?
+        }
         None => materializer.empty(),
     };
     for record in log.read_tail(&view).await? {
+        let objects = record_proofs(log, &view, record.objects());
         materializer
-            .apply(&mut state, record.operation(), record.objects())
+            .apply(&mut state, record.operation(), &objects)
             .map_err(MaterializeError::State)?;
     }
     Ok(Materialized { view, state })
+}
+
+fn record_proofs(log: &Log, view: &View, objects: &[ObjectRef]) -> Vec<StagedObject> {
+    objects
+        .iter()
+        .cloned()
+        .map(|object| log.staged_object(view, object))
+        .collect()
 }

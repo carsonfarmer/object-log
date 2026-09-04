@@ -86,9 +86,9 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     assert!(checkpoint_view.tail().is_empty());
     let checkpoint = faults.metrics();
     assert_eq!(checkpoint.operation(Operation::Put).requests, 2);
-    // The tail commit, the pack node, and its chunk blobs.
-    assert_eq!(checkpoint.operation(Operation::Get).requests, chunks + 2);
-    assert_eq!(checkpoint.total_requests(), chunks + 4);
+    // The tail commit. Its authenticated pack proof avoids node and blob reads.
+    assert_eq!(checkpoint.operation(Operation::Get).requests, 1);
+    assert_eq!(checkpoint.total_requests(), 3);
     let durable_after_checkpoint = stored_bytes(&inner, &root).await?;
     assert!(durable_after_checkpoint > durable_after_publication);
 

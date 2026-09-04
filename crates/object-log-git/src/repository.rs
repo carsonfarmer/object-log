@@ -6,7 +6,7 @@ use std::{
 
 use bytes::Bytes;
 use object_log::{
-    CheckpointStatus, CommitStatus, Log, ObjectRef, PreparedCommit, TransactionId, View,
+    CheckpointStatus, CommitStatus, Log, PreparedCommit, StagedObject, TransactionId, View,
     materialize,
 };
 use tokio::{fs::File, task};
@@ -35,7 +35,7 @@ pub struct Repository {
 #[derive(Debug)]
 struct Pack {
     bytes: u64,
-    root: ObjectRef,
+    root: StagedObject,
     live: bool,
 }
 
@@ -96,7 +96,7 @@ impl Repository {
         let mut objects = git::ObjectSet::new();
         let mut recovered = BTreeMap::new();
         for (id, (bytes, root)) in state.packs {
-            let pack_objects = recover_pack(log, &view, path, id, bytes, &root).await?;
+            let pack_objects = recover_pack(log, &view, path, id, bytes, root.reference()).await?;
             git::extend_objects(&mut objects, pack_objects.iter().copied())?;
             recovered.insert(id, (bytes, root, pack_objects));
         }
@@ -274,10 +274,9 @@ impl Repository {
         }
 
         let snapshot = Record::snapshot(self.format, self.refs, packs)?.encode()?;
-        let objects = self.log.stage_objects(&self.view, roots).await?;
         Ok(self
             .log
-            .publish_checkpoint(&self.view, &through, snapshot, objects)
+            .publish_checkpoint(&self.view, &through, snapshot, roots)
             .await?)
     }
 }
@@ -515,6 +514,60 @@ mod tests {
                 Some(&fixture.target)
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reuses_materialized_pack_proofs_without_graph_reads() -> TestResult {
+        let fixture = fixture(ObjectFormat::Sha1, b"checkpoint proof")?;
+        let (log, faults, _) = test_log("repository-checkpoint-proof").await?;
+        let repository = Repository::open(
+            &log,
+            fixture.directory.path().join("initial"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        let push = repository
+            .prepare_push(
+                TransactionId::new(),
+                vec![RefUpdate::new(
+                    "refs/heads/main",
+                    None,
+                    Some(fixture.target),
+                )?],
+                Some(&fixture.pack),
+            )
+            .await?;
+        assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
+
+        let checkpoint = Repository::open(
+            &log,
+            fixture.directory.path().join("checkpoint"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        faults.reset();
+        assert!(matches!(
+            checkpoint.checkpoint().await?,
+            CheckpointStatus::Published(_)
+        ));
+        let metrics = faults.metrics();
+        assert_eq!(metrics.operation(Operation::Get).requests, 1);
+        assert_eq!(metrics.operation(Operation::Put).requests, 2);
+        assert_eq!(
+            metrics
+                .events
+                .iter()
+                .filter(|event| {
+                    event.operation == Operation::Get && event.path.contains("/commits/")
+                })
+                .count(),
+            1
+        );
+        assert!(metrics.events.iter().all(|event| {
+            event.operation != Operation::Get
+                || (!event.path.contains("/nodes/") && !event.path.contains("/blobs/"))
+        }));
         Ok(())
     }
 

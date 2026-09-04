@@ -1444,7 +1444,7 @@ impl Log {
         Ok(())
     }
 
-    fn staged_object(&self, view: &View, object: ObjectRef) -> StagedObject {
+    pub(crate) fn staged_object(&self, view: &View, object: ObjectRef) -> StagedObject {
         StagedObject {
             object,
             domain: Arc::clone(&self.staging_domain),

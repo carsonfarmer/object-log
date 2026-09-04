@@ -316,11 +316,15 @@ pub(crate) struct StagingDomain;
 /// Proof that one immutable object graph is ready for publication.
 ///
 /// A staged object is valid only for its source [`Log`] handle and collection
-/// epoch. Clones of that handle share the proof. Use [`Log::stage_objects`] to
-/// use durable [`ObjectRef`] values in new work. The proof is process-local and
-/// is not part of a recovery token. It relies on the backend keeping the exact
-/// created bytes until object-log garbage collection deletes their physical
-/// key.
+/// epoch. Clones of that handle share the proof. [`Materializer`] receives new
+/// proofs for references in the authenticated checkpoint and commit records of
+/// its exact view. Use [`Log::stage_objects`] for arbitrary durable references.
+/// Recovery tokens and separately opened handles do not share the proof. Their
+/// publication paths verify the complete object graph.
+///
+/// The process-local proof is not durable. Its fast path relies on authenticated
+/// record envelopes, collection-epoch fencing, conditional head publication,
+/// and the backend preserving exact immutable bytes until object-log deletes them.
 #[derive(Clone, Debug)]
 pub struct StagedObject {
     pub(crate) object: ObjectRef,
