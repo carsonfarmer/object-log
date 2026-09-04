@@ -2,7 +2,7 @@ use std::{collections::VecDeque, mem::size_of, path::PathBuf};
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt, stream};
-use object_log::{Log, ObjectKind, ObjectRef, StagedObject, View};
+use object_log::{Log, ObjectKind, ObjectRef, ReferenceNode, StagedObject, View};
 
 use crate::{
     Error, ObjectFormat, ObjectId,
@@ -35,6 +35,13 @@ pub(crate) async fn stage(
     if count > log.options().max_object_refs {
         return invalid("pack needs too many chunks");
     }
+    let staging_bytes = count
+        .checked_mul(size_of::<StagedObject>() + size_of::<ObjectRef>())
+        .ok_or_else(|| Error::InvalidPack("Git staging size overflowed".into()))?;
+    let _staging_memory = operation.reserve(staging_bytes)?;
+    let _root_memory = operation.reserve(MAX_PACK_ROOT_BYTES)?;
+    operation.work(MAX_PACK_ROOT_BYTES)?;
+    operation.io(MAX_PACK_ROOT_BYTES)?;
     let children = stream::iter((0..count).map(|index| {
         let chunk = bytes.slice(index * CHUNK_BYTES..bytes.len().min((index + 1) * CHUNK_BYTES));
         async move {
@@ -45,7 +52,6 @@ pub(crate) async fn stage(
     .buffered(MAX_TRANSFERS)
     .try_collect()
     .await?;
-    operation.io(MAX_PACK_ROOT_BYTES)?;
     let root = log
         .put_node(view, Bytes::from(normalized.index), children)
         .await?;
@@ -60,10 +66,9 @@ pub(crate) async fn stage(
 
 pub(crate) struct Catalog {
     packs: Box<[Pack]>,
-    directory: Box<[Location]>,
+    directory: Vec<Location>,
     operation: Operation,
-    _load_memory: Reservation,
-    _directory_memory: Reservation,
+    _memory: Reservation,
 }
 
 struct Pack {
@@ -71,8 +76,7 @@ struct Pack {
     bytes: u32,
     index: PackIndex,
     offsets: Box<[OffsetEntry]>,
-    chunks: Box<[ObjectRef]>,
-    _offset_memory: Reservation,
+    node: ReferenceNode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,49 +101,24 @@ pub(crate) async fn load(
     if roots.len() > usize::from(u16::MAX) {
         return invalid("catalog has too many packs");
     }
-    let mut charged = roots
-        .len()
-        .checked_mul(size_of::<Pack>())
-        .ok_or_else(|| Error::InvalidPack("catalog size overflowed".into()))?;
-    for (descriptor, root) in roots {
-        validate_pack_ref(format, descriptor, root)?;
+    let memory = operation.reserve(catalog_bytes(format, roots)?)?;
+    for (_, root) in roots {
         let root_bytes = usize::try_from(root.len())
             .map_err(|_| Error::InvalidPack("pack root exceeds memory".into()))?;
-        charged = charged
-            .checked_add(root_bytes)
-            .ok_or_else(|| Error::InvalidPack("catalog size overflowed".into()))?;
-        if charged > MAX_CATALOG_BYTES {
-            return invalid("catalog exceeds byte limit");
-        }
         operation.work(root_bytes)?;
         operation.io(root_bytes)?;
     }
-    let load_memory = operation.reserve(charged)?;
     let loads = stream::iter(roots.iter().map(|(descriptor, root)| async move {
-        load_pack(operation, log, view, format, descriptor, root).await
+        load_pack(log, view, format, descriptor, root).await
     }))
     .buffered(MAX_TRANSFERS);
     futures::pin_mut!(loads);
     let mut packs = Vec::with_capacity(roots.len());
+    let mut entries = 0;
     while let Some(pack) = loads.try_next().await? {
-        charged = size_of::<PackIndex>()
-            .checked_add(
-                pack.index.num_objects() as usize
-                    * (size_of::<Location>() + size_of::<OffsetEntry>()),
-            )
-            .and_then(|bytes| charged.checked_add(bytes))
-            .ok_or_else(|| Error::InvalidPack("catalog size overflowed".into()))?;
-        if charged > MAX_CATALOG_BYTES {
-            return invalid("catalog exceeds byte limit");
-        }
+        entries += pack.index.num_objects() as usize;
         packs.push(pack);
     }
-
-    let entries = packs
-        .iter()
-        .map(|pack| pack.index.num_objects() as usize)
-        .sum::<usize>();
-    let directory_memory = operation.reserve(entries * size_of::<Location>())?;
     let mut directory = Vec::with_capacity(entries);
     for (pack, stored) in packs.iter().enumerate() {
         let pack = u16::try_from(pack)
@@ -159,15 +138,39 @@ pub(crate) async fn load(
     directory.dedup_by(|a, b| oid(&packs, *a) == oid(&packs, *b));
     Ok(Catalog {
         packs: packs.into_boxed_slice(),
-        directory: directory.into_boxed_slice(),
+        directory,
         operation: operation.clone(),
-        _load_memory: load_memory,
-        _directory_memory: directory_memory,
+        _memory: memory,
     })
 }
 
+fn catalog_bytes(
+    format: ObjectFormat,
+    roots: &[(PackDescriptor, ObjectRef)],
+) -> Result<usize, Error> {
+    let hash = format.digest_len();
+    let index_fixed = 1_032 + 2 * hash;
+    let index_entry = hash + 8;
+    roots.iter().try_fold(
+        roots.len() * size_of::<Pack>(),
+        |total, (descriptor, root)| {
+            validate_pack_ref(format, descriptor, root)?;
+            let root = usize::try_from(root.len())
+                .map_err(|_| Error::InvalidPack("pack root exceeds memory".into()))?;
+            let entries =
+                ((root.saturating_sub(index_fixed)) / index_entry).min(MAX_OBJECTS as usize);
+            let dynamic = root
+                + MAX_PACK_BYTES.div_ceil(CHUNK_BYTES) * size_of::<ObjectRef>()
+                + entries * (size_of::<OffsetEntry>() + size_of::<Location>());
+            total
+                .checked_add(dynamic)
+                .filter(|total| *total <= MAX_CATALOG_BYTES)
+                .ok_or_else(|| Error::InvalidPack("catalog exceeds byte limit".into()))
+        },
+    )
+}
+
 async fn load_pack(
-    operation: &Operation,
     log: &Log,
     view: &View,
     format: ObjectFormat,
@@ -191,16 +194,14 @@ async fn load_pack(
             return invalid("pack chunk is invalid");
         }
     }
-    let (index, offsets, offset_memory) =
-        validate_index(operation, node.payload(), format, descriptor)?;
+    let (index, offsets) = validate_index(node.payload(), format, descriptor)?;
     Ok(Pack {
         id: descriptor.id,
         bytes: u32::try_from(bytes)
             .map_err(|_| Error::InvalidPack("pack length exceeds u32".into()))?,
         index,
         offsets,
-        chunks: chunks.to_vec().into_boxed_slice(),
-        _offset_memory: offset_memory,
+        node,
     })
 }
 
@@ -223,11 +224,10 @@ fn validate_pack_ref(
 }
 
 fn validate_index(
-    operation: &Operation,
     bytes: &Bytes,
     format: ObjectFormat,
     descriptor: &PackDescriptor,
-) -> Result<(PackIndex, Box<[OffsetEntry]>, Reservation), Error> {
+) -> Result<(PackIndex, Box<[OffsetEntry]>), Error> {
     if bytes.len() > MAX_INDEX_BYTES {
         return invalid("pack index exceeds byte limit");
     }
@@ -255,7 +255,6 @@ fn validate_index(
     let mut exact_fan = [0_u32; 256];
     let mut previous = None;
     let pack_end = descriptor.bytes - hash_len as u64;
-    let offset_memory = operation.reserve(count as usize * size_of::<OffsetEntry>())?;
     let mut offsets = Vec::with_capacity(count as usize);
     for (position, entry) in index.iter().enumerate() {
         if entry.oid.as_slice().iter().all(|byte| *byte == 0)
@@ -294,7 +293,7 @@ fn validate_index(
     {
         return invalid("pack index offsets are not unique");
     }
-    Ok((index, offsets.into_boxed_slice(), offset_memory))
+    Ok((index, offsets.into_boxed_slice()))
 }
 
 fn oid(packs: &[Pack], location: Location) -> &[u8] {
@@ -512,7 +511,8 @@ impl<'a> Reader<'a> {
             return Ok(bytes.clone());
         }
         let object = self.catalog.packs[usize::from(pack)]
-            .chunks
+            .node
+            .children()
             .get(usize::from(index))
             .ok_or_else(|| Error::InvalidPack("pack chunk is missing".into()))?
             .clone();
@@ -608,8 +608,6 @@ fn apply_delta(op: &Operation, base: &[u8], delta: &[u8], hash: bool) -> Result<
     Ok(hold(Bytes::from(result), memory))
 }
 
-const _: () = assert!(size_of::<Location>() == 8);
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -623,7 +621,7 @@ mod tests {
     use object_log::{
         CollectionFinish, CollectionStart, CommitStatus, LogId, Options, TransactionId,
         ValidatedBackend,
-        sim::{FaultStore, Operation as StoreOperation},
+        sim::{FailurePhase, FaultStore, Operation as StoreOperation},
     };
     use object_store::{memory::InMemory, path::Path as StorePath};
 
@@ -648,6 +646,19 @@ mod tests {
         bases: &[ExternalBase<'_>],
     ) -> Result<Normalized, Error> {
         crate::pack::normalize(&test_operation(), format, input, bases)
+    }
+
+    fn maximal_normalized(operation: &Operation) -> Result<Normalized, Error> {
+        let memory = [
+            operation.reserve(MAX_PACK_BYTES)?,
+            operation.reserve(MAX_INDEX_BYTES)?,
+        ];
+        Ok(Normalized {
+            bytes: vec![0; MAX_PACK_BYTES],
+            index: vec![0; MAX_INDEX_BYTES],
+            id: ObjectId::from_bytes(ObjectFormat::Sha1, &[1; 20])?,
+            _memory: memory,
+        })
     }
 
     struct Fixture {
@@ -882,6 +893,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stage_reserves_exact_maximum_before_writes_and_through_root_put() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "stage-memory").await?;
+        let vectors = MAX_PACK_BYTES.div_ceil(CHUNK_BYTES)
+            * (size_of::<StagedObject>() + size_of::<ObjectRef>());
+        let required = MAX_PACK_BYTES + MAX_INDEX_BYTES + MAX_PACK_ROOT_BYTES + vectors;
+        let pool = Pool::new(required);
+        let operation = pool.admit()?;
+        let normalized = maximal_normalized(&operation)?;
+        store.reset();
+        let mut pause = store.pause_put_at(17, FailurePhase::Before);
+        let worker = operation.clone();
+        let worker_log = log.clone();
+        let worker_view = view.clone();
+        let task =
+            tokio::spawn(
+                async move { stage(&worker, &worker_log, &worker_view, normalized).await },
+            );
+        assert!(pause.wait_until_entered().await);
+        assert_eq!(operation.live_bytes(), required);
+        assert!(pause.release());
+        let (_, root) = task.await??;
+        assert_eq!(root.reference().len(), MAX_PACK_ROOT_BYTES as u64);
+        assert_eq!(operation.live_bytes(), 0);
+
+        let operation = Pool::new(required - 1).admit()?;
+        let normalized = maximal_normalized(&operation)?;
+        store.reset();
+        assert!(stage(&operation, &log, &view, normalized).await.is_err());
+        assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catalog_preflight_rejects_derived_limit_without_gets() -> TestResult {
+        for (format, name) in [
+            (ObjectFormat::Sha1, "catalog-sha1"),
+            (ObjectFormat::Sha256, "catalog-sha256"),
+        ] {
+            let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+            let (log, view) = open(store.clone(), name).await?;
+            let root = log
+                .put_node(&view, Bytes::from(vec![0; MAX_INDEX_BYTES]), Vec::new())
+                .await?;
+            let descriptor = PackDescriptor {
+                id: ObjectId::from_bytes(format, &vec![1; format.digest_len()])?,
+                bytes: (12 + format.digest_len()) as u64,
+            };
+            let pair = (descriptor, root.reference().clone());
+            let mut roots = Vec::new();
+            while catalog_bytes(format, &roots).is_ok() {
+                roots.push(pair.clone());
+            }
+            assert!(catalog_bytes(format, &roots[..roots.len() - 1]).is_ok());
+            store.reset();
+            assert!(
+                load(&test_operation(), &log, &view, format, &roots)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catalog_reservation_releases_on_drop_and_cancel() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "catalog-release").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 2, true, false)?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let roots = vec![(descriptor, root.reference().clone())];
+        let expected = catalog_bytes(ObjectFormat::Sha1, &roots)?;
+        let bounded = Pool::new(expected - 1);
+        store.reset();
+        assert!(
+            load(&bounded.admit()?, &log, &view, ObjectFormat::Sha1, &roots,)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+
+        let pool = Pool::new(expected);
+        let operation = pool.admit()?;
+        let catalog = load(&operation, &log, &view, ObjectFormat::Sha1, &roots).await?;
+        assert_eq!(operation.live_bytes(), expected);
+        drop(catalog);
+        assert_eq!(operation.live_bytes(), 0);
+
+        store.reset();
+        let mut pause = store.pause_next_get(FailurePhase::Before);
+        {
+            let loading = load(&operation, &log, &view, ObjectFormat::Sha1, &roots);
+            tokio::pin!(loading);
+            let entered = tokio::select! {
+                entered = pause.wait_until_entered() => entered,
+                _ = &mut loading => return Err("catalog load completed before its pause".into()),
+            };
+            assert!(entered);
+            assert_eq!(operation.live_bytes(), expected);
+        }
+        assert!(!pause.release());
+        assert_eq!(operation.live_bytes(), 0);
+        drop(operation);
+        assert!(pool.admit().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn duplicate_ids_choose_the_lowest_pack_id_for_every_root_order() -> TestResult {
         let store = FaultStore::from_arc(Arc::new(InMemory::new()));
         let (log, view) = open(store, "duplicates").await?;
@@ -975,7 +1096,7 @@ mod tests {
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let mut reader = Reader::new(&log, &view, &catalog);
-        assert!(catalog.packs[0].chunks.len() > MAX_CACHE_BYTES / CHUNK_BYTES);
+        assert!(catalog.packs[0].node.children().len() > MAX_CACHE_BYTES / CHUNK_BYTES);
         for index in 0..MAX_CACHE_BYTES / CHUNK_BYTES {
             drop(reader.chunk(0, index).await?);
         }
@@ -985,7 +1106,7 @@ mod tests {
         drop(reader.chunk(0, MAX_CACHE_BYTES / CHUNK_BYTES).await?);
         drop(pressure);
         let first = reader.chunk(0, 0).await?.slice(..16);
-        for index in 1..catalog.packs[0].chunks.len() {
+        for index in 1..catalog.packs[0].node.children().len() {
             drop(reader.chunk(0, index).await?);
         }
         assert!(reader.cache_bytes <= MAX_CACHE_BYTES);
@@ -1256,15 +1377,7 @@ mod tests {
             bytes: pack.len() as u64,
         };
         let oversized = Bytes::from(vec![0; MAX_INDEX_BYTES + 1]);
-        assert!(
-            validate_index(
-                &test_operation(),
-                &oversized,
-                ObjectFormat::Sha1,
-                &descriptor
-            )
-            .is_err()
-        );
+        assert!(validate_index(&oversized, ObjectFormat::Sha1, &descriptor).is_err());
 
         let mut corrupt = index.clone();
         corrupt[7] = 1;
