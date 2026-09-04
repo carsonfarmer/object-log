@@ -68,7 +68,9 @@ API:
   object, and delta-depth limits. A private sparse reader loads standard
   indexes without a local repository and reads only the required durable pack
   chunks. A private host-neutral wire module implements protocol-v2 `ls-refs`
-  and fetch framing plus classic receive-pack framing.
+  and fetch framing plus classic receive-pack framing. A private bounded writer
+  creates self-contained SHA-1 and SHA-256 fetch packs. It reuses validated
+  compressed entries and materializes an object when reuse would omit its base.
 - [`object-log-git-http`](crates/object-log-git-http) is the current native
   protocol-v0 reference host for SHA-1. Its tests use an unchanged Git client.
   Issue #17 moves protocol and storage into one WASI-compatible core while the
@@ -76,16 +78,24 @@ API:
   protocol v2 for upload-pack discovery and fetch. Push remains standard
   receive-pack.
 
-At revision `8d28839`, the private pack, durable-reader, wire, and operation
-budget foundations contain 2,048 product lines. Task 1 is integrated. Task 2
-adds compressed-entry reuse. Later tasks connect the foundations through the
-existing public `Repository` and `PreparedPush` surface. They add no public
-`Engine`, `Service`, or `Outcome` type. One process-wide 88 MiB pool admits one
-active engine operation under the provisional 128 MiB WASI process model. The
-[Git proof plan](GIT_PLAN.md) defines the 12 tasks, reduced phase limits,
-performance gates, and source-size stop gates. The
-[architecture gate](docs/evidence/git-architecture-gate-2026-09-04.md) records
-what is ready and what remains disconnected.
+At revision `b322985`, the private pack, durable-reader and writer, wire, and
+operation-budget foundations contain 2,189 product lines. Tasks 1 and 2 are
+complete. Task 3 adds one common public `Repository` for native and WASIp2. It
+owns the exact `View`, refs, authenticated pack roots and sizes, `Operation`,
+and retained-state reservation. Each later object-reading command creates its
+own private `Catalog` and `Reader`, so `ls-refs` does not load pack indexes and
+`Repository` needs no self-reference. This pre-release API correction replaces
+the native-only signatures with `Repository::open(&Log, ObjectFormat)` and
+`refs(&self)`. The shared API has no work directory or path output. The
+replacement path has not run a real Git protocol-v2 client trial because these
+private modules remain disconnected. The plan adds no public `Engine`,
+`Service`, `Outcome`, `Catalog`, or `Reader` type. Receive-pack remains later.
+One process-wide 88 MiB pool admits one active engine operation under the
+provisional 128 MiB WASI process model. The package manifest declares the
+Tokio runtime support used by the native oracle, so standalone all-feature
+checks do not depend on workspace feature unification. The
+[Git proof plan](GIT_PLAN.md) defines the 12 tasks, phase limits, performance
+gates, and source-size stop gates.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
@@ -117,7 +127,9 @@ records durable layout, sparse request counts, cache behavior, limits, and
 remaining engine work. The
 [`Git WASI wire protocol`](docs/evidence/git-wasi-wire-2026-09-04.md) records
 protocol behavior, exact fixtures, limits, `WASIp2` checks, and remaining host
-integration work.
+integration work. The
+[`Git fetch-pack writer`](docs/evidence/git-fetch-pack-2026-09-04.md) records
+task-2 behavior, validation, line counts, and the remaining connection work.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
 live AWS qualification goals.

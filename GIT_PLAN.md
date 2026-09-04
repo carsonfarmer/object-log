@@ -14,25 +14,29 @@ The core `object-log` crate remains independent from Git.
 
 ## Current state
 
-Revision `8d28839b27c0d0f6122f981f13f79412ca11e233` completes task 1B with four
-private, host-neutral foundations:
+Revision `b322985c616d948e7365739e3286baeaeb460acc` completes tasks 1 and 2 with
+four private, host-neutral foundations:
 
 | Module | Product lines | State |
 | --- | ---: | --- |
-| Pack normalization | 617 | Accepted |
-| Durable staging and sparse reads | 610 | Accepted |
+| Pack normalization | 618 | Accepted |
+| Durable staging, sparse reads, and fetch writing | 750 | Accepted |
 | Git wire protocol | 616 | Accepted |
 | Operation budgets | 205 | Accepted |
-| Total | 2,048 | Accepted |
+| Total | 2,189 | Accepted |
 
-The counts are raw Rust lines before each module's `#[cfg(test)]` section.
-The [architecture gate](docs/evidence/git-architecture-gate-2026-09-04.md)
-records task 1B acceptance and the current no-go decision. The
+The counts are raw Rust lines before each module's `#[cfg(test)]` section. Task
+2 added 141 product lines and 287 test lines. The
+[architecture gate](docs/evidence/git-architecture-gate-2026-09-04.md) records
+task-1 acceptance and the no-go decision at that revision. The
 [pack](docs/evidence/git-wasi-pack-2026-09-04.md),
 [durable reader](docs/evidence/git-wasi-durable-reader-2026-09-04.md), and
 [wire](docs/evidence/git-wasi-wire-2026-09-04.md) records contain the foundation
-behavior and local checks. The modules support SHA-1 and SHA-256 and pass
-native and WASIp2 checks without default features.
+behavior and local checks. The
+[fetch-pack record](docs/evidence/git-fetch-pack-2026-09-04.md) covers the
+task-2 writer. The modules support SHA-1 and SHA-256. The native crate and the
+no-default-feature WASIp2 target pass standalone checks. The manifest declares
+the Tokio runtime support used by the native oracle.
 
 The private modules are not connected through `Repository`. A real Git v2
 trial remains blocked until that connection exists.
@@ -70,10 +74,19 @@ code or measured runtime cost.
 
 ## API contract
 
-Keep the current public `Repository` and `PreparedPush` integration surface.
-Reuse the current public value types. Do not add public `Engine`, `Service`, or
-`Outcome` types. Packet parsing, graph traversal, pack creation, budgets, and
-object-log state remain private.
+Task 3 replaces the native-only public `Repository` signatures with one common
+public type for native and WASIp2. Its shared entry points are
+`Repository::open(&Log, ObjectFormat)` and `refs(&self)`. The shared API has no
+work directory or path output. `Repository` owns the exact `View`, refs,
+authenticated pack roots and sizes, `Operation`, and retained-state
+reservation. It does not retain standard indexes or a `Reader`. Each later
+object-reading command creates one private `Catalog` and `Reader`. This lets
+`ls-refs` avoid pack-index loads and avoids a self-reference. This is a
+pre-release API correction.
+
+Do not add public `Engine`, `Service`, `Outcome`, `Catalog`, or `Reader` types.
+Packet parsing, graph traversal, pack creation, budgets, and object-log state
+remain private. Receive-pack and its publication surface remain later tasks.
 
 The native HTTP and Spin adapters must call the same `Repository` path. The
 adapters can enforce smaller transport limits, but they cannot weaken the
@@ -176,12 +189,18 @@ the response.
    and add `CommitRef::len()`. This pre-release change lets the engine reserve
    exact checkpoint and tail bytes before concurrent reads and keeps one
    materialization path. Add exact-limit and limit-plus-one tests.
-2. Follow the private
-   [fetch-pack source gate](docs/evidence/git-fetch-pack-source-gate-2026-09-04.md).
-   Keep the format name v1. Avoid unrelated layout work, but allow a layout
-   change that reduces code or improves measured performance.
-3. Load one repository view through the existing `Repository` surface. Retain
-   refs, authenticated pack proofs, standard indexes, and one sparse reader.
+2. Complete at `b322985`: add the private bounded fetch-pack writer defined by
+   the [source gate](docs/evidence/git-fetch-pack-source-gate-2026-09-04.md).
+   Reuse validated compressed entries, materialize unsafe delta fallbacks, and
+   produce self-contained SHA-1 and SHA-256 packs. The
+   [implementation record](docs/evidence/git-fetch-pack-2026-09-04.md) contains
+   the checks and line counts.
+3. Replace the native-only signatures with one common public `Repository` for
+   native and WASIp2. Open it with `Repository::open(&Log, ObjectFormat)` and
+   expose refs through `refs(&self)`. Retain the exact `View`, refs,
+   authenticated pack roots and sizes, `Operation`, and retained-state
+   reservation. Create one private `Catalog` and `Reader` inside each later
+   object-reading command. Return no work directory or path.
 4. Add iterative commit, tree, and annotated-tag traversal. Enforce graph,
    object, work, call, transfer, and memory budgets in one place.
 5. Validate reachable wants and usable haves against one view. Compute the
@@ -290,16 +309,16 @@ Count product and test lines separately from revision `2ee2174`.
 | Tranche | Expected change | Stop gate |
 | --- | ---: | ---: |
 | Task 1: pack, durable, wire, and private budgets | Complete at 2,048 retained product lines | Retained product exceeds 2,050 |
-| Task 2 compressed-entry reuse | Add at most 160 net product lines and 450 test lines | Any new dependency, Cargo feature, public API, format-name change, or line-limit excess |
+| Task 2 compressed-entry reuse | Complete at +141 product lines and +287 test lines | Any new dependency, named crate feature, public API, format-name change, or line-limit excess |
 | Repository, graph, hybrid fetch, and receive | Add 900–1,225 | Added product exceeds 1,275 |
 | Native HTTP and Spin adapters | Add 180–280 | Added product exceeds 300 |
 | Tests | Add 1,600–2,400 | Report separately |
 
-At revision `8d28839`, the combined Git and HTTP implementation has 4,960 raw
-product lines. This count includes each `src/**/*.rs` line before its top-level
-`#[cfg(test)] mod tests` section. The native deletion target is 2,165 product
-lines. After that deletion, the expected Git, HTTP, and Spin total is
-3,480–4,125 product lines. Stop if it exceeds 4,150.
+At revision `b322985`, the private replacement foundation has 2,189 raw product
+lines. The combined Git and HTTP implementation has 4,970 raw product lines.
+Task 2 stayed within its separate source-size gate. The native deletion target
+remains 2,165 product lines. After that deletion, the expected Git, HTTP, and
+Spin total is 3,480–4,125 product lines. Stop if it exceeds 4,150.
 
 Do not continue past a missed intermediate gate because a later deletion might
 offset it. Reduce the current tranche before integration.
