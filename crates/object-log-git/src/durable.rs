@@ -1523,6 +1523,7 @@ mod tests {
                     .map(|item| item.0)
                     .collect::<Vec<_>>();
                 let entries = indexed_entries(&fixture.normalized, format)?;
+                assert!(entries.iter().any(|entry| entry.2 >= 2));
                 let delta = entries
                     .iter()
                     .find(|entry| entry.1.is_delta())
@@ -1558,6 +1559,22 @@ mod tests {
                 verify_fetch_pack(&fallback, format, &[delta])?;
                 assert!(!inspect_pack(&fallback, format)?[0].0.is_delta());
             }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_pack_writes_empty_sha1_and_sha256_packs() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+            let name = format!("empty-fetch-{format:?}");
+            let (log, view) = open(store, &name).await?;
+            let fixture = pack_fixture(format, Vec::new(), false, false)?;
+            let (descriptor, root) =
+                stage(&test_operation(), &log, &view, fixture.normalized).await?;
+            let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+            let output = Reader::new(&log, &view, &catalog).fetch_pack(&[]).await?;
+            verify_fetch_pack(&output, format, &[])?;
         }
         Ok(())
     }
