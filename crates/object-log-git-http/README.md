@@ -14,8 +14,8 @@ The server supports these routes:
 
 It accepts identity and gzip request bodies. Axum and Hyper handle fixed-length
 and chunked requests. Upload responses stream from an anonymous temporary file
-after pack generation succeeds. This prevents a false `200` response when pack
-generation fails. Discovery and receive reports stay below their protocol
+after pack generation succeeds, so pack generation cannot fail after an HTTP
+`200` response starts. Discovery and receive reports stay below their protocol
 limits and use memory.
 
 Run the server with an existing S3 bucket:
@@ -38,13 +38,14 @@ path sends the complete reachable object set. It accepts a requested object
 that was reachable in the current durable repository even when a concurrent
 push changed the advertised ref before the POST arrived.
 
-A receive result stays successful only after durable publication. A rejected
-push returns a Git protocol rejection with HTTP `200`. An uncertain or expired
-publication returns HTTP `503`. The client must fetch fresh refs before it
-decides whether its requested ref transaction became visible. The server does
-not retain the object-log recovery token. This loses exact historical attempt
-classification, but it does not report false success. Staged objects that did
-not publish remain eligible for object-log garbage collection.
+The server sends a successful receive result only after durable publication. A
+rejected push returns a Git protocol rejection with HTTP `200`. An uncertain or
+expired publication returns HTTP `503`. The client must fetch fresh refs before
+it decides whether its requested ref transaction became visible. The server
+does not retain the object-log recovery token, so it cannot classify a
+historical attempt exactly. It never reports success without confirmed durable
+publication. Staged objects that did not publish remain eligible for object-log
+garbage collection.
 
 The host limits active Git work, encoded and decoded request data, packet-line
 counts, pack bytes, and idle body time. Active operations continue under a task

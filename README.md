@@ -3,13 +3,13 @@
 [![Rust CI](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml/badge.svg)](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml)
 
 `object-log` is an experimental Rust library for a small, generic,
-object-storage-backed write-ahead log. Higher-level storage systems use its
-public API. The key-value, `SQLite`, and Git crates are API proofs.
+object-storage-backed write-ahead log. The key-value, `SQLite`, and Git crates
+test its public API.
 
 Durable Object behavior, tenancy, routing, and actor or service ownership are
 out of scope.
 
-The durable model is small:
+The durable model has:
 
 - One mutable `index.cbor` object for each logical log.
 - Immutable WAL entries, payloads, reference nodes, checkpoints, and
@@ -38,49 +38,46 @@ The current durable format is v1. Before the first release, its byte layout can
 change when a different layout makes the design smaller or better. The project
 does not provide compatibility readers for earlier development layouts.
 
-The project is independent from Spin. The
-[`object-log-kv`](crates/object-log-kv),
-[`object-log-sqlite`](crates/object-log-sqlite), and
-[`object-log-git`](crates/object-log-git) proof crates use only the public core
-API. The `SQLite` proof stores a complete first snapshot and later committed WAL
-ranges in the same log contract. Its tests include in-memory storage, injected
-faults, and garbage collection. A separate local acceptance test recovers an
-exact 1,000-record WAL tail. The repository also has Criterion benchmarks and
-an opt-in loopback `MinIO` test.
+The project is independent from Spin. Its proof crates use only the public core
+API:
 
-The Git proof implements strict refs and records, SHA-1 and SHA-256 pack
-normalization, thin-pack normalization, bounded chunk storage, reachable-object
-validation, atomic ref publication, lost-response recovery, and cold recovery
-into a standard bare repository. Its checkpoint keeps each pack that contains a
-live object. Its collection test removes more than 100 dead physical objects,
-then cold-recovers the live repository and passes strict Git validation. Its
-benchmarks, request audit, and pinned `MinIO` lifecycle are complete.
+- [`object-log-kv`](crates/object-log-kv) tests a key-value store.
+- [`object-log-sqlite`](crates/object-log-sqlite) stores a complete first
+  snapshot and later committed WAL ranges. Its tests cover in-memory storage,
+  injected faults, garbage collection, and exact recovery of a 1,000-record WAL
+  tail. It also has Criterion benchmarks and an opt-in loopback `MinIO` test.
+- [`object-log-git`](crates/object-log-git) implements strict refs and records,
+  SHA-1 and SHA-256 pack normalization, thin-pack normalization, bounded chunk
+  storage, reachable-object validation, atomic ref publication, lost-response
+  recovery, and cold recovery into a standard bare repository. Its checkpoint
+  keeps each pack that contains a live object. Its collection test removes more
+  than 100 dead physical objects, cold-recovers the live repository, and passes
+  strict Git validation. The proof also has benchmarks, a request audit, and a
+  pinned `MinIO` lifecycle.
+- [`object-log-git-http`](crates/object-log-git-http) implements the four Git
+  smart HTTP protocol v0 operations for SHA-1 repositories. Its native Axum
+  server has one fixed `/repo` mapping, bounded gzip and identity request
+  streams, chunked upload responses, explicit HTTP errors, and S3-compatible
+  configuration. An unchanged Git client pushes, clones, fetches, creates and
+  deletes branches and tags, rejects a non-fast-forward push, and passes
+  `git fsck --strict`.
 
-The `object-log-git-http` crate implements the four Git smart HTTP protocol v0
-operations for SHA-1 repositories. Its native Axum server has one fixed `/repo`
-mapping, bounded gzip and identity request streams, chunked upload responses,
-explicit HTTP errors, and S3-compatible configuration. An unchanged Git client
-pushes, clones, fetches, creates and deletes branches and tags, rejects a
-non-fast-forward push, and passes `git fsck --strict`.
-
-See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
-[SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the
-current contracts. The
-[`StagedObject` local evidence](docs/evidence/staged-objects-local-2026-09-03.md)
+The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
+[SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
+[`StagedObject` evidence](docs/evidence/staged-objects-local-2026-09-03.md)
 records request counts, transferred bytes, and recovery checks. The
-[`SQLite` local evidence](docs/evidence/sqlite-local-2026-09-03.md) records the
-tests, local measurements, and remaining qualification work. The
-[`Git` local evidence](docs/evidence/git-local-2026-09-03.md) records its
-storage measurements and `MinIO` lifecycle. The
+[`SQLite` evidence](docs/evidence/sqlite-local-2026-09-03.md) records tests,
+local measurements, and remaining qualification work. The
+[`Git` evidence](docs/evidence/git-local-2026-09-03.md) records storage
+measurements and the `MinIO` lifecycle. The
 [`Git HTTP` evidence](docs/evidence/git-http-local-2026-09-03.md) records the
 protocol proof. The
 [`Git server` evidence](docs/evidence/git-server-local-2026-09-03.md) records
-the native host tests and limits.
+native host tests and limits.
 
-See [docs/follow-ons.md](docs/follow-ons.md) for the ordered Git, WASI
-filesystem, and live AWS qualification goals. The
-[Git example plan](GIT_PLAN.md) defines a minimal serverless repository over
-immutable packs and atomic ref transactions.
+[docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
+live AWS qualification goals. The [Git example plan](GIT_PLAN.md) defines a
+minimal serverless repository over immutable packs and atomic ref transactions.
 
 [GitHub issue #11](https://github.com/carsonfarmer/object-log/issues/11) is the
 current index of active limitations and follow-on work. Each linked issue has

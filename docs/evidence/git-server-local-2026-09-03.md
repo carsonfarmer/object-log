@@ -2,9 +2,9 @@
 
 ## Result
 
-At `9057ae8`, `object-log-git-http` provides a native Axum server for one
-object-log-backed repository at `/repo`. Product code does not run Git or link
-to C Git. The tests use an unchanged Git 2.54.0 client.
+At `9057ae8`, `object-log-git-http` hosts one object-log-backed repository at
+`/repo` with Axum. Product code does not run Git or link to C Git. The tests use
+an unchanged Git 2.54.0 client.
 
 The local suite passed eight unit tests and three loopback tests. It covers:
 
@@ -59,15 +59,15 @@ Git's receive report with HTTP `200`.
 A receive operation returns success only after durable publication. An
 uncertain or expired result returns `503`. A fresh ref advertisement tells the
 client whether its requested Git state is visible. The server does not retain
-or disclose the recovery token. It loses exact classification of the old HTTP
-attempt, but it does not send false success. Unpublished staged objects remain
-eligible for object-log collection.
+or disclose the recovery token, so it cannot classify the old HTTP attempt
+exactly. It sends success only after confirmed durable publication. Unpublished
+staged objects remain eligible for object-log collection.
 
 Each active Git operation holds one semaphore permit. Admission returns `503`
-instead of waiting when all permits are in use. The upload response owns its
-permit and temporary file until the body reaches EOF or is dropped. A unit test
-checks permit retention and release. Work tasks stay tracked if their handler
-is canceled. Graceful shutdown waits for those work tasks.
+when all permits are in use. The upload response owns its permit and temporary
+file until the body reaches EOF or is dropped. A unit test checks permit
+retention and release. Work tasks remain tracked after handler cancellation.
+Graceful shutdown waits for those work tasks.
 
 The host applies 60-second request-body and response-body idle timeouts. It does
 not impose a whole-operation timeout that could abandon publication. A front

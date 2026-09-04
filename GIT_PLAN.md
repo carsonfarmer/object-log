@@ -2,9 +2,8 @@
 
 ## Outcome
 
-`object-log` is the product. It is a small, generic, object-storage-backed WAL
-for higher-level storage systems. The `object-log-git` crate is one proof of
-its public API.
+`object-log` is a small, generic, object-storage-backed WAL for higher-level
+storage systems. The `object-log-git` crate tests its public API.
 
 The native Git storage adapter accepts parsed ref commands and an optional pack
 path. It validates both inputs, publishes one atomic object-log update, and
@@ -14,18 +13,15 @@ only the public `object-log` API.
 The separate `object-log-git-http` crate tests smart HTTP over this storage
 adapter. The core WAL does not contain Git protocol code or Git libraries.
 
-This goal follows the local SQLite demonstration. The cross-example API review
-in issue #13 follows this goal.
-
 ## Library choice
 
 Use `gix` and `gix-pack` with pure-Rust features. They provide pack parsing,
 object access, reference validation, and repository materialization. The
 adapter does not run a Git executable and does not use C FFI.
 
-The first target is a native serverless function or container with disposable
-local storage. This includes Linux services that provide a temporary directory.
-The adapter can perform blocking pack and repository work on a bounded worker.
+The current target is a native serverless function or container with disposable
+local storage. This includes Linux services with a temporary directory. The
+adapter can perform blocking pack and repository work on a bounded worker.
 
 The current `gix` storage path does not work as a WASI guest. Its high-level
 pack path uses memory maps, which `memmap2` does not support on WASI. The
@@ -61,7 +57,7 @@ is opaque. Its recovery token identifies the exact publication attempt.
 `publish` performs the conditional publication. The core `Log::resume` method
 resolves a lost response from the recovery token without another pack upload.
 
-The first crate supports SHA-1 and SHA-256 repositories. It supports direct refs
+The adapter supports SHA-1 and SHA-256 repositories. It supports direct refs
 under `refs/heads/` and `refs/tags/`, plus one configured symbolic `HEAD`. It
 rejects other symbolic refs, shallow state, alternates, and invalid object
 graphs. It disables replacement objects and does not run Git hooks.
@@ -91,8 +87,8 @@ checkpoints remove dead packs from durable state. They do not rewrite mixed
 live and dead packs. Live pack count and recovery bytes can still grow until a
 later pack-compaction feature rewrites those packs.
 
-Durable Object behavior, tenancy, routing, and actor or service ownership are
-out of scope. This proof does not add them to the WAL.
+Durable Object behavior, tenancy, routing, and actor or service ownership remain
+outside this work.
 
 ## Smart HTTP boundary
 
@@ -110,8 +106,8 @@ creation and deletion, and non-fast-forward rejection with an unmodified Git
 client. Product code does not invoke Git. The test client uses the standard Git
 program.
 
-No reviewed Rust Git server crate exposes the required publication boundary.
-The available crates update local refs before they return success, require a Git
+None of the reviewed Rust Git server crates exposes the required publication
+boundary. They update local refs before they return success, require a Git
 process, support only SHA-1, or include a much larger server policy surface. The
 HTTP proof uses `gix-packetline` for framing and the existing `gix` and
 `gix-pack` crates for Git data. Re-evaluate server libraries when one can return
@@ -155,19 +151,19 @@ unreachable bytes from a pack that also contains live objects.
 
 ## Current status
 
-The native storage proof, request audit, benchmarks, pinned `MinIO` lifecycle,
-checkpoint, collection, and local evidence are complete. The local protocol v0
-proof passes for SHA-1. Its unmodified-client loopback covers the accepted
-operations and passes strict Git validation.
+The native storage proof has a request audit, benchmarks, a pinned `MinIO`
+lifecycle, checkpoint and collection tests, and local evidence. The local
+protocol v0 proof passes for SHA-1. Its unmodified-client loopback covers the
+accepted operations and passes strict Git validation.
 
-The native HTTP host is complete for the accepted local boundary. The next
-product tranche is the cross-example API and simplicity review in issue #13.
-Live provider qualification remains separate.
+The native HTTP host passes the accepted local tests. Issue #13 tracks the next
+cross-example API and simplicity review. Live provider qualification remains
+separate.
 
 ## Limits
 
 Keep Git policy outside the generic log. Use one repository for each log and one
-push for each publication. The current host has one fixed repository and does
+push for each publication. The current host has one fixed repository. It does
 not provide authentication, TLS, or tenant routing. A front proxy must limit
 header bytes before Hyper parses them.
 
@@ -178,9 +174,6 @@ live AWS work, and a WASI Git adapter remain deferred. Recovery has no aggregate
 byte quota. A later quota needs a maintenance path that can checkpoint or
 collect an oversized repository.
 
-A Spin guest is not the first server proof. The current Git object database and
-pack writer do not support its WASI path, and the guest has no object-storage
-backend for this API.
-
-Durable Object behavior, tenancy, routing, and actor or service ownership are
-not goals for this project.
+The first server proof uses native Rust. The current Git object database and
+pack writer do not support its WASI path. A Spin guest also has no
+object-storage backend for this API.
