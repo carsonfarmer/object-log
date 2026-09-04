@@ -311,10 +311,6 @@ fn ref_name(value: &[u8]) -> Result<(FullName, RefKind), Error> {
     Ok((name, kind))
 }
 
-pub(crate) fn validate_ref_name(value: &[u8]) -> Result<(), Error> {
-    ref_name(value).map(|_| ())
-}
-
 fn verify_target(repo: &gix::Repository, kind: RefKind, target: ObjectId) -> Result<(), Error> {
     match kind {
         RefKind::Branch => repo.find_commit(target).map(|_| ()).map_err(error),
@@ -438,7 +434,7 @@ mod tests {
 
     #[test]
     fn enforces_ref_and_branch_policy() -> Result<(), Box<dyn StdError>> {
-        assert!(validate_ref_name(b"refs/tags/\xff").is_err());
+        assert!(!crate::is_valid_ref_name(b"refs/tags/\xff"));
         let fixture = fixture("sha1", ObjectFormat::Sha1)?;
         let path = fixture.root.path().join("bare");
         let repo = init(&path, ObjectFormat::Sha1)?;

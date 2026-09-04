@@ -8,17 +8,20 @@ license = "Apache-2.0"
 publish = false
 
 [features]
-default = []
-aws = ["object_store/aws"]
+default = ["native-oracle"]
+native-oracle = ["dep:gix", "dep:gix-pack", "dep:tokio"]
+aws = ["native-oracle", "object_store/aws"]
 
 [dependencies]
+bstr = { version = "1.12", default-features = false, features = ["std"] }
 bytes = "1.10"
-gix = { version = "0.87.1", default-features = false, features = ["revision", "sha1", "sha256"] }
-gix-pack = { version = "0.74.2", default-features = false, features = ["generate", "sha1", "sha256", "streaming-input"] }
+gix = { version = "0.87.1", default-features = false, features = ["revision", "sha1", "sha256"], optional = true }
+gix-pack = { version = "0.74.2", default-features = false, features = ["generate", "sha1", "sha256", "streaming-input"], optional = true }
+gix-validate = "0.11.4"
 minicbor = { version = "2.3", features = ["derive", "std"] }
 object-log = { path = "../.." }
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["fs", "io-util"] }
+tokio = { version = "1.47", features = ["fs", "io-util"], optional = true }
 
 [dev-dependencies]
 criterion = "0.7"

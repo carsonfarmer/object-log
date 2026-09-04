@@ -1,9 +1,10 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-performance-acceptance git-minio-test git-http-minio-test
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-wasi-check git-performance-acceptance git-minio-test git-http-minio-test
 
 check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo test --workspace --all-features
+	$(MAKE) git-wasi-check
 
 test:
 	cargo test --workspace --all-features
@@ -29,6 +30,9 @@ gc-acceptance:
 
 git-bench:
 	cargo bench -p object-log-git --bench git
+
+git-wasi-check:
+	cargo +1.97.1 check -p object-log-git --lib --target wasm32-wasip2 --no-default-features
 
 git-performance-acceptance:
 	cargo test -p object-log-git --test performance_acceptance git_request_and_byte_accounting -- --ignored --exact --nocapture

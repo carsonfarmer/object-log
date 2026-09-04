@@ -2,12 +2,18 @@
 
 #![deny(missing_docs, unsafe_code)]
 
+#[cfg(feature = "native-oracle")]
 mod format;
+#[cfg(feature = "native-oracle")]
 mod git;
+#[cfg(feature = "native-oracle")]
 mod repository;
+#[cfg(feature = "native-oracle")]
 mod state;
+#[cfg(feature = "native-oracle")]
 mod storage;
 
+#[cfg(feature = "native-oracle")]
 pub use repository::{PreparedPush, Repository};
 
 use std::{collections::BTreeMap, fmt};
@@ -75,6 +81,7 @@ impl ObjectId {
     }
 
     /// Returns the ID algorithm.
+    #[cfg(feature = "native-oracle")]
     pub(crate) const fn format(self) -> ObjectFormat {
         match self.0 {
             Digest::Sha1(_) => ObjectFormat::Sha1,
@@ -145,7 +152,7 @@ impl RefUpdate {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        if git::validate_ref_name(&self.name).is_err() {
+        if !is_valid_ref_name(&self.name) {
             return Err(Error::InvalidRefName);
         }
         if self.expected == self.target {
@@ -178,6 +185,7 @@ pub enum Error {
     #[error("invalid Git pack: {0}")]
     InvalidPack(String),
     /// A local repository uses unsupported state or configuration.
+    #[cfg(feature = "native-oracle")]
     #[error("unsupported Git repository")]
     UnsupportedRepository,
     /// A ref or object target is invalid.
@@ -193,9 +201,11 @@ pub enum Error {
     #[error("invalid reachable Git object graph: {0}")]
     InvalidObjectGraph(&'static str),
     /// The local work directory cannot be used as a new disposable cache.
+    #[cfg(feature = "native-oracle")]
     #[error("Git work directory must not exist or must be empty")]
     WorkDirectoryNotEmpty,
     /// A local Git operation failed.
+    #[cfg(feature = "native-oracle")]
     #[error("Git operation failed: {0}")]
     Git(String),
     /// Pack transfer or validation failed.
@@ -205,10 +215,12 @@ pub enum Error {
     #[error(transparent)]
     ObjectLog(#[from] object_log::Error),
     /// A blocking local Git task stopped before it returned a result.
+    #[cfg(feature = "native-oracle")]
     #[error("local Git task stopped")]
     BlockingTask,
 }
 
+#[cfg(feature = "native-oracle")]
 impl From<git::Error> for Error {
     fn from(error: git::Error) -> Self {
         match error {
@@ -226,6 +238,7 @@ impl From<git::Error> for Error {
     }
 }
 
+#[cfg(feature = "native-oracle")]
 impl From<storage::Error> for Error {
     fn from(error: storage::Error) -> Self {
         match error {
@@ -243,6 +256,12 @@ fn nibble(byte: u8) -> Result<u8, Error> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(Error::InvalidObjectId),
     }
+}
+
+fn is_valid_ref_name(value: &[u8]) -> bool {
+    (value.starts_with(b"refs/heads/") || value.starts_with(b"refs/tags/"))
+        && std::str::from_utf8(value).is_ok()
+        && gix_validate::reference::name(bstr::BStr::new(value)).is_ok()
 }
 
 #[cfg(test)]

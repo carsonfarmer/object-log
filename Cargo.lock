@@ -2228,11 +2228,13 @@ dependencies = [
 name = "object-log-git"
 version = "0.1.0"
 dependencies = [
+ "bstr",
  "bytes",
  "criterion",
  "futures",
  "gix",
  "gix-pack",
+ "gix-validate",
  "minicbor",
  "object-log",
  "object_store",

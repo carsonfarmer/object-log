@@ -20,7 +20,7 @@ use crate::{Error as RecordError, ObjectFormat, ObjectId as RecordObjectId};
 
 mod local;
 
-pub(crate) use local::{init, materialize, open, validate_ref_name, validate_snapshot};
+pub(crate) use local::{init, materialize, open, validate_snapshot};
 
 const PACK_HEADER_LEN: usize = 12;
 const MAX_PACK_BYTES: usize = 512 * 1024 * 1024;
