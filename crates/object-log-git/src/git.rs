@@ -11,6 +11,9 @@ use crate::{Error as RecordError, ObjectFormat, ObjectId as RecordObjectId};
 
 mod local;
 
+#[allow(unused_imports, reason = "used by the pending repository adapter")]
+pub(crate) use local::{init, materialize, open, validate_ref_name};
+
 const PACK_HEADER_LEN: usize = 12;
 const MAX_PACK_BYTES: usize = 512 * 1024 * 1024;
 const MAX_OBJECT_BYTES: usize = 256 * 1024 * 1024;
@@ -69,6 +72,8 @@ pub(crate) enum Error {
     StaleReference,
     #[error("branch update is not a fast-forward")]
     NonFastForward,
+    #[error("invalid reachable object graph: {0}")]
+    InvalidObjectGraph(&'static str),
     #[error("repository operation failed: {0}")]
     Repository(String),
     #[error("I/O failed for {path}: {source}")]
@@ -91,6 +96,19 @@ pub(crate) struct IndexedPack {
     pub(crate) objects: Vec<ObjectId>,
 }
 
+pub(crate) fn prepare_push(
+    path: &Path,
+    format: ObjectFormat,
+    current: &crate::RefSnapshot,
+    updates: &[crate::RefUpdate],
+    pack: Option<&Path>,
+) -> Result<Option<NormalizedPack>, Error> {
+    let repo = open(path, format)?;
+    let pack = pack.map(|path| normalize_pack(&repo, path)).transpose()?;
+    local::apply_at(&repo, current, updates)?;
+    Ok(pack)
+}
+
 /// Validate and normalize a received pack. Thin-pack bases come from `repo`.
 /// The normalized, self-contained pack is also installed in `repo`.
 pub(crate) fn normalize_pack(repo: &gix::Repository, path: &Path) -> Result<NormalizedPack, Error> {
@@ -99,6 +117,18 @@ pub(crate) fn normalize_pack(repo: &gix::Repository, path: &Path) -> Result<Norm
         .data_path
         .clone()
         .ok_or_else(|| Error::Pack("gix did not return a pack path".into()))?;
+    let length = fs::metadata(&path)
+        .map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?
+        .len();
+    if length > MAX_PACK_BYTES as u64 {
+        remove_keep(outcome.keep_path.as_deref())?;
+        return Err(Error::InvalidPack(
+            "normalized pack exceeds the byte limit".into(),
+        ));
+    }
     let indexed = indexed_outcome(repo, &outcome);
     let cleanup = remove_keep(outcome.keep_path.as_deref());
     let indexed = indexed?;
@@ -108,6 +138,18 @@ pub(crate) fn normalize_pack(repo: &gix::Repository, path: &Path) -> Result<Norm
         path,
         objects: indexed.objects,
     })
+}
+
+pub(crate) fn verify_pack_checksum(path: &Path, expected: RecordObjectId) -> Result<(), Error> {
+    let expected = ObjectId::try_from(expected).map_err(|_| Error::InvalidReference)?;
+    let pack = gix_pack::data::File::at(path, expected.kind())
+        .map_err(|error| Error::InvalidPack(error.to_string()))?;
+    let actual = pack
+        .verify_checksum(&mut gix::progress::Discard, &AtomicBool::new(false))
+        .map_err(|error| Error::InvalidPack(error.to_string()))?;
+    (actual == expected)
+        .then_some(())
+        .ok_or_else(|| Error::InvalidPack("pack checksum does not match its ID".into()))
 }
 
 /// Install and index a self-contained pack that was returned by `normalize_pack`.
@@ -294,6 +336,7 @@ mod tests {
             let source = bare(fixture.path().join("source"), hash)?;
             let normalized = normalize_pack(&source, &fixture.pack)?;
             assert!(!normalized.objects.is_empty());
+            verify_pack_checksum(&normalized.path, RecordObjectId::try_from(normalized.id)?)?;
             verify_object_access(&source, &normalized.objects)?;
             let record_id = RecordObjectId::try_from(normalized.id)?;
             assert_eq!(ObjectId::try_from(record_id)?, normalized.id);

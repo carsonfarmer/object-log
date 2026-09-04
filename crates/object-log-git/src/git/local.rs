@@ -13,6 +13,8 @@ use super::Error;
 use crate::{ObjectFormat, RefSnapshot, RefUpdate};
 
 const HEAD: &str = "refs/heads/main";
+const MAX_GRAPH_DEPTH: usize = 65_536;
+const MAX_GRAPH_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum RefKind {
@@ -20,14 +22,19 @@ enum RefKind {
     Tag,
 }
 
-pub(super) fn init(path: &Path, format: ObjectFormat) -> Result<gix::Repository, Error> {
+pub(crate) fn init(path: &Path, format: ObjectFormat) -> Result<gix::Repository, Error> {
     let options = gix::create::Options {
         object_hash: Some(format.into()),
         ..Default::default()
     };
-    let repo = gix::ThreadSafeRepository::init(path, gix::create::Kind::Bare, options)
-        .map_err(error)?
-        .to_thread_local();
+    let repo = gix::ThreadSafeRepository::init_opts(
+        path,
+        gix::create::Kind::Bare,
+        options,
+        open_options(),
+    )
+    .map_err(error)?
+    .to_thread_local();
     let head = FullName::try_from(HEAD).map_err(error)?;
     commit(
         &repo,
@@ -45,24 +52,43 @@ pub(super) fn init(path: &Path, format: ObjectFormat) -> Result<gix::Repository,
     Ok(repo)
 }
 
-pub(super) fn open(path: &Path, format: ObjectFormat) -> Result<gix::Repository, Error> {
-    let options = gix::open::Options::isolated()
-        .strict_config(true)
-        .open_path_as_is(true);
-    let repo = gix::open_opts(path, options).map_err(error)?;
+pub(crate) fn open(path: &Path, format: ObjectFormat) -> Result<gix::Repository, Error> {
+    let repo = gix::open_opts(path, open_options()).map_err(error)?;
     validate_repository(&repo, format)?;
     Ok(repo)
 }
 
 pub(super) fn apply(repo: &gix::Repository, updates: &[RefUpdate]) -> Result<(), Error> {
+    apply_at(repo, &snapshot(repo)?, updates)
+}
+
+pub(super) fn apply_at(
+    repo: &gix::Repository,
+    current: &RefSnapshot,
+    updates: &[RefUpdate],
+) -> Result<(), Error> {
+    verify_updates(repo, current, updates)?;
     let edits = updates
         .iter()
-        .map(|update| prepare(repo, update))
+        .map(|update| {
+            let (name, _) = ref_name(&update.name)?;
+            let previous = update
+                .expected
+                .map(ObjectId::try_from)
+                .transpose()
+                .map_err(|_| Error::InvalidReference)?;
+            let target = update
+                .target
+                .map(ObjectId::try_from)
+                .transpose()
+                .map_err(|_| Error::InvalidReference)?;
+            edit(name, previous, target)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     commit(repo, edits)
 }
 
-pub(super) fn materialize(repo: &gix::Repository, desired: &RefSnapshot) -> Result<(), Error> {
+pub(crate) fn materialize(repo: &gix::Repository, desired: &RefSnapshot) -> Result<(), Error> {
     let current = snapshot(repo)?;
     let mut edits = Vec::with_capacity(current.len() + desired.len());
     for (name, target) in desired {
@@ -92,6 +118,37 @@ pub(super) fn materialize(repo: &gix::Repository, desired: &RefSnapshot) -> Resu
     commit(repo, edits)
 }
 
+pub(crate) fn verify_updates(
+    repo: &gix::Repository,
+    current: &RefSnapshot,
+    updates: &[RefUpdate],
+) -> Result<(), Error> {
+    let mut roots = Vec::with_capacity(updates.len());
+    for update in updates {
+        let (_, kind) = ref_name(&update.name)?;
+        if current.get(update.name.as_slice()).copied() != update.expected {
+            return Err(Error::StaleReference);
+        }
+        let Some(target) = update.target else {
+            continue;
+        };
+        let target = ObjectId::try_from(target).map_err(|_| Error::InvalidReference)?;
+        if matches!(kind, RefKind::Branch)
+            && let Some(old) = update.expected
+            && !is_ancestor(
+                repo,
+                ObjectId::try_from(old).map_err(|_| Error::InvalidReference)?,
+                target,
+            )?
+        {
+            return Err(Error::NonFastForward);
+        }
+        let expected = matches!(kind, RefKind::Branch).then_some(gix::objs::Kind::Commit);
+        roots.push((target, expected));
+    }
+    verify_graph(repo, roots)
+}
+
 pub(super) fn snapshot(repo: &gix::Repository) -> Result<RefSnapshot, Error> {
     let platform = repo.references().map_err(error)?;
     let references = platform.all().map_err(error)?;
@@ -114,6 +171,7 @@ fn validate_repository(repo: &gix::Repository, format: ObjectFormat) -> Result<(
     if !repo.is_bare() || repo.object_hash() != format.into() || repo.is_shallow() {
         return Err(Error::UnsupportedRepository);
     }
+    reject_alternates(repo)?;
     let head = repo.head_name().map_err(error)?;
     if head.as_ref().map(FullName::as_bstr).map(AsRef::as_ref) != Some(HEAD.as_bytes()) {
         return Err(Error::UnsupportedRepository);
@@ -122,35 +180,102 @@ fn validate_repository(repo: &gix::Repository, format: ObjectFormat) -> Result<(
     Ok(())
 }
 
-fn prepare(repo: &gix::Repository, update: &RefUpdate) -> Result<RefEdit, Error> {
-    let (name, kind) = ref_name(&update.name)?;
-    let current = direct_target(repo, &name)?;
-    let expected = update
-        .expected
-        .map(ObjectId::try_from)
-        .transpose()
-        .map_err(|_| Error::InvalidReference)?;
-    if current != expected {
-        return Err(Error::StaleReference);
-    }
-    let target = update
-        .target
-        .map(ObjectId::try_from)
-        .transpose()
-        .map_err(|_| Error::InvalidReference)?;
-    if let Some(target) = target {
-        verify_target(repo, kind, target)?;
-        if matches!(kind, RefKind::Branch)
-            && let Some(current) = current
-            && !is_ancestor(repo, current, target)?
+fn open_options() -> gix::open::Options {
+    gix::open::Options::isolated()
+        .strict_config(true)
+        .open_path_as_is(true)
+        .object_store_slots(gix::odb::store::init::Slots::Given(1_024))
+        .config_overrides([
+            format!("gitoxide.objects.allocLimit={}", super::MAX_OBJECT_BYTES),
+            "gitoxide.objects.noReplace=true".to_owned(),
+        ])
+}
+
+fn reject_alternates(repo: &gix::Repository) -> Result<(), Error> {
+    for name in ["alternates", "http-alternates"] {
+        let path = repo.git_dir().join("objects/info").join(name);
+        if path
+            .try_exists()
+            .map_err(|source| Error::Io { path, source })?
         {
-            return Err(Error::NonFastForward);
+            return Err(Error::UnsupportedRepository);
         }
     }
-    edit(name, current, target)
+    Ok(())
+}
+
+fn verify_graph(
+    repo: &gix::Repository,
+    roots: Vec<(ObjectId, Option<gix::objs::Kind>)>,
+) -> Result<(), Error> {
+    let mut pending = roots
+        .into_iter()
+        .map(|(id, kind)| (id, kind, 0))
+        .collect::<Vec<_>>();
+    let mut seen = BTreeMap::new();
+    let mut bytes = 0_u64;
+    while let Some((id, expected, depth)) = pending.pop() {
+        if depth > MAX_GRAPH_DEPTH {
+            return Err(Error::InvalidObjectGraph("depth limit exceeded"));
+        }
+        if let Some(kind) = seen.get(&id) {
+            if expected.is_some_and(|expected| expected != *kind) {
+                return Err(Error::InvalidObjectGraph(
+                    "object kind conflicts with its edge",
+                ));
+            }
+            continue;
+        }
+        if seen.len() >= super::MAX_OBJECTS as usize {
+            return Err(Error::InvalidObjectGraph("object count limit exceeded"));
+        }
+        let object = repo.find_object(id).map_err(error)?;
+        if object.data.len() > super::MAX_OBJECT_BYTES
+            || expected.is_some_and(|expected| expected != object.kind)
+        {
+            return Err(Error::InvalidObjectGraph("object kind or size is invalid"));
+        }
+        bytes = bytes
+            .checked_add(object.data.len() as u64)
+            .filter(|bytes| *bytes <= MAX_GRAPH_BYTES)
+            .ok_or(Error::InvalidObjectGraph("decoded byte limit exceeded"))?;
+        let data = gix::objs::Data::new(&object.data, object.kind, id.kind());
+        data.verify_checksum(id.as_ref()).map_err(error)?;
+        seen.insert(id, object.kind);
+        let next = depth + 1;
+        match data.decode().map_err(error)? {
+            gix::objs::ObjectRef::Commit(commit) => {
+                pending.push((commit.tree(), Some(gix::objs::Kind::Tree), next));
+                pending.extend(
+                    commit
+                        .parents()
+                        .map(|id| (id, Some(gix::objs::Kind::Commit), next)),
+                );
+            }
+            gix::objs::ObjectRef::Tree(tree) => {
+                pending.extend(tree.entries.into_iter().filter_map(|entry| {
+                    use gix::objs::tree::EntryKind;
+                    let kind = match entry.mode.kind() {
+                        EntryKind::Tree => gix::objs::Kind::Tree,
+                        EntryKind::Blob | EntryKind::BlobExecutable | EntryKind::Link => {
+                            gix::objs::Kind::Blob
+                        }
+                        EntryKind::Commit => return None,
+                    };
+                    Some((entry.oid.to_owned(), Some(kind), next))
+                }));
+            }
+            gix::objs::ObjectRef::Tag(tag) => {
+                pending.push((tag.target(), Some(tag.target_kind), next));
+            }
+            gix::objs::ObjectRef::Blob(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn ref_name(value: &[u8]) -> Result<(FullName, RefKind), Error> {
+    std::str::from_utf8(value).map_err(|_| Error::InvalidReference)?;
     let name = FullName::try_from(BString::from(value)).map_err(|_| Error::InvalidReference)?;
     let value: &[u8] = name.as_bstr().as_ref();
     let kind = if value.starts_with(b"refs/heads/") {
@@ -163,16 +288,8 @@ fn ref_name(value: &[u8]) -> Result<(FullName, RefKind), Error> {
     Ok((name, kind))
 }
 
-fn direct_target(repo: &gix::Repository, name: &FullName) -> Result<Option<ObjectId>, Error> {
-    repo.try_find_reference(name)
-        .map_err(error)?
-        .map(|reference| {
-            reference
-                .try_id()
-                .map(gix::Id::detach)
-                .ok_or(Error::UnsupportedRepository)
-        })
-        .transpose()
+pub(crate) fn validate_ref_name(value: &[u8]) -> Result<(), Error> {
+    ref_name(value).map(|_| ())
 }
 
 fn verify_target(repo: &gix::Repository, kind: RefKind, target: ObjectId) -> Result<(), Error> {
@@ -244,6 +361,15 @@ mod tests {
             let path = fixture.root.path().join("bare");
             let repo = init(&path, format)?;
             import(&repo, &fixture.work)?;
+            verify_updates(
+                &repo,
+                &RefSnapshot::new(),
+                &[RefUpdate::new(
+                    "refs/heads/main",
+                    None,
+                    Some(fixture.second),
+                )?],
+            )?;
             let desired = RefSnapshot::from([
                 (b"refs/heads/main".to_vec(), fixture.first),
                 (b"refs/tags/blob".to_vec(), fixture.blob),
@@ -266,7 +392,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_and_corrupt_reachable_objects() -> Result<(), Box<dyn StdError>> {
+        for revision in ["main^{tree}", "main:file"] {
+            let fixture = fixture("sha1", ObjectFormat::Sha1)?;
+            let missing = parse(&fixture.work, ObjectFormat::Sha1, revision)?;
+            fs::remove_file(loose_path(&fixture.work, missing))?;
+            assert!(verify_main(&fixture).is_err());
+        }
+
+        let fixture = fixture("sha1", ObjectFormat::Sha1)?;
+        let blob = loose_path(&fixture.work, fixture.blob);
+        fs::remove_file(&blob)?;
+        fs::write(blob, b"corrupt")?;
+        assert!(verify_main(&fixture).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn enforces_ref_and_branch_policy() -> Result<(), Box<dyn StdError>> {
+        assert!(validate_ref_name(b"refs/tags/\xff").is_err());
         let fixture = fixture("sha1", ObjectFormat::Sha1)?;
         let path = fixture.root.path().join("bare");
         let repo = init(&path, ObjectFormat::Sha1)?;
@@ -368,6 +512,25 @@ mod tests {
             ],
         )?;
         Ok(())
+    }
+
+    fn verify_main(fixture: &Fixture) -> Result<(), Box<dyn StdError>> {
+        let repo = gix::open_opts(fixture.work.join(".git"), open_options())?;
+        verify_updates(
+            &repo,
+            &RefSnapshot::new(),
+            &[RefUpdate::new(
+                "refs/heads/main",
+                None,
+                Some(fixture.second),
+            )?],
+        )?;
+        Ok(())
+    }
+
+    fn loose_path(work: &Path, id: RecordObjectId) -> std::path::PathBuf {
+        let id = id.to_string();
+        work.join(".git/objects").join(&id[..2]).join(&id[2..])
     }
 
     fn parse(
