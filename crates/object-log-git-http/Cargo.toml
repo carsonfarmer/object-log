@@ -29,6 +29,7 @@ url = "2"
 [dev-dependencies]
 object-log = { path = "../..", features = ["test-util"] }
 tokio = { version = "1.47", features = ["process"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints.rust]
 unsafe_code = "deny"

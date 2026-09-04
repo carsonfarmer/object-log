@@ -141,6 +141,7 @@ async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> Test
         ["commit", "--quiet", "--allow-empty", "-m", "tip"],
     )?;
     git(Some(&source), ["push", "--quiet"])?;
+    let expected_tip = git_stdout(Some(&source), ["rev-parse", "HEAD"])?;
     let output = git_trace(Some(&clone), ["fetch", "--quiet"])?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
@@ -149,7 +150,14 @@ async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> Test
     assert!(trace.matches("=> send header: post ").count() >= 2);
     assert!(trace.contains("=> send header: content-encoding: gzip"));
     assert!(trace.contains("<= recv header: transfer-encoding: chunked"));
-    git(Some(&clone), ["fsck", "--strict"])?;
+    assert_eq!(
+        git_stdout(Some(&clone), ["rev-parse", "refs/remotes/origin/main"])?,
+        expected_tip
+    );
+    git(
+        Some(&clone),
+        ["cat-file", "-e", &format!("{expected_tip}^{{tree}}")],
+    )?;
     assert!(std::fs::read_dir(scratch)?.next().is_none());
     server.abort();
     Ok(())
@@ -294,6 +302,15 @@ fn git_output<const N: usize>(
     args: [&str; N],
 ) -> TestResult<std::process::Output> {
     Ok(git_command(directory, args).output()?)
+}
+
+fn git_stdout<const N: usize>(directory: Option<&Path>, args: [&str; N]) -> TestResult<String> {
+    let output = git_output(directory, args)?;
+    if output.status.success() {
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
+    }
 }
 
 fn git_trace<const N: usize>(

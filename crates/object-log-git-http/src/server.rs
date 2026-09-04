@@ -405,9 +405,18 @@ impl IntoResponse for Failure {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
+    use axum::http::{Request, header};
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use object_log::{Log, LogId, Options, ValidatedBackend};
+    use object_store::{memory::InMemory, path::Path as StorePath};
     use tokio::io::AsyncReadExt;
+    use tower::ServiceExt;
 
     use super::*;
+    use crate::MAX_COMMANDS;
 
     #[tokio::test]
     async fn response_reader_owns_its_concurrency_permit() -> Result<(), Box<dyn StdError>> {
@@ -424,5 +433,137 @@ mod tests {
         drop(reader);
         assert_eq!(permits.available_permits(), 1);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn routes_apply_git_metadata_and_client_error_statuses() -> Result<(), Box<dyn StdError>>
+    {
+        let (server, _scratch) = test_server().await?;
+        let app = server.router();
+        let response = app
+            .clone()
+            .oneshot(Request::get("/repo/info/refs?service=git-upload-pack").body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static(
+                "application/x-git-upload-pack-advertisement"
+            ))
+        );
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static(
+                "no-cache, max-age=0, must-revalidate"
+            ))
+        );
+        assert_eq!(response.headers().get(PRAGMA), Some(&PRAGMA_NO_CACHE));
+        assert_eq!(response.headers().get(EXPIRES), Some(&EXPIRES_PAST));
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/repo/info/refs?service=bad").body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(Request::post("/repo/git-upload-pack").body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let response = app
+            .oneshot(
+                Request::post("/repo/git-upload-pack")
+                    .header(CONTENT_TYPE, "application/x-git-upload-pack-request")
+                    .body(Body::from("0008"))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamed_request_and_protocol_limits_are_enforced() -> Result<(), Box<dyn StdError>> {
+        let (server, _scratch) = test_server().await?;
+        let app = server.router();
+        let id = "11".repeat(20);
+        let mut negotiation = packet(format!("want {id}\n").as_bytes());
+        negotiation.extend_from_slice(b"00000000");
+        let split = negotiation.len() / 2;
+        let body = Body::from_stream(futures::stream::iter([
+            Ok::<_, Infallible>(Bytes::copy_from_slice(&negotiation[..split])),
+            Ok(Bytes::copy_from_slice(&negotiation[split..])),
+        ]));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/repo/git-upload-pack")
+                    .header(CONTENT_TYPE, "application/x-git-upload-pack-request")
+                    .body(body)?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await?.to_bytes(),
+            "0008NAK\n"
+        );
+
+        let want = packet(format!("want {id}\n").as_bytes());
+        let mut too_many = Vec::with_capacity(want.len() * (MAX_COMMANDS + 1));
+        for _ in 0..=MAX_COMMANDS {
+            too_many.extend_from_slice(&want);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/repo/git-upload-pack")
+                    .header(CONTENT_TYPE, "application/x-git-upload-pack-request")
+                    .body(Body::from(too_many))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let response = app
+            .oneshot(
+                Request::get("/repo/info/refs?service=git-upload-pack")
+                    .header(header::USER_AGENT, "x".repeat(MAX_HEADER_BYTES))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+        Ok(())
+    }
+
+    async fn test_server() -> Result<(GitHttpServer, tempfile::TempDir), Box<dyn StdError>> {
+        let backend = ValidatedBackend::new(
+            Arc::new(InMemory::new()),
+            StorePath::from("git-http-server-tests"),
+        )
+        .await?;
+        let log = Log::open(
+            backend.scope(&LogId::new("repository")?),
+            Options::default(),
+        )
+        .await?;
+        let scratch = tempfile::tempdir()?;
+        let concurrency = "2".parse()?;
+        Ok((
+            GitHttpServer::new(
+                SmartHttp::new(log, scratch.path()),
+                scratch.path(),
+                concurrency,
+            ),
+            scratch,
+        ))
+    }
+
+    fn packet(data: &[u8]) -> Vec<u8> {
+        let mut packet = format!("{:04x}", data.len() + 4).into_bytes();
+        packet.extend_from_slice(data);
+        packet
     }
 }
