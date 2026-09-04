@@ -11,6 +11,7 @@ use minicbor::bytes::ByteVec;
 use minicbor::{Decode, Encode};
 use object_store::UpdateVersion;
 use std::collections::{BTreeSet, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -420,7 +421,7 @@ struct CheckpointEncodeWire<'a> {
     objects: Vec<ObjectRefWire>,
 }
 
-#[derive(Clone, Debug, Decode, Encode, PartialEq)]
+#[derive(Encode)]
 #[cbor(map)]
 struct NodeWire {
     #[n(1)]
@@ -680,19 +681,127 @@ pub(crate) fn encode_node(node: &Node) -> Result<Bytes, Error> {
     })
 }
 
-pub(crate) fn decode_node(bytes: &[u8]) -> Result<Node, Error> {
-    let wire: NodeWire = decode_envelope(bytes)?;
-    require_version(wire.format_version)?;
-    let node = Node {
-        payload: Bytes::from(wire.payload),
-        children: wire
-            .children
-            .into_iter()
-            .map(ObjectRef::try_from)
-            .collect::<Result<_, _>>()?,
-    };
-    require_canonical(bytes, &encode_node(&node)?)?;
-    Ok(node)
+pub(crate) fn decode_node(bytes: &Bytes, options: Options) -> Result<Node, Error> {
+    let envelope = decode_node_envelope(bytes)?;
+    let (payload_range, children) = decode_node_payload(&bytes[envelope.clone()], options)?;
+    Ok(Node {
+        payload: bytes
+            .slice(envelope.start + payload_range.start..envelope.start + payload_range.end),
+        children,
+    })
+}
+
+macro_rules! exact_value {
+    ($decoder:ident, $encoder:ident, $method:ident) => {{
+        let value = $decoder
+            .$method()
+            .map_err(|error| Error::InvalidFormat(error.to_string()))?;
+        $encoder.$method(value).map_err(|_| invalid_node())?;
+        value
+    }};
+}
+
+macro_rules! exact_len {
+    ($decoder:ident, $encoder:ident, $method:ident) => {{
+        let Some(value) = $decoder
+            .$method()
+            .map_err(|error| Error::InvalidFormat(error.to_string()))?
+        else {
+            return Err(invalid_node());
+        };
+        $encoder.$method(value).map_err(|_| invalid_node())?;
+        value
+    }};
+}
+
+fn decode_node_envelope(bytes: &[u8]) -> Result<Range<usize>, Error> {
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let mut encoder = minicbor::Encoder::new(MatchingWriter(bytes));
+    valid(exact_len!(decoder, encoder, map) == 2)?;
+    valid(exact_value!(decoder, encoder, u8) == 1)?;
+    let payload = exact_value!(decoder, encoder, bytes);
+    let payload_range = decoder.position() - payload.len()..decoder.position();
+    valid(exact_value!(decoder, encoder, u8) == 2)?;
+    let encoded_digest = exact_value!(decoder, encoder, bytes);
+    valid(decoder.position() == bytes.len())?;
+    if digest(encoded_digest)? != Digest::of(payload) {
+        return Err(Error::CorruptObject);
+    }
+    Ok(payload_range)
+}
+
+fn decode_node_payload(
+    bytes: &[u8],
+    options: Options,
+) -> Result<(Range<usize>, Vec<ObjectRef>), Error> {
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let mut encoder = minicbor::Encoder::new(MatchingWriter(bytes));
+    valid(exact_len!(decoder, encoder, map) == 3)?;
+    valid(exact_value!(decoder, encoder, u8) == 1)?;
+    let version = exact_value!(decoder, encoder, u32);
+    require_version(version)?;
+    valid(exact_value!(decoder, encoder, u8) == 2)?;
+    let payload = exact_value!(decoder, encoder, bytes);
+    let payload_range = decoder.position() - payload.len()..decoder.position();
+    valid(exact_value!(decoder, encoder, u8) == 3)?;
+    let child_count = exact_len!(decoder, encoder, array);
+    let child_count =
+        usize::try_from(child_count).map_err(|_| Error::LimitExceeded("object references"))?;
+    if child_count > options.max_object_refs {
+        return Err(Error::LimitExceeded("object references"));
+    }
+    let mut children = Vec::new();
+    children
+        .try_reserve_exact(child_count)
+        .map_err(|_| Error::LimitExceeded("object references"))?;
+    for _ in 0..child_count {
+        valid(exact_len!(decoder, encoder, map) == 4)?;
+        valid(exact_value!(decoder, encoder, u8) == 1)?;
+        let kind = match exact_value!(decoder, encoder, u8) {
+            value if value == ObjectKindWire::Blob as u8 => ObjectKind::Blob,
+            value if value == ObjectKindWire::Node as u8 => ObjectKind::Node,
+            _ => return Err(Error::InvalidFormat("invalid node child kind".into())),
+        };
+        valid(exact_value!(decoder, encoder, u8) == 2)?;
+        let digest_bytes = exact_value!(decoder, encoder, bytes);
+        valid(exact_value!(decoder, encoder, u8) == 3)?;
+        let len = exact_value!(decoder, encoder, u64);
+        if len > u64::try_from(options.max_object_bytes).unwrap_or(u64::MAX) {
+            return Err(Error::LimitExceeded("object bytes"));
+        }
+        valid(exact_value!(decoder, encoder, u8) == 4)?;
+        let storage_id_bytes = exact_value!(decoder, encoder, bytes);
+        children.push(ObjectRef {
+            kind,
+            storage_id: storage_id(storage_id_bytes)?,
+            digest: digest(digest_bytes)?,
+            len,
+        });
+    }
+    valid(decoder.position() == bytes.len())?;
+    Ok((payload_range, children))
+}
+
+struct MatchingWriter<'a>(&'a [u8]);
+
+impl minicbor::encode::Write for MatchingWriter<'_> {
+    type Error = ();
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        if !self.0.starts_with(bytes) {
+            return Err(());
+        }
+        self.0 = &self.0[bytes.len()..];
+        Ok(())
+    }
+}
+
+fn valid(condition: bool) -> Result<(), Error> {
+    condition.then_some(()).ok_or_else(invalid_node)
+}
+
+fn invalid_node() -> Error {
+    Error::InvalidFormat("reference node is not canonical format version 1".into())
 }
 
 pub(crate) fn encode_recovery_token(prepared: &PreparedCommit) -> Result<Bytes, Error> {
@@ -1099,10 +1208,10 @@ mod tests {
     use super::{
         Checkpoint, CheckpointWire, CollectionCandidate, CollectionCandidateWire, CollectionPlan,
         CollectionPlanRef, CollectionPlanWire, Commit, EnvelopeWire, FORMAT_VERSION, Head,
-        HeadWire, Node, ObjectRefWire, OptionsWire, decode_checkpoint, decode_collection_plan,
-        decode_commit, decode_head, decode_node, decode_recovery_token, encode_checkpoint,
-        encode_collection_plan, encode_commit, encode_envelope, encode_head, encode_node,
-        encode_recovery_token,
+        HeadWire, Node, NodeWire, ObjectRefWire, OptionsWire, decode_checkpoint,
+        decode_collection_plan, decode_commit, decode_head, decode_node, decode_recovery_token,
+        encode_checkpoint, encode_collection_plan, encode_commit, encode_envelope, encode_head,
+        encode_node, encode_recovery_token,
     };
     use crate::store::{ImmutableKey, ImmutableKind};
     use crate::{CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, Options};
@@ -1118,6 +1227,31 @@ mod tests {
 
     fn storage_id() -> crate::StorageId {
         crate::StorageId::from_uuid(uuid::Uuid::from_u128(2))
+    }
+
+    fn object_ref(kind: ObjectKind, len: u64) -> ObjectRef {
+        ObjectRef {
+            kind,
+            storage_id: storage_id(),
+            digest: Digest::of(b"page"),
+            len,
+        }
+    }
+
+    fn wrap_node_payload(payload: Vec<u8>) -> Bytes {
+        let digest = Digest::of(&payload).as_bytes().to_vec();
+        Bytes::from(
+            minicbor::to_vec(EnvelopeWire { payload, digest })
+                .unwrap_or_else(|error| panic!("envelope encode failed: {error}")),
+        )
+    }
+
+    fn node_options(encoded: &Bytes, max_object_refs: usize) -> Options {
+        Options {
+            max_object_refs,
+            max_object_bytes: encoded.len(),
+            ..Options::default()
+        }
     }
 
     fn commit_ref(sequence: u64, data: &[u8]) -> CommitRef {
@@ -1409,21 +1543,275 @@ mod tests {
     }
 
     #[test]
-    fn reference_node_round_trip_preserves_children() {
+    fn reference_node_round_trip_is_stable_and_keeps_payload_backing() {
         let node = Node {
-            payload: Bytes::from_static(b"page map"),
-            children: vec![ObjectRef {
-                kind: ObjectKind::Blob,
-                storage_id: storage_id(),
-                digest: Digest::of(b"page"),
-                len: 4,
-            }],
+            payload: Bytes::from_static(b"unique opaque node payload"),
+            children: vec![object_ref(ObjectKind::Blob, 4)],
         };
 
         let encoded = encode_node(&node).unwrap_or_else(|error| panic!("encode failed: {error}"));
-        let decoded =
-            decode_node(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
+        let payload_offset = encoded
+            .windows(node.payload.len())
+            .position(|bytes| bytes == node.payload)
+            .unwrap_or_else(|| panic!("encoded payload is missing"));
+        let decoded = decode_node(&encoded, node_options(&encoded, 1))
+            .unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(decoded, node);
+        assert!(std::ptr::eq(
+            decoded.payload.as_ptr(),
+            encoded[payload_offset..].as_ptr()
+        ));
+        assert_eq!(
+            hex::encode(encoded),
+            "a201585ca3010102581a756e69717565206f7061717565206e6f6465207061796c6f61640381a40101025820cad079fe52fa1b162e375eceec083d82ed9ac94420e05934969828aee170249103040450000000000000000000000000000000020258202488ddf0fe738ebed3830755cf0142dba307002f8c3cab0e5e94c95ba99b833b"
+        );
+    }
+
+    #[test]
+    fn reference_node_accepts_exact_payload_and_child_limits() {
+        let node = Node {
+            payload: Bytes::from(vec![7; 64 * 1024]),
+            children: Vec::new(),
+        };
+        let encoded = encode_node(&node).unwrap_or_else(|error| panic!("encode failed: {error}"));
+        let decoded = decode_node(&encoded, node_options(&encoded, 0))
+            .unwrap_or_else(|error| panic!("decode failed: {error}"));
+        assert_eq!(decoded.payload, node.payload);
+
+        let child = object_ref(ObjectKind::Blob, 4);
+        let node = Node {
+            payload: Bytes::new(),
+            children: vec![child; Options::default().max_object_refs],
+        };
+        let encoded = encode_node(&node).unwrap_or_else(|error| panic!("encode failed: {error}"));
+        let decoded = decode_node(
+            &encoded,
+            node_options(&encoded, Options::default().max_object_refs),
+        )
+        .unwrap_or_else(|error| panic!("decode failed: {error}"));
+        assert_eq!(decoded.children.len(), Options::default().max_object_refs);
+    }
+
+    #[test]
+    fn reference_node_rejects_child_count_before_child_decode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut payload = Vec::new();
+        minicbor::Encoder::new(&mut payload)
+            .map(3)?
+            .u8(1)?
+            .u32(FORMAT_VERSION)?
+            .u8(2)?
+            .bytes(b"")?
+            .u8(3)?
+            .array(u64::MAX)?;
+        let encoded = wrap_node_payload(payload);
+        assert!(matches!(
+            decode_node(&encoded, node_options(&encoded, 1)),
+            Err(Error::LimitExceeded("object references"))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reference_node_rejects_noncanonical_shapes() -> Result<(), Box<dyn std::error::Error>> {
+        let mut noncanonical = minicbor::to_vec(NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: Vec::new(),
+            children: Vec::new(),
+        })?;
+        noncanonical.splice(1..2, [0x18, 0x01]);
+
+        let mut noncanonical_length = minicbor::to_vec(NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: Vec::new(),
+            children: Vec::new(),
+        })?;
+        let array = noncanonical_length.len() - 1;
+        noncanonical_length.splice(array..=array, [0x98, 0]);
+
+        let mut reordered = Vec::new();
+        minicbor::Encoder::new(&mut reordered)
+            .map(3)?
+            .u8(2)?
+            .bytes(b"")?
+            .u8(1)?
+            .u32(FORMAT_VERSION)?
+            .u8(3)?
+            .array(0)?;
+
+        let mut indefinite = Vec::new();
+        minicbor::Encoder::new(&mut indefinite)
+            .map(3)?
+            .u8(1)?
+            .u32(FORMAT_VERSION)?
+            .u8(2)?
+            .bytes(b"")?
+            .u8(3)?
+            .begin_array()?
+            .end()?;
+
+        let mut trailing = minicbor::to_vec(NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: Vec::new(),
+            children: Vec::new(),
+        })?;
+        trailing.push(0);
+
+        for payload in [
+            noncanonical,
+            noncanonical_length,
+            reordered,
+            indefinite,
+            trailing,
+        ] {
+            let encoded = wrap_node_payload(payload);
+            assert!(matches!(
+                decode_node(&encoded, node_options(&encoded, 0)),
+                Err(Error::InvalidFormat(_))
+            ));
+        }
+
+        let payload = minicbor::to_vec(NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: Vec::new(),
+            children: Vec::new(),
+        })?;
+        let digest = Digest::of(&payload);
+        let mut reordered_envelope = Vec::new();
+        minicbor::Encoder::new(&mut reordered_envelope)
+            .map(2)?
+            .u8(2)?
+            .bytes(digest.as_bytes())?
+            .u8(1)?
+            .bytes(&payload)?;
+        let mut indefinite_envelope = Vec::new();
+        minicbor::Encoder::new(&mut indefinite_envelope)
+            .begin_map()?
+            .u8(1)?
+            .bytes(&payload)?
+            .u8(2)?
+            .bytes(digest.as_bytes())?
+            .end()?;
+        for encoded in [reordered_envelope, indefinite_envelope] {
+            let encoded = Bytes::from(encoded);
+            assert!(matches!(
+                decode_node(&encoded, node_options(&encoded, 0)),
+                Err(Error::InvalidFormat(_))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reference_node_rejects_truncation_digest_and_value_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = minicbor::to_vec(NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: Vec::new(),
+            children: Vec::new(),
+        })?;
+        let mut truncated = wrap_node_payload(payload.clone()).to_vec();
+        truncated.pop();
+        let truncated = Bytes::from(truncated);
+        assert!(matches!(
+            decode_node(&truncated, node_options(&truncated, 0)),
+            Err(Error::InvalidFormat(_))
+        ));
+
+        let wrong_digest = Bytes::from(minicbor::to_vec(EnvelopeWire {
+            payload,
+            digest: vec![0; 32],
+        })?);
+        assert!(matches!(
+            decode_node(&wrong_digest, node_options(&wrong_digest, 0)),
+            Err(Error::CorruptObject)
+        ));
+
+        let mut wrong_type = Vec::new();
+        minicbor::Encoder::new(&mut wrong_type)
+            .map(3)?
+            .u8(1)?
+            .str("1")?
+            .u8(2)?
+            .bytes(b"")?
+            .u8(3)?
+            .array(0)?;
+        let wrong_type = wrap_node_payload(wrong_type);
+        assert!(matches!(
+            decode_node(&wrong_type, node_options(&wrong_type, 0)),
+            Err(Error::InvalidFormat(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reference_node_rejects_invalid_child_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let child = ObjectRefWire::from(&object_ref(ObjectKind::Blob, 4));
+        let mut invalid_children = Vec::new();
+        let mut invalid_kind = child.clone();
+        invalid_kind.kind = 9;
+        invalid_children.push(invalid_kind);
+        let mut checkpoint_kind = child.clone();
+        checkpoint_kind.kind = 2;
+        invalid_children.push(checkpoint_kind);
+        let mut digest = child.clone();
+        digest.digest.pop();
+        invalid_children.push(digest);
+        let mut storage_id = child.clone();
+        storage_id.storage_id.pop();
+        invalid_children.push(storage_id);
+
+        for child in invalid_children {
+            let encoded = encode_envelope(&NodeWire {
+                format_version: FORMAT_VERSION,
+                payload: Vec::new(),
+                children: vec![child],
+            })
+            .unwrap_or_else(|error| panic!("encode failed: {error}"));
+            assert!(matches!(
+                decode_node(&encoded, node_options(&encoded, 1)),
+                Err(Error::InvalidFormat(_))
+            ));
+        }
+
+        let mut long_child = child;
+        long_child.len = u64::MAX;
+        let encoded = encode_envelope(&NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: Vec::new(),
+            children: vec![long_child],
+        })
+        .unwrap_or_else(|error| panic!("encode failed: {error}"));
+        assert!(matches!(
+            decode_node(&encoded, node_options(&encoded, 1)),
+            Err(Error::LimitExceeded("object bytes"))
+        ));
+
+        let child = object_ref(ObjectKind::Blob, 4);
+        let mut wrong_length_type = Vec::new();
+        minicbor::Encoder::new(&mut wrong_length_type)
+            .map(3)?
+            .u8(1)?
+            .u32(FORMAT_VERSION)?
+            .u8(2)?
+            .bytes(b"")?
+            .u8(3)?
+            .array(1)?
+            .map(4)?
+            .u8(1)?
+            .u8(1)?
+            .u8(2)?
+            .bytes(child.digest.as_bytes())?
+            .u8(3)?
+            .str("4")?
+            .u8(4)?
+            .bytes(child.storage_id.as_uuid().as_bytes())?;
+        let encoded = wrap_node_payload(wrong_length_type);
+        assert!(matches!(
+            decode_node(&encoded, node_options(&encoded, 1)),
+            Err(Error::InvalidFormat(_))
+        ));
+        Ok(())
     }
 
     #[test]

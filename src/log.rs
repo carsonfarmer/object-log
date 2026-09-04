@@ -771,8 +771,7 @@ impl Log {
             ));
         }
         let bytes = self.read_immutable_for_view(view, object).await?;
-        let node = format::decode_node(&bytes)?;
-        self.validate_dependencies(&node.children)?;
+        let node = format::decode_node(&bytes, self.options)?;
         Ok(ReferenceNode {
             payload: node.payload,
             children: node.children,
@@ -1901,8 +1900,7 @@ impl Log {
             }
             ObjectKind::Node => {
                 let bytes = self.read_immutable(object).await?;
-                let node = format::decode_node(&bytes)?;
-                self.validate_dependencies(&node.children)?;
+                let node = format::decode_node(&bytes, self.options)?;
                 Ok(node.children)
             }
             ObjectKind::Checkpoint => Err(Error::InvalidFormat(
