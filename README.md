@@ -37,9 +37,12 @@ contract.
 `put_object` and `put_node` return process-local `StagedObject` proofs.
 `prepare` and `publish_checkpoint` accept those proofs, so the same `Log`
 handle or one of its clones can publish without reading the object graph back.
-`stage_objects` fully verifies existing durable references before it creates
-proofs. Recovery tokens do not contain a proof. `resume` and publication from
-a separately opened handle fully verify the referenced graph.
+`materialize` also creates proofs for references in the authenticated
+checkpoint and tail records of its exact view. An adapter can retain those
+proofs and publish them with that view. `stage_objects` fully verifies arbitrary
+durable references before it creates proofs. Recovery tokens do not contain a
+proof. `resume` and publication from a separately opened handle fully verify
+the referenced graph. A collection-epoch change rejects an older proof.
 
 The current durable format is v1. Before the first release, its byte layout can
 change when a different layout makes the design smaller or better. The project
@@ -73,6 +76,8 @@ The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
 [`StagedObject` evidence](docs/evidence/staged-objects-local-2026-09-03.md)
 records request counts, transferred bytes, and recovery checks. The
+[`materialized proof` evidence](docs/evidence/materialized-proofs-2026-09-04.md)
+records the no-read checkpoint path and its proof boundaries. The
 [`API simplification` evidence](docs/evidence/api-simplification-local-2026-09-03.md)
 records allocation, encoding, line-count, and API changes. The
 [`observed-state API` evidence](docs/evidence/observed-state-api-2026-09-04.md)

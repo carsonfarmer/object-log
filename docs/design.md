@@ -133,10 +133,14 @@ the view names.
 clone and for its collection epoch. It lets publication rely on the completed
 create-only write without reading the object graph back. It is not serialized.
 
-`stage_objects` accepts durable `ObjectRef` values, verifies each complete
-transitive graph, checks the active collection fence, and returns staged
-proofs. An adapter uses it when it reuses objects from an earlier view or
-another process.
+`materialize` creates the same type of proof for each ordered object reference
+in the authenticated checkpoint and tail records of its loaded view. An
+adapter can retain these proofs and publish them with that exact view without
+reading the object graph. A changed collection epoch rejects the proof.
+
+`stage_objects` accepts arbitrary durable `ObjectRef` values, verifies each
+complete transitive graph, checks the active collection fence, and returns
+staged proofs.
 
 A separately opened handle cannot use another handle's proof. A recovery token
 does not contain one. Both paths fully verify the referenced graph before they
@@ -269,10 +273,11 @@ content-addressed cycle cannot be formed without breaking digest verification.
 
 ## Materializer
 
-The optional helper restores typed state. It receives the explicit object
-references with each opaque snapshot or operation. It can keep those references
-for lazy adapter reads. Each domain encodes and publishes its own checkpoints
-because only the domain knows which objects the snapshot retains.
+The optional helper restores typed state. It receives publication proofs for
+the ordered object references in each authenticated snapshot or operation. It
+can retain those proofs for lazy reads and a checkpoint against the returned
+view. Each domain encodes and publishes its own checkpoints because only the
+domain knows which objects the snapshot retains.
 
 ```rust
 trait Materializer {
@@ -283,13 +288,13 @@ trait Materializer {
     fn restore(
         &self,
         checkpoint: &[u8],
-        objects: &[ObjectRef],
+        objects: &[StagedObject],
     ) -> Result<Self::State, Self::Error>;
     fn apply(
         &self,
         state: &mut Self::State,
         operation: &[u8],
-        objects: &[ObjectRef],
+        objects: &[StagedObject],
     ) -> Result<(), Self::Error>;
 }
 ```

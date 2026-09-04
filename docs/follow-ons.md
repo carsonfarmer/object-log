@@ -58,14 +58,20 @@ object graph back. `stage_objects` fully verifies existing durable references
 before it creates proofs. Recovery tokens omit the proof, and recovered or
 separately opened work uses full graph verification.
 
+`materialize` also creates same-handle proofs for references in the
+authenticated checkpoint and tail records of its exact view. An adapter can
+retain them in materialized state and publish a checkpoint without rereading
+the graph. A collection-epoch change invalidates the proofs.
+
 This fast path requires exact immutable bytes to remain at their physical key
 until object-log garbage collection deletes them. External lifecycle expiry,
 deletion, or overwrite violates the storage contract.
 
 The API and its local acceptance evidence are complete. The
 [staged-object evidence](evidence/staged-objects-local-2026-09-03.md) records
-request counts, transferred bytes, recovery checks, and limits. The Git
-example uses this API.
+new-object request counts, transferred bytes, recovery checks, and limits. The
+[materialized-proof evidence](evidence/materialized-proofs-2026-09-04.md)
+records no-read Git checkpoints and the proof boundary.
 
 [Issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes all
 current limitations and follow-on work. The linked issues define separate

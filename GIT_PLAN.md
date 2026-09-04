@@ -123,6 +123,12 @@ adding a temporary public API.
 - Reject a state with more live pack roots than one checkpoint can retain.
   Repacking is the required follow-on for that limit.
 
+The materialized-proof part is complete locally. Git checkpoints retain the
+authenticated pack proofs produced during recovery and do not read pack nodes
+or blobs again. The
+[`materialized proof evidence`](docs/evidence/materialized-proofs-2026-09-04.md)
+records the request counts and safety review.
+
 ### 4. Protocol
 
 - Implement protocol v2 discovery, `ls-refs`, and have-aware `fetch`.

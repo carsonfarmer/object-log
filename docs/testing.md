@@ -16,8 +16,8 @@ Run tests in this order:
 
 No cloud backend is part of this stage.
 
-At revision `03d4327b5d865912cfad6549faa619adc222e9c3`, the local
-all-feature gate passes 189 regular tests. It also compiles six ignored,
+At revision `c173b0328c3c0ec36528b371bd37bc52920f1fe0`, the local
+all-feature gate passes 241 regular tests. It also compiles nine ignored,
 opt-in tests. The focused garbage-collection suite has 28 tests. The memory and
 temporary-filesystem tests prove repeatable immutable deletion. The opt-in
 MinIO flow proves 1,001 candidates across the 1,000-key bulk-delete boundary.
@@ -66,9 +66,13 @@ not yet prove every listed case. Current gaps appear below the matrix.
 - A batch is visible atomically as one commit.
 - New object writes return a staged proof before the commit is visible.
 - Same-handle publication does not read the newly staged object graph back.
+- Materialization creates same-handle, exact-epoch proofs only from references
+  in authenticated checkpoint and tail records.
+- A proof retained by materialized state can enter a checkpoint for the
+  returned view without another graph read.
 - A separately opened handle cannot use another handle's proof.
 - A collection-epoch change invalidates an earlier staged proof.
-- `stage_objects` fully verifies and deduplicates an existing transitive graph.
+- `stage_objects` fully verifies and deduplicates an arbitrary transitive graph.
 - Recovery tokens omit process-local proofs and require full graph
   verification.
 - Two writers from one view produce one winner and one conflict.
