@@ -85,7 +85,9 @@ protocol proof. The
 native host tests and limits. The
 [`Git WASI baseline`](docs/evidence/git-wasi-baseline-2026-09-04.md) records the
 native line count, protocol trace, request bytes, and latency baseline for the
-WASI-compatible replacement.
+WASI-compatible replacement. The
+[`Git WASI contract`](docs/evidence/git-wasi-contract-2026-09-04.md) records the
+first target boundary, CI gate, dependency graph, and limitations.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
 live AWS qualification goals. The [Git proof plan](GIT_PLAN.md) defines one

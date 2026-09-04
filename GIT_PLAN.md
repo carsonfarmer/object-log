@@ -79,7 +79,7 @@ behavior.
 
 ## Implementation tranches
 
-### 1. WASI contract
+### 1. WASI contract — complete locally
 
 - Separate the host-neutral core from the temporary native engine.
 - Add only the service, protocol, and limit values required by later work.
