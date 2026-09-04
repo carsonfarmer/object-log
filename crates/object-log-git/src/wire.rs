@@ -2,7 +2,10 @@ use std::io::{self, Write};
 
 use gix_packetline::{Channel, PacketLineRef, blocking_io::encode, decode};
 
-use crate::{ObjectFormat, ObjectId, RefUpdate, pack::MAX_INPUT_BYTES};
+use crate::{
+    ObjectFormat, ObjectId, RefUpdate,
+    pack::{MAX_INPUT_BYTES, MAX_OUTPUT_BYTES},
+};
 
 const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECEIVE_BYTES: usize = 1024 * 1024;
@@ -235,12 +238,10 @@ pub(crate) fn write_fetch(
     format: ObjectFormat,
     reply: FetchReply<'_>,
 ) -> Result<(), Error> {
-    if let FetchReply::Acknowledgments(ids) = reply {
-        within(ids.len(), MAX_ITEMS, "acknowledgments")?;
-        ids.iter().try_for_each(|id| validate_id(*id, format))?;
-    }
     match reply {
         FetchReply::Acknowledgments(ids) => {
+            within(ids.len(), MAX_ITEMS, "acknowledgments")?;
+            ids.iter().try_for_each(|id| validate_id(*id, format))?;
             encode::text_to_write(b"acknowledgments", &mut *output)?;
             if ids.is_empty() {
                 encode::text_to_write(b"NAK", &mut *output)?;
@@ -254,6 +255,7 @@ pub(crate) fn write_fetch(
             }
         }
         FetchReply::Pack(pack) => {
+            within(pack.len(), MAX_OUTPUT_BYTES, "pack bytes")?;
             write_pack(output, pack)?;
         }
     }
@@ -479,7 +481,7 @@ fn validate_id(id: ObjectId, format: ObjectFormat) -> Result<(), Error> {
 }
 
 fn validate_reason(reason: &[u8]) -> Result<(), Error> {
-    if reason.is_empty() || reason.contains(&b'\n') || reason.contains(&0) {
+    if reason.is_empty() || reason == b"ok" || reason.contains(&b'\n') || reason.contains(&0) {
         return Err(Error::Protocol("invalid receive status reason"));
     }
     Ok(())
@@ -949,6 +951,20 @@ mod tests {
         assert!(packets.is_empty());
         assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD)?, 1);
         assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD + 1)?, 2);
+
+        let pack = vec![0; MAX_OUTPUT_BYTES + 1];
+        write_fetch(
+            &mut io::sink(),
+            ObjectFormat::Sha1,
+            FetchReply::Pack(&pack[..MAX_OUTPUT_BYTES]),
+        )?;
+        output.clear();
+        limit(write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::Pack(&pack),
+        ));
+        assert!(output.is_empty());
         Ok(())
     }
 
@@ -1353,6 +1369,17 @@ mod tests {
                 &mut output,
                 std::slice::from_ref(&update),
                 ReceiveStatus::Rejected(invalid),
+            ));
+            assert!(output.is_empty());
+        }
+        for status in [
+            ReceiveStatus::Rejected(b"ok"),
+            ReceiveStatus::InvalidPack(b"ok"),
+        ] {
+            protocol(write_receive_status(
+                &mut output,
+                std::slice::from_ref(&update),
+                status,
             ));
             assert!(output.is_empty());
         }

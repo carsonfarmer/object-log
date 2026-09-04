@@ -10,10 +10,11 @@ use gix_pack::data::{Version, input::EntriesToBytesIter};
 use crate::{Error, ObjectFormat, ObjectId};
 
 pub(super) const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 const DEFAULT_LIMITS: Limits = Limits {
     input_bytes: MAX_INPUT_BYTES,
-    output_bytes: 64 * 1024 * 1024,
+    output_bytes: MAX_OUTPUT_BYTES,
     object_bytes: 16 * 1024 * 1024,
     work_bytes: 256 * 1024 * 1024,
     objects: 65_535,
