@@ -1024,6 +1024,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b1689ff5ddeee4acfb2a43e875a1072a76d208624b15a9065c938b39cb0da2a"
 dependencies = [
  "bstr",
+ "getrandom 0.4.3",
  "gix-hash",
  "gix-object",
  "thiserror",
@@ -2233,8 +2234,12 @@ dependencies = [
  "criterion",
  "futures",
  "gix",
+ "gix-features",
+ "gix-hash",
+ "gix-object",
  "gix-pack",
  "gix-validate",
+ "gix-zlib",
  "minicbor",
  "object-log",
  "object_store",

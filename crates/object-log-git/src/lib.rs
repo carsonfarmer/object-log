@@ -6,6 +6,11 @@
 mod format;
 #[cfg(feature = "native-oracle")]
 mod git;
+#[allow(
+    dead_code,
+    reason = "the next Git storage tranche consumes this internal module"
+)]
+mod pack;
 #[cfg(feature = "native-oracle")]
 mod repository;
 #[cfg(feature = "native-oracle")]
