@@ -76,6 +76,14 @@ API:
   protocol v2 for upload-pack discovery and fetch. Push remains standard
   receive-pack.
 
+At revision `2ee2174`, the private pack, durable-reader, and wire foundations
+contain 1,684 product lines. The next Git tranche connects them through the
+existing public `Repository` and `PreparedPush` surface. It adds no public
+`Engine`, `Service`, or `Outcome` type. One process-wide 88 MiB pool admits one
+active engine operation under the provisional 128 MiB WASI process model. The
+[Git proof plan](GIT_PLAN.md) defines the 12 tasks, reduced phase limits,
+performance gates, and source-size stop gates.
+
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
 [`StagedObject` evidence](docs/evidence/staged-objects-local-2026-09-03.md)
@@ -109,8 +117,7 @@ protocol behavior, exact fixtures, limits, `WASIp2` checks, and remaining host
 integration work.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
-live AWS qualification goals. The [Git proof plan](GIT_PLAN.md) defines one
-WASI-compatible Git engine over immutable packs and atomic ref transactions.
+live AWS qualification goals.
 
 [GitHub issue #11](https://github.com/carsonfarmer/object-log/issues/11) is the
 current index of active limitations and follow-on work. Each linked issue has

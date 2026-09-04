@@ -3,186 +3,224 @@
 ## Outcome
 
 `object-log-git` must prove that the generic WAL can support Git smart HTTP
-discovery, clone, incremental fetch, atomic push, and cold recovery. The
-durable authority is object storage. Local files are optional cache data.
+discovery, clone, incremental fetch, atomic push, and cold recovery. Object
+storage is the durable authority. Local files and memory are cache data.
 
-The first runnable host can be native. The protocol, pack, object-lookup, and
-publication code must compile for `wasm32-wasip2`, so a later Spin component
-only adapts HTTP and object storage.
+The first integrated host can remain native. The protocol, pack, object lookup,
+and publication path must compile for `wasm32-wasip2`. A later Spin component
+must adapt HTTP and object storage without a second Git engine.
 
 The core `object-log` crate remains independent from Git.
 
-## Current reference implementation
+## Current state
 
-The current native proof supports SHA-1 and SHA-256 pack storage, atomic ref
-transactions, cold recovery, checkpoints, collection, and Git smart HTTP
-protocol v0. It uses a disposable bare repository and high-level `gix` APIs.
+Revision `2ee21742d7acf64e7ceb6ddb79c6407c0462bcf5` has three private,
+host-neutral foundations:
 
-This implementation is a temporary test reference. Its memory-mapped object
-database and filesystem pack writer are not WASI-compatible. Its fetch path
-also sends all reachable objects because it does not use the client's `have`
-set.
+| Module | Product lines | State |
+| --- | ---: | --- |
+| Pack normalization | 500 | Complete locally |
+| Durable staging and sparse reads | 578 | Complete locally |
+| Git wire protocol | 606 | Complete locally |
+| Total | 1,684 | Complete locally |
 
-The replacement must pass the current storage and client tests before the
-native-only core is deleted. The
-[`Git WASI baseline`](docs/evidence/git-wasi-baseline-2026-09-04.md) records the
-reference line counts, tests, protocol trace, request bytes, and local latency.
+The counts are raw Rust lines before each module's `#[cfg(test)]` section.
+The [pack](docs/evidence/git-wasi-pack-2026-09-04.md),
+[durable reader](docs/evidence/git-wasi-durable-reader-2026-09-04.md), and
+[wire](docs/evidence/git-wasi-wire-2026-09-04.md) records contain the foundation
+behavior and local checks. The modules support SHA-1 and SHA-256 and pass
+native and WASIp2 checks without default features.
 
-## Required design
+The native proof remains the client and storage oracle. It uses a disposable
+bare repository and high-level `gix` APIs. It supports atomic ref transactions,
+cold recovery, checkpoints, collection, and protocol-v0 smart HTTP. Its fetch
+path sends all reachable objects because it ignores the client's `have` set.
+The [baseline](docs/evidence/git-wasi-baseline-2026-09-04.md) records its size,
+protocol trace, storage requests, and local latency.
+
+Do not delete the native oracle until the replacement passes the same client
+and storage cases.
+
+## Storage and consistency contract
 
 - One object log owns one Git repository.
 - Standard immutable packs and indexes contain Git objects.
 - Large pack and index data use bounded object-log chunks.
 - One object-log publication applies one ordered ref transaction.
 - The object-log head is the only mutable durable authority.
-- A bounded read builds its complete response against one view. If collection
-  expires that view, the engine discards all partial state and retries once
-  before it writes response bytes.
+- One operation reads one exact observed view. A `View` is not a retention
+  lease. It can restart once if collection expires that view. It must finish
+  validation before it writes response bytes.
 - Object lookup reads standard indexes and only the required pack ranges.
-- Push validates pack checksums, deltas, object IDs, connectivity, and ref
+- A push validates pack checksums, deltas, object IDs, connectivity, and ref
   rules before publication.
-- Thin input packs become self-contained durable packs.
-- Fetch returns a self-contained pack for
-  `reachable(wants) - reachable(valid haves)`.
+- A thin input becomes a self-contained durable pack.
+- A fetch produces a self-contained output pack.
 - Checkpoints retain packs that contain live objects. Collection removes dead
   pack and index chunks.
 
-The pre-release storage format can change if a new shape removes code or makes
-the runtime better. Do not add a compatibility reader for an earlier
-development shape.
+The durable layout is pre-release. It can change when another layout reduces
+code or measured runtime cost.
 
-## Small host-neutral boundary
+## API contract
 
-Keep the public API concrete and byte-oriented. Do not add a generic Git engine
-trait. The core accepts bounded asynchronous input and output. It preserves
-object-log's committed, conflict, pending, and expired-evidence states.
+Keep the current public `Repository` and `PreparedPush` integration surface.
+Reuse the current public value types. Do not add public `Engine`, `Service`, or
+`Outcome` types. Packet parsing, graph traversal, pack creation, budgets, and
+object-log state remain private.
 
-Expose only values that an HTTP adapter or higher-level storage caller needs.
-Keep packet parsing, pack normalization, graph traversal, and object-log state
-inside `object-log-git`.
+The native HTTP and Spin adapters must call the same `Repository` path. The
+adapters can enforce smaller transport limits, but they cannot weaken the
+engine limits.
 
-The core owns all protocol limits. HTTP adapters can add stricter transport
-limits. A declared content length permits early rejection but never replaces
-counting the received bytes.
+## Git protocol policy
 
-## Git wire behavior
+Upload-pack discovery and fetch use protocol v2 with `ls-refs` and `fetch`.
+Push uses classic receive-pack because Git protocol v2 does not define a new
+push command.
 
-Upload-pack discovery and fetch use Git protocol version 2. The server supports
-`ls-refs` and `fetch`. It does not fall back to a protocol v0 upload-pack
-advertisement when the client requests version 2.
+The first engine accepts wants only when they are reachable from the refs in
+the exact observed view. This project policy is stricter than protocol v2,
+which permits an arbitrary object ID in `want`. The engine rejects an
+unreachable want. For an accepted request, it returns:
 
-Push uses classic receive-pack. Git protocol version 2 does not define a new
-push command. The receive-pack path keeps the current atomic publication and
-per-ref result behavior.
+```text
+reachable(wants) - reachable(valid haves)
+```
 
-The first protocol set excludes shallow clones, filters, ref-in-want, packfile
-URIs, and sideband-all. Add a capability only with a test for its complete
-behavior.
+The engine validates haves against the same exact observed view. It acknowledges
+common haves during negotiation. It sends a pack only after `done`. For
+`include-tag`, it fully peels annotated tags and includes the complete applicable
+tag chain, not only a direct target.
 
-## Implementation tranches
+The first protocol set excludes shallow fetches, filters, `ref-in-want`,
+packfile URIs, `sideband-all`, and progress. Add a capability only with a test
+for its complete behavior.
 
-### 1. WASI contract — complete locally
+## Memory and operation budgets
 
-- Separate the host-neutral core from the temporary native engine.
-- Add only the service, protocol, and limit values required by later work.
-- Reject unsupported service and protocol combinations.
-- Compile `object-log-git` for `wasm32-wasip2` without native features.
-- Keep Tokio filesystem, temporary files, memory maps, and high-level
-  `gix::Repository` out of the WASI dependency graph.
+The process admits one active Git engine operation. All repositories share one
+88 MiB live allocation pool. All requests in the process share this limit.
 
-### 2. Pack engine — complete locally
+| Process memory | Budget |
+| --- | ---: |
+| Git live pool | 88 MiB |
+| Runtime allowance | 24 MiB |
+| Safety reserve | 16 MiB |
+| WASI host model | 128 MiB |
+| Provisional observed peak target | 120 MiB |
 
-- Use low-level Gitoxide crates for pack parsing, validation, delta resolution,
-  normalization, and index generation.
-- Support base objects, `OFS_DELTA`, in-pack `REF_DELTA`, and thin packs whose
-  external bases exist in the pinned view.
-- Bound input bytes, decoded object bytes, object count, work, and delta depth.
-- Produce packs that pass `git index-pack --strict` and `git fsck --strict`.
+Each operation uses one cumulative budget. A retry does not reset its counters.
 
-The first implementation holds one explicitly bounded incoming pack in memory.
-It accepts pack version 2, SHA-1 and SHA-256 objects, in-pack `REF_DELTA`,
-`OFS_DELTA`, and exact external bases for thin packs. It produces and retains a
-standard version 2 index. The
-[`pack-engine evidence`](docs/evidence/git-wasi-pack-2026-09-04.md) records the
-limits, tests, source size, and local timing.
+| Operation resource | Limit |
+| --- | ---: |
+| Logical object-log I/O calls | 512 |
+| Uploaded plus downloaded bytes | 96 MiB |
+| Decode, graph, and pack work | 256 MiB |
+| Thin-base resolution rounds | 32 |
+| Restart after expired evidence | 1 |
 
-Runtime WASI memory measurement remains part of engine integration. The
-current private pack entry point cannot run as a standalone component without
-adding a temporary public API.
+These counters conservatively charge object-log I/O issued by the engine.
+Backend retries can add physical calls. Record physical retries in MinIO
+evidence instead of adding product instrumentation.
 
-### 3. Durable objects — sparse reader complete locally
+The engine must also record total calls, transferred bytes, and serial request
+depth. There is no smaller request-depth performance threshold yet.
 
-- Store immutable packs and indexes through object-log reference trees.
-- Load refs and the pack catalog without creating a local Git repository.
-- Build one compact in-memory object directory from the standard indexes.
-- Find blobs, trees, commits, and tags through standard indexes.
-- Traverse commits, trees, and annotated tags with explicit bounds.
-- Preserve object-log recovery, checkpoint, and collection behavior.
-- Reuse authenticated materialization proofs when a checkpoint retains an
-  existing pack. Do not download complete pack graphs during checkpointing.
-- Reject a state with more live pack roots than one checkpoint can retain.
-  Repacking is the required follow-on for that limit.
+The first implementation task must replace the larger foundation defaults with
+these phase limits:
 
-The materialized-proof part is complete locally. Git checkpoints retain the
-authenticated pack proofs produced during recovery and do not read pack nodes
-or blobs again. The
-[`materialized proof evidence`](docs/evidence/materialized-proofs-2026-09-04.md)
-records the request counts and safety review.
+| Phase resource | Limit |
+| --- | ---: |
+| Catalog, view, and graph state | 24 MiB |
+| Verified pack-chunk cache | 8 MiB |
+| Receive control | 1 MiB |
+| Incoming receive pack | 9 MiB |
+| Raw fetch pack | 9,437,184 bytes |
+| Framed fetch response | 9,437,926 bytes |
+| Normalized durable pack | 16 MiB |
+| One decoded object | 8 MiB |
+| Standard pack index | 2 MiB |
+| Objects in one pack or graph walk | 32,768 |
+| Delta depth | 256 |
 
-Pack staging, catalog loading, and sparse object reads are also complete as a
-private module. Catalog loading reads standard indexes without a local Git
-repository. An object miss reads no pack data, and a hit reads only the needed
-durable chunks. The
-[`durable reader evidence`](docs/evidence/git-wasi-durable-reader-2026-09-04.md)
-records the request counts, cache behavior, validation, limits, and remaining
-engine work.
+Receive control and the incoming pack have separate limits. Both are charged
+to the same live pool.
 
-### 4. Protocol — wire framing complete locally
+These limits are provisional until the WASIp2 adapter measures peak process
+memory. If the runtime needs more than 24 MiB, reduce the live pool or a phase
+limit. Do not assign the 16 MiB reserve to a phase.
 
-- Implement protocol v2 discovery, `ls-refs`, and have-aware `fetch`.
-- Implement classic receive-pack advertisement, command parsing, and status.
-- Use `gix-packetline` where it removes code.
-- Reject malformed or unsupported requests before object reads or publication.
+## Pack creation policy
 
-One private host-neutral module now implements these advertisement, request,
-and response boundaries for SHA-1 and SHA-256. It compiles for WASIp2 without
-default features. It is not yet connected to graph traversal, pack generation,
-publication, HTTP, or Spin. The
-[`wire protocol evidence`](docs/evidence/git-wasi-wire-2026-09-04.md) records
-the exact fixtures, bounds, build proof, and remaining integration work.
+Compressed-entry reuse is a P0 fetch requirement. The pack builder must reuse
+validated compressed entries when possible. If a selected delta and its
+base are both in the output, it must encode the relation as `REF_DELTA` against
+the selected base ID and reuse the compressed delta stream.
 
-### 5. Integration and deletion
+If reuse cannot prove a valid selected base, the builder must materialize the
+object, verify its ID, and write a full object. The output pack must contain
+every base that it needs. The client must not need an external object to read
+the response.
 
-- Connect protocol, pack, durable lookup, and publication through one engine.
-- Keep Axum as a thin native routing and transport adapter.
-- Add a thin `wasm32-wasip2` Spin example that calls the same engine.
-- Compare the new engine with the native reference on the same fixtures.
-- Delete the native repository materializer, protocol v0 upload-pack engine,
-  and native-only core dependencies after acceptance passes.
+## Twelve sequential implementation tasks
 
-## Acceptance
+1. Centralize the process pool, operation counters, and reduced limits. Replace
+   `object_log::materialize` with `materialize(log, owned_view, materializer)`
+   and add `CommitRef::len()`. This pre-release change lets the engine reserve
+   exact checkpoint and tail bytes before concurrent reads and keeps one
+   materialization path. Add exact-limit and limit-plus-one tests.
+2. Add compressed-entry inspection and reuse. Cover selected-base `REF_DELTA`,
+   full-object fallback, checksums, order, and self-contained output.
+3. Load one repository view through the existing `Repository` surface. Retain
+   refs, authenticated pack proofs, standard indexes, and one sparse reader.
+4. Add iterative commit, tree, and annotated-tag traversal. Enforce graph,
+   object, work, call, transfer, and memory budgets in one place.
+5. Validate reachable wants and usable haves against one view. Compute the
+   exact selected object set without reading unrelated blobs.
+6. Build the fetch pack from reused compressed entries and materialized
+   fallbacks. Validate it with Git and enforce the raw and framed byte limits.
+7. Connect protocol-v2 discovery, `ls-refs`, negotiation, and fetch to
+   `Repository`. Buffer the bounded response and allow one expired-view retry.
+8. Resolve receive-pack thin bases in at most 32 rounds. Normalize the pack,
+   check connectivity and ref rules, and keep all counters cumulative.
+9. Prepare and publish the ordered receive ref transaction. Preserve current
+   conflict, pending-result, lost-response, and per-ref status behavior.
+10. Change the native Axum host into a thin adapter and run unchanged-client
+    parity against the native oracle. Keep the oracle available for comparison.
+11. Add the thin Spin WASIp2 adapter. Record imports and peak process memory,
+    then run all memory-store and filesystem-store acceptance and performance
+    cases.
+12. Run the same accepted cases against local MinIO. Delete the native oracle
+    only after client and storage parity, all hard gates, and required owner
+    reviews pass. Finish with Rust, adversarial, prose, and deletion reviews.
+
+Tasks are sequential because each task supplies the contract or evidence for
+the next task. Local memory and filesystem cases must pass before MinIO.
+
+## Functional acceptance
 
 An unchanged Git client must:
 
-- discover an empty and a populated repository with protocol v2;
+- discover empty and populated SHA-1 and SHA-256 repositories with protocol v2;
 - clone, fetch, and list refs;
-- push a new branch, annotated tag, fast-forward update, and deletions;
-- receive a clear rejection for stale and non-fast-forward updates; and
+- perform an incremental fetch that excludes every object reachable from an
+  accepted have;
+- push a branch, annotated tag, fast-forward update, and deletion;
+- receive clear stale and non-fast-forward rejections; and
 - pass `git fsck --strict` after cold recovery.
 
 Packet traces must show `version 2`, `command=ls-refs`, and `command=fetch`.
-The incremental-fetch fixture must contain the new tip and no object reachable
-from an accepted `have`. Record its pack bytes against the current
-full-reachable response.
-
-Two pushes from one view must have one durable winner. A lost response must be
-recoverable after the host and all local cache data are removed. Rejected and
-losing packs must become collectable.
+Generated fetch packs must pass `git index-pack --strict`. Two pushes from one
+view must have one durable winner. A lost response must be recoverable after
+the host and all cache data are removed. Rejected and losing packs must become
+collectable.
 
 The same checkpoint, collection, and cold-clone lifecycle must pass with memory
-storage and local MinIO. Live AWS qualification remains separate.
+storage, filesystem storage, and then local MinIO. Live AWS qualification
+remains separate.
 
-Required build gates include:
+The build gates include:
 
 ```sh
 cargo +1.97.1 check -p object-log-git --lib \
@@ -191,11 +229,14 @@ cargo +1.97.1 build -p object-log-git-spin \
   --target wasm32-wasip2 --release
 ```
 
-## Performance and size control
+## Performance acceptance
 
-Compare the native reference and replacement with the same revision, Git
-client, machine, and fixtures. Measure p50 and p95 time, wire bytes, peak
-memory, object-store requests, and transferred bytes for:
+Use the same revision, pinned Git 2.54 client, machine, and deterministic fixture
+for the Git oracle and replacement. Run one warm-up and ten paired samples.
+Record p50 and p95 time, raw and framed bytes, logical store calls, transferred
+bytes, and observed logical serial request depth.
+
+Measure:
 
 - a 4 KiB one-commit push and clone;
 - an 8 MiB deterministic pack;
@@ -203,15 +244,74 @@ memory, object-store requests, and transferred bytes for:
 - one incremental fetch after those 384 commits; and
 - a thin incremental push.
 
-Use one warm-up and ten measured samples. Record raw results and limitations.
-Cold recovery must not download complete pack bodies.
+The hard local gates are:
 
-Limit new product code to 1,540 lines and aim to delete at least 1,100
-native-only product lines. Stop for a simplicity review above 1,600 new product
-lines. Run a Rust review, an adversarial correctness review, a prose review,
-and a deletion review at stable checkpoints.
+- The fetch pack contains exactly the expected object-ID set.
+- `git index-pack --strict --check-self-contained-and-connected` accepts the
+  fetch pack.
+- For the 8 MiB full fetch and 384-commit incremental fetch, candidate pack
+  bytes are at most 1.10 times a same-run `git pack-objects --stdout --revs`
+  oracle.
+- Every raw fetch pack is at most 9,437,184 bytes.
+- Every framed fetch response is at most 9,437,926 bytes.
+- The measured 8 MiB fixture succeeds.
+- Every operation stays within 512 logical store calls and 96 MiB of combined
+  transfer.
+
+Ten samples do not define a hard latency gate. With ten samples, p95 is the
+maximum observation. If candidate p50 or p95 exceeds 1.25 times an equivalent
+Git oracle, run 30 paired samples and require owner performance review before
+native deletion. Record noisy results as inconclusive.
+
+After the Spin component exists, measure a fresh process with
+`--max-instance-memory 134217728` and `/usr/bin/time -l`. A peak at or below
+120 MiB is a provisional target, not a hard gate. A later Linux test must
+enforce a 128 MiB cgroup and prove that the host survives the workload.
+
+No tighter call-count or serial-depth performance gate exists yet. Measurement
+code must add zero product lines; keep it in test and support code. A failed
+hard gate blocks native-oracle deletion.
+
+## Source-size gates
+
+Count product and test lines separately from revision `2ee2174`.
+
+| Tranche | Expected change | Stop gate |
+| --- | ---: | ---: |
+| Pack, durable, wire, and private budgets | Add 260–400; delete 80–160 | Retained product exceeds 2,050 |
+| Repository, graph, hybrid fetch, and receive | Add 900–1,225 | Added product exceeds 1,275 |
+| Native HTTP and Spin adapters | Add 180–280 | Added product exceeds 300 |
+| Tests | Add 1,600–2,400 | Report separately |
+
+The current combined Git and HTTP implementation has 4,465 product lines. The
+native deletion target is 2,165 product lines. After that deletion, the
+expected Git, HTTP, and Spin total is 3,480–4,125 product lines. Stop if it
+exceeds 4,150.
+
+Do not continue past a missed intermediate gate because a later deletion might
+offset it. Reduce the current tranche before integration.
+
+## Standards and prior art
+
+- Git's [protocol-v2](https://git-scm.com/docs/protocol-v2) defines `ls-refs`,
+  want/have negotiation, and fetch response sections. The reachable-only want
+  rule above is a stricter project policy.
+- Git's [pack format](https://git-scm.com/docs/gitformat-pack) defines
+  `REF_DELTA`, `OFS_DELTA`, checksums, and self-contained stored packs.
+- Git's [pack-objects](https://git-scm.com/docs/git-pack-objects) documents
+  delta reuse and the standard pack output used as the performance oracle.
+- [`gix-pack` 0.74.2](https://docs.rs/gix-pack/0.74.2/gix_pack/) supplies the
+  low-level pack and index types used by the private foundation.
+- Cursor's [Git at any scale](https://cursor.com/blog/git-at-any-scale) supports
+  the object-storage WAL, immutable pack, atomic publication, and disposable
+  cache model.
+- Walgit's [remote reader](https://github.com/tobi/walgit/blob/main/crates/walgit-wal/src/remote.rs)
+  is prior art for indexed range reads and a process-wide block cache over
+  object storage.
+- Cloudflare documents a [128 MB per-isolate memory limit](https://developers.cloudflare.com/workers/platform/limits/),
+  including WebAssembly allocations. This plan uses a 128 MiB process model
+  and a lower 120 MiB provisional target.
 
 GitHub issue [#17](https://github.com/carsonfarmer/object-log/issues/17) tracks
 this work. Issue [#14](https://github.com/carsonfarmer/object-log/issues/14)
-tracks only native-host hardening that remains useful after the shared engine
-exists.
+tracks native-host hardening that remains useful after the shared path exists.

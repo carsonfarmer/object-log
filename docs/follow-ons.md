@@ -104,13 +104,25 @@ test reference. Its loopback tests use an unchanged client for clone, fetch,
 push, branch and tag changes, and non-fast-forward rejection.
 
 Issue [#17](https://github.com/carsonfarmer/object-log/issues/17) replaces the
-native-only Git core. The first host can remain native. Protocol, pack, object
-lookup, and publication code must compile for `wasm32-wasip2` so a later Spin
-component remains a thin adapter. Upload-pack discovery and fetch must use
-protocol v2 and subtract valid client `have` objects. Push keeps classic
-receive-pack. The new engine must pass the current tests before the native
-repository materializer and protocol v0 upload-pack path are deleted. See
-[`GIT_PLAN.md`](../GIT_PLAN.md).
+native-only Git core. At revision `2ee2174`, private pack normalization,
+durable staging and sparse reads, and Git wire framing are complete locally.
+They contain 1,684 product lines and compile for `wasm32-wasip2` without
+default features.
+
+The next 12 tasks connect those foundations through the existing public
+`Repository` and `PreparedPush` surface. Protocol-v2 fetch accepts reachable
+wants and subtracts valid client haves. Fetch pack creation first reuses safe
+compressed entries, then materializes objects when reuse cannot produce a
+self-contained pack. Classic receive-pack returns the current conflict,
+pending-result, lost-response, and per-ref statuses.
+
+One process-wide 88 MiB pool admits one active engine operation under a
+provisional 128 MiB WASI process model. Each operation has cumulative call,
+transfer, work, thin-resolution, and retry limits. Local memory and filesystem
+acceptance must pass before MinIO. The native oracle remains until unchanged
+Git clients and the storage lifecycle reach parity. See the current
+[`GIT_PLAN.md`](../GIT_PLAN.md) for the exact tasks, limits, performance gates,
+and source-size stop gates.
 
 ## 2. WASI filesystem storage
 
