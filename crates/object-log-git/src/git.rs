@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     io::{BufReader, Read, Seek},
     path::{Path, PathBuf},
@@ -11,13 +12,14 @@ use crate::{Error as RecordError, ObjectFormat, ObjectId as RecordObjectId};
 
 mod local;
 
-#[allow(unused_imports, reason = "used by the pending repository adapter")]
 pub(crate) use local::{init, materialize, open, validate_ref_name, validate_snapshot};
 
 const PACK_HEADER_LEN: usize = 12;
 const MAX_PACK_BYTES: usize = 512 * 1024 * 1024;
 const MAX_OBJECT_BYTES: usize = 256 * 1024 * 1024;
-const MAX_OBJECTS: u32 = 1_000_000;
+const MAX_REPOSITORY_OBJECTS: u32 = 1_000_000;
+
+pub(crate) type ObjectSet = HashSet<ObjectId>;
 
 impl TryFrom<Kind> for ObjectFormat {
     type Error = RecordError;
@@ -101,12 +103,28 @@ pub(crate) fn prepare_push(
     format: ObjectFormat,
     current: &crate::RefSnapshot,
     updates: &[crate::RefUpdate],
+    mut objects: ObjectSet,
     pack: Option<&Path>,
 ) -> Result<Option<NormalizedPack>, Error> {
     let repo = open(path, format)?;
     let pack = pack.map(|path| normalize_pack(&repo, path)).transpose()?;
-    local::apply_at(&repo, current, updates)?;
+    if let Some(pack) = &pack {
+        extend_objects(&mut objects, pack.objects.iter().copied())?;
+    }
+    local::apply_at(&repo, current, updates, &objects)?;
     Ok(pack)
+}
+
+pub(crate) fn extend_objects(
+    objects: &mut ObjectSet,
+    additional: impl IntoIterator<Item = ObjectId>,
+) -> Result<(), Error> {
+    for id in additional {
+        if objects.insert(id) && objects.len() > MAX_REPOSITORY_OBJECTS as usize {
+            return Err(Error::InvalidObjectGraph("object count limit exceeded"));
+        }
+    }
+    Ok(())
 }
 
 /// Validate and normalize a received pack. Thin-pack bases come from `repo`.
@@ -140,18 +158,6 @@ pub(crate) fn normalize_pack(repo: &gix::Repository, path: &Path) -> Result<Norm
     })
 }
 
-pub(crate) fn verify_pack_checksum(path: &Path, expected: RecordObjectId) -> Result<(), Error> {
-    let expected = ObjectId::try_from(expected).map_err(|_| Error::InvalidReference)?;
-    let pack = gix_pack::data::File::at(path, expected.kind())
-        .map_err(|error| Error::InvalidPack(error.to_string()))?;
-    let actual = pack
-        .verify_checksum(&mut gix::progress::Discard, &AtomicBool::new(false))
-        .map_err(|error| Error::InvalidPack(error.to_string()))?;
-    (actual == expected)
-        .then_some(())
-        .ok_or_else(|| Error::InvalidPack("pack checksum does not match its ID".into()))
-}
-
 /// Install and index a self-contained pack that was returned by `normalize_pack`.
 pub(crate) fn install_pack(repo: &gix::Repository, path: &Path) -> Result<IndexedPack, Error> {
     let outcome = write_pack(repo, path, false)?;
@@ -162,11 +168,12 @@ pub(crate) fn install_pack(repo: &gix::Repository, path: &Path) -> Result<Indexe
 }
 
 /// Resolve every object through the repository object database.
+#[cfg(test)]
 pub(crate) fn verify_object_access(
     repo: &gix::Repository,
     objects: &[ObjectId],
 ) -> Result<(), Error> {
-    if objects.len() > MAX_OBJECTS as usize {
+    if objects.len() > MAX_REPOSITORY_OBJECTS as usize {
         return Err(Error::InvalidPack("too many indexed objects".into()));
     }
     for id in objects {
@@ -226,7 +233,7 @@ fn write_pack(
         options,
     )
     .map_err(|error| Error::Pack(error.to_string()))?;
-    if outcome.index.num_objects > MAX_OBJECTS {
+    if outcome.index.num_objects > MAX_REPOSITORY_OBJECTS {
         remove_keep(outcome.keep_path.as_deref())?;
         return Err(Error::InvalidPack("too many normalized objects".into()));
     }
@@ -244,7 +251,7 @@ fn validate_header(header: &[u8; PACK_HEADER_LEN], length: u64) -> Result<(), Er
             "only pack version 2 is supported".into(),
         ));
     }
-    if objects > MAX_OBJECTS {
+    if objects > MAX_REPOSITORY_OBJECTS {
         return Err(Error::InvalidPack("pack has too many objects".into()));
     }
     Ok(())
@@ -268,7 +275,7 @@ fn read_index(path: &Path, hash: Kind) -> Result<IndexedPack, Error> {
         .verify_checksum(&mut gix::progress::Discard, &AtomicBool::new(false))
         .map_err(|error| Error::Pack(error.to_string()))?;
     let objects = index.iter().map(|entry| entry.oid).collect::<Vec<_>>();
-    if objects.len() > MAX_OBJECTS as usize {
+    if objects.len() > MAX_REPOSITORY_OBJECTS as usize {
         return Err(Error::InvalidPack("index has too many objects".into()));
     }
     Ok(IndexedPack {
@@ -310,7 +317,6 @@ mod tests {
             let source = bare(fixture.path().join("source"), hash)?;
             let normalized = normalize_pack(&source, &fixture.pack)?;
             assert!(!normalized.objects.is_empty());
-            verify_pack_checksum(&normalized.path, RecordObjectId::try_from(normalized.id)?)?;
             verify_object_access(&source, &normalized.objects)?;
             let record_id = RecordObjectId::try_from(normalized.id)?;
             assert_eq!(ObjectId::try_from(record_id)?, normalized.id);
@@ -360,7 +366,7 @@ mod tests {
 
         let header_path = fixture.path().join("header.pack");
         let mut header =
-            gix_pack::data::header::encode(gix_pack::data::Version::V2, MAX_OBJECTS + 1);
+            gix_pack::data::header::encode(gix_pack::data::Version::V2, MAX_REPOSITORY_OBJECTS + 1);
         fs::write(&header_path, header)?;
         assert!(install_pack(&repo, &header_path).is_err());
         header[4..8].copy_from_slice(&3_u32.to_be_bytes());

@@ -2,14 +2,13 @@
 
 #![deny(missing_docs, unsafe_code)]
 
-#[allow(dead_code, reason = "used by the pending repository adapter")]
 mod format;
-#[allow(dead_code, reason = "used by the pending repository adapter")]
 mod git;
-#[allow(dead_code, reason = "used by the pending repository adapter")]
+mod repository;
 mod state;
-#[allow(dead_code, reason = "used by the pending repository adapter")]
 mod storage;
+
+pub use repository::{PreparedPush, Repository};
 
 use std::{collections::BTreeMap, fmt};
 
@@ -146,7 +145,7 @@ impl RefUpdate {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        if self.name.is_empty() || self.name.len() > 1_024 || self.name.contains(&0) {
+        if git::validate_ref_name(&self.name).is_err() {
             return Err(Error::InvalidRefName);
         }
         if self.expected == self.target {
@@ -166,8 +165,8 @@ pub enum Error {
     /// An object ID is invalid.
     #[error("invalid Git object ID")]
     InvalidObjectId,
-    /// A ref name is empty, too long, or contains a null byte.
-    #[error("invalid Git ref name")]
+    /// A ref name is not a supported valid branch or tag name.
+    #[error("invalid Git branch or tag name")]
     InvalidRefName,
     /// A durable record is invalid.
     #[error("invalid Git record: {0}")]
@@ -175,6 +174,66 @@ pub enum Error {
     /// Committed expected-old values do not match replay state.
     #[error("Git ref state diverged")]
     StateDiverged,
+    /// A pack is malformed, corrupt, or outside a configured limit.
+    #[error("invalid Git pack: {0}")]
+    InvalidPack(String),
+    /// A local repository uses unsupported state or configuration.
+    #[error("unsupported Git repository")]
+    UnsupportedRepository,
+    /// A ref or object target is invalid.
+    #[error("invalid Git reference")]
+    InvalidReference,
+    /// A ref changed after its expected value was observed.
+    #[error("Git reference changed")]
+    StaleReference,
+    /// A branch update does not descend from its current commit.
+    #[error("Git branch update is not a fast-forward")]
+    NonFastForward,
+    /// An object reachable from a proposed ref is invalid.
+    #[error("invalid reachable Git object graph: {0}")]
+    InvalidObjectGraph(&'static str),
+    /// The local work directory cannot be used as a new disposable cache.
+    #[error("Git work directory must not exist or must be empty")]
+    WorkDirectoryNotEmpty,
+    /// A local Git operation failed.
+    #[error("Git operation failed: {0}")]
+    Git(String),
+    /// Pack transfer or validation failed.
+    #[error("Git pack storage failed: {0}")]
+    PackStorage(String),
+    /// An object-log operation failed.
+    #[error(transparent)]
+    ObjectLog(#[from] object_log::Error),
+    /// A blocking local Git task stopped before it returned a result.
+    #[error("local Git task stopped")]
+    BlockingTask,
+}
+
+impl From<git::Error> for Error {
+    fn from(error: git::Error) -> Self {
+        match error {
+            git::Error::InvalidPack(message) | git::Error::Pack(message) => {
+                Self::InvalidPack(message)
+            }
+            git::Error::NotBare | git::Error::UnsupportedRepository => Self::UnsupportedRepository,
+            git::Error::InvalidReference => Self::InvalidReference,
+            git::Error::StaleReference => Self::StaleReference,
+            git::Error::NonFastForward => Self::NonFastForward,
+            git::Error::InvalidObjectGraph(message) => Self::InvalidObjectGraph(message),
+            git::Error::Repository(message) => Self::Git(message),
+            git::Error::Io { path, source } => Self::Git(format!("{}: {source}", path.display())),
+        }
+    }
+}
+
+impl From<storage::Error> for Error {
+    fn from(error: storage::Error) -> Self {
+        match error {
+            storage::Error::ObjectLog(error) => Self::ObjectLog(error),
+            storage::Error::InvalidPack(message) => Self::InvalidPack(message.to_owned()),
+            storage::Error::Io(error) => Self::PackStorage(error.to_string()),
+        }
+    }
 }
 
 fn nibble(byte: u8) -> Result<u8, Error> {
@@ -199,8 +258,8 @@ mod tests {
             .map_err(|_| Error::InvalidRecord("test encoding failed"))?;
         assert!(minicbor::decode::<ObjectId>(&zero).is_err());
         assert!(RefUpdate::new("refs/heads/main", None, Some(id)).is_ok());
-        assert!(RefUpdate::new("refs/notes/x", None, Some(id)).is_ok());
-        assert!(RefUpdate::new(Bytes::from_static(b"refs/tags/\xff"), None, Some(id)).is_ok());
+        assert!(RefUpdate::new("refs/notes/x", None, Some(id)).is_err());
+        assert!(RefUpdate::new(Bytes::from_static(b"refs/tags/\xff"), None, Some(id)).is_err());
         assert!(RefUpdate::new("", None, Some(id)).is_err());
         assert!(RefUpdate::new(Bytes::from_static(b"refs/heads/a\0b"), None, Some(id)).is_err());
         assert!(RefUpdate::new("refs/heads/main", Some(id), Some(id)).is_err());

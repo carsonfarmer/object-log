@@ -9,7 +9,7 @@ use gix::{
     },
 };
 
-use super::Error;
+use super::{Error, ObjectSet};
 use crate::{ObjectFormat, RefSnapshot, RefUpdate};
 
 const HEAD: &str = "refs/heads/main";
@@ -62,8 +62,9 @@ pub(super) fn apply_at(
     repo: &gix::Repository,
     current: &RefSnapshot,
     updates: &[RefUpdate],
+    objects: &ObjectSet,
 ) -> Result<(), Error> {
-    verify_updates(repo, current, updates)?;
+    verify_updates(repo, current, updates, objects)?;
     let edits = updates
         .iter()
         .map(|update| {
@@ -118,8 +119,10 @@ pub(crate) fn verify_updates(
     repo: &gix::Repository,
     current: &RefSnapshot,
     updates: &[RefUpdate],
+    objects: &ObjectSet,
 ) -> Result<(), Error> {
     let mut roots = Vec::with_capacity(updates.len());
+    let mut ancestry = Vec::new();
     for update in updates {
         let (_, kind) = ref_name(&update.name)?;
         if current.get(update.name.as_slice()).copied() != update.expected {
@@ -131,21 +134,29 @@ pub(crate) fn verify_updates(
         let target = ObjectId::try_from(target).map_err(|_| Error::InvalidReference)?;
         if matches!(kind, RefKind::Branch)
             && let Some(old) = update.expected
-            && !is_ancestor(
-                repo,
+        {
+            ancestry.push((
                 ObjectId::try_from(old).map_err(|_| Error::InvalidReference)?,
                 target,
-            )?
-        {
-            return Err(Error::NonFastForward);
+            ));
         }
         let expected = matches!(kind, RefKind::Branch).then_some(gix::objs::Kind::Commit);
         roots.push((target, expected));
     }
-    verify_graph(repo, roots)
+    verify_graph(repo, roots, objects)?;
+    for (old, new) in ancestry {
+        if !is_ancestor(repo, old, new)? {
+            return Err(Error::NonFastForward);
+        }
+    }
+    Ok(())
 }
 
-pub(crate) fn validate_snapshot(repo: &gix::Repository, refs: &RefSnapshot) -> Result<(), Error> {
+pub(crate) fn validate_snapshot(
+    repo: &gix::Repository,
+    refs: &RefSnapshot,
+    objects: &ObjectSet,
+) -> Result<(), Error> {
     let roots = refs
         .iter()
         .map(|(name, target)| {
@@ -155,7 +166,7 @@ pub(crate) fn validate_snapshot(repo: &gix::Repository, refs: &RefSnapshot) -> R
             Ok((target, expected))
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    verify_graph(repo, roots)
+    verify_graph(repo, roots, objects)
 }
 
 pub(super) fn snapshot(repo: &gix::Repository) -> Result<RefSnapshot, Error> {
@@ -216,6 +227,7 @@ fn reject_alternates(repo: &gix::Repository) -> Result<(), Error> {
 fn verify_graph(
     repo: &gix::Repository,
     roots: Vec<(ObjectId, Option<gix::objs::Kind>)>,
+    objects: &ObjectSet,
 ) -> Result<(), Error> {
     let mut pending = roots
         .into_iter()
@@ -235,8 +247,10 @@ fn verify_graph(
             }
             continue;
         }
-        if seen.len() >= super::MAX_OBJECTS as usize {
-            return Err(Error::InvalidObjectGraph("object count limit exceeded"));
+        if !objects.contains(&id) {
+            return Err(Error::InvalidObjectGraph(
+                "object is not in a verified pack",
+            ));
         }
         let object = repo.find_object(id).map_err(error)?;
         if object.data.len() > super::MAX_OBJECT_BYTES
@@ -378,12 +392,13 @@ mod tests {
                     None,
                     Some(fixture.second),
                 )?],
+                &fixture.objects,
             )?;
             let desired = RefSnapshot::from([
                 (b"refs/heads/main".to_vec(), fixture.first),
                 (b"refs/tags/blob".to_vec(), fixture.blob),
             ]);
-            validate_snapshot(&repo, &desired)?;
+            validate_snapshot(&repo, &desired, &fixture.objects)?;
             materialize(&repo, &desired)?;
 
             assert_eq!(snapshot(&repo)?, desired);
@@ -410,7 +425,7 @@ mod tests {
             assert!(verify_main(&fixture).is_err());
             let repo = gix::open_opts(fixture.work.join(".git"), open_options())?;
             let refs = RefSnapshot::from([(b"refs/heads/main".to_vec(), fixture.second)]);
-            assert!(validate_snapshot(&repo, &refs).is_err());
+            assert!(validate_snapshot(&repo, &refs, &fixture.objects).is_err());
         }
 
         let fixture = fixture("sha1", ObjectFormat::Sha1)?;
@@ -436,17 +451,13 @@ mod tests {
             ]),
         )?;
 
-        let invalid = RefUpdate::new("refs/heads/bad..name", None, Some(fixture.first))?;
-        assert!(matches!(
-            apply(&repo, &[invalid]),
-            Err(Error::InvalidReference)
-        ));
         let missing = RecordObjectId::from_bytes(ObjectFormat::Sha1, &[9; 20])?;
         let missing = RefUpdate::new("refs/heads/missing", None, Some(missing))?;
-        assert!(apply(&repo, &[missing]).is_err());
+        assert!(apply(&repo, &fixture.objects, &[missing]).is_err());
 
         apply(
             &repo,
+            &fixture.objects,
             &[RefUpdate::new(
                 "refs/heads/main",
                 Some(fixture.first),
@@ -454,24 +465,32 @@ mod tests {
             )?],
         )?;
         let stale = RefUpdate::new("refs/heads/main", Some(fixture.first), Some(fixture.side))?;
-        assert!(matches!(apply(&repo, &[stale]), Err(Error::StaleReference)));
+        assert!(matches!(
+            apply(&repo, &fixture.objects, &[stale]),
+            Err(Error::StaleReference)
+        ));
         let non_fast_forward =
             RefUpdate::new("refs/heads/main", Some(fixture.second), Some(fixture.side))?;
         assert!(matches!(
-            apply(&repo, &[non_fast_forward]),
+            apply(&repo, &fixture.objects, &[non_fast_forward]),
             Err(Error::NonFastForward)
         ));
 
         apply(
             &repo,
+            &fixture.objects,
             &[RefUpdate::new("refs/tags/blob", Some(fixture.blob), None)?],
         )?;
         assert!(!snapshot(&repo)?.contains_key(&b"refs/tags/blob"[..]));
         Ok(())
     }
 
-    fn apply(repo: &gix::Repository, updates: &[RefUpdate]) -> Result<(), Error> {
-        apply_at(repo, &snapshot(repo)?, updates)
+    fn apply(
+        repo: &gix::Repository,
+        objects: &ObjectSet,
+        updates: &[RefUpdate],
+    ) -> Result<(), Error> {
+        apply_at(repo, &snapshot(repo)?, updates, objects)
     }
 
     struct Fixture {
@@ -481,6 +500,7 @@ mod tests {
         second: RecordObjectId,
         side: RecordObjectId,
         blob: RecordObjectId,
+        objects: ObjectSet,
     }
 
     fn fixture(name: &str, format: ObjectFormat) -> Result<Fixture, Box<dyn StdError>> {
@@ -503,11 +523,13 @@ mod tests {
         fs::write(work.join("side"), b"side\n")?;
         git(Some(&work), &["add", "side"])?;
         git(Some(&work), &["commit", "--quiet", "-m", "side"])?;
+        let objects = object_set(&work, format)?;
         Ok(Fixture {
             first: parse(&work, format, "main~1")?,
             second: parse(&work, format, "main")?,
             side: parse(&work, format, "side")?,
             blob: parse(&work, format, "main:file")?,
+            objects,
             root,
             work,
         })
@@ -541,8 +563,21 @@ mod tests {
                 None,
                 Some(fixture.second),
             )?],
+            &fixture.objects,
         )?;
         Ok(())
+    }
+
+    fn object_set(path: &Path, format: ObjectFormat) -> Result<ObjectSet, Box<dyn StdError>> {
+        let mut objects = ObjectSet::new();
+        for line in git(Some(path), &["rev-list", "--objects", "--all"])?.lines() {
+            let id = line
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| "object listing contains an empty line".to_string())?;
+            objects.insert(ObjectId::try_from(RecordObjectId::parse(format, id)?)?);
+        }
+        Ok(objects)
     }
 
     fn loose_path(work: &Path, id: RecordObjectId) -> std::path::PathBuf {

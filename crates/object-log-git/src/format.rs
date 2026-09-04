@@ -213,8 +213,8 @@ mod tests {
             checkpoint: true,
             format: ObjectFormat::Sha1,
             refs: vec![
-                RefUpdate::new("z", None, Some(id(1)))?,
-                RefUpdate::new("a", None, Some(id(2)))?,
+                RefUpdate::new("refs/tags/z", None, Some(id(1)))?,
+                RefUpdate::new("refs/tags/a", None, Some(id(2)))?,
             ],
             packs: vec![],
         }

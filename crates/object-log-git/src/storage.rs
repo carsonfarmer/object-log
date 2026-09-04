@@ -6,6 +6,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinSet;
 
+use crate::ObjectId;
+
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PACK_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TRANSFERS: usize = 8;
@@ -25,9 +27,19 @@ pub(crate) struct StagedPack {
     pub(crate) bytes: u64,
 }
 
-pub(crate) async fn stage_pack(log: &Log, view: &View, path: &Path) -> Result<StagedPack, Error> {
+pub(crate) async fn stage_pack(
+    log: &Log,
+    view: &View,
+    path: &Path,
+    expected: ObjectId,
+) -> Result<StagedPack, Error> {
     let mut file = File::open(path).await?;
     let bytes = file.metadata().await?.len();
+    let trailer_bytes = u64::try_from(expected.as_bytes().len())
+        .map_err(|_| Error::InvalidPack("pack trailer length exceeds u64"))?;
+    let content_bytes = bytes
+        .checked_sub(trailer_bytes)
+        .ok_or(Error::InvalidPack("pack is shorter than its checksum"))?;
     let chunk_bytes = log.options().max_object_bytes.min(CHUNK_BYTES);
     if bytes == 0 || bytes > MAX_PACK_BYTES {
         return Err(Error::InvalidPack("pack byte length is out of range"));
@@ -45,14 +57,26 @@ pub(crate) async fn stage_pack(log: &Log, view: &View, path: &Path) -> Result<St
 
     let mut children = Vec::with_capacity(chunks);
     let mut uploads = JoinSet::new();
+    let mut hasher = gix::hash::hasher(expected.format().into());
+    let mut trailer = [0; 32];
     let mut read = 0_u64;
     for index in 0..chunks {
         let len = usize::try_from((bytes - read).min(chunk_bytes_u64))
             .map_err(|_| Error::InvalidPack("chunk length exceeds usize"))?;
+        let len_u64 =
+            u64::try_from(len).map_err(|_| Error::InvalidPack("chunk length exceeds u64"))?;
         let mut chunk = vec![0; len];
         file.read_exact(&mut chunk).await?;
+        let body_len = usize::try_from((content_bytes - read.min(content_bytes)).min(len_u64))
+            .map_err(|_| Error::InvalidPack("hashed byte length exceeds usize"))?;
+        hasher.update(&chunk[..body_len]);
+        if body_len < len {
+            let offset = usize::try_from(read.saturating_sub(content_bytes))
+                .map_err(|_| Error::InvalidPack("pack trailer offset exceeds usize"))?;
+            trailer[offset..offset + len - body_len].copy_from_slice(&chunk[body_len..]);
+        }
         read = read
-            .checked_add(u64::try_from(len).map_err(|_| Error::InvalidPack("pack is too large"))?)
+            .checked_add(len_u64)
             .ok_or(Error::InvalidPack("pack is too large"))?;
         let log = log.clone();
         let cursor = view.cursor().clone();
@@ -67,6 +91,14 @@ pub(crate) async fn stage_pack(log: &Log, view: &View, path: &Path) -> Result<St
     let mut extra = [0];
     if file.read(&mut extra).await? != 0 || read != bytes {
         return Err(Error::InvalidPack("pack changed while it was read"));
+    }
+    let digest = hasher
+        .try_finalize()
+        .map_err(|_| Error::InvalidPack("pack checksum failed"))?;
+    if digest.as_slice() != expected.as_bytes()
+        || &trailer[..expected.as_bytes().len()] != expected.as_bytes()
+    {
+        return Err(Error::InvalidPack("pack checksum does not match"));
     }
     let root = log.put_node(view.cursor(), Bytes::new(), children).await?;
     Ok(StagedPack { root, bytes })
@@ -176,6 +208,24 @@ mod tests {
         Ok(file)
     }
 
+    fn pack(len: usize) -> TestResult<(Vec<u8>, ObjectId)> {
+        let trailer = 20;
+        let mut bytes = b"pack"
+            .iter()
+            .copied()
+            .cycle()
+            .take(len.checked_sub(trailer).ok_or("pack is too short")?)
+            .collect::<Vec<_>>();
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(&bytes);
+        let digest = hasher.try_finalize()?;
+        bytes.extend_from_slice(digest.as_slice());
+        Ok((
+            bytes,
+            ObjectId::from_bytes(crate::ObjectFormat::Sha1, digest.as_slice())?,
+        ))
+    }
+
     async fn recover(log: &Log, view: &View, pack: &StagedPack) -> TestResult<Vec<u8>> {
         let directory = TempDir::new()?;
         let path = directory.path().join("pack");
@@ -188,9 +238,17 @@ mod tests {
     #[tokio::test]
     async fn rejects_zero_and_too_many_chunks_before_put() -> TestResult {
         let (log, view, faults, _) = open(Options::default()).await?;
+        let expected = ObjectId::from_bytes(crate::ObjectFormat::Sha1, &[1; 20])?;
         let file = input(&[])?;
         assert!(matches!(
-            stage_pack(&log, &view, file.path()).await,
+            stage_pack(&log, &view, file.path(), expected).await,
+            Err(Error::InvalidPack(_))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+
+        let file = input(&[1])?;
+        assert!(matches!(
+            stage_pack(&log, &view, file.path(), expected).await,
             Err(Error::InvalidPack(_))
         ));
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
@@ -201,9 +259,10 @@ mod tests {
             ..Options::default()
         };
         let (log, view, faults, _) = open(options).await?;
-        let file = input(&vec![7; 1_025])?;
+        let (bytes, expected) = pack(1_025)?;
+        let file = input(&bytes)?;
         assert!(matches!(
-            stage_pack(&log, &view, file.path()).await,
+            stage_pack(&log, &view, file.path(), expected).await,
             Err(Error::InvalidPack(_))
         ));
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
@@ -217,15 +276,10 @@ mod tests {
             ..Options::default()
         };
         let (log, view, _, _) = open(options).await?;
-        for len in [1_usize, 1_024, 1_025] {
-            let bytes = b"pack"
-                .iter()
-                .copied()
-                .cycle()
-                .take(len)
-                .collect::<Vec<_>>();
+        for len in [21_usize, 1_024, 1_025] {
+            let (bytes, expected) = pack(len)?;
             let file = input(&bytes)?;
-            let pack = stage_pack(&log, &view, file.path()).await?;
+            let pack = stage_pack(&log, &view, file.path(), expected).await?;
             assert_eq!(pack.bytes, u64::try_from(len)?);
             assert_eq!(recover(&log, &view, &pack).await?, bytes);
             let node = log.read_node(&view, pack.root.reference()).await?;
@@ -237,8 +291,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_wrong_descriptor_length_before_writing() -> TestResult {
         let (log, view, _, _) = open(Options::default()).await?;
-        let file = input(b"pack")?;
-        let pack = stage_pack(&log, &view, file.path()).await?;
+        let (bytes, expected) = pack(24)?;
+        let file = input(&bytes)?;
+        let pack = stage_pack(&log, &view, file.path(), expected).await?;
         let directory = TempDir::new()?;
         let path = directory.path().join("output");
         let mut output = File::create(&path).await?;
@@ -261,8 +316,9 @@ mod tests {
     #[tokio::test]
     async fn missing_and_corrupt_children_fail() -> TestResult {
         let (log, view, faults, inner) = open(Options::default()).await?;
-        let file = input(b"pack")?;
-        let pack = stage_pack(&log, &view, file.path()).await?;
+        let (bytes, expected) = pack(24)?;
+        let file = input(&bytes)?;
+        let pack = stage_pack(&log, &view, file.path(), expected).await?;
         let child = faults
             .metrics()
             .events
@@ -284,6 +340,25 @@ mod tests {
                 .await
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_never_stages_a_root() -> TestResult {
+        let (log, view, faults, _) = open(Options::default()).await?;
+        for corrupt in [0, 23] {
+            faults.reset();
+            let (mut bytes, expected) = pack(24)?;
+            bytes[corrupt] ^= 1;
+            let file = input(&bytes)?;
+            assert!(matches!(
+                stage_pack(&log, &view, file.path(), expected).await,
+                Err(Error::InvalidPack("pack checksum does not match"))
+            ));
+            assert!(!faults.metrics().events.iter().any(|event| {
+                event.operation == Operation::Put && event.path.contains("/nodes/")
+            }));
+        }
         Ok(())
     }
 }
