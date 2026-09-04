@@ -5,10 +5,7 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-use gix_pack::data::{
-    Version,
-    input::{BytesToEntriesIter, EntriesToBytesIter, EntryDataMode, Mode},
-};
+use gix_pack::data::{Version, input::EntriesToBytesIter};
 
 use crate::{Error, ObjectFormat, ObjectId};
 
@@ -20,6 +17,8 @@ const DEFAULT_LIMITS: Limits = Limits {
     objects: 65_535,
     index_bytes: 4 * 1024 * 1024,
 };
+// Git's pack generator documents 4095 as its maximum delta depth.
+const MAX_DELTA_DEPTH: u16 = 4095;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Limits {
@@ -31,7 +30,7 @@ pub(crate) struct Limits {
     index_bytes: usize,
 }
 
-pub(crate) struct Base<'a> {
+pub(crate) struct ExternalBase<'a> {
     pub(crate) id: ObjectId,
     pub(crate) kind: gix_object::Kind,
     pub(crate) data: &'a [u8],
@@ -39,65 +38,56 @@ pub(crate) struct Base<'a> {
 
 pub(crate) struct Normalized {
     pub(crate) bytes: Vec<u8>,
+    pub(crate) index: Vec<u8>,
     pub(crate) id: ObjectId,
-    pub(crate) objects: Box<[ObjectId]>,
 }
 
 pub(crate) fn normalize(
     format: ObjectFormat,
     input: &[u8],
-    bases: &[Base<'_>],
+    external_bases: &[ExternalBase<'_>],
 ) -> Result<Normalized, Error> {
-    normalize_with(format, input, bases, DEFAULT_LIMITS)
+    normalize_with(format, input, external_bases, DEFAULT_LIMITS)
 }
 
 fn normalize_with(
     format: ObjectFormat,
     input: &[u8],
-    bases: &[Base<'_>],
+    external_bases: &[ExternalBase<'_>],
     limits: Limits,
 ) -> Result<Normalized, Error> {
     if input.len() > limits.input_bytes {
         return invalid("input exceeds byte limit");
     }
     let hash = object_hash(format);
-    let header: &[u8; 12] = input
-        .get(..12)
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or_else(|| Error::InvalidPack("input is truncated".into()))?;
-    let (version, count) = gix_pack::data::header::decode(header).map_err(pack_error)?;
-    if version != Version::V2 {
-        return invalid("pack version is unsupported");
-    }
-    if count > limits.objects {
-        return invalid("object count exceeds limit");
-    }
-    let (entries, input_work) = scan(input, hash, count, limits)?;
+    let (entries, input_work) = scan(input, hash, limits)?;
 
-    let bases = Bases::new(hash, bases, limits, input_work)?;
-    let entries = resolve_external(entries, &bases, limits, hash.len_in_bytes())?;
+    let bases = ExternalBases::new(hash, external_bases, limits, input_work)?;
+    let (entries, output_bytes) = resolve_external(entries, &bases, limits, hash.len_in_bytes())?;
     let object_count = entries.len();
     let entries = entries.into_iter().map(Ok);
-    let mut output = Cursor::new(Vec::new());
-    {
+    let mut output = Cursor::new(Vec::with_capacity(output_bytes));
+    let indexed_entries = {
         let mut writer = EntriesToBytesIter::new(entries, &mut output, Version::V2, hash);
+        let mut indexed = Vec::with_capacity(object_count);
         for entry in &mut writer {
-            entry.map_err(pack_error)?;
+            indexed.push(entry.map_err(pack_error)?);
         }
-    }
+        indexed
+    };
     let bytes = output.into_inner();
-    let (id, objects) = index(&bytes, hash, object_count, limits)?;
-    Ok(Normalized { bytes, id, objects })
+    let (id, index) = index(&bytes, format, hash, indexed_entries, limits)?;
+    Ok(Normalized { bytes, index, id })
 }
 
-struct Bases<'a> {
+struct ExternalBases<'a> {
     values: BTreeMap<gix_hash::ObjectId, (gix_object::Kind, &'a [u8])>,
 }
 
-impl<'a> Bases<'a> {
+impl<'a> ExternalBases<'a> {
     fn new(
         hash: gix_hash::Kind,
-        bases: &[Base<'a>],
+        bases: &[ExternalBase<'a>],
         limits: Limits,
         mut work: usize,
     ) -> Result<Self, Error> {
@@ -130,12 +120,18 @@ impl<'a> Bases<'a> {
 fn scan(
     input: &[u8],
     hash: gix_hash::Kind,
-    count: u32,
     limits: Limits,
 ) -> Result<(Vec<gix_pack::data::input::Entry>, usize), Error> {
     let pack = gix_pack::data::File::from_data(input, PathBuf::new(), hash)
         .map_err(pack_error)?
         .with_alloc_limit_bytes(Some(limits.object_bytes));
+    if pack.version() != Version::V2 {
+        return invalid("pack version is unsupported");
+    }
+    let count = pack.num_objects();
+    if count > limits.objects {
+        return invalid("object count exceeds limit");
+    }
     pack.verify_checksum(
         &mut gix_features::progress::Discard,
         &AtomicBool::new(false),
@@ -153,9 +149,7 @@ fn scan(
         if entry.header_size() != entry.header.size(entry.decompressed_size) {
             return invalid("pack entry header is not canonical");
         }
-        if !offsets.insert(offset) {
-            return invalid("pack entry offsets are not unique");
-        }
+        offsets.insert(offset);
         if let gix_pack::data::entry::Header::OfsDelta { base_distance } = entry.header {
             let base = entry
                 .checked_base_pack_offset(base_distance)
@@ -182,9 +176,12 @@ fn scan(
         if result_size > limits.object_bytes {
             return invalid("decoded object exceeds byte limit");
         }
+        let inflated_work = inflated_size
+            .checked_mul(1 + usize::from(entry.header.is_delta()))
+            .ok_or_else(|| Error::InvalidPack("decoded work overflowed".into()))?;
         work = work
             .checked_add(result_size)
-            .and_then(|value| value.checked_add(inflated_size))
+            .and_then(|value| value.checked_add(inflated_work))
             .ok_or_else(|| Error::InvalidPack("decoded work overflowed".into()))?;
         if work > limits.work_bytes {
             return invalid("decoded work exceeds limit");
@@ -195,7 +192,11 @@ fn scan(
                 Error::InvalidPack("compressed entry length does not fit in a pack".into())
             })?)
             .ok_or_else(|| Error::InvalidPack("pack entry offset overflowed".into()))?;
-        let end_in_memory = checked_entry_end(end, pack.pack_end())?;
+        let end_in_memory = usize::try_from(end)
+            .map_err(|_| Error::InvalidPack("pack entry end does not fit in memory".into()))?;
+        if end_in_memory > pack.pack_end() {
+            return invalid("pack entry extends beyond the trailer");
+        }
         let start = usize::try_from(entry.data_offset)
             .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
         let pack_offset = usize::try_from(offset)
@@ -218,15 +219,6 @@ fn scan(
         return invalid("pack object count does not match its entries");
     }
     Ok((entries, work))
-}
-
-fn checked_entry_end(end: u64, pack_end: usize) -> Result<usize, Error> {
-    let end = usize::try_from(end)
-        .map_err(|_| Error::InvalidPack("pack entry end does not fit in memory".into()))?;
-    if end > pack_end {
-        return invalid("pack entry extends beyond the trailer");
-    }
-    Ok(end)
 }
 
 fn delta_result_size(delta: &[u8]) -> Result<usize, Error> {
@@ -254,10 +246,10 @@ fn delta_size(bytes: &[u8]) -> Result<(u64, usize), Error> {
 
 fn resolve_external(
     entries: Vec<gix_pack::data::input::Entry>,
-    bases: &Bases<'_>,
+    bases: &ExternalBases<'_>,
     limits: Limits,
     trailer_bytes: usize,
-) -> Result<Vec<gix_pack::data::input::Entry>, Error> {
+) -> Result<(Vec<gix_pack::data::input::Entry>, usize), Error> {
     if 12_usize
         .checked_add(trailer_bytes)
         .is_none_or(|bytes| bytes > limits.output_bytes)
@@ -318,7 +310,14 @@ fn resolve_external(
         entry.crc32 = Some(entry.compute_crc32());
         next_offset = push_entry(&mut output, entry, next_offset, limits, trailer_bytes)?;
     }
-    Ok(output)
+    if inserted.len() != bases.values.len() {
+        return invalid("external base set is not exact");
+    }
+    let output_bytes = usize::try_from(next_offset)
+        .ok()
+        .and_then(|bytes| bytes.checked_add(trailer_bytes))
+        .ok_or_else(|| Error::InvalidPack("normalized pack size overflowed".into()))?;
+    Ok((output, output_bytes))
 }
 
 fn push_entry(
@@ -347,14 +346,16 @@ fn push_entry(
 
 fn index(
     pack: &[u8],
+    format: ObjectFormat,
     hash: gix_hash::Kind,
-    object_count: usize,
+    entries: Vec<gix_pack::data::input::Entry>,
     limits: Limits,
-) -> Result<(ObjectId, Box<[ObjectId]>), Error> {
-    let mut source = Cursor::new(pack);
-    let mut entries =
-        BytesToEntriesIter::new_from_header(&mut source, Mode::Verify, EntryDataMode::Crc32, hash)
-            .map_err(pack_error)?;
+) -> Result<(ObjectId, Vec<u8>), Error> {
+    let object_count = entries.len();
+    let relationships = entries
+        .iter()
+        .map(|entry| (entry.pack_offset, entry.header))
+        .collect::<Vec<_>>();
     let index_bytes = 8_usize
         .checked_add(256 * 4)
         .and_then(|bytes| bytes.checked_add((hash.len_in_bytes() + 8).checked_mul(object_count)?))
@@ -366,6 +367,7 @@ fn index(
     let mut progress = gix_features::progress::Discard;
     let mut index = Vec::with_capacity(index_bytes);
     let interrupt = AtomicBool::new(false);
+    let mut entries = entries.into_iter().map(Ok);
     let outcome = gix_pack::index::write_data_iter_to_stream(
         gix_pack::index::Version::V2,
         || Ok((entry_bytes, pack)),
@@ -379,27 +381,89 @@ fn index(
         Version::V2,
     )
     .map_err(pack_error)?;
-    if outcome.num_objects > limits.objects {
-        return invalid("object count exceeds limit");
+    let file = gix_pack::index::File::from_data(index.as_slice(), PathBuf::new(), hash)
+        .map_err(pack_error)?;
+    let mut previous = None;
+    for entry in file.iter() {
+        if previous == Some(entry.oid) {
+            return invalid("pack contains duplicate object IDs");
+        }
+        previous = Some(entry.oid);
     }
-    if outcome.num_objects == 0 {
-        gix_pack::data::File::from_data(pack, PathBuf::new(), hash)
-            .map_err(pack_error)?
-            .verify_checksum(&mut gix_features::progress::Discard, &interrupt)
-            .map_err(pack_error)?;
-    } else if usize::try_from(source.position()).ok() != Some(pack.len()) {
-        return invalid("normalized pack has trailing data");
-    }
-    let file = gix_pack::index::File::from_data(index, PathBuf::new(), hash).map_err(pack_error)?;
-    let objects = file
+    validate_delta_depth(&relationships, &file)?;
+    let id = ObjectId::from_bytes(format, outcome.data_hash.as_slice())?;
+    Ok((id, index))
+}
+
+fn validate_delta_depth(
+    entries: &[(u64, gix_pack::data::entry::Header)],
+    index: &gix_pack::index::File<&[u8]>,
+) -> Result<(), Error> {
+    let parents = entries
         .iter()
-        .map(|entry| ObjectId::from_bytes(object_format(hash), entry.oid.as_slice()))
-        .collect::<Result<Box<[_]>, _>>()?;
-    if objects.windows(2).any(|pair| pair[0] == pair[1]) {
-        return invalid("pack contains duplicate object IDs");
+        .map(|(offset, header)| {
+            let parent = match header {
+                gix_pack::data::entry::Header::OfsDelta { base_distance } => {
+                    Some(offset.checked_sub(*base_distance).ok_or_else(|| {
+                        Error::InvalidPack("invalid OFS_DELTA base offset".into())
+                    })?)
+                }
+                gix_pack::data::entry::Header::RefDelta { base_id } => Some(
+                    index
+                        .lookup(base_id)
+                        .map(|position| index.pack_offset_at_index(position))
+                        .ok_or_else(|| Error::InvalidPack("REF_DELTA base is missing".into()))?,
+                ),
+                _ => None,
+            };
+            parent
+                .map(|offset| {
+                    entries
+                        .binary_search_by_key(&offset, |(offset, _)| *offset)
+                        .map_err(|_| Error::InvalidPack("delta base is missing".into()))
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    validate_parent_depth(&parents)
+}
+
+fn validate_parent_depth(parents: &[Option<usize>]) -> Result<(), Error> {
+    let mut depths = vec![None::<u16>; parents.len()];
+    let mut visiting = vec![false; parents.len()];
+    let mut path = Vec::new();
+    for start in 0..parents.len() {
+        path.clear();
+        let mut current = start;
+        let known_depth = loop {
+            if let Some(depth) = depths[current] {
+                break depth;
+            }
+            if visiting[current] {
+                return invalid("delta graph contains a cycle");
+            }
+            visiting[current] = true;
+            path.push(current);
+            match parents[current] {
+                Some(parent) => current = parent,
+                None => break 0_u16,
+            }
+        };
+        let mut depth = known_depth;
+        while let Some(node) = path.pop() {
+            depth = if parents[node].is_some() {
+                depth + 1
+            } else {
+                0
+            };
+            if depth > MAX_DELTA_DEPTH {
+                return invalid("delta depth exceeds limit");
+            }
+            depths[node] = Some(depth);
+            visiting[node] = false;
+        }
     }
-    let id = ObjectId::from_bytes(object_format(hash), outcome.data_hash.as_slice())?;
-    Ok((id, objects))
+    Ok(())
 }
 
 fn entry_bytes<'a>(range: gix_pack::data::EntryRange, pack: &'a &[u8]) -> Option<&'a [u8]> {
@@ -412,14 +476,6 @@ const fn object_hash(format: ObjectFormat) -> gix_hash::Kind {
     match format {
         ObjectFormat::Sha1 => gix_hash::Kind::Sha1,
         ObjectFormat::Sha256 => gix_hash::Kind::Sha256,
-    }
-}
-
-fn object_format(hash: gix_hash::Kind) -> ObjectFormat {
-    match hash {
-        gix_hash::Kind::Sha1 => ObjectFormat::Sha1,
-        gix_hash::Kind::Sha256 => ObjectFormat::Sha256,
-        _ => unreachable!("Gitoxide returned an unsupported hash kind"),
     }
 }
 
@@ -447,16 +503,20 @@ mod tests {
     }
 
     impl Fixture {
-        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        fn new(format: ObjectFormat) -> Result<Self, Box<dyn std::error::Error>> {
             let dir = tempfile::tempdir()?;
-            git(dir.path(), ["init", "--bare", "--quiet"], &[])?;
+            let mut init = vec!["init", "--bare", "--quiet"];
+            if format == ObjectFormat::Sha256 {
+                init.push("--object-format=sha256");
+            }
+            git(dir.path(), init, &[])?;
             let mut blobs = Vec::new();
             for marker in b'1'..=b'3' {
                 let mut data = vec![b'a'; 50_000];
                 data.push(marker);
                 data.push(b'\n');
                 let output = git(dir.path(), ["hash-object", "-w", "--stdin"], &data)?;
-                let id = ObjectId::parse(ObjectFormat::Sha1, std::str::from_utf8(&output)?.trim())?;
+                let id = ObjectId::parse(format, std::str::from_utf8(&output)?.trim())?;
                 blobs.push((id, data));
             }
             Ok(Self { dir, blobs })
@@ -480,17 +540,17 @@ mod tests {
 
     #[test]
     fn normalizes_base_ofs_and_in_pack_ref_objects() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::new(ObjectFormat::Sha1)?;
         for (pack, expected_delta) in [(fixture.pack(true)?, "ofs"), (fixture.pack(false)?, "ref")]
         {
-            let entries = entries(&pack)?;
+            let entries = entries(&pack, ObjectFormat::Sha1)?;
             assert!(entries.iter().any(|(entry, _)| match entry.header {
                 gix_pack::data::entry::Header::OfsDelta { .. } => expected_delta == "ofs",
                 gix_pack::data::entry::Header::RefDelta { .. } => expected_delta == "ref",
                 _ => false,
             }));
             let normalized = normalize(ObjectFormat::Sha1, &pack, &[])?;
-            assert_eq!(normalized.objects.len(), fixture.blobs.len());
+            assert_eq!(object_count(&normalized, ObjectFormat::Sha1)?, 3);
             assert_eq!(
                 normalized.id.as_bytes(),
                 &normalized.bytes[normalized.bytes.len() - 20..]
@@ -502,9 +562,9 @@ mod tests {
 
     #[test]
     fn normalizes_a_ref_delta_before_its_in_pack_base() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::new(ObjectFormat::Sha1)?;
         let pack = ref_delta_first(&fixture.pack(false)?)?;
-        let first = entries(&pack)?
+        let first = entries(&pack, ObjectFormat::Sha1)?
             .into_iter()
             .next()
             .ok_or("reordered pack is empty")?
@@ -515,56 +575,65 @@ mod tests {
         ));
 
         let normalized = normalize(ObjectFormat::Sha1, &pack, &[])?;
-        assert_eq!(normalized.objects.len(), fixture.blobs.len());
+        assert_eq!(object_count(&normalized, ObjectFormat::Sha1)?, 3);
         verify_with_git(&normalized.bytes, ObjectFormat::Sha1)?;
         Ok(())
     }
 
     #[test]
     fn resolves_a_thin_ref_delta_from_a_supplied_base() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
-        let full = fixture.pack(false)?;
-        let (thin, base_id) = thin_ref_deltas(&full)?;
-        let (_, data) = fixture
-            .blobs
-            .iter()
-            .find(|(id, _)| id.as_bytes() == base_id.as_slice())
-            .ok_or("generated REF_DELTA did not name a fixture blob")?;
-        assert!(normalize(ObjectFormat::Sha1, &thin, &[]).is_err());
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let fixture = Fixture::new(format)?;
+            let full = fixture.pack(false)?;
+            let (thin, base_id) = thin_ref_deltas(&full, format)?;
+            let (_, data) = fixture
+                .blobs
+                .iter()
+                .find(|(id, _)| id.as_bytes() == base_id.as_slice())
+                .ok_or("generated REF_DELTA did not name a fixture blob")?;
+            assert!(normalize(format, &thin, &[]).is_err());
 
-        let base = Base {
-            id: ObjectId::from_bytes(ObjectFormat::Sha1, base_id.as_slice())?,
-            kind: gix_object::Kind::Blob,
-            data,
-        };
-        let normalized = normalize(ObjectFormat::Sha1, &thin, &[base])?;
-        assert_eq!(normalized.objects.len(), fixture.blobs.len());
-        assert!(entries(&normalized.bytes)?.iter().all(|(entry, _)| {
-            !matches!(entry.header, gix_pack::data::entry::Header::RefDelta { .. })
-        }));
-        verify_with_git(&normalized.bytes, ObjectFormat::Sha1)?;
-        assert!(
-            normalize_with(
-                ObjectFormat::Sha1,
+            let normalized = normalize(
+                format,
                 &thin,
-                &[Base {
-                    id: ObjectId::from_bytes(ObjectFormat::Sha1, base_id.as_slice())?,
+                &[ExternalBase {
+                    id: ObjectId::from_bytes(format, base_id.as_slice())?,
                     kind: gix_object::Kind::Blob,
                     data,
                 }],
-                Limits {
-                    objects: 2,
-                    ..DEFAULT_LIMITS
-                },
-            )
-            .is_err()
-        );
+            )?;
+            assert_eq!(object_count(&normalized, format)?, 3);
+            assert!(
+                entries(&normalized.bytes, format)?
+                    .iter()
+                    .all(|(entry, _)| {
+                        !matches!(entry.header, gix_pack::data::entry::Header::RefDelta { .. })
+                    })
+            );
+            verify_with_git(&normalized.bytes, format)?;
+            assert!(
+                normalize_with(
+                    format,
+                    &thin,
+                    &[ExternalBase {
+                        id: ObjectId::from_bytes(format, base_id.as_slice())?,
+                        kind: gix_object::Kind::Blob,
+                        data,
+                    }],
+                    Limits {
+                        objects: 2,
+                        ..DEFAULT_LIMITS
+                    },
+                )
+                .is_err()
+            );
+        }
         Ok(())
     }
 
     #[test]
     fn rejects_corrupt_or_ambiguous_pack_structure() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::new(ObjectFormat::Sha1)?;
         let pack = fixture.pack(true)?;
 
         let mut checksum = pack.clone();
@@ -574,7 +643,7 @@ mod tests {
         assert!(normalize(ObjectFormat::Sha1, &pack[..pack.len() - 1], &[]).is_err());
 
         let mut invalid_offset = pack.clone();
-        let entry = entries(&pack)?
+        let entry = entries(&pack, ObjectFormat::Sha1)?
             .into_iter()
             .find(|(entry, _)| {
                 matches!(entry.header, gix_pack::data::entry::Header::OfsDelta { .. })
@@ -586,7 +655,7 @@ mod tests {
         assert!(normalize(ObjectFormat::Sha1, &invalid_offset, &[]).is_err());
 
         let mut overlong = pack.clone();
-        let base = entries(&pack)?
+        let base = entries(&pack, ObjectFormat::Sha1)?
             .into_iter()
             .find(|(entry, _)| entry.header.as_kind().is_some())
             .ok_or("Git did not produce a base object")?
@@ -618,14 +687,13 @@ mod tests {
         wrong_count[8..12].copy_from_slice(&2_u32.to_be_bytes());
         rehash(&mut wrong_count)?;
         assert!(normalize(ObjectFormat::Sha1, &wrong_count, &[]).is_err());
-        assert!(checked_entry_end(21, 20).is_err());
         Ok(())
     }
 
     #[test]
     fn rejects_each_resource_limit_before_returning_a_pack()
     -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::new(ObjectFormat::Sha1)?;
         let pack = fixture.pack(false)?;
         let limits = Limits {
             input_bytes: pack.len() - 1,
@@ -670,12 +738,19 @@ mod tests {
             assert!(normalize_with(ObjectFormat::Sha1, &pack, &[], limits).is_err());
         }
 
-        let (_, exact_work) = scan(
-            &pack,
-            gix_hash::Kind::Sha1,
-            u32::try_from(fixture.blobs.len())?,
-            DEFAULT_LIMITS,
-        )?;
+        let (_, exact_work) = scan(&pack, gix_hash::Kind::Sha1, DEFAULT_LIMITS)?;
+        assert!(
+            normalize_with(
+                ObjectFormat::Sha1,
+                &pack,
+                &[],
+                Limits {
+                    work_bytes: exact_work - 1,
+                    ..DEFAULT_LIMITS
+                },
+            )
+            .is_err()
+        );
         for limits in [
             Limits {
                 object_bytes: fixture.blobs[0].1.len(),
@@ -727,7 +802,7 @@ mod tests {
             hasher.update(&pack);
             pack.extend_from_slice(hasher.try_finalize()?.as_slice());
             let normalized = normalize(format, &pack, &[])?;
-            assert!(normalized.objects.is_empty());
+            assert_eq!(object_count(&normalized, format)?, 0);
             assert_eq!(normalized.bytes, pack);
             verify_with_git(&normalized.bytes, format)?;
         }
@@ -745,28 +820,91 @@ mod tests {
         let id = git(dir.path(), ["hash-object", "-w", "--stdin"], b"sha256\n")?;
         let pack = git(dir.path(), ["pack-objects", "--stdout"], &id)?;
         let normalized = normalize(ObjectFormat::Sha256, &pack, &[])?;
-        assert_eq!(normalized.objects.len(), 1);
+        assert_eq!(object_count(&normalized, ObjectFormat::Sha256)?, 1);
         verify_with_git(&normalized.bytes, ObjectFormat::Sha256)?;
         Ok(())
     }
 
     #[test]
     fn rejects_bad_external_base_evidence() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
+        let fixture = Fixture::new(ObjectFormat::Sha1)?;
+        let full = fixture.pack(false)?;
         let (id, data) = &fixture.blobs[0];
-        let bad = Base {
+        let bad = ExternalBase {
             id: *id,
             kind: gix_object::Kind::Blob,
             data: &data[..data.len() - 1],
         };
-        assert!(normalize(ObjectFormat::Sha1, &fixture.pack(false)?, &[bad]).is_err());
+        assert!(normalize(ObjectFormat::Sha1, &full, &[bad]).is_err());
+
+        let base_id = entries(&full, ObjectFormat::Sha1)?
+            .into_iter()
+            .find_map(|(entry, _)| match entry.header {
+                gix_pack::data::entry::Header::RefDelta { base_id } => Some(base_id),
+                _ => None,
+            })
+            .ok_or("Git did not produce a REF_DELTA")?;
+        let (_, data) = fixture
+            .blobs
+            .iter()
+            .find(|(id, _)| id.as_bytes() == base_id.as_slice())
+            .ok_or("generated REF_DELTA did not name a fixture blob")?;
+        let present = ExternalBase {
+            id: ObjectId::from_bytes(ObjectFormat::Sha1, base_id.as_slice())?,
+            kind: gix_object::Kind::Blob,
+            data,
+        };
+        assert!(matches!(
+            normalize(ObjectFormat::Sha1, &full, &[present]),
+            Err(Error::InvalidPack(message)) if message == "pack contains duplicate object IDs"
+        ));
+
+        let data = b"unused external base";
+        let id = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, data)?;
+        let unused = ExternalBase {
+            id: ObjectId::from_bytes(ObjectFormat::Sha1, id.as_slice())?,
+            kind: gix_object::Kind::Blob,
+            data,
+        };
+        assert!(matches!(
+            normalize(ObjectFormat::Sha1, &full, &[unused]),
+            Err(Error::InvalidPack(message)) if message == "external base set is not exact"
+        ));
         Ok(())
+    }
+
+    #[test]
+    fn enforces_the_git_generator_delta_depth_limit() {
+        let mut parents = Vec::with_capacity(usize::from(MAX_DELTA_DEPTH) + 2);
+        parents.push(None);
+        for position in 1..=usize::from(MAX_DELTA_DEPTH) {
+            parents.push(Some(position - 1));
+        }
+        assert!(validate_parent_depth(&parents).is_ok());
+        parents.push(Some(parents.len() - 1));
+        assert!(validate_parent_depth(&parents).is_err());
+        assert!(validate_parent_depth(&[Some(1), Some(0)]).is_err());
     }
 
     type ParsedEntries = Vec<(gix_pack::data::Entry, Range<usize>)>;
 
-    fn entries(bytes: &[u8]) -> Result<ParsedEntries, Box<dyn std::error::Error>> {
-        let file = gix_pack::data::File::from_data(bytes, PathBuf::new(), gix_hash::Kind::Sha1)?;
+    fn object_count(
+        normalized: &Normalized,
+        format: ObjectFormat,
+    ) -> Result<u32, Box<dyn std::error::Error>> {
+        Ok(gix_pack::index::File::from_data(
+            normalized.index.as_slice(),
+            PathBuf::new(),
+            object_hash(format),
+        )?
+        .num_objects())
+    }
+
+    fn entries(
+        bytes: &[u8],
+        format: ObjectFormat,
+    ) -> Result<ParsedEntries, Box<dyn std::error::Error>> {
+        let file = gix_pack::data::File::from_data(bytes, PathBuf::new(), object_hash(format))?;
         let mut inflate = gix_zlib::Inflate::default();
         let mut data = Vec::new();
         let mut offset = 12_u64;
@@ -784,8 +922,9 @@ mod tests {
 
     fn thin_ref_deltas(
         full: &[u8],
+        format: ObjectFormat,
     ) -> Result<(Vec<u8>, gix_hash::ObjectId), Box<dyn std::error::Error>> {
-        let entries = entries(full)?;
+        let entries = entries(full, format)?;
         let base_id = entries
             .iter()
             .find_map(|(entry, _)| {
@@ -813,24 +952,24 @@ mod tests {
         for (_, range) in deltas {
             thin.extend_from_slice(&full[range]);
         }
-        append_hash(&mut thin)?;
+        append_hash(&mut thin, format)?;
         Ok((thin, base_id))
     }
 
     fn duplicate_base_entry(full: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let (_, range) = entries(full)?
+        let (_, range) = entries(full, ObjectFormat::Sha1)?
             .into_iter()
             .find(|(entry, _)| entry.header.as_kind().is_some())
             .ok_or("Git did not produce a base object")?;
         let mut duplicated = gix_pack::data::header::encode(Version::V2, 2).to_vec();
         duplicated.extend_from_slice(&full[range.clone()]);
         duplicated.extend_from_slice(&full[range]);
-        append_hash(&mut duplicated)?;
+        append_hash(&mut duplicated, ObjectFormat::Sha1)?;
         Ok(duplicated)
     }
 
     fn ref_delta_first(full: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let mut entries = entries(full)?;
+        let mut entries = entries(full, ObjectFormat::Sha1)?;
         let position = entries
             .iter()
             .position(|(entry, _)| {
@@ -844,17 +983,20 @@ mod tests {
         for (_, range) in entries {
             reordered.extend_from_slice(&full[range]);
         }
-        append_hash(&mut reordered)?;
+        append_hash(&mut reordered, ObjectFormat::Sha1)?;
         Ok(reordered)
     }
 
     fn rehash(pack: &mut Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
         pack.truncate(pack.len() - 20);
-        append_hash(pack)
+        append_hash(pack, ObjectFormat::Sha1)
     }
 
-    fn append_hash(pack: &mut Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-        let mut hasher = gix_hash::hasher(gix_hash::Kind::Sha1);
+    fn append_hash(
+        pack: &mut Vec<u8>,
+        format: ObjectFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut hasher = gix_hash::hasher(object_hash(format));
         hasher.update(pack);
         let id = hasher.try_finalize()?;
         pack.extend_from_slice(id.as_slice());
