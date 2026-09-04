@@ -13,7 +13,6 @@ use axum::{
         HeaderMap, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, EXPIRES, PRAGMA},
     },
-    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -32,7 +31,6 @@ use tower_http::{
 use crate::{Error, ReceiveOutcome, Service, SmartHttp};
 
 const MAX_ENCODED_BODY_BYTES: usize = 513 * 1024 * 1024;
-const MAX_HEADER_BYTES: usize = 16 * 1024;
 const REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 const PRAGMA_NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
@@ -78,11 +76,10 @@ impl GitHttpServer {
             .layer(ResponseBodyTimeoutLayer::new(RESPONSE_IDLE_TIMEOUT))
             .layer(RequestBodyTimeoutLayer::new(REQUEST_BODY_IDLE_TIMEOUT))
             .layer(RequestBodyLimitLayer::new(MAX_ENCODED_BODY_BYTES))
-            .layer(middleware::from_fn(limit_headers))
             .with_state(self)
     }
 
-    /// Stops task admission and waits for active Git operations to finish.
+    /// Waits for detached Git operations after the router has stopped.
     pub async fn shutdown(&self) {
         self.tasks.close();
         self.tasks.wait().await;
@@ -96,23 +93,6 @@ impl GitHttpServer {
                 TryAcquireError::Closed => Failure::internal(),
             })
     }
-}
-
-async fn limit_headers(request: axum::extract::Request, next: Next) -> Response {
-    let uri = request.uri();
-    let mut bytes = request.method().as_str().len() + uri.path().len();
-    bytes = bytes.saturating_add(uri.query().map_or(0, str::len));
-    for (name, value) in request.headers() {
-        bytes = bytes.saturating_add(name.as_str().len() + value.as_bytes().len());
-    }
-    if bytes > MAX_HEADER_BYTES {
-        return Failure::new(
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            "request headers are too large",
-        )
-        .into_response();
-    }
-    next.run(request).await
 }
 
 async fn info_refs(
@@ -140,8 +120,8 @@ async fn upload_pack(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, Failure> {
-    require_request_headers(&headers, Service::UploadPack)?;
-    let mut input = request_reader(body, &headers)?;
+    let encoding = require_request_headers(&headers, Service::UploadPack)?;
+    let mut input = request_reader(body, encoding);
     let permit = host.permit()?;
     let endpoint = host.endpoint.clone();
     let scratch = host.scratch.clone();
@@ -184,8 +164,8 @@ async fn receive_pack(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, Failure> {
-    require_request_headers(&headers, Service::ReceivePack)?;
-    let mut input = request_reader(body, &headers)?;
+    let encoding = require_request_headers(&headers, Service::ReceivePack)?;
+    let mut input = request_reader(body, encoding);
     let permit = host.permit()?;
     let endpoint = host.endpoint.clone();
     let (outcome, output) = host
@@ -217,15 +197,15 @@ async fn receive_pack(
     ))
 }
 
-fn request_reader(body: Body, headers: &HeaderMap) -> Result<RequestReader, Failure> {
+fn request_reader(body: Body, encoding: Encoding) -> RequestReader {
     let stream = body.into_data_stream().map_err(body_error);
     let reader = BufReader::new(StreamReader::new(stream));
-    match content_encoding(headers)? {
-        Encoding::Identity => Ok(Box::pin(reader)),
+    match encoding {
+        Encoding::Identity => Box::pin(reader),
         Encoding::Gzip => {
             let mut decoder = GzipDecoder::new(reader);
             decoder.multiple_members(true);
-            Ok(Box::pin(decoder))
+            Box::pin(decoder)
         }
     }
 }
@@ -255,29 +235,30 @@ fn parse_service(query: Option<&str>) -> Result<Service, Failure> {
     }
 }
 
-fn require_request_headers(headers: &HeaderMap, service: Service) -> Result<(), Failure> {
+fn require_request_headers(headers: &HeaderMap, service: Service) -> Result<Encoding, Failure> {
     let expected = match service {
         Service::UploadPack => "application/x-git-upload-pack-request",
         Service::ReceivePack => "application/x-git-receive-pack-request",
     };
-    let content_type = single_header(headers, CONTENT_TYPE)?;
-    if !content_type.eq_ignore_ascii_case(expected) {
+    let mut content_types = headers.get_all(CONTENT_TYPE).iter();
+    let content_type = content_types
+        .next()
+        .ok_or_else(|| Failure::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "missing content type"))?;
+    if content_types.next().is_some() {
+        return Err(Failure::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "repeated content type",
+        ));
+    }
+    if !content_type
+        .as_bytes()
+        .eq_ignore_ascii_case(expected.as_bytes())
+    {
         return Err(Failure::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported Git content type",
         ));
     }
-    content_encoding(headers)?;
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum Encoding {
-    Identity,
-    Gzip,
-}
-
-fn content_encoding(headers: &HeaderMap) -> Result<Encoding, Failure> {
     let mut values = headers.get_all(CONTENT_ENCODING).iter();
     let Some(value) = values.next() else {
         return Ok(Encoding::Identity);
@@ -285,35 +266,19 @@ fn content_encoding(headers: &HeaderMap) -> Result<Encoding, Failure> {
     if values.next().is_some() {
         return Err(Failure::unsupported_encoding());
     }
-    let value = value
-        .to_str()
-        .map_err(|_| Failure::unsupported_encoding())?;
-    if value.eq_ignore_ascii_case("identity") {
+    if value.as_bytes().eq_ignore_ascii_case(b"identity") {
         Ok(Encoding::Identity)
-    } else if value.eq_ignore_ascii_case("gzip") {
+    } else if value.as_bytes().eq_ignore_ascii_case(b"gzip") {
         Ok(Encoding::Gzip)
     } else {
         Err(Failure::unsupported_encoding())
     }
 }
 
-fn single_header(
-    headers: &HeaderMap,
-    name: axum::http::header::HeaderName,
-) -> Result<&str, Failure> {
-    let mut values = headers.get_all(name).iter();
-    let value = values
-        .next()
-        .ok_or_else(|| Failure::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "missing content type"))?;
-    if values.next().is_some() {
-        return Err(Failure::new(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "repeated content type",
-        ));
-    }
-    value
-        .to_str()
-        .map_err(|_| Failure::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid content type"))
+#[derive(Clone, Copy)]
+enum Encoding {
+    Identity,
+    Gzip,
 }
 
 fn response(service: Service, advertisement: bool, status: StatusCode, body: Body) -> Response {
@@ -407,7 +372,7 @@ impl IntoResponse for Failure {
 mod tests {
     use std::convert::Infallible;
 
-    use axum::http::{Request, header};
+    use axum::http::Request;
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use object_log::{Log, LogId, Options, ValidatedBackend};
@@ -524,17 +489,6 @@ mod tests {
             .await?;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-        let response = app
-            .oneshot(
-                Request::get("/repo/info/refs?service=git-upload-pack")
-                    .header(header::USER_AGENT, "x".repeat(MAX_HEADER_BYTES))
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-        );
         Ok(())
     }
 
