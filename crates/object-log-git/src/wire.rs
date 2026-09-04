@@ -4,7 +4,7 @@ use gix_packetline::{Channel, PacketLineRef, blocking_io::encode, decode};
 
 use crate::{
     ObjectFormat, ObjectId, RefUpdate,
-    pack::{MAX_INPUT_BYTES, MAX_OUTPUT_BYTES},
+    pack::{MAX_INPUT_BYTES, MAX_PACK_BYTES},
 };
 
 const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -203,13 +203,13 @@ pub(crate) fn write_ls_refs(
     for advertised in refs {
         validate_ref(advertised, format, true)?;
         packet_size(&[
-            advertised.target.map_or(6, |_| digest_len(format) * 2),
+            advertised.target.map_or(6, |_| format.digest_len() * 2),
             1,
             advertised.name.len(),
             advertised
                 .symref_target
                 .map_or(0, |target| 15 + target.len()),
-            advertised.peeled.map_or(0, |_| 8 + digest_len(format) * 2),
+            advertised.peeled.map_or(0, |_| 8 + format.digest_len() * 2),
         ])?;
     }
     let mut line = Vec::with_capacity(128);
@@ -255,7 +255,7 @@ pub(crate) fn write_fetch(
             }
         }
         FetchReply::Pack(pack) => {
-            within(pack.len(), MAX_OUTPUT_BYTES, "pack bytes")?;
+            within(pack.len(), MAX_PACK_BYTES, "pack bytes")?;
             write_pack(output, pack)?;
         }
     }
@@ -271,7 +271,7 @@ pub(crate) fn write_receive_advertisement(
     validate_receive_advertisement(format, refs)?;
     let mut line = Vec::with_capacity(192);
     if refs.is_empty() {
-        line.extend(std::iter::repeat_n(b'0', digest_len(format) * 2));
+        line.extend(std::iter::repeat_n(b'0', format.digest_len() * 2));
         line.extend_from_slice(b" capabilities^{}");
         push_receive_capabilities(&mut line, format);
         write_text(output, &mut line)?;
@@ -426,7 +426,7 @@ fn validate_receive_advertisement(
     let capability_bytes = receive_capabilities_len(format);
     if refs.is_empty() {
         return packet_size(&[
-            digest_len(format) * 2,
+            format.digest_len() * 2,
             1,
             b"capabilities^{}".len(),
             capability_bytes,
@@ -440,13 +440,13 @@ fn validate_receive_advertisement(
             return Err(Error::Protocol("receive refs are not in C-locale order"));
         }
         packet_size(&[
-            digest_len(format) * 2,
+            format.digest_len() * 2,
             1,
             advertised.name.len(),
             if index == 0 { capability_bytes } else { 0 },
         ])?;
         if advertised.peeled.is_some() {
-            packet_size(&[digest_len(format) * 2, 1, advertised.name.len(), 3])?;
+            packet_size(&[format.digest_len() * 2, 1, advertised.name.len(), 3])?;
         }
     }
     Ok(())
@@ -517,7 +517,7 @@ fn parse_update(command: &[u8], format: ObjectFormat) -> Result<RefUpdate, Error
 }
 
 fn parse_optional_id(value: &[u8], format: ObjectFormat) -> Result<Option<ObjectId>, Error> {
-    if value.len() == digest_len(format) * 2 && value.iter().all(|byte| *byte == b'0') {
+    if value.len() == format.digest_len() * 2 && value.iter().all(|byte| *byte == b'0') {
         Ok(None)
     } else {
         parse_id(value, format).map(Some)
@@ -566,13 +566,6 @@ fn push_id(line: &mut Vec<u8>, id: ObjectId) {
     for byte in id.as_bytes() {
         line.push(HEX[usize::from(byte >> 4)]);
         line.push(HEX[usize::from(byte & 0x0f)]);
-    }
-}
-
-const fn digest_len(format: ObjectFormat) -> usize {
-    match format {
-        ObjectFormat::Sha1 => 20,
-        ObjectFormat::Sha256 => 32,
     }
 }
 
@@ -952,11 +945,11 @@ mod tests {
         assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD)?, 1);
         assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD + 1)?, 2);
 
-        let pack = vec![0; MAX_OUTPUT_BYTES + 1];
+        let pack = vec![0; MAX_PACK_BYTES + 1];
         write_fetch(
             &mut io::sink(),
             ObjectFormat::Sha1,
-            FetchReply::Pack(&pack[..MAX_OUTPUT_BYTES]),
+            FetchReply::Pack(&pack[..MAX_PACK_BYTES]),
         )?;
         output.clear();
         limit(write_fetch(
@@ -1442,7 +1435,7 @@ mod tests {
         pack: &[u8],
         line_feed: bool,
     ) -> io::Result<Vec<u8>> {
-        if old.len() != digest_len(format) * 2 || new.len() != digest_len(format) * 2 {
+        if old.len() != format.digest_len() * 2 || new.len() != format.digest_len() * 2 {
             return Err(io::Error::other("test object ID length is wrong"));
         }
         let mut command = format!("{old} {new} refs/heads/main").into_bytes();

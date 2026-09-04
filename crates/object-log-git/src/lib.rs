@@ -47,6 +47,15 @@ pub enum ObjectFormat {
     Sha256,
 }
 
+impl ObjectFormat {
+    pub(crate) const fn digest_len(self) -> usize {
+        match self {
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+        }
+    }
+}
+
 /// A validated Git object ID.
 #[derive(Clone, Copy, Debug, Encode, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[cbor(transparent)]
@@ -68,10 +77,7 @@ impl ObjectId {
     ///
     /// Returns [`Error::InvalidObjectId`] for an invalid or zero ID.
     pub fn parse(format: ObjectFormat, value: &str) -> Result<Self, Error> {
-        let byte_len = match format {
-            ObjectFormat::Sha1 => 20,
-            ObjectFormat::Sha256 => 32,
-        };
+        let byte_len = format.digest_len();
         if value.len() != byte_len * 2 {
             return Err(Error::InvalidObjectId);
         }

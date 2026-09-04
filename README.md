@@ -105,7 +105,7 @@ pack normalizer's behavior, limits, tests, source size, and local timing. The
 records durable layout, sparse request counts, cache behavior, limits, and
 remaining engine work. The
 [`Git WASI wire protocol`](docs/evidence/git-wasi-wire-2026-09-04.md) records
-protocol behavior, exact fixtures, limits, WASIp2 checks, and remaining host
+protocol behavior, exact fixtures, limits, `WASIp2` checks, and remaining host
 integration work.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and

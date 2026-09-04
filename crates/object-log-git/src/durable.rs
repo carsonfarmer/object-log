@@ -5,22 +5,21 @@ use futures::{StreamExt, TryStreamExt, stream};
 use object_log::{Log, ObjectKind, ObjectRef, StagedObject, View};
 
 use crate::{
-    Error, ObjectFormat, ObjectId, format::PackDescriptor, pack::Normalized, pack::object_hash,
+    Error, ObjectFormat, ObjectId,
+    format::PackDescriptor,
+    pack::{
+        MAX_DELTA_DEPTH, MAX_INDEX_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS, MAX_PACK_BYTES,
+        MAX_WORK_BYTES, Normalized, delta_integer, invalid, object_hash, pack_error,
+    },
 };
 
 const CHUNK_BYTES: usize = 1024 * 1024;
-const MAX_PACK_BYTES: usize = 64 * CHUNK_BYTES;
-const MAX_INDEX_BYTES: usize = 4 * CHUNK_BYTES;
 // Canonical CBOR adds 4,022 bytes for the envelope and 64 maximum-size chunk references.
-const MAX_PACK_ROOT_BYTES: u64 = 4 * 1024 * 1024 + 4_022;
+const MAX_PACK_ROOT_BYTES: u64 = MAX_INDEX_BYTES as u64 + 4_022;
 const MAX_CATALOG_BYTES: usize = 64 * CHUNK_BYTES;
 const MAX_CACHE_BYTES: usize = 32 * CHUNK_BYTES;
 const MAX_TRANSFERS: usize = 8;
-const MAX_OBJECTS: u32 = 65_535;
-const MAX_OBJECT_BYTES: usize = 16 * CHUNK_BYTES;
-const MAX_READ_WORK: usize = 256 * CHUNK_BYTES;
 const MAX_READ_REQUESTS: usize = 256;
-const MAX_DELTA_DEPTH: usize = 4095;
 
 type PackIndex = gix_pack::index::File<Bytes>;
 
@@ -325,7 +324,7 @@ impl<'a> Reader<'a> {
             catalog,
             cache: BTreeMap::new(),
             cache_bytes: 0,
-            work_limit: MAX_READ_WORK,
+            work_limit: MAX_WORK_BYTES,
             request_limit: MAX_READ_REQUESTS,
             depth_limit: MAX_DELTA_DEPTH,
             work: 0,
@@ -512,9 +511,9 @@ fn apply_delta(
     delta: &[u8],
     mut charge: impl FnMut(usize) -> Result<(), Error>,
 ) -> Result<Vec<u8>, Error> {
-    let (base_size, mut position) = delta_integer(delta, 0)?;
-    let (result_size, consumed) = delta_integer(delta, position)?;
-    position = consumed;
+    let (base_size, mut position) = delta_integer(delta)?;
+    let (result_size, consumed) = delta_integer(&delta[position..])?;
+    position += consumed;
     if base_size != base.len() || result_size > MAX_OBJECT_BYTES {
         return invalid("delta base or result size is invalid");
     }
@@ -573,37 +572,6 @@ fn apply_delta(
         return invalid("delta result size does not match");
     }
     Ok(result)
-}
-
-fn delta_integer(bytes: &[u8], mut position: usize) -> Result<(usize, usize), Error> {
-    let mut value = 0_usize;
-    let mut shift = 0_u32;
-    loop {
-        let byte = *bytes
-            .get(position)
-            .ok_or_else(|| Error::InvalidPack("delta size is truncated".into()))?;
-        position += 1;
-        let part = usize::from(byte & 0x7f);
-        if part > usize::MAX >> shift {
-            return invalid("delta size overflowed");
-        }
-        value |= part << shift;
-        if byte & 0x80 == 0 {
-            return Ok((value, position));
-        }
-        shift = shift
-            .checked_add(7)
-            .filter(|shift| *shift < usize::BITS)
-            .ok_or_else(|| Error::InvalidPack("delta size overflowed".into()))?;
-    }
-}
-
-fn pack_error(error: impl std::fmt::Display) -> Error {
-    Error::InvalidPack(error.to_string())
-}
-
-fn invalid<T>(message: &'static str) -> Result<T, Error> {
-    Err(Error::InvalidPack(message.into()))
 }
 
 const _: () = assert!(size_of::<Location>() == 8);
@@ -748,7 +716,7 @@ mod tests {
         let store = FaultStore::from_arc(Arc::new(InMemory::new()));
         let (log, view) = open(store.clone(), "round-trip").await?;
         let empty = pack_fixture(format, Vec::new(), false, false)?;
-        assert_eq!(empty.normalized.bytes.len(), 12 + format_len(format));
+        assert_eq!(empty.normalized.bytes.len(), 12 + format.digest_len());
         let (descriptor, root) = stage(&log, &view, empty.normalized).await?;
         let empty = load_one(&log, &view, format, descriptor, &root).await?;
         assert!(empty.directory.is_empty());
@@ -774,7 +742,7 @@ mod tests {
 
         let mut reader = Reader::new(&log, &view, &catalog);
         store.reset();
-        let missing = ObjectId::from_bytes(format, &vec![0xfe; format_len(format)])?;
+        let missing = ObjectId::from_bytes(format, &vec![0xfe; format.digest_len()])?;
         assert!(reader.find(missing).await?.is_none());
         let gets = store.metrics().operation(Operation::Get);
         assert_eq!(gets.requests, 0);
@@ -938,12 +906,12 @@ mod tests {
     }
 
     fn index_oid_range(format: ObjectFormat, position: usize) -> std::ops::Range<usize> {
-        let start = 8 + 256 * 4 + position * format_len(format);
-        start..start + format_len(format)
+        let start = 8 + 256 * 4 + position * format.digest_len();
+        start..start + format.digest_len()
     }
 
     fn index_crc_offset(index: &[u8], format: ObjectFormat, position: usize) -> usize {
-        8 + 256 * 4 + index_count(index) * format_len(format) + position * 4
+        8 + 256 * 4 + index_count(index) * format.digest_len() + position * 4
     }
 
     fn index_offset_offset(index: &[u8], format: ObjectFormat, position: usize) -> usize {
@@ -964,7 +932,7 @@ mod tests {
     }
 
     fn rehash_index(index: &mut [u8], format: ObjectFormat) -> TestResult {
-        let hash_len = format_len(format);
+        let hash_len = format.digest_len();
         let mut hasher = gix_hash::hasher(object_hash(format));
         hasher.update(&index[..index.len() - hash_len]);
         let digest = hasher.try_finalize()?;
@@ -974,7 +942,7 @@ mod tests {
     }
 
     fn rehash_pack(pack: &mut [u8], format: ObjectFormat) -> TestResult<ObjectId> {
-        let hash_len = format_len(format);
+        let hash_len = format.digest_len();
         let mut hasher = gix_hash::hasher(object_hash(format));
         hasher.update(&pack[..pack.len() - hash_len]);
         let digest = hasher.try_finalize()?;
@@ -984,7 +952,7 @@ mod tests {
     }
 
     fn set_pack_id(index: &mut [u8], format: ObjectFormat, id: ObjectId) {
-        let hash_len = format_len(format);
+        let hash_len = format.digest_len();
         let start = index.len() - hash_len * 2;
         index[start..start + hash_len].copy_from_slice(id.as_bytes());
     }
@@ -1008,7 +976,7 @@ mod tests {
             .find(|offset| *offset > start as u64);
         let end = match next {
             Some(offset) => usize::try_from(offset)?,
-            None => pack_len - format_len(format),
+            None => pack_len - format.digest_len(),
         };
         Ok(start..end)
     }
@@ -1210,7 +1178,7 @@ mod tests {
             object_hash(ObjectFormat::Sha1),
         )?;
         let compressed = usize::try_from(entry.data_offset)?;
-        assert!(delta_integer(&[0xff; 16], 0).is_err());
+        assert!(delta_integer(&[0xff; 16]).is_err());
         assert!(apply_delta(&[], &[0, 1, 1], |_| Ok(())).is_err());
 
         let mut pack = original_pack.clone();
@@ -1438,9 +1406,5 @@ mod tests {
             .is_err()
         );
         Ok(())
-    }
-
-    fn format_len(format: ObjectFormat) -> usize {
-        object_hash(format).len_in_bytes()
     }
 }

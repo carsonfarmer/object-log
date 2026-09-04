@@ -10,21 +10,25 @@ use gix_pack::data::{Version, input::EntriesToBytesIter};
 use crate::{Error, ObjectFormat, ObjectId};
 
 pub(super) const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
-pub(super) const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const MAX_PACK_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MAX_OBJECTS: u32 = 65_535;
+pub(super) const MAX_OBJECT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_WORK_BYTES: usize = 256 * 1024 * 1024;
+// Git's pack generator documents 4095 as its maximum delta depth.
+pub(super) const MAX_DELTA_DEPTH: usize = 4095;
 
 const DEFAULT_LIMITS: Limits = Limits {
     input_bytes: MAX_INPUT_BYTES,
-    output_bytes: MAX_OUTPUT_BYTES,
-    object_bytes: 16 * 1024 * 1024,
-    work_bytes: 256 * 1024 * 1024,
-    objects: 65_535,
-    index_bytes: 4 * 1024 * 1024,
+    output_bytes: MAX_PACK_BYTES,
+    object_bytes: MAX_OBJECT_BYTES,
+    work_bytes: MAX_WORK_BYTES,
+    objects: MAX_OBJECTS,
+    index_bytes: MAX_INDEX_BYTES,
 };
-// Git's pack generator documents 4095 as its maximum delta depth.
-const MAX_DELTA_DEPTH: u16 = 4095;
 
 #[derive(Clone, Copy)]
-pub(crate) struct Limits {
+struct Limits {
     input_bytes: usize,
     output_bytes: usize,
     object_bytes: usize,
@@ -226,24 +230,27 @@ fn scan(
 }
 
 fn delta_result_size(delta: &[u8]) -> Result<usize, Error> {
-    let (_, consumed) = delta_size(delta)?;
-    let (size, _) = delta_size(&delta[consumed..])?;
-    usize::try_from(size)
-        .map_err(|_| Error::InvalidPack("delta result does not fit in memory".into()))
+    let (_, consumed) = delta_integer(delta)?;
+    let (size, _) = delta_integer(&delta[consumed..])?;
+    Ok(size)
 }
 
-fn delta_size(bytes: &[u8]) -> Result<(u64, usize), Error> {
-    let mut size = 0_u64;
+pub(super) fn delta_integer(bytes: &[u8]) -> Result<(usize, usize), Error> {
+    let mut size = 0_usize;
+    let mut shift = 0_u32;
     for (index, byte) in bytes.iter().copied().enumerate() {
-        let shift = u32::try_from(index)
-            .ok()
-            .and_then(|value| value.checked_mul(7))
-            .filter(|value| *value < u64::BITS)
-            .ok_or_else(|| Error::InvalidPack("delta size overflowed".into()))?;
-        size |= u64::from(byte & 0x7f) << shift;
+        let part = usize::from(byte & 0x7f);
+        if part > usize::MAX >> shift {
+            return invalid("delta size overflowed");
+        }
+        size |= part << shift;
         if byte & 0x80 == 0 {
             return Ok((size, index + 1));
         }
+        shift = shift
+            .checked_add(7)
+            .filter(|shift| *shift < usize::BITS)
+            .ok_or_else(|| Error::InvalidPack("delta size overflowed".into()))?;
     }
     invalid("delta size is truncated")
 }
@@ -460,7 +467,7 @@ fn validate_parent_depth(parents: &[Option<usize>]) -> Result<(), Error> {
             } else {
                 0
             };
-            if depth > MAX_DELTA_DEPTH {
+            if usize::from(depth) > MAX_DELTA_DEPTH {
                 return invalid("delta depth exceeds limit");
             }
             depths[node] = Some(depth);
@@ -483,11 +490,11 @@ pub(crate) const fn object_hash(format: ObjectFormat) -> gix_hash::Kind {
     }
 }
 
-fn pack_error(error: impl std::fmt::Display) -> Error {
+pub(super) fn pack_error(error: impl std::fmt::Display) -> Error {
     Error::InvalidPack(error.to_string())
 }
 
-fn invalid<T>(message: &'static str) -> Result<T, Error> {
+pub(super) fn invalid<T>(message: &'static str) -> Result<T, Error> {
     Err(Error::InvalidPack(message.into()))
 }
 
@@ -540,6 +547,24 @@ mod tests {
             }
             git(self.dir.path(), arguments, ids.as_bytes())
         }
+    }
+
+    fn assert_delta_error(bytes: &[u8], expected: &str) {
+        assert!(matches!(
+            delta_integer(bytes),
+            Err(Error::InvalidPack(message)) if message == expected
+        ));
+    }
+
+    #[test]
+    fn delta_integer_rejects_target_width_overflow_and_truncation() {
+        let bits = std::mem::size_of::<usize>() * 8;
+        let encoded = bits.div_ceil(7);
+        let mut terminating_overflow = vec![0x80; encoded];
+        terminating_overflow[encoded - 1] = 1 << (bits % 7);
+        assert_delta_error(&terminating_overflow, "delta size overflowed");
+        assert_delta_error(&vec![0x80; encoded], "delta size overflowed");
+        assert_delta_error(&[0x80], "delta size is truncated");
     }
 
     #[test]
@@ -879,9 +904,9 @@ mod tests {
 
     #[test]
     fn enforces_the_git_generator_delta_depth_limit() {
-        let mut parents = Vec::with_capacity(usize::from(MAX_DELTA_DEPTH) + 2);
+        let mut parents = Vec::with_capacity(MAX_DELTA_DEPTH + 2);
         parents.push(None);
-        for position in 1..=usize::from(MAX_DELTA_DEPTH) {
+        for position in 1..=MAX_DELTA_DEPTH {
             parents.push(Some(position - 1));
         }
         assert!(validate_parent_depth(&parents).is_ok());
