@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
+    mem::size_of,
     path::PathBuf,
     sync::atomic::AtomicBool,
 };
@@ -17,14 +18,12 @@ pub(super) const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_INDEX_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const MAX_OBJECTS: u32 = 32_768;
 pub(super) const MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
-pub(super) const MAX_WORK_BYTES: usize = budget::WORK_BYTES;
 pub(super) const MAX_DELTA_DEPTH: usize = 256;
 
 const DEFAULT_LIMITS: Limits = Limits {
     input_bytes: MAX_RECEIVE_PACK_BYTES,
     output_bytes: MAX_PACK_BYTES,
     object_bytes: MAX_OBJECT_BYTES,
-    work_bytes: MAX_WORK_BYTES,
     objects: MAX_OBJECTS,
     index_bytes: MAX_INDEX_BYTES,
 };
@@ -34,7 +33,6 @@ struct Limits {
     input_bytes: usize,
     output_bytes: usize,
     object_bytes: usize,
-    work_bytes: usize,
     objects: u32,
     index_bytes: usize,
 }
@@ -45,7 +43,6 @@ pub(crate) struct ExternalBase<'a> {
     pub(crate) data: &'a [u8],
 }
 
-#[cfg_attr(test, derive(Clone))]
 pub(crate) struct Normalized {
     pub(crate) bytes: Vec<u8>,
     pub(crate) index: Vec<u8>,
@@ -73,9 +70,9 @@ fn normalize_with(
         return invalid("input exceeds byte limit");
     }
     let hash = object_hash(format);
-    let (entries, input_work) = scan(operation, input, hash, limits)?;
+    let entries = scan(operation, input, hash, limits)?;
 
-    let bases = ExternalBases::new(operation, hash, external_bases, limits, input_work)?;
+    let bases = ExternalBases::new(operation, hash, external_bases, limits)?;
     let (entries, output_bytes) = resolve_external(entries, &bases, limits, hash.len_in_bytes())?;
     let object_count = entries.len();
     let entries = entries.into_iter().map(Ok);
@@ -110,7 +107,6 @@ impl<'a> ExternalBases<'a> {
         hash: gix_hash::Kind,
         bases: &[ExternalBase<'a>],
         limits: Limits,
-        mut work: usize,
     ) -> Result<Self, Error> {
         let mut values = BTreeMap::new();
         for base in bases {
@@ -123,12 +119,6 @@ impl<'a> ExternalBases<'a> {
             }
             if values.insert(id, (base.kind, base.data)).is_some() {
                 return invalid("external base is duplicated");
-            }
-            work = work
-                .checked_add(base.data.len())
-                .ok_or_else(|| Error::InvalidPack("decoded work overflowed".into()))?;
-            if work > limits.work_bytes {
-                return invalid("decoded work exceeds limit");
             }
             operation.work(base.data.len())?;
             if values.len() > limits.objects as usize {
@@ -144,7 +134,7 @@ fn scan(
     input: &[u8],
     hash: gix_hash::Kind,
     limits: Limits,
-) -> Result<(Vec<gix_pack::data::input::Entry>, usize), Error> {
+) -> Result<Vec<gix_pack::data::input::Entry>, Error> {
     let pack = gix_pack::data::File::from_data(input, PathBuf::new(), hash)
         .map_err(pack_error)?
         .with_alloc_limit_bytes(Some(limits.object_bytes));
@@ -164,8 +154,8 @@ fn scan(
     let mut offset = 12_u64;
     let mut offsets = BTreeSet::new();
     let mut inflated = Vec::new();
+    let mut _inflated_memory = None;
     let mut inflate = gix_zlib::Inflate::default();
-    let mut work = 0_usize;
     let mut entries = Vec::with_capacity(count as usize);
     for position in 0..count {
         let entry = pack.entry(offset).map_err(pack_error)?;
@@ -187,7 +177,15 @@ fn scan(
         if inflated_size > limits.object_bytes {
             return invalid("entry exceeds object byte limit");
         }
-        inflated.resize(inflated_size, 0);
+        operation.work(inflated_size * (1 + usize::from(entry.header.is_delta())))?;
+        if inflated_size > inflated.capacity() {
+            let memory = operation.reserve(inflated_size)?;
+            let next = vec![0; inflated_size];
+            inflated = next;
+            _inflated_memory = Some(memory);
+        } else {
+            inflated.resize(inflated_size, 0);
+        }
         let compressed = pack
             .decompress_entry(&entry, &mut inflate, &mut inflated)
             .map_err(pack_error)?;
@@ -199,17 +197,7 @@ fn scan(
         if result_size > limits.object_bytes {
             return invalid("decoded object exceeds byte limit");
         }
-        let inflated_work = inflated_size
-            .checked_mul(1 + usize::from(entry.header.is_delta()))
-            .ok_or_else(|| Error::InvalidPack("decoded work overflowed".into()))?;
-        work = work
-            .checked_add(result_size)
-            .and_then(|value| value.checked_add(inflated_work))
-            .ok_or_else(|| Error::InvalidPack("decoded work overflowed".into()))?;
-        if work > limits.work_bytes {
-            return invalid("decoded work exceeds limit");
-        }
-        operation.work(result_size + inflated_work)?;
+        operation.work(result_size)?;
         let end = entry
             .data_offset
             .checked_add(u64::try_from(compressed).map_err(|_| {
@@ -242,7 +230,7 @@ fn scan(
     if usize::try_from(offset).ok() != Some(pack.pack_end()) {
         return invalid("pack object count does not match its entries");
     }
-    Ok((entries, work))
+    Ok(entries)
 }
 
 fn delta_result_size(delta: &[u8]) -> Result<usize, Error> {
@@ -380,10 +368,21 @@ fn index(
     limits: Limits,
 ) -> Result<(ObjectId, Vec<u8>, budget::Reservation), Error> {
     let object_count = entries.len();
-    let relationships = entries
-        .iter()
-        .map(|entry| (entry.pack_offset, entry.header))
-        .collect::<Vec<_>>();
+    let graph_item_bytes = size_of::<(u64, gix_pack::data::entry::Header)>()
+        + size_of::<Option<usize>>()
+        + size_of::<Option<u16>>()
+        + size_of::<bool>()
+        + size_of::<usize>();
+    let graph_bytes = object_count
+        .checked_mul(graph_item_bytes)
+        .ok_or_else(|| Error::InvalidPack("pack graph size overflowed".into()))?;
+    let _graph_memory = operation.reserve(graph_bytes)?;
+    let mut relationships = Vec::with_capacity(object_count);
+    relationships.extend(
+        entries
+            .iter()
+            .map(|entry| (entry.pack_offset, entry.header)),
+    );
     let index_bytes = 8_usize
         .checked_add(256 * 4)
         .and_then(|bytes| bytes.checked_add((hash.len_in_bytes() + 8).checked_mul(object_count)?))
@@ -428,39 +427,39 @@ fn validate_delta_depth(
     entries: &[(u64, gix_pack::data::entry::Header)],
     index: &gix_pack::index::File<&[u8]>,
 ) -> Result<(), Error> {
-    let parents = entries
-        .iter()
-        .map(|(offset, header)| {
-            let parent = match header {
-                gix_pack::data::entry::Header::OfsDelta { base_distance } => {
-                    Some(offset.checked_sub(*base_distance).ok_or_else(|| {
-                        Error::InvalidPack("invalid OFS_DELTA base offset".into())
-                    })?)
-                }
-                gix_pack::data::entry::Header::RefDelta { base_id } => Some(
-                    index
-                        .lookup(base_id)
-                        .map(|position| index.pack_offset_at_index(position))
-                        .ok_or_else(|| Error::InvalidPack("REF_DELTA base is missing".into()))?,
-                ),
-                _ => None,
-            };
+    let mut parents = Vec::with_capacity(entries.len());
+    for (offset, header) in entries {
+        let parent = match header {
+            gix_pack::data::entry::Header::OfsDelta { base_distance } => Some(
+                offset
+                    .checked_sub(*base_distance)
+                    .ok_or_else(|| Error::InvalidPack("invalid OFS_DELTA base offset".into()))?,
+            ),
+            gix_pack::data::entry::Header::RefDelta { base_id } => Some(
+                index
+                    .lookup(base_id)
+                    .map(|position| index.pack_offset_at_index(position))
+                    .ok_or_else(|| Error::InvalidPack("REF_DELTA base is missing".into()))?,
+            ),
+            _ => None,
+        };
+        parents.push(
             parent
                 .map(|offset| {
                     entries
                         .binary_search_by_key(&offset, |(offset, _)| *offset)
                         .map_err(|_| Error::InvalidPack("delta base is missing".into()))
                 })
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+                .transpose()?,
+        );
+    }
     validate_parent_depth(&parents)
 }
 
 fn validate_parent_depth(parents: &[Option<usize>]) -> Result<(), Error> {
     let mut depths = vec![None::<u16>; parents.len()];
     let mut visiting = vec![false; parents.len()];
-    let mut path = Vec::new();
+    let mut path = Vec::with_capacity(parents.len());
     for start in 0..parents.len() {
         path.clear();
         let mut current = start;
@@ -548,14 +547,6 @@ mod tests {
         limits: Limits,
     ) -> Result<Normalized, Error> {
         super::normalize_with(&operation(), format, input, external_bases, limits)
-    }
-
-    fn scan(
-        input: &[u8],
-        hash: gix_hash::Kind,
-        limits: Limits,
-    ) -> Result<(Vec<gix_pack::data::input::Entry>, usize), Error> {
-        super::scan(&operation(), input, hash, limits)
     }
 
     struct Fixture {
@@ -774,6 +765,11 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new(ObjectFormat::Sha1)?;
         let pack = fixture.pack(false)?;
+        let operation = budget::Pool::new(0).admit()?;
+        assert!(matches!(
+            super::normalize(&operation, ObjectFormat::Sha1, &pack, &[]),
+            Err(Error::InvalidPack(message)) if message == "Git live-memory limit exceeded"
+        ));
         let limits = Limits {
             input_bytes: pack.len() - 1,
             ..DEFAULT_LIMITS
@@ -802,10 +798,6 @@ mod tests {
                 ..DEFAULT_LIMITS
             },
             Limits {
-                work_bytes: 8,
-                ..DEFAULT_LIMITS
-            },
-            Limits {
                 output_bytes: 8,
                 ..DEFAULT_LIMITS
             },
@@ -817,24 +809,10 @@ mod tests {
             assert!(normalize_with(ObjectFormat::Sha1, &pack, &[], limits).is_err());
         }
 
-        let (_, exact_work) = scan(&pack, gix_hash::Kind::Sha1, DEFAULT_LIMITS)?;
-        assert!(
-            normalize_with(
-                ObjectFormat::Sha1,
-                &pack,
-                &[],
-                Limits {
-                    work_bytes: exact_work - 1,
-                    ..DEFAULT_LIMITS
-                },
-            )
-            .is_err()
-        );
         for limits in [
             Limits {
                 object_bytes: fixture.blobs[0].1.len(),
                 objects: u32::try_from(fixture.blobs.len())?,
-                work_bytes: exact_work,
                 ..DEFAULT_LIMITS
             },
             Limits {

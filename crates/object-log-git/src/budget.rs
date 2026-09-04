@@ -1,9 +1,6 @@
-use std::{
-    ops::Deref,
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use bytes::Bytes;
@@ -30,9 +27,16 @@ struct PoolState {
 
 impl Pool {
     pub(crate) fn shared() -> &'static Self {
-        POOL.get_or_init(|| Self::new(LIVE_BYTES))
+        POOL.get_or_init(|| {
+            Self(Arc::new(PoolState {
+                active: Mutex::new(false),
+                live: AtomicUsize::new(0),
+                limit: LIVE_BYTES,
+            }))
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn new(limit: usize) -> Self {
         Self(Arc::new(PoolState {
             active: Mutex::new(false),
@@ -119,10 +123,10 @@ impl Operation {
             self.0.pool.limit,
             "Git live-memory limit exceeded",
         )?;
-        Ok(Reservation(Arc::new(ReservationState {
+        Ok(Reservation {
             operation: self.0.clone(),
             bytes,
-        })))
+        })
     }
 
     #[cfg(test)]
@@ -155,15 +159,12 @@ fn charge(
         .map_err(|_| Error::InvalidPack(message.into()))
 }
 
-#[derive(Clone)]
-pub(crate) struct Reservation(Arc<ReservationState>);
-
-struct ReservationState {
+pub(crate) struct Reservation {
     operation: Arc<OperationState>,
     bytes: usize,
 }
 
-impl Drop for ReservationState {
+impl Drop for Reservation {
     fn drop(&mut self) {
         self.operation
             .pool
@@ -172,34 +173,22 @@ impl Drop for ReservationState {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct LiveBytes {
+struct BytesOwner {
     bytes: Bytes,
-    reservation: Reservation,
+    _reservation: Reservation,
 }
 
-impl std::fmt::Debug for LiveBytes {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.bytes.fmt(formatter)
-    }
-}
-
-impl LiveBytes {
-    pub(crate) fn new(bytes: Bytes, reservation: Reservation) -> Self {
-        Self { bytes, reservation }
-    }
-
-    pub(crate) fn slice(&self, range: impl std::ops::RangeBounds<usize>) -> Self {
-        Self::new(self.bytes.slice(range), self.reservation.clone())
-    }
-}
-
-impl Deref for LiveBytes {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
+impl AsRef<[u8]> for BytesOwner {
+    fn as_ref(&self) -> &[u8] {
         &self.bytes
     }
+}
+
+pub(crate) fn hold(bytes: Bytes, reservation: Reservation) -> Bytes {
+    Bytes::from_owner(BytesOwner {
+        bytes,
+        _reservation: reservation,
+    })
 }
 
 fn invalid<T>(message: &'static str) -> Result<T, Error> {
@@ -215,7 +204,7 @@ mod tests {
         let pool = Pool::new(4);
         let operation = pool.admit()?;
         assert!(pool.admit().is_err());
-        let bytes = LiveBytes::new(Bytes::from_static(b"1234"), operation.reserve(4)?);
+        let bytes = hold(Bytes::from_static(b"1234"), operation.reserve(4)?);
         assert!(operation.reserve(1).is_err());
         let slice = bytes.slice(1..3);
         drop(bytes);

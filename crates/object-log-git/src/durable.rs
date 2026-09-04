@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, VecDeque},
-    mem::size_of,
-    path::PathBuf,
-};
+use std::{collections::VecDeque, mem::size_of, path::PathBuf};
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt, stream};
@@ -14,7 +10,7 @@ use crate::{
     pack::{
         MAX_DELTA_DEPTH, MAX_INDEX_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS, MAX_PACK_BYTES,
         Normalized,
-        budget::{LiveBytes, Operation, Reservation},
+        budget::{Operation, Reservation, hold},
         delta_integer, invalid, object_hash, pack_error,
     },
 };
@@ -66,6 +62,7 @@ pub(crate) struct Catalog {
     packs: Box<[Pack]>,
     directory: Box<[Location]>,
     operation: Operation,
+    _load_memory: Reservation,
     _directory_memory: Reservation,
 }
 
@@ -73,10 +70,8 @@ struct Pack {
     id: ObjectId,
     bytes: u32,
     index: PackIndex,
-    index_bytes: usize,
     offsets: Box<[OffsetEntry]>,
     chunks: Box<[ObjectRef]>,
-    _root_memory: Reservation,
     _offset_memory: Reservation,
 }
 
@@ -102,23 +97,35 @@ pub(crate) async fn load(
     if roots.len() > usize::from(u16::MAX) {
         return invalid("catalog has too many packs");
     }
+    let mut charged = roots
+        .len()
+        .checked_mul(size_of::<Pack>())
+        .ok_or_else(|| Error::InvalidPack("catalog size overflowed".into()))?;
+    for (descriptor, root) in roots {
+        validate_pack_ref(format, descriptor, root)?;
+        let root_bytes = usize::try_from(root.len())
+            .map_err(|_| Error::InvalidPack("pack root exceeds memory".into()))?;
+        charged = charged
+            .checked_add(root_bytes)
+            .ok_or_else(|| Error::InvalidPack("catalog size overflowed".into()))?;
+        if charged > MAX_CATALOG_BYTES {
+            return invalid("catalog exceeds byte limit");
+        }
+        operation.io(root_bytes)?;
+    }
+    let load_memory = operation.reserve(charged)?;
     let loads = stream::iter(roots.iter().map(|(descriptor, root)| async move {
         load_pack(operation, log, view, format, descriptor, root).await
     }))
     .buffered(MAX_TRANSFERS);
     futures::pin_mut!(loads);
-    let mut charged = 0_usize;
     let mut packs = Vec::with_capacity(roots.len());
     while let Some(pack) = loads.try_next().await? {
-        charged = pack
-            .index_bytes
-            .checked_add(size_of::<PackIndex>())
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    pack.index.num_objects() as usize
-                        * (size_of::<Location>() + size_of::<OffsetEntry>()),
-                )
-            })
+        charged = size_of::<PackIndex>()
+            .checked_add(
+                pack.index.num_objects() as usize
+                    * (size_of::<Location>() + size_of::<OffsetEntry>()),
+            )
             .and_then(|bytes| charged.checked_add(bytes))
             .ok_or_else(|| Error::InvalidPack("catalog size overflowed".into()))?;
         if charged > MAX_CATALOG_BYTES {
@@ -153,6 +160,7 @@ pub(crate) async fn load(
         packs: packs.into_boxed_slice(),
         directory: directory.into_boxed_slice(),
         operation: operation.clone(),
+        _load_memory: load_memory,
         _directory_memory: directory_memory,
     })
 }
@@ -165,22 +173,8 @@ async fn load_pack(
     descriptor: &PackDescriptor,
     root: &ObjectRef,
 ) -> Result<Pack, Error> {
-    if root.kind() != ObjectKind::Node || descriptor.id.format() != format {
-        return invalid("pack root or object format is invalid");
-    }
-    if root.len() > MAX_PACK_ROOT_BYTES as u64 {
-        return invalid("pack root exceeds byte limit");
-    }
     let bytes = usize::try_from(descriptor.bytes)
         .map_err(|_| Error::InvalidPack("pack length exceeds memory".into()))?;
-    let hash_len = descriptor.id.as_bytes().len();
-    if bytes > MAX_PACK_BYTES || bytes < 12 + hash_len {
-        return invalid("pack byte length is out of range");
-    }
-    let root_bytes = usize::try_from(root.len())
-        .map_err(|_| Error::InvalidPack("pack root exceeds memory".into()))?;
-    operation.io(root_bytes)?;
-    let root_memory = operation.reserve(root_bytes)?;
     let node = log.read_node(view, root).await?;
     let chunks = node.children();
     if chunks.len() != bytes.div_ceil(CHUNK_BYTES) {
@@ -196,7 +190,6 @@ async fn load_pack(
             return invalid("pack chunk is invalid");
         }
     }
-    let index_bytes = node.payload().len();
     let (index, offsets, offset_memory) =
         validate_index(operation, node.payload(), format, descriptor)?;
     Ok(Pack {
@@ -204,12 +197,28 @@ async fn load_pack(
         bytes: u32::try_from(bytes)
             .map_err(|_| Error::InvalidPack("pack length exceeds u32".into()))?,
         index,
-        index_bytes,
         offsets,
         chunks: chunks.to_vec().into_boxed_slice(),
-        _root_memory: root_memory,
         _offset_memory: offset_memory,
     })
+}
+
+fn validate_pack_ref(
+    format: ObjectFormat,
+    descriptor: &PackDescriptor,
+    root: &ObjectRef,
+) -> Result<(), Error> {
+    if root.kind() != ObjectKind::Node || descriptor.id.format() != format {
+        return invalid("pack root or object format is invalid");
+    }
+    if root.len() > MAX_PACK_ROOT_BYTES as u64 {
+        return invalid("pack root exceeds byte limit");
+    }
+    let hash_len = descriptor.id.as_bytes().len() as u64;
+    if descriptor.bytes > MAX_PACK_BYTES as u64 || descriptor.bytes < 12 + hash_len {
+        return invalid("pack byte length is out of range");
+    }
+    Ok(())
 }
 
 fn validate_index(
@@ -327,15 +336,14 @@ impl Pack {
 
 pub(crate) struct Object {
     pub(crate) kind: gix_object::Kind,
-    pub(crate) data: LiveBytes,
+    pub(crate) data: Bytes,
 }
 
 pub(crate) struct Reader<'a> {
     log: &'a Log,
     view: &'a View,
     catalog: &'a Catalog,
-    cache: BTreeMap<(u16, u16), LiveBytes>,
-    cache_order: VecDeque<(u16, u16)>,
+    cache: VecDeque<((u16, u16), Bytes)>,
     cache_bytes: usize,
 }
 
@@ -345,8 +353,7 @@ impl<'a> Reader<'a> {
             log,
             view,
             catalog,
-            cache: BTreeMap::new(),
-            cache_order: VecDeque::new(),
+            cache: VecDeque::new(),
             cache_bytes: 0,
         }
     }
@@ -362,12 +369,12 @@ impl<'a> Reader<'a> {
         let location = self.catalog.directory[position];
         let pack = &self.catalog.packs[usize::from(location.pack)];
         let mut current = location.index;
-        let mut visited = vec![false; pack.index.num_objects() as usize];
         let delta_capacity = MAX_DELTA_DEPTH.min(pack.index.num_objects() as usize);
         let _read_memory = self
             .catalog
             .operation
-            .reserve(pack.index.num_objects() as usize + delta_capacity * size_of::<LiveBytes>())?;
+            .reserve(pack.index.num_objects() as usize + delta_capacity * size_of::<Bytes>())?;
+        let mut visited = vec![false; pack.index.num_objects() as usize];
         let mut deltas = Vec::with_capacity(delta_capacity);
         let (kind, mut data) = loop {
             let slot = visited
@@ -457,15 +464,11 @@ impl<'a> Reader<'a> {
         }
         Ok(DecodedEntry {
             header: entry.header,
-            data: LiveBytes::new(Bytes::from(data), memory),
+            data: hold(Bytes::from(data), memory),
         })
     }
 
-    async fn read_range(
-        &mut self,
-        pack: u16,
-        range: std::ops::Range<u32>,
-    ) -> Result<LiveBytes, Error> {
+    async fn read_range(&mut self, pack: u16, range: std::ops::Range<u32>) -> Result<Bytes, Error> {
         let first = range.start as usize / CHUNK_BYTES;
         let last = (range.end as usize - 1) / CHUNK_BYTES;
         if first == last {
@@ -493,13 +496,13 @@ impl<'a> Reader<'a> {
             };
             bytes.extend_from_slice(&chunk[start..end]);
         }
-        Ok(LiveBytes::new(bytes.freeze(), memory))
+        Ok(hold(bytes.freeze(), memory))
     }
 
-    async fn chunk(&mut self, pack: u16, index: usize) -> Result<LiveBytes, Error> {
+    async fn chunk(&mut self, pack: u16, index: usize) -> Result<Bytes, Error> {
         let index = u16::try_from(index)
             .map_err(|_| Error::InvalidPack("pack chunk index exceeds u16".into()))?;
-        if let Some(bytes) = self.cache.get(&(pack, index)) {
+        if let Some((_, bytes)) = self.cache.iter().find(|(key, _)| *key == (pack, index)) {
             return Ok(bytes.clone());
         }
         let object = self.catalog.packs[usize::from(pack)]
@@ -516,28 +519,25 @@ impl<'a> Reader<'a> {
         if value.len() != bytes {
             return invalid("pack chunk byte length does not match");
         }
-        let value = LiveBytes::new(value, memory);
+        let value = hold(value, memory);
         while self.cache_bytes + bytes > MAX_CACHE_BYTES {
-            let Some(oldest) = self.cache_order.pop_front() else {
+            let Some((_, removed)) = self.cache.pop_front() else {
                 break;
             };
-            if let Some(removed) = self.cache.remove(&oldest) {
-                self.cache_bytes -= removed.len();
-            }
+            self.cache_bytes -= removed.len();
         }
         self.cache_bytes += bytes;
-        self.cache_order.push_back((pack, index));
-        self.cache.insert((pack, index), value.clone());
+        self.cache.push_back(((pack, index), value.clone()));
         Ok(value)
     }
 }
 
 struct DecodedEntry {
     header: gix_pack::data::entry::Header,
-    data: LiveBytes,
+    data: Bytes,
 }
 
-fn apply_delta(operation: &Operation, base: &[u8], delta: &[u8]) -> Result<LiveBytes, Error> {
+fn apply_delta(operation: &Operation, base: &[u8], delta: &[u8]) -> Result<Bytes, Error> {
     let (base_size, mut position) = delta_integer(delta)?;
     let (result_size, consumed) = delta_integer(&delta[position..])?;
     position += consumed;
@@ -599,7 +599,7 @@ fn apply_delta(operation: &Operation, base: &[u8], delta: &[u8]) -> Result<LiveB
     if result.len() != result_size {
         return invalid("delta result size does not match");
     }
-    Ok(LiveBytes::new(Bytes::from(result), memory))
+    Ok(hold(Bytes::from(result), memory))
 }
 
 const _: () = assert!(size_of::<Location>() == 8);
@@ -607,6 +607,7 @@ const _: () = assert!(size_of::<Location>() == 8);
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         error::Error as StdError,
         path::Path,
         process::{Command, Stdio},
@@ -777,16 +778,34 @@ mod tests {
         let fixture = fixture(format, 10, true, false)?;
         let chunks = fixture.normalized.bytes.len().div_ceil(CHUNK_BYTES);
         let first_id = fixture.objects[0].0;
+        let Fixture {
+            normalized,
+            objects,
+        } = fixture;
 
         store.reset();
-        let (descriptor, root) =
-            stage(&test_operation(), &log, &view, fixture.normalized.clone()).await?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, normalized).await?;
         let puts = store.metrics().operation(StoreOperation::Put);
         assert_eq!(puts.requests, (chunks + 1) as u64);
         assert_eq!(
             puts.uploaded_bytes,
             descriptor.bytes + root.reference().len()
         );
+
+        store.reset();
+        let pool = Pool::new(usize::try_from(root.reference().len())? + size_of::<Pack>() - 1);
+        assert!(
+            load(
+                &pool.admit()?,
+                &log,
+                &view,
+                format,
+                &[(descriptor.clone(), root.reference().clone())]
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
 
         store.reset();
         let blocked = test_operation();
@@ -816,7 +835,7 @@ mod tests {
         let gets = store.metrics().operation(StoreOperation::Get);
         assert_eq!(gets.requests, 0);
         assert_eq!(gets.downloaded_bytes, 0);
-        for (id, expected) in fixture.objects {
+        for (id, expected) in objects {
             let object = reader.find(id).await?.ok_or("stored object is missing")?;
             assert_eq!(object.kind, gix_object::Kind::Blob);
             assert_eq!(&object.data[..], expected);
@@ -939,7 +958,7 @@ mod tests {
             drop(reader.chunk(0, index).await?);
         }
         assert!(reader.cache_bytes <= MAX_CACHE_BYTES);
-        assert!(!reader.cache.contains_key(&(0, 0)));
+        assert!(reader.cache.iter().all(|(key, _)| *key != (0, 0)));
         let retained = catalog.operation.live_bytes();
         drop(first);
         assert_eq!(retained - catalog.operation.live_bytes(), CHUNK_BYTES);
