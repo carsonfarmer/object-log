@@ -1,4 +1,4 @@
-use std::{env, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{env, error::Error, net::SocketAddr, num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use object_log::{Log, LogId, Options, ValidatedBackend};
 use object_log_git_http::{GitHttpServer, SmartHttp};
@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use url::Url;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:3000";
-const DEFAULT_CONCURRENCY: usize = 4;
+const DEFAULT_CONCURRENCY: &str = "4";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -23,10 +23,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| DEFAULT_LISTEN.into())
         .parse::<SocketAddr>()?;
     let concurrency = env::var("OBJECT_LOG_CONCURRENCY")
-        .map_or(Ok(DEFAULT_CONCURRENCY), |value| value.parse::<usize>())?;
-    if concurrency == 0 {
-        return Err("OBJECT_LOG_CONCURRENCY must be nonzero".into());
-    }
+        .unwrap_or_else(|_| DEFAULT_CONCURRENCY.into())
+        .parse::<NonZeroUsize>()?;
     let scratch = env::var_os("OBJECT_LOG_SCRATCH")
         .map_or_else(|| env::temp_dir().join("object-log-git"), PathBuf::from);
 
@@ -38,12 +36,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )
     .await?;
     let endpoint = SmartHttp::new(log, &scratch);
-    let app = GitHttpServer::new(endpoint, scratch, concurrency).router();
+    let host = GitHttpServer::new(endpoint, scratch, concurrency);
+    let app = host.clone().router();
     let listener = TcpListener::bind(listen).await?;
     tracing::info!(address = %listener.local_addr()?, "Git HTTP server listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
         .await?;
+    host.shutdown().await;
     Ok(())
 }
 

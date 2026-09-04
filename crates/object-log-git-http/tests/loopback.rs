@@ -1,11 +1,24 @@
-use std::{error::Error as StdError, path::Path, process::Command, sync::Arc};
+use std::{
+    error::Error as StdError,
+    path::Path,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
 
-use axum::Router;
+use axum::{
+    Router,
+    extract::{Request, State},
+    middleware::{self, Next},
+    response::Response,
+};
 use object_log::{Log, LogId, Options, ValidatedBackend};
 use object_log_git_http::{GitHttpServer, SmartHttp};
 use object_store::{memory::InMemory, path::Path as StorePath};
 use tempfile::TempDir;
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
 
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
@@ -23,7 +36,7 @@ async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> Tes
     )
     .await?;
     let scratch = root.path().join("scratch");
-    let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, 4).router();
+    let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?).router();
     let (url, server) = serve(app).await?;
     assert!(git_output(None, ["ls-remote", &url])?.stdout.is_empty());
 
@@ -97,6 +110,156 @@ async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> Tes
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> TestResult {
+    let root = TempDir::new()?;
+    let (url, scratch, server, _) = repository_server(&root, "git-http-large").await?;
+    let source = root.path().join("large-source");
+    git(None, ["init", "--quiet", "-b", "main", path(&source)?])?;
+    write(&source, "base")?;
+    git(Some(&source), ["add", "file"])?;
+    git(Some(&source), ["commit", "--quiet", "-m", "base"])?;
+    for revision in 0..384 {
+        git(
+            Some(&source),
+            [
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                &format!("history-{revision}"),
+            ],
+        )?;
+    }
+    git(Some(&source), ["remote", "add", "origin", &url])?;
+    git(Some(&source), ["push", "--quiet", "-u", "origin", "main"])?;
+
+    let clone = root.path().join("large-clone");
+    git(None, ["clone", "--quiet", &url, path(&clone)?])?;
+    git(
+        Some(&source),
+        ["commit", "--quiet", "--allow-empty", "-m", "tip"],
+    )?;
+    git(Some(&source), ["push", "--quiet"])?;
+    let output = git_trace(Some(&clone), ["fetch", "--quiet"])?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+    }
+    let trace = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    assert!(trace.matches("=> send header: post ").count() >= 2);
+    assert!(trace.contains("=> send header: content-encoding: gzip"));
+    assert!(trace.contains("<= recv header: transfer-encoding: chunked"));
+    git(Some(&clone), ["fsck", "--strict"])?;
+    assert!(std::fs::read_dir(scratch)?.next().is_none());
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_pushes_report_one_durable_winner() -> TestResult {
+    let root = TempDir::new()?;
+    let (url, scratch, server, gate) = repository_server(&root, "git-http-concurrent").await?;
+    let source = root.path().join("concurrent-source");
+    git(None, ["init", "--quiet", "-b", "main", path(&source)?])?;
+    write(&source, "base")?;
+    git(Some(&source), ["add", "file"])?;
+    git(Some(&source), ["commit", "--quiet", "-m", "base"])?;
+    git(Some(&source), ["remote", "add", "origin", &url])?;
+    git(Some(&source), ["push", "--quiet", "-u", "origin", "main"])?;
+
+    let left = root.path().join("left");
+    let right = root.path().join("right");
+    git(None, ["clone", "--quiet", &url, path(&left)?])?;
+    git(None, ["clone", "--quiet", &url, path(&right)?])?;
+    write(&left, "left")?;
+    git(Some(&left), ["commit", "--quiet", "-am", "left"])?;
+    write(&right, "right")?;
+    git(Some(&right), ["commit", "--quiet", "-am", "right"])?;
+
+    gate.arm();
+    let left_push = tokio::task::spawn_blocking(move || {
+        git_trace(Some(&left), ["push", "--quiet", "origin", "main"])
+    });
+    let right_push = tokio::task::spawn_blocking(move || {
+        git_trace(Some(&right), ["push", "--quiet", "origin", "main"])
+    });
+    let (left_push, right_push) = tokio::try_join!(left_push, right_push)?;
+    let left_push = left_push?;
+    let right_push = right_push?;
+    assert!(sent_receive_pack(&left_push.stderr));
+    assert!(sent_receive_pack(&right_push.stderr));
+    assert!(gate.arrivals() >= 2);
+    assert_ne!(left_push.status.success(), right_push.status.success());
+    let expected = if left_push.status.success() {
+        "left"
+    } else {
+        "right"
+    };
+
+    let final_clone = root.path().join("concurrent-final");
+    git(None, ["clone", "--quiet", &url, path(&final_clone)?])?;
+    git(Some(&final_clone), ["fsck", "--strict"])?;
+    assert_eq!(std::fs::read_to_string(final_clone.join("file"))?, expected);
+    assert!(std::fs::read_dir(scratch)?.next().is_none());
+    server.abort();
+    Ok(())
+}
+
+async fn repository_server(
+    root: &TempDir,
+    namespace: &str,
+) -> TestResult<(String, std::path::PathBuf, JoinHandle<()>, ReceiveGate)> {
+    let backend =
+        ValidatedBackend::new(Arc::new(InMemory::new()), StorePath::from(namespace)).await?;
+    let log = Log::open(
+        backend.scope(&LogId::new("repository")?),
+        Options::default(),
+    )
+    .await?;
+    let scratch = root.path().join(format!("{namespace}-scratch"));
+    let gate = ReceiveGate::default();
+    let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?)
+        .router()
+        .layer(middleware::from_fn_with_state(gate.clone(), gate_receive));
+    let (url, server) = serve(app).await?;
+    Ok((url, scratch, server, gate))
+}
+
+#[derive(Clone, Default)]
+struct ReceiveGate(Arc<ReceiveGateState>);
+
+#[derive(Default)]
+struct ReceiveGateState {
+    armed: AtomicBool,
+    arrivals: AtomicUsize,
+    notify: Notify,
+}
+
+impl ReceiveGate {
+    fn arm(&self) {
+        self.0.armed.store(true, Ordering::Release);
+    }
+
+    fn arrivals(&self) -> usize {
+        self.0.arrivals.load(Ordering::Acquire)
+    }
+}
+
+async fn gate_receive(State(gate): State<ReceiveGate>, request: Request, next: Next) -> Response {
+    if gate.0.armed.load(Ordering::Acquire) && request.uri().path() == "/repo/git-receive-pack" {
+        gate.0.arrivals.fetch_add(1, Ordering::AcqRel);
+        loop {
+            let notified = gate.0.notify.notified();
+            if gate.arrivals() >= 2 {
+                gate.0.notify.notify_waiters();
+                break;
+            }
+            notified.await;
+        }
+    }
+    next.run(request).await
+}
+
 async fn serve(app: Router) -> TestResult<(String, JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -130,6 +293,27 @@ fn git_output<const N: usize>(
     directory: Option<&Path>,
     args: [&str; N],
 ) -> TestResult<std::process::Output> {
+    Ok(git_command(directory, args).output()?)
+}
+
+fn git_trace<const N: usize>(
+    directory: Option<&Path>,
+    args: [&str; N],
+) -> TestResult<std::process::Output> {
+    let mut command = git_command(directory, args);
+    command
+        .env("GIT_TRACE_CURL", "1")
+        .env("GIT_TRACE_CURL_NO_DATA", "1");
+    Ok(command.output()?)
+}
+
+fn sent_receive_pack(trace: &[u8]) -> bool {
+    String::from_utf8_lossy(trace)
+        .to_ascii_lowercase()
+        .contains("=> send header: post /repo/git-receive-pack")
+}
+
+fn git_command<const N: usize>(directory: Option<&Path>, args: [&str; N]) -> Command {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -142,5 +326,5 @@ fn git_output<const N: usize>(
     if let Some(directory) = directory {
         command.current_dir(directory);
     }
-    Ok(command.output()?)
+    command
 }

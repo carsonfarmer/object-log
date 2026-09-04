@@ -20,8 +20,8 @@ object_store = { version = "0.14", features = ["aws"] }
 tempfile = "3.20"
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
-tokio-util = { version = "0.7", features = ["io"] }
-tower-http = { version = "0.6", features = ["limit"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+tower-http = { version = "0.6", features = ["limit", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

@@ -1,6 +1,8 @@
 //! Native HTTP host for one fixed Git repository.
 
+use std::task::{Context, Poll};
 use std::{error::Error as StdError, io, path::PathBuf, pin::Pin, sync::Arc};
+use std::{num::NonZeroUsize, time::Duration};
 
 use async_compression::tokio::bufread::GzipDecoder;
 use axum::{
@@ -11,20 +13,28 @@ use axum::{
         HeaderMap, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, EXPIRES, PRAGMA},
     },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures::TryStreamExt;
 use tokio::{
-    io::{AsyncRead, AsyncSeekExt, BufReader, SeekFrom},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    io::{AsyncRead, AsyncSeekExt, BufReader, ReadBuf, SeekFrom},
+    sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError},
 };
 use tokio_util::io::{ReaderStream, StreamReader};
-use tower_http::limit::RequestBodyLimitLayer;
+use tokio_util::task::TaskTracker;
+use tower_http::{
+    limit::RequestBodyLimitLayer,
+    timeout::{RequestBodyTimeoutLayer, ResponseBodyTimeoutLayer},
+};
 
 use crate::{Error, ReceiveOutcome, Service, SmartHttp};
 
 const MAX_ENCODED_BODY_BYTES: usize = 513 * 1024 * 1024;
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+const REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 const PRAGMA_NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
 const EXPIRES_PAST: HeaderValue = HeaderValue::from_static("Fri, 01 Jan 1980 00:00:00 GMT");
 
@@ -39,21 +49,23 @@ pub struct GitHttpServer {
     endpoint: SmartHttp,
     scratch: PathBuf,
     permits: Arc<Semaphore>,
+    tasks: TaskTracker,
 }
 
 impl GitHttpServer {
     /// Creates a host with a fixed limit on active Git operations.
     ///
-    /// # Panics
-    ///
-    /// Panics if `max_concurrency` is zero.
     #[must_use]
-    pub fn new(endpoint: SmartHttp, scratch: impl Into<PathBuf>, max_concurrency: usize) -> Self {
-        assert!(max_concurrency != 0, "Git HTTP concurrency must be nonzero");
+    pub fn new(
+        endpoint: SmartHttp,
+        scratch: impl Into<PathBuf>,
+        max_concurrency: NonZeroUsize,
+    ) -> Self {
         Self {
             endpoint,
             scratch: scratch.into(),
-            permits: Arc::new(Semaphore::new(max_concurrency)),
+            permits: Arc::new(Semaphore::new(max_concurrency.get())),
+            tasks: TaskTracker::new(),
         }
     }
 
@@ -63,16 +75,44 @@ impl GitHttpServer {
             .route("/repo/info/refs", get(info_refs))
             .route("/repo/git-upload-pack", post(upload_pack))
             .route("/repo/git-receive-pack", post(receive_pack))
+            .layer(ResponseBodyTimeoutLayer::new(RESPONSE_IDLE_TIMEOUT))
+            .layer(RequestBodyTimeoutLayer::new(REQUEST_BODY_IDLE_TIMEOUT))
             .layer(RequestBodyLimitLayer::new(MAX_ENCODED_BODY_BYTES))
+            .layer(middleware::from_fn(limit_headers))
             .with_state(self)
     }
 
-    async fn permit(&self) -> Result<OwnedSemaphorePermit, Failure> {
-        Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| Failure::internal())
+    /// Stops task admission and waits for active Git operations to finish.
+    pub async fn shutdown(&self) {
+        self.tasks.close();
+        self.tasks.wait().await;
     }
+
+    fn permit(&self) -> Result<OwnedSemaphorePermit, Failure> {
+        Arc::clone(&self.permits)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                TryAcquireError::NoPermits => Failure::busy(),
+                TryAcquireError::Closed => Failure::internal(),
+            })
+    }
+}
+
+async fn limit_headers(request: axum::extract::Request, next: Next) -> Response {
+    let uri = request.uri();
+    let mut bytes = request.method().as_str().len() + uri.path().len();
+    bytes = bytes.saturating_add(uri.query().map_or(0, str::len));
+    for (name, value) in request.headers() {
+        bytes = bytes.saturating_add(name.as_str().len() + value.as_bytes().len());
+    }
+    if bytes > MAX_HEADER_BYTES {
+        return Failure::new(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "request headers are too large",
+        )
+        .into_response();
+    }
+    next.run(request).await
 }
 
 async fn info_refs(
@@ -80,16 +120,18 @@ async fn info_refs(
     RawQuery(query): RawQuery,
 ) -> Result<Response, Failure> {
     let service = parse_service(query.as_deref())?;
-    let permit = host.permit().await?;
+    let permit = host.permit()?;
     let endpoint = host.endpoint.clone();
-    let output = tokio::spawn(async move {
-        let _permit = permit;
-        let mut output = Vec::new();
-        endpoint.advertise(service, &mut output).await?;
-        Ok::<_, Error>(output)
-    })
-    .await
-    .map_err(|_| Failure::internal())??;
+    let output = host
+        .tasks
+        .spawn(async move {
+            let _permit = permit;
+            let mut output = Vec::new();
+            endpoint.advertise(service, &mut output).await?;
+            Ok::<_, Error>(output)
+        })
+        .await
+        .map_err(|_| Failure::internal())??;
     Ok(response(service, true, StatusCode::OK, Body::from(output)))
 }
 
@@ -100,22 +142,41 @@ async fn upload_pack(
 ) -> Result<Response, Failure> {
     require_request_headers(&headers, Service::UploadPack)?;
     let mut input = request_reader(body, &headers)?;
-    let permit = host.permit().await?;
+    let permit = host.permit()?;
     let endpoint = host.endpoint.clone();
     let scratch = host.scratch.clone();
-    let output = tokio::spawn(async move {
-        let _permit = permit;
-        tokio::fs::create_dir_all(&scratch).await?;
-        let output = tempfile::tempfile_in(scratch)?;
-        let mut output = tokio::fs::File::from_std(output);
-        endpoint.upload_pack(&mut input, &mut output).await?;
-        output.seek(SeekFrom::Start(0)).await?;
-        Ok::<_, Error>(output)
-    })
-    .await
-    .map_err(|_| Failure::internal())??;
-    let body = Body::from_stream(ReaderStream::new(output));
+    let (output, permit) = host
+        .tasks
+        .spawn(async move {
+            tokio::fs::create_dir_all(&scratch).await?;
+            let output = tempfile::tempfile_in(scratch)?;
+            let mut output = tokio::fs::File::from_std(output);
+            endpoint.upload_pack(&mut input, &mut output).await?;
+            output.seek(SeekFrom::Start(0)).await?;
+            Ok::<_, Error>((output, permit))
+        })
+        .await
+        .map_err(|_| Failure::internal())??;
+    let body = Body::from_stream(ReaderStream::new(PermittedReader {
+        inner: output,
+        _permit: permit,
+    }));
     Ok(response(Service::UploadPack, false, StatusCode::OK, body))
+}
+
+struct PermittedReader<R> {
+    inner: R,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for PermittedReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(context, buffer)
+    }
 }
 
 async fn receive_pack(
@@ -125,19 +186,28 @@ async fn receive_pack(
 ) -> Result<Response, Failure> {
     require_request_headers(&headers, Service::ReceivePack)?;
     let mut input = request_reader(body, &headers)?;
-    let permit = host.permit().await?;
+    let permit = host.permit()?;
     let endpoint = host.endpoint.clone();
-    let (outcome, output) = tokio::spawn(async move {
-        let _permit = permit;
-        let mut output = Vec::new();
-        let outcome = endpoint.receive_pack(&mut input, &mut output).await?;
-        Ok::<_, Error>((outcome, output))
-    })
-    .await
-    .map_err(|_| Failure::internal())??;
-    let status = match outcome {
+    let (outcome, output) = host
+        .tasks
+        .spawn(async move {
+            let _permit = permit;
+            let mut output = Vec::new();
+            let outcome = endpoint.receive_pack(&mut input, &mut output).await?;
+            Ok::<_, Error>((outcome, output))
+        })
+        .await
+        .map_err(|_| Failure::internal())??;
+    let status = match &outcome {
         ReceiveOutcome::Committed | ReceiveOutcome::Rejected => StatusCode::OK,
-        ReceiveOutcome::Pending(_) | ReceiveOutcome::Expired => StatusCode::SERVICE_UNAVAILABLE,
+        ReceiveOutcome::Pending(_) => {
+            tracing::warn!("Git publication remains uncertain; client must refresh refs");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        ReceiveOutcome::Expired => {
+            tracing::warn!("Git publication evidence expired; client must refresh refs");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     };
     Ok(response(
         Service::ReceivePack,
@@ -162,19 +232,19 @@ fn request_reader(body: Body, headers: &HeaderMap) -> Result<RequestReader, Fail
 
 fn body_error(error: axum::Error) -> io::Error {
     let mut source = error.source();
-    let mut too_large = false;
+    let mut kind = io::ErrorKind::InvalidData;
     while let Some(current) = source {
         if current.is::<http_body_util::LengthLimitError>() {
-            too_large = true;
+            kind = io::ErrorKind::FileTooLarge;
+            break;
+        }
+        if current.is::<tower_http::timeout::TimeoutError>() {
+            kind = io::ErrorKind::TimedOut;
             break;
         }
         source = current.source();
     }
-    if too_large {
-        io::Error::new(io::ErrorKind::FileTooLarge, error)
-    } else {
-        io::Error::new(io::ErrorKind::InvalidData, error)
-    }
+    io::Error::new(kind, error)
 }
 
 fn parse_service(query: Option<&str>) -> Result<Service, Failure> {
@@ -289,12 +359,25 @@ impl Failure {
             "unsupported content encoding",
         )
     }
+
+    const fn busy() -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "Git service is busy")
+    }
 }
 
 impl From<Error> for Failure {
     fn from(error: Error) -> Self {
         match error {
             Error::Protocol(_) => Self::new(StatusCode::BAD_REQUEST, "invalid Git protocol"),
+            Error::RequestTooLarge(_) => {
+                Self::new(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+            }
+            Error::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                Self::new(StatusCode::BAD_REQUEST, "truncated request body")
+            }
+            Error::Io(error) if error.kind() == io::ErrorKind::TimedOut => {
+                Self::new(StatusCode::REQUEST_TIMEOUT, "request body timed out")
+            }
             Error::Io(error) if error.kind() == io::ErrorKind::InvalidData => {
                 Self::new(StatusCode::BAD_REQUEST, "invalid request body")
             }
@@ -317,5 +400,29 @@ impl IntoResponse for Failure {
             self.message,
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn response_reader_owns_its_concurrency_permit() -> Result<(), Box<dyn StdError>> {
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&permits).acquire_owned().await?;
+        let mut reader = PermittedReader {
+            inner: tokio::io::empty(),
+            _permit: permit,
+        };
+        assert_eq!(permits.available_permits(), 0);
+
+        assert_eq!(reader.read(&mut [0]).await?, 0);
+        assert_eq!(permits.available_permits(), 0);
+        drop(reader);
+        assert_eq!(permits.available_permits(), 1);
+        Ok(())
     }
 }

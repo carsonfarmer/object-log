@@ -82,9 +82,12 @@ pub enum ReceiveOutcome {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The request is malformed or exceeds a fixed limit.
+    /// The request is malformed.
     #[error("invalid Git protocol: {0}")]
     Protocol(&'static str),
+    /// The request exceeds a fixed byte or item limit.
+    #[error("Git request is too large: {0}")]
+    RequestTooLarge(&'static str),
     /// A local scratch operation failed.
     #[error("Git HTTP I/O failed: {0}")]
     Io(#[from] std::io::Error),
@@ -233,7 +236,7 @@ async fn parse_upload(input: &mut (impl AsyncRead + Unpin)) -> Result<UploadRequ
             Packet::Flush => break,
             Packet::Data(line) => {
                 if wants.len() == MAX_COMMANDS {
-                    return Err(Error::Protocol("too many wants"));
+                    return Err(Error::RequestTooLarge("too many wants"));
                 }
                 let line = trim_newline(&line);
                 let value = line
@@ -273,7 +276,7 @@ async fn parse_upload(input: &mut (impl AsyncRead + Unpin)) -> Result<UploadRequ
                 parse_id(value)?;
                 haves += 1;
                 if haves > MAX_HAVES {
-                    return Err(Error::Protocol("too many haves"));
+                    return Err(Error::RequestTooLarge("too many haves"));
                 }
             }
         }
@@ -317,7 +320,7 @@ async fn parse_receive(
             Packet::Flush => break,
             Packet::Data(line) => {
                 if updates.len() == MAX_COMMANDS {
-                    return Err(Error::Protocol("too many ref commands"));
+                    return Err(Error::RequestTooLarge("too many ref commands"));
                 }
                 let line = trim_newline(&line);
                 let command = if updates.is_empty() {
@@ -388,9 +391,11 @@ async fn spool_pack(input: &mut (impl AsyncRead + Unpin), path: &Path) -> Result
             break;
         }
         bytes = bytes
-            .checked_add(u64::try_from(read).map_err(|_| Error::Protocol("pack is too large"))?)
+            .checked_add(
+                u64::try_from(read).map_err(|_| Error::RequestTooLarge("pack is too large"))?,
+            )
             .filter(|bytes| *bytes <= MAX_PACK_BYTES)
-            .ok_or(Error::Protocol("pack is too large"))?;
+            .ok_or(Error::RequestTooLarge("pack is too large"))?;
         output.write_all(&buffer[..read]).await?;
     }
     output.flush().await?;
@@ -518,7 +523,9 @@ async fn read_packet_optional(
             Packet::Flush => 4,
         })
         .filter(|total| *total <= limit)
-        .ok_or(Error::Protocol("control data exceeds the byte limit"))?;
+        .ok_or(Error::RequestTooLarge(
+            "control data exceeds the byte limit",
+        ))?;
     Ok(Some(packet))
 }
 
