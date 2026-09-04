@@ -80,7 +80,7 @@ API:
 
 At revision `b322985`, the private pack, durable-reader and writer, wire, and
 operation-budget foundations contain 2,189 product lines. Tasks 1 and 2 are
-complete. Task 3 adds one common public `Repository` for native and WASIp2. It
+complete. Task 3 adds one common public `Repository` for native and `WASIp2`. It
 owns the exact `View`, refs, authenticated pack roots and sizes, `Operation`,
 and retained-state reservation. Each later object-reading command creates its
 own private `Catalog` and `Reader`, so `ls-refs` does not load pack indexes and
