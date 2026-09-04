@@ -2,14 +2,13 @@ use std::io::{self, Write};
 
 use gix_packetline::{Channel, PacketLineRef, blocking_io::encode, decode};
 
-use crate::{ObjectFormat, ObjectId, RefUpdate};
+use crate::{ObjectFormat, ObjectId, RefUpdate, pack::MAX_INPUT_BYTES};
 
 const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECEIVE_BYTES: usize = 1024 * 1024;
-const MAX_PACK_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COMMANDS: usize = 1_024;
 const MAX_ITEMS: usize = 65_535;
-const MAX_BAND_DATA: usize = 65_515;
+const MAX_PACKET_PAYLOAD: usize = 65_515;
 const UPLOAD_SHA1: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n000afetch\n0017object-format=sha1\n0000";
 const UPLOAD_SHA256: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n000afetch\n0019object-format=sha256\n0000";
 
@@ -36,12 +35,14 @@ pub(crate) enum UploadRequest<'a> {
         done: bool,
         thin_pack: bool,
         ofs_delta: bool,
+        include_tag: bool,
     },
 }
 
 pub(crate) struct ReceiveRequest<'a> {
     pub(crate) updates: Box<[RefUpdate]>,
     pub(crate) pack: &'a [u8],
+    pub(crate) report_status: bool,
 }
 
 pub(crate) struct AdvertisedRef<'a> {
@@ -54,7 +55,6 @@ pub(crate) struct AdvertisedRef<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum FetchReply<'a> {
     Acknowledgments(&'a [ObjectId]),
-    Ready { common: ObjectId, pack: &'a [u8] },
     Pack(&'a [u8]),
 }
 
@@ -69,11 +69,10 @@ pub(crate) fn write_upload_advertisement(
     output: &mut impl Write,
     format: ObjectFormat,
 ) -> Result<(), Error> {
-    let advertisement = match format {
+    output.write_all(match format {
         ObjectFormat::Sha1 => UPLOAD_SHA1,
         ObjectFormat::Sha256 => UPLOAD_SHA256,
-    };
-    output.write_all(advertisement)?;
+    })?;
     Ok(())
 }
 
@@ -81,14 +80,14 @@ pub(crate) fn parse_upload(input: &[u8], format: ObjectFormat) -> Result<UploadR
     within(input.len(), MAX_UPLOAD_BYTES, "upload control bytes")?;
     let mut packets = input;
     let command = match packet(&mut packets)? {
-        PacketLineRef::Data(line) => text(line)?,
+        PacketLineRef::Data(line) => text(line),
         _ => return Err(Error::Protocol("missing command")),
     }
     .strip_prefix(b"command=")
     .ok_or(Error::Protocol("missing command"))?;
     let mut capabilities = 0_u8;
     while let Some(line) = data_until(&mut packets, PacketLineRef::Delimiter)? {
-        let line = text(line)?;
+        let line = text(line);
         let bit = if line == format_capability(format) {
             1
         } else if valid_agent(line) {
@@ -101,7 +100,7 @@ pub(crate) fn parse_upload(input: &[u8], format: ObjectFormat) -> Result<UploadR
         }
         capabilities |= bit;
     }
-    if capabilities & 1 == 0 {
+    if format == ObjectFormat::Sha256 && capabilities & 1 == 0 {
         return Err(Error::Protocol("missing object-format capability"));
     }
     let request = match command {
@@ -119,17 +118,13 @@ fn parse_ls_refs<'a>(packets: &mut &'a [u8]) -> Result<UploadRequest<'a>, Error>
     let (mut peel, mut symrefs, mut unborn) = (false, false, false);
     let mut prefixes = Vec::new();
     while let Some(line) = data_until(packets, PacketLineRef::Flush)? {
-        match text(line)? {
+        match text(line) {
             b"peel" if !peel => peel = true,
             b"symrefs" if !symrefs => symrefs = true,
             b"unborn" if !unborn => unborn = true,
             line if line.starts_with(b"ref-prefix ") => {
                 within(prefixes.len() + 1, MAX_COMMANDS, "ref prefixes")?;
-                let prefix = &line[b"ref-prefix ".len()..];
-                if prefix.is_empty() {
-                    return Err(Error::Protocol("empty ref prefix"));
-                }
-                prefixes.push(prefix);
+                prefixes.push(&line[b"ref-prefix ".len()..]);
             }
             _ => return Err(Error::Protocol("unsupported ls-refs argument")),
         }
@@ -149,29 +144,30 @@ fn parse_fetch<'a>(
     format: ObjectFormat,
 ) -> Result<UploadRequest<'a>, Error> {
     let (mut wants, mut haves) = (Vec::new(), Vec::new());
-    let (mut done, mut thin_pack, mut ofs_delta, mut no_progress) = (false, false, false, false);
+    let (mut done, mut options) = (false, 0_u8);
     while let Some(line) = data_until(packets, PacketLineRef::Flush)? {
-        let line = text(line)?;
+        let line = text(line);
         if done {
             return Err(Error::Protocol("fetch argument follows done"));
         }
-        let options_allowed = wants.is_empty() && haves.is_empty();
-        if line == b"thin-pack" && options_allowed && !thin_pack {
-            thin_pack = true;
-        } else if line == b"ofs-delta" && options_allowed && !ofs_delta {
-            ofs_delta = true;
-        } else if line == b"no-progress" && options_allowed && !no_progress {
-            no_progress = true;
+        let option = match line {
+            b"thin-pack" => Some(1),
+            b"ofs-delta" => Some(2),
+            b"include-tag" => Some(4),
+            b"no-progress" => Some(8),
+            _ => None,
+        };
+        if let Some(bit) = option {
+            if options & bit != 0 {
+                return Err(Error::Protocol("duplicate fetch option"));
+            }
+            options |= bit;
         } else if line == b"done" && !wants.is_empty() {
             done = true;
-        } else if let Some(id) = line.strip_prefix(b"want ")
-            && haves.is_empty()
-        {
+        } else if let Some(id) = line.strip_prefix(b"want ") {
             within(wants.len() + 1, MAX_COMMANDS, "wants")?;
             wants.push(parse_id(id, format)?);
-        } else if let Some(id) = line.strip_prefix(b"have ")
-            && !wants.is_empty()
-        {
+        } else if let Some(id) = line.strip_prefix(b"have ") {
             within(haves.len() + 1, MAX_ITEMS, "haves")?;
             haves.push(parse_id(id, format)?);
         } else {
@@ -189,16 +185,30 @@ fn parse_fetch<'a>(
         wants: wants.into_boxed_slice(),
         haves: haves.into_boxed_slice(),
         done,
-        thin_pack,
-        ofs_delta,
+        thin_pack: options & 1 != 0,
+        ofs_delta: options & 2 != 0,
+        include_tag: options & 4 != 0,
     })
 }
 
 pub(crate) fn write_ls_refs(
     output: &mut impl Write,
+    format: ObjectFormat,
     refs: &[AdvertisedRef<'_>],
 ) -> Result<(), Error> {
     within(refs.len(), MAX_ITEMS, "advertised refs")?;
+    for advertised in refs {
+        validate_ref(advertised, format, true)?;
+        packet_size(&[
+            advertised.target.map_or(6, |_| digest_len(format) * 2),
+            1,
+            advertised.name.len(),
+            advertised
+                .symref_target
+                .map_or(0, |target| 15 + target.len()),
+            advertised.peeled.map_or(0, |_| 8 + digest_len(format) * 2),
+        ])?;
+    }
     let mut line = Vec::with_capacity(128);
     for advertised in refs {
         match advertised.target {
@@ -220,7 +230,15 @@ pub(crate) fn write_ls_refs(
     flush(output)
 }
 
-pub(crate) fn write_fetch(output: &mut impl Write, reply: FetchReply<'_>) -> Result<(), Error> {
+pub(crate) fn write_fetch(
+    output: &mut impl Write,
+    format: ObjectFormat,
+    reply: FetchReply<'_>,
+) -> Result<(), Error> {
+    if let FetchReply::Acknowledgments(ids) = reply {
+        within(ids.len(), MAX_ITEMS, "acknowledgments")?;
+        ids.iter().try_for_each(|id| validate_id(*id, format))?;
+    }
     match reply {
         FetchReply::Acknowledgments(ids) => {
             encode::text_to_write(b"acknowledgments", &mut *output)?;
@@ -235,15 +253,6 @@ pub(crate) fn write_fetch(output: &mut impl Write, reply: FetchReply<'_>) -> Res
                 }
             }
         }
-        FetchReply::Ready { common, pack } => {
-            encode::text_to_write(b"acknowledgments", &mut *output)?;
-            let mut line = b"ACK ".to_vec();
-            push_id(&mut line, common);
-            write_text(output, &mut line)?;
-            encode::text_to_write(b"ready", &mut *output)?;
-            encode::delim_to_write(&mut *output)?;
-            write_pack(output, pack)?;
-        }
         FetchReply::Pack(pack) => {
             write_pack(output, pack)?;
         }
@@ -257,6 +266,7 @@ pub(crate) fn write_receive_advertisement(
     refs: &[AdvertisedRef<'_>],
 ) -> Result<(), Error> {
     within(refs.len(), MAX_ITEMS, "advertised refs")?;
+    validate_receive_advertisement(format, refs)?;
     let mut line = Vec::with_capacity(192);
     if refs.is_empty() {
         line.extend(std::iter::repeat_n(b'0', digest_len(format) * 2));
@@ -301,6 +311,7 @@ pub(crate) fn parse_receive(
             "control bytes",
         )?;
         within(updates.len() + 1, MAX_COMMANDS, "ref commands")?;
+        let line = text(line);
         let command = if updates.is_empty() {
             let nul = line
                 .iter()
@@ -336,7 +347,7 @@ pub(crate) fn parse_receive(
         MAX_RECEIVE_BYTES,
         "control bytes",
     )?;
-    if updates.is_empty() || capabilities & 3 != 3 {
+    if updates.is_empty() || (format == ObjectFormat::Sha256 && capabilities & 2 == 0) {
         return Err(Error::Protocol("missing receive requirements"));
     }
     let mut names: Vec<_> = updates
@@ -348,13 +359,18 @@ pub(crate) fn parse_receive(
         return Err(Error::Protocol("duplicate ref command"));
     }
     let pack = packets;
-    within(pack.len(), MAX_PACK_BYTES, "pack bytes")?;
-    if !pack.is_empty() && !pack.starts_with(b"PACK") {
-        return Err(Error::Protocol("data after commands is not a Git pack"));
+    within(pack.len(), MAX_INPUT_BYTES, "pack bytes")?;
+    let needs_pack = updates.iter().any(|update| update.target.is_some());
+    if needs_pack && (pack.is_empty() || !pack.starts_with(b"PACK")) {
+        return Err(Error::Protocol("create or update has no Git pack"));
+    }
+    if !needs_pack && !pack.is_empty() {
+        return Err(Error::Protocol("delete-only request has a Git pack"));
     }
     Ok(ReceiveRequest {
         updates: updates.into_boxed_slice(),
         pack,
+        report_status: capabilities & 1 != 0,
     })
 }
 
@@ -363,11 +379,26 @@ pub(crate) fn write_receive_status(
     updates: &[RefUpdate],
     status: ReceiveStatus<'_>,
 ) -> Result<(), Error> {
+    within(updates.len(), MAX_COMMANDS, "ref statuses")?;
+    if updates.is_empty() {
+        return Err(Error::Protocol("receive status has no ref commands"));
+    }
     let (unpack, rejection) = match status {
         ReceiveStatus::Success => (b"ok".as_slice(), None),
         ReceiveStatus::Rejected(reason) => (b"ok".as_slice(), Some(reason)),
         ReceiveStatus::InvalidPack(reason) => (reason, Some(reason)),
     };
+    if let Some(reason) = rejection {
+        validate_reason(reason)?;
+    }
+    packet_size(&[7, unpack.len()])?;
+    for update in updates {
+        packet_size(&[
+            3,
+            update.name.len(),
+            rejection.map_or(0, |reason| 1 + reason.len()),
+        ])?;
+    }
     let mut line = b"unpack ".to_vec();
     line.extend_from_slice(unpack);
     write_text(output, &mut line)?;
@@ -386,6 +417,88 @@ pub(crate) fn write_receive_status(
     flush(output)
 }
 
+fn validate_receive_advertisement(
+    format: ObjectFormat,
+    refs: &[AdvertisedRef<'_>],
+) -> Result<(), Error> {
+    let capability_bytes = receive_capabilities_len(format);
+    if refs.is_empty() {
+        return packet_size(&[
+            digest_len(format) * 2,
+            1,
+            b"capabilities^{}".len(),
+            capability_bytes,
+        ]);
+    }
+    for (index, advertised) in refs.iter().enumerate() {
+        validate_ref(advertised, format, false)?;
+        if (advertised.name == b"HEAD" && index != 0)
+            || index > 0 && refs[index - 1].name >= advertised.name
+        {
+            return Err(Error::Protocol("receive refs are not in C-locale order"));
+        }
+        packet_size(&[
+            digest_len(format) * 2,
+            1,
+            advertised.name.len(),
+            if index == 0 { capability_bytes } else { 0 },
+        ])?;
+        if advertised.peeled.is_some() {
+            packet_size(&[digest_len(format) * 2, 1, advertised.name.len(), 3])?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_ref(
+    advertised: &AdvertisedRef<'_>,
+    format: ObjectFormat,
+    allow_unborn: bool,
+) -> Result<(), Error> {
+    if advertised.name != b"HEAD" && !crate::is_valid_ref_name(advertised.name) {
+        return Err(Error::Protocol("invalid advertised ref name"));
+    }
+    if advertised.target.is_none() && (!allow_unborn || advertised.peeled.is_some()) {
+        return Err(Error::Protocol("receive advertisement has an unborn ref"));
+    }
+    for id in [advertised.target, advertised.peeled].into_iter().flatten() {
+        validate_id(id, format)?;
+    }
+    if let Some(target) = advertised.symref_target
+        && !crate::is_valid_ref_name(target)
+    {
+        return Err(Error::Protocol("invalid symbolic ref target"));
+    }
+    Ok(())
+}
+
+fn validate_id(id: ObjectId, format: ObjectFormat) -> Result<(), Error> {
+    (id.format() == format)
+        .then_some(())
+        .ok_or(Error::Protocol("object ID uses the wrong format"))
+}
+
+fn validate_reason(reason: &[u8]) -> Result<(), Error> {
+    if reason.is_empty() || reason.contains(&b'\n') || reason.contains(&0) {
+        return Err(Error::Protocol("invalid receive status reason"));
+    }
+    Ok(())
+}
+
+fn packet_size(parts: &[usize]) -> Result<(), Error> {
+    let size = parts
+        .iter()
+        .try_fold(0_usize, |total, part| total.checked_add(*part))
+        .ok_or(Error::Limit("packet text bytes"))?;
+    within(size, MAX_PACKET_PAYLOAD, "packet text bytes")
+}
+
+fn receive_capabilities_len(format: ObjectFormat) -> usize {
+    b"\0report-status delete-refs atomic ofs-delta ".len()
+        + format_capability(format).len()
+        + b" agent=object-log".len()
+}
+
 fn parse_update(command: &[u8], format: ObjectFormat) -> Result<RefUpdate, Error> {
     let mut fields = command.split(|byte| *byte == b' ');
     let (Some(old), Some(new), Some(name), None) =
@@ -394,7 +507,7 @@ fn parse_update(command: &[u8], format: ObjectFormat) -> Result<RefUpdate, Error
         return Err(Error::Protocol("invalid ref command"));
     };
     RefUpdate::new(
-        bytes::Bytes::copy_from_slice(name),
+        name,
         parse_optional_id(old, format)?,
         parse_optional_id(new, format)?,
     )
@@ -429,7 +542,7 @@ fn write_text(output: &mut impl Write, line: &mut Vec<u8>) -> Result<(), Error> 
 
 fn write_pack(output: &mut impl Write, pack: &[u8]) -> Result<(), Error> {
     encode::text_to_write(b"packfile", &mut *output)?;
-    for chunk in pack.chunks(MAX_BAND_DATA) {
+    for chunk in pack.chunks(MAX_PACKET_PAYLOAD) {
         encode::band_to_write(Channel::Data, chunk, &mut *output)?;
     }
     Ok(())
@@ -474,9 +587,8 @@ fn valid_agent(capability: &[u8]) -> bool {
         .is_some_and(|agent| !agent.is_empty() && agent.iter().all(u8::is_ascii_graphic))
 }
 
-fn text(line: &[u8]) -> Result<&[u8], Error> {
-    line.strip_suffix(b"\n")
-        .ok_or(Error::Protocol("packet is not text"))
+fn text(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\n").unwrap_or(line)
 }
 
 fn data_until<'a>(
@@ -501,11 +613,13 @@ fn packet<'a>(input: &mut &'a [u8]) -> Result<PacketLineRef<'a>, Error> {
 mod tests {
     use super::*;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     const SHA1_A: &str = "1cca161013c9b0595b0a4637cbed4eb259f9973a";
     const SHA1_B: &str = "792b551e898164e75e5b7abf04612881a8f478c3";
     const SHA256_A: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const EMPTY_SHA1_PACK: &[u8] = b"PACK\0\0\0\x02\0\0\0\0\x02\x9d\x08\x82\x3b\xd8\xa8\xea\xb5\x10\xad\x6a\xc7\x5c\x82\x3c\xfd\x3e\xd3\x1e";
+    const EMPTY_SHA256_PACK: &[u8] = b"PACK\0\0\0\x02\0\0\0\0\x7e\xd8\x90\xd8\xa4\x57\x60\xf3\xee\xcf\x73\x04\x5b\x1d\x10\x47\x08\x5a\xf4\x77\x6d\xc6\x83\xd7\x8e\xac\x82\x20\x3d\xf1\x99\x3f";
 
     #[test]
     fn upload_advertisement_matches_protocol_v2() -> TestResult {
@@ -564,11 +678,13 @@ mod tests {
             "0017object-format=sha1\n",
             "0001",
             "000ethin-pack\n",
+            "0032want 1cca161013c9b0595b0a4637cbed4eb259f9973a\n",
             "0010no-progress\n",
             "000eofs-delta\n",
             "0032want 1cca161013c9b0595b0a4637cbed4eb259f9973a\n",
-            "0032want 1cca161013c9b0595b0a4637cbed4eb259f9973a\n",
             "0032have 792b551e898164e75e5b7abf04612881a8f478c3\n",
+            "0010include-tag\n",
+            "0032want 792b551e898164e75e5b7abf04612881a8f478c3\n",
             "0009done\n",
             "0000"
         )
@@ -579,13 +695,20 @@ mod tests {
             done,
             thin_pack,
             ofs_delta,
+            include_tag,
         } = parse_upload(input, ObjectFormat::Sha1)?
         else {
             return Err("expected fetch".into());
         };
-        assert_eq!(wants.as_ref(), [id(ObjectFormat::Sha1, SHA1_A)?]);
+        assert_eq!(
+            wants.as_ref(),
+            [
+                id(ObjectFormat::Sha1, SHA1_A)?,
+                id(ObjectFormat::Sha1, SHA1_B)?
+            ]
+        );
         assert_eq!(haves.as_ref(), [id(ObjectFormat::Sha1, SHA1_B)?]);
-        assert!(done && thin_pack && ofs_delta);
+        assert!(done && thin_pack && ofs_delta && include_tag);
 
         let input = upload(
             b"fetch",
@@ -612,12 +735,38 @@ mod tests {
         invalid_upload(b"ls-refs", &[b"peel", b"peel"])?;
         invalid_upload(b"fetch", &[b"thin-pack"])?;
         invalid_upload(b"fetch", &[b"want 00".as_slice(), b"done"])?;
+        invalid_upload(
+            b"fetch",
+            &[format!("want {SHA1_A}").as_bytes(), b"done", b"ofs-delta"],
+        )?;
+        for option in [
+            b"thin-pack".as_slice(),
+            b"ofs-delta",
+            b"include-tag",
+            b"no-progress",
+        ] {
+            invalid_upload(
+                b"fetch",
+                &[format!("want {SHA1_A}").as_bytes(), option, option],
+            )?;
+        }
+        let missing_format = upload_with(b"ls-refs", None, &[], false)?;
+        assert!(parse_upload(&missing_format, ObjectFormat::Sha1).is_ok());
+        protocol(parse_upload(&missing_format, ObjectFormat::Sha256));
+        Ok(())
+    }
 
-        let mut missing_format = Vec::new();
-        encode::text_to_write(b"command=ls-refs", &mut missing_format)?;
-        encode::delim_to_write(&mut missing_format)?;
-        encode::flush_to_write(&mut missing_format)?;
-        protocol(parse_upload(&missing_format, ObjectFormat::Sha1));
+    #[test]
+    fn accepts_optional_line_feeds_and_empty_prefixes() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for line_feed in [false, true] {
+                let input = upload_with(b"ls-refs", Some(format), &[b"ref-prefix "], line_feed)?;
+                let UploadRequest::LsRefs { prefixes, .. } = parse_upload(&input, format)? else {
+                    return Err("expected ls-refs".into());
+                };
+                assert_eq!(prefixes.as_ref(), [b"".as_slice()]);
+            }
+        }
         Ok(())
     }
 
@@ -653,15 +802,24 @@ mod tests {
             &upload(b"fetch", ObjectFormat::Sha1, &args)?,
             ObjectFormat::Sha1,
         ));
-        let prefixes = vec![b"ref-prefix refs/".as_slice(); MAX_COMMANDS + 1];
+        let mut prefixes = vec![b"ref-prefix refs/".as_slice(); MAX_COMMANDS];
+        assert!(
+            parse_upload(
+                &upload(b"ls-refs", ObjectFormat::Sha1, &prefixes)?,
+                ObjectFormat::Sha1,
+            )
+            .is_ok()
+        );
+        prefixes.push(b"ref-prefix refs/");
         limit(parse_upload(
             &upload(b"ls-refs", ObjectFormat::Sha1, &prefixes)?,
             ObjectFormat::Sha1,
         ));
-        limit(parse_upload(
-            &vec![b'0'; MAX_UPLOAD_BYTES + 1],
-            ObjectFormat::Sha1,
-        ));
+        let exact = sized_upload(MAX_UPLOAD_BYTES)?;
+        assert_eq!(exact.len(), MAX_UPLOAD_BYTES);
+        assert!(parse_upload(&exact, ObjectFormat::Sha1).is_ok());
+        let excessive = sized_upload(MAX_UPLOAD_BYTES + 1)?;
+        limit(parse_upload(&excessive, ObjectFormat::Sha1));
         Ok(())
     }
 
@@ -690,7 +848,7 @@ mod tests {
             },
         ];
         let mut output = Vec::new();
-        write_ls_refs(&mut output, &refs)?;
+        write_ls_refs(&mut output, ObjectFormat::Sha1, &refs)?;
         assert_eq!(
             output,
             concat!(
@@ -705,35 +863,69 @@ mod tests {
     }
 
     #[test]
+    fn writes_sha256_ids_and_rejects_mixed_formats_before_output() -> TestResult {
+        let sha1 = id(ObjectFormat::Sha1, SHA1_A)?;
+        let sha256 = id(ObjectFormat::Sha256, SHA256_A)?;
+        let refs = [AdvertisedRef {
+            name: b"refs/heads/main",
+            target: Some(sha256),
+            peeled: None,
+            symref_target: None,
+        }];
+        let mut output = Vec::new();
+        write_ls_refs(&mut output, ObjectFormat::Sha256, &refs)?;
+        assert_eq!(
+            output,
+            format!("0055{SHA256_A} refs/heads/main\n0000").as_bytes()
+        );
+        output.clear();
+        write_fetch(
+            &mut output,
+            ObjectFormat::Sha256,
+            FetchReply::Acknowledgments(&[sha256]),
+        )?;
+        assert_eq!(
+            output,
+            format!("0014acknowledgments\n0049ACK {SHA256_A}\n0000").as_bytes()
+        );
+
+        output.clear();
+        protocol(write_fetch(
+            &mut output,
+            ObjectFormat::Sha256,
+            FetchReply::Acknowledgments(&[sha256, sha1]),
+        ));
+        assert!(output.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn writes_fetch_sections_and_maximum_sideband_chunks() -> TestResult {
         let a = id(ObjectFormat::Sha1, SHA1_A)?;
         let mut output = Vec::new();
-        write_fetch(&mut output, FetchReply::Acknowledgments(&[]))?;
+        write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::Acknowledgments(&[]),
+        )?;
         assert_eq!(output, b"0014acknowledgments\n0008NAK\n0000");
 
-        let pack = vec![7; MAX_BAND_DATA * 2 + 1];
+        let pack = vec![7; MAX_PACKET_PAYLOAD * 2 + 1];
         output.clear();
-        write_fetch(&mut output, FetchReply::Acknowledgments(&[a]))?;
+        write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::Acknowledgments(&[a]),
+        )?;
         assert_eq!(
             output,
             format!("0014acknowledgments\n0031ACK {SHA1_A}\n0000").as_bytes()
         );
         output.clear();
-        write_fetch(
-            &mut output,
-            FetchReply::Ready {
-                common: a,
-                pack: b"PACK",
-            },
-        )?;
-        let mut ready = format!("0014acknowledgments\n0031ACK {SHA1_A}\n").into_bytes();
-        ready.extend_from_slice(b"000aready\n0001000dpackfile\n0009\x01PACK0000");
-        assert_eq!(output, ready);
-        output.clear();
-        write_fetch(&mut output, FetchReply::Pack(&pack))?;
+        write_fetch(&mut output, ObjectFormat::Sha1, FetchReply::Pack(&pack))?;
         assert!(output.starts_with(b"000dpackfile\n"));
         let mut packets = output.as_slice();
-        assert_eq!(text(data(packet(&mut packets)?)?)?, b"packfile");
+        assert_eq!(text(data(packet(&mut packets)?)?), b"packfile");
         let mut rebuilt = Vec::new();
         let mut chunks = 0;
         loop {
@@ -745,7 +937,7 @@ mod tests {
                     }
                     let band = &line[1..];
                     assert_eq!(band, &pack[rebuilt.len()..rebuilt.len() + band.len()]);
-                    assert!(band.len() <= MAX_BAND_DATA);
+                    assert!(band.len() <= MAX_PACKET_PAYLOAD);
                     rebuilt.extend_from_slice(band);
                     chunks += 1;
                 }
@@ -755,6 +947,8 @@ mod tests {
         assert_eq!(chunks, 3);
         assert_eq!(rebuilt, pack);
         assert!(packets.is_empty());
+        assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD)?, 1);
+        assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD + 1)?, 2);
         Ok(())
     }
 
@@ -799,12 +993,70 @@ mod tests {
                 symref_target: None,
             })
             .collect();
-        limit(write_ls_refs(&mut Vec::new(), &excessive));
+        limit(write_ls_refs(
+            &mut Vec::new(),
+            ObjectFormat::Sha1,
+            &excessive,
+        ));
         limit(write_receive_advertisement(
             &mut Vec::new(),
             ObjectFormat::Sha1,
             &excessive,
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn validates_complete_advertisements_before_output() -> TestResult {
+        let sha1 = id(ObjectFormat::Sha1, SHA1_A)?;
+        let sha256 = id(ObjectFormat::Sha256, SHA256_A)?;
+        let valid = |name: &'static [u8], target| AdvertisedRef {
+            name,
+            target,
+            peeled: None,
+            symref_target: None,
+        };
+        let cases = [
+            vec![
+                valid(b"refs/heads/b", Some(sha1)),
+                valid(b"refs/heads/a", Some(sha1)),
+            ],
+            vec![
+                valid(b"refs/heads/a", Some(sha1)),
+                valid(b"refs/heads/a", Some(sha1)),
+            ],
+            vec![
+                valid(b"refs/heads/a", Some(sha1)),
+                valid(b"HEAD", Some(sha1)),
+            ],
+            vec![
+                valid(b"refs/heads/a", Some(sha1)),
+                valid(b"refs/heads/b", None),
+            ],
+            vec![
+                valid(b"refs/heads/a", Some(sha1)),
+                valid(b"refs/heads/b", Some(sha256)),
+            ],
+        ];
+        for refs in cases {
+            let mut output = Vec::new();
+            protocol(write_receive_advertisement(
+                &mut output,
+                ObjectFormat::Sha1,
+                &refs,
+            ));
+            assert!(output.is_empty());
+        }
+
+        let mixed = [AdvertisedRef {
+            name: b"refs/tags/v1",
+            target: Some(sha1),
+            peeled: Some(sha256),
+            symref_target: None,
+        }];
+        let mut output = Vec::new();
+        protocol(write_ls_refs(&mut output, ObjectFormat::Sha1, &mixed));
+        assert!(output.is_empty());
         Ok(())
     }
 
@@ -819,6 +1071,7 @@ mod tests {
         )
         .as_bytes();
         let request = parse_receive(input, ObjectFormat::Sha1)?;
+        assert!(request.report_status);
         assert_eq!(request.updates.len(), 1);
         assert_eq!(request.updates[0].name, b"refs/heads/main");
         assert_eq!(
@@ -843,6 +1096,7 @@ mod tests {
         encode::data_to_write(command.as_bytes(), &mut input)?;
         encode::flush_to_write(&mut input)?;
         let request = parse_receive(&input, ObjectFormat::Sha256)?;
+        assert!(request.report_status);
         assert_eq!(
             request.updates[0].expected,
             Some(id(ObjectFormat::Sha256, SHA256_A)?)
@@ -852,12 +1106,71 @@ mod tests {
     }
 
     #[test]
+    fn receive_defaults_sha1_accepts_line_feeds_and_enforces_pack_shape() -> TestResult {
+        for line_feed in [false, true] {
+            let zeros = "0".repeat(40);
+            let input = receive_one(
+                ObjectFormat::Sha1,
+                &zeros,
+                SHA1_A,
+                b"",
+                EMPTY_SHA1_PACK,
+                line_feed,
+            )?;
+            let request = parse_receive(&input, ObjectFormat::Sha1)?;
+            assert!(!request.report_status);
+            assert_eq!(request.pack, EMPTY_SHA1_PACK);
+
+            let zeros = "0".repeat(64);
+            let input = receive_one(
+                ObjectFormat::Sha256,
+                &zeros,
+                SHA256_A,
+                b"object-format=sha256",
+                EMPTY_SHA256_PACK,
+                line_feed,
+            )?;
+            let request = parse_receive(&input, ObjectFormat::Sha256)?;
+            assert!(!request.report_status);
+            assert_eq!(request.pack, EMPTY_SHA256_PACK);
+        }
+
+        let zeros = "0".repeat(40);
+        protocol(parse_receive(
+            &receive_one(ObjectFormat::Sha1, &zeros, SHA1_A, b"", &[], false)?,
+            ObjectFormat::Sha1,
+        ));
+        let delete = receive_one(ObjectFormat::Sha1, SHA1_A, &zeros, b"", &[], false)?;
+        assert!(parse_receive(&delete, ObjectFormat::Sha1)?.pack.is_empty());
+        protocol(parse_receive(
+            &receive_one(
+                ObjectFormat::Sha1,
+                SHA1_A,
+                &zeros,
+                b"",
+                EMPTY_SHA1_PACK,
+                false,
+            )?,
+            ObjectFormat::Sha1,
+        ));
+        let missing_sha256 = receive_one(
+            ObjectFormat::Sha256,
+            &"0".repeat(64),
+            SHA256_A,
+            b"",
+            EMPTY_SHA256_PACK,
+            false,
+        )?;
+        protocol(parse_receive(&missing_sha256, ObjectFormat::Sha256));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_receive_capabilities_commands_and_pack() -> TestResult {
         invalid_receive(b"report-status-v2 object-format=sha1", b"PACK")?;
         invalid_receive(b"report-status report-status object-format=sha1", b"PACK")?;
         invalid_receive(b"report-status delete-refs object-format=sha1", b"PACK")?;
         invalid_receive(b"report-status object-format=sha1", b"junk")?;
-        invalid_receive(b"object-format=sha1", b"PACK")?;
         invalid_receive(b"report-status object-format=sha256", b"PACK")?;
         let mut duplicate = receive(b"report-status object-format=sha1", 1, b"PACK")?;
         let offset = duplicate.len() - 8;
@@ -890,18 +1203,18 @@ mod tests {
             ObjectFormat::Sha1,
         ));
 
-        let mut long_name = b"refs/heads/".to_vec();
-        long_name.extend(std::iter::repeat_n(b'a', 64_900));
-        let input =
-            receive_with_name(b"report-status object-format=sha1", 17, b"PACK", &long_name)?;
-        limit(parse_receive(&input, ObjectFormat::Sha1));
+        let exact = sized_receive(MAX_RECEIVE_BYTES, EMPTY_SHA1_PACK)?;
+        assert_eq!(exact.len() - EMPTY_SHA1_PACK.len(), MAX_RECEIVE_BYTES);
+        assert!(parse_receive(&exact, ObjectFormat::Sha1).is_ok());
+        let excessive = sized_receive(MAX_RECEIVE_BYTES + 1, EMPTY_SHA1_PACK)?;
+        limit(parse_receive(&excessive, ObjectFormat::Sha1));
 
-        let mut pack = vec![0; MAX_PACK_BYTES];
+        let mut pack = vec![0; MAX_INPUT_BYTES];
         pack[..4].copy_from_slice(b"PACK");
         let input = receive(b"report-status object-format=sha1", 1, &pack)?;
         assert_eq!(
             parse_receive(&input, ObjectFormat::Sha1)?.pack.len(),
-            MAX_PACK_BYTES
+            MAX_INPUT_BYTES
         );
         pack.push(0);
         limit(parse_receive(
@@ -936,19 +1249,155 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn enforces_output_count_limits_without_partial_output() -> TestResult {
+        let sha1 = id(ObjectFormat::Sha1, SHA1_A)?;
+        let names: Vec<_> = (0..=MAX_ITEMS)
+            .map(|index| format!("refs/heads/{index:05}").into_bytes())
+            .collect();
+        let refs: Vec<_> = names
+            .iter()
+            .map(|name| AdvertisedRef {
+                name,
+                target: Some(sha1),
+                peeled: None,
+                symref_target: None,
+            })
+            .collect();
+        write_ls_refs(&mut io::sink(), ObjectFormat::Sha1, &refs[..MAX_ITEMS])?;
+        write_receive_advertisement(&mut io::sink(), ObjectFormat::Sha1, &refs[..MAX_ITEMS])?;
+        let mut output = Vec::new();
+        limit(write_receive_advertisement(
+            &mut output,
+            ObjectFormat::Sha1,
+            &refs,
+        ));
+        assert!(output.is_empty());
+
+        let acknowledgments = vec![sha1; MAX_ITEMS + 1];
+        write_fetch(
+            &mut io::sink(),
+            ObjectFormat::Sha1,
+            FetchReply::Acknowledgments(&acknowledgments[..MAX_ITEMS]),
+        )?;
+        limit(write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::Acknowledgments(&acknowledgments),
+        ));
+        assert!(output.is_empty());
+
+        let updates: Result<Vec<_>, _> = (0..=MAX_COMMANDS)
+            .map(|index| RefUpdate::new(format!("refs/heads/r{index}"), None, Some(sha1)))
+            .collect();
+        let updates = updates?;
+        write_receive_status(
+            &mut io::sink(),
+            &updates[..MAX_COMMANDS],
+            ReceiveStatus::Success,
+        )?;
+        limit(write_receive_status(
+            &mut output,
+            &updates,
+            ReceiveStatus::Success,
+        ));
+        assert!(output.is_empty());
+        protocol(write_receive_status(
+            &mut output,
+            &[],
+            ReceiveStatus::Success,
+        ));
+        assert!(output.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn enforces_packet_and_reason_limits_before_output() -> TestResult {
+        let sha1 = id(ObjectFormat::Sha1, SHA1_A)?;
+        let mut name = b"refs/heads/".to_vec();
+        name.resize(MAX_PACKET_PAYLOAD - 41, b'a');
+        let exact = [AdvertisedRef {
+            name: &name,
+            target: Some(sha1),
+            peeled: None,
+            symref_target: None,
+        }];
+        write_ls_refs(&mut io::sink(), ObjectFormat::Sha1, &exact)?;
+        name.push(b'a');
+        let excessive = [AdvertisedRef {
+            name: &name,
+            target: Some(sha1),
+            peeled: None,
+            symref_target: None,
+        }];
+        let mut output = Vec::new();
+        limit(write_ls_refs(&mut output, ObjectFormat::Sha1, &excessive));
+        assert!(output.is_empty());
+
+        let update = RefUpdate::new("refs/heads/main", None, Some(sha1))?;
+        let mut reason = vec![b'a'; MAX_PACKET_PAYLOAD - update.name.len() - 4];
+        write_receive_status(
+            &mut io::sink(),
+            std::slice::from_ref(&update),
+            ReceiveStatus::Rejected(&reason),
+        )?;
+        reason.push(b'a');
+        limit(write_receive_status(
+            &mut output,
+            std::slice::from_ref(&update),
+            ReceiveStatus::Rejected(&reason),
+        ));
+        assert!(output.is_empty());
+        for invalid in [b"".as_slice(), b"bad\nreason", b"bad\0reason"] {
+            protocol(write_receive_status(
+                &mut output,
+                std::slice::from_ref(&update),
+                ReceiveStatus::Rejected(invalid),
+            ));
+            assert!(output.is_empty());
+        }
+        Ok(())
+    }
+
     fn id(format: ObjectFormat, value: &str) -> Result<ObjectId, crate::Error> {
         ObjectId::parse(format, value)
     }
 
     fn upload(command: &[u8], format: ObjectFormat, args: &[&[u8]]) -> io::Result<Vec<u8>> {
+        upload_with(command, Some(format), args, true)
+    }
+
+    fn upload_with(
+        command: &[u8],
+        format: Option<ObjectFormat>,
+        args: &[&[u8]],
+        line_feed: bool,
+    ) -> io::Result<Vec<u8>> {
         let mut input = Vec::new();
         let mut header = b"command=".to_vec();
         header.extend_from_slice(command);
-        encode::text_to_write(&header, &mut input)?;
-        encode::text_to_write(format_capability(format), &mut input)?;
+        encode_line(&header, line_feed, &mut input)?;
+        if let Some(format) = format {
+            encode_line(format_capability(format), line_feed, &mut input)?;
+        }
         encode::delim_to_write(&mut input)?;
         for argument in args {
-            encode::text_to_write(argument, &mut input)?;
+            encode_line(argument, line_feed, &mut input)?;
+        }
+        encode::flush_to_write(&mut input)?;
+        Ok(input)
+    }
+
+    fn sized_upload(bytes: usize) -> io::Result<Vec<u8>> {
+        let mut input = Vec::new();
+        encode::data_to_write(b"command=ls-refs", &mut input)?;
+        encode::delim_to_write(&mut input)?;
+        while input.len() + 4 < bytes {
+            let remaining = bytes - input.len() - 4;
+            let packet_bytes = sized_packet(remaining, b"ref-prefix ".len() + 4);
+            let mut line = b"ref-prefix ".to_vec();
+            line.resize(packet_bytes - 4, b'a');
+            encode::data_to_write(&line, &mut input)?;
         }
         encode::flush_to_write(&mut input)?;
         Ok(input)
@@ -956,6 +1405,78 @@ mod tests {
 
     fn receive(capabilities: &[u8], count: usize, pack: &[u8]) -> io::Result<Vec<u8>> {
         receive_with_name(capabilities, count, pack, b"refs/heads/r")
+    }
+
+    fn receive_one(
+        format: ObjectFormat,
+        old: &str,
+        new: &str,
+        capabilities: &[u8],
+        pack: &[u8],
+        line_feed: bool,
+    ) -> io::Result<Vec<u8>> {
+        if old.len() != digest_len(format) * 2 || new.len() != digest_len(format) * 2 {
+            return Err(io::Error::other("test object ID length is wrong"));
+        }
+        let mut command = format!("{old} {new} refs/heads/main").into_bytes();
+        command.push(0);
+        command.extend_from_slice(capabilities);
+        let mut input = Vec::new();
+        encode_line(&command, line_feed, &mut input)?;
+        encode::flush_to_write(&mut input)?;
+        input.extend_from_slice(pack);
+        Ok(input)
+    }
+
+    fn sized_receive(control_bytes: usize, pack: &[u8]) -> io::Result<Vec<u8>> {
+        let mut input = Vec::new();
+        let mut index = 0;
+        while input.len() + 4 < control_bytes {
+            let remaining = control_bytes - input.len() - 4;
+            let packet_bytes = sized_packet(remaining, 128);
+            let mut command = format!("{SHA1_A} {SHA1_B} refs/heads/r{index}/").into_bytes();
+            let capability = usize::from(index == 0);
+            command.resize(packet_bytes - 4 - capability, b'a');
+            if index == 0 {
+                command.push(0);
+            }
+            encode::data_to_write(&command, &mut input)?;
+            index += 1;
+        }
+        encode::flush_to_write(&mut input)?;
+        input.extend_from_slice(pack);
+        Ok(input)
+    }
+
+    fn sized_packet(remaining: usize, minimum: usize) -> usize {
+        if remaining <= 65_520 {
+            remaining
+        } else if remaining - 65_520 < minimum {
+            remaining - minimum
+        } else {
+            65_520
+        }
+    }
+
+    fn encode_line(line: &[u8], line_feed: bool, output: &mut Vec<u8>) -> io::Result<()> {
+        if line_feed {
+            encode::text_to_write(line, output).map(|_| ())
+        } else {
+            encode::data_to_write(line, output).map(|_| ())
+        }
+    }
+
+    fn sideband_chunks(bytes: usize) -> TestResult<usize> {
+        let pack = vec![0; bytes];
+        let mut output = Vec::new();
+        write_fetch(&mut output, ObjectFormat::Sha1, FetchReply::Pack(&pack))?;
+        let mut packets = output.as_slice();
+        packet(&mut packets)?;
+        let mut chunks = 0;
+        while !matches!(packet(&mut packets)?, PacketLineRef::Flush) {
+            chunks += 1;
+        }
+        Ok(chunks)
     }
 
     fn invalid_upload(command: &[u8], args: &[&[u8]]) -> TestResult {

@@ -64,7 +64,7 @@ pub(crate) async fn publish(
     target: Option<ObjectId>,
     pack: Option<&Path>,
 ) -> TestResult<View> {
-    let update = RefUpdate::new(name.to_owned(), expected, target)?;
+    let update = RefUpdate::new(name, expected, target)?;
     let prepared = repository
         .prepare_push(TransactionId::new(), vec![update], pack)
         .await?;

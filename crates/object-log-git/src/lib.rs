@@ -33,7 +33,6 @@ pub use repository::{PreparedPush, Repository};
 
 use std::{collections::BTreeMap, fmt};
 
-use bytes::Bytes;
 use minicbor::{Decode, Decoder, Encode};
 
 /// A Git object identity algorithm.
@@ -152,12 +151,12 @@ impl RefUpdate {
     ///
     /// Returns an error for an invalid name or no change.
     pub fn new(
-        name: impl Into<Bytes>,
+        name: impl AsRef<[u8]>,
         expected: Option<ObjectId>,
         target: Option<ObjectId>,
     ) -> Result<Self, Error> {
         let value = Self {
-            name: name.into().to_vec(),
+            name: name.as_ref().to_vec(),
             expected,
             target,
         };
@@ -292,9 +291,9 @@ mod tests {
         assert!(minicbor::decode::<ObjectId>(&zero).is_err());
         assert!(RefUpdate::new("refs/heads/main", None, Some(id)).is_ok());
         assert!(RefUpdate::new("refs/notes/x", None, Some(id)).is_err());
-        assert!(RefUpdate::new(Bytes::from_static(b"refs/tags/\xff"), None, Some(id)).is_err());
+        assert!(RefUpdate::new(b"refs/tags/\xff", None, Some(id)).is_err());
         assert!(RefUpdate::new("", None, Some(id)).is_err());
-        assert!(RefUpdate::new(Bytes::from_static(b"refs/heads/a\0b"), None, Some(id)).is_err());
+        assert!(RefUpdate::new(b"refs/heads/a\0b", None, Some(id)).is_err());
         assert!(RefUpdate::new("refs/heads/main", Some(id), Some(id)).is_err());
         Ok(())
     }
