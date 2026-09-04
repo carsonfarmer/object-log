@@ -7,7 +7,7 @@ protocol v0 operations for SHA-1 repositories. Product code uses `gix`,
 `gix-pack`, and `gix-packetline`. It does not invoke Git or a C Git library.
 
 The loopback test starts a native HTTP service and uses an unmodified Git 2.54.0
-client. It proves:
+client. It covers:
 
 - empty repository discovery
 - initial push and clone
@@ -17,19 +17,19 @@ client. It proves:
 - final content and ref state
 - `git fsck --strict`
 
-Five protocol unit tests and the loopback test pass. The full workspace gate
+Five protocol unit tests and one loopback test pass. The full workspace gate
 passes with 219 tests and eight opt-in tests ignored.
 
 ## Durable publication
 
-Receive-pack parses and bounds the ref commands and optional pack. It delegates
+Receive-pack bounds and parses the ref commands and optional pack. It delegates
 pack validation and ref policy to `object-log-git`. It writes a success report
 only after object-log confirms the conditional publication or resolves its
 recovery token as committed.
 
 Client errors produce Git `ng` results. Object-store, durable-state, local Git,
-and blocking-task errors return to the HTTP host. This lets the host distinguish
-a rejected push from an internal failure.
+and blocking-task errors return to the HTTP host. The host can distinguish a
+rejected push from an internal failure.
 
 ## Upload negotiation
 
@@ -43,22 +43,22 @@ request data.
 
 The fetch pack contains the complete object set reachable from current refs.
 The implementation validates each requested object ID against the advertised
-refs or a peeled annotated tag. It ignores `have` lines. This is correct, but it
-uses more transfer bandwidth than an incremental pack.
+refs or a peeled annotated tag. It ignores `have` lines, so it transfers more
+data than an incremental pack.
 
 ## Bounds
 
-- At most 1,024 wants or ref commands.
+- At most 1,024 `want` lines in an upload or ref commands in a receive.
 - At most 65,536 `have` lines.
 - At most 8 MiB of upload control data.
 - At most 1 MiB of receive control data.
-- At most 512 MiB for an input or output pack.
+- Each input or output pack is at most 512 MiB.
 - At most 10 million repository objects through the storage adapter's existing
   graph limit.
 
-Pack input uses bounded disk spooling. Pack output is written to a bounded
-temporary file before the response starts. A regression test proves that the
-input accepts a `PACK` header split across one-byte reads.
+The service spools pack input to disk within the input limit. It writes pack
+output to a temporary file within the output limit before the response starts.
+A regression test verifies a `PACK` header split across one-byte reads.
 
 ## Size
 
@@ -69,7 +69,7 @@ writer used by the protocol crate.
 
 ## Deployment limits
 
-This is a verified Git protocol service, not a deployable HTTP server. The
+This is a verified protocol service proof, not a deployable HTTP server. The
 loopback HTTP fixture buffers request and response bodies. A production host
 must provide:
 
@@ -79,12 +79,12 @@ must provide:
 - header and HTTP status handling
 - request cancellation and service-level resource limits
 
-The upload oracle confirmed that Git uses gzip for large, multi-round
-negotiation requests. Gzip therefore belongs in the future HTTP host, not in the
-protocol parser.
+The local protocol capture showed Git 2.54.0 using gzip for large, multi-round
+negotiation requests. The future HTTP host must decode the bounded gzip body
+before it calls the protocol parser.
 
 The current proof does not cover simultaneous pushes or a dropped HTTP response
-after publication. The storage adapter separately proves one CAS winner and
+after publication. The storage adapter separately tests one CAS winner and
 lost-response recovery. Protocol v2, SHA-256 HTTP, incremental pack selection,
 and a runnable host remain follow-on work. GitHub issue #14 tracks the
 deployable host.

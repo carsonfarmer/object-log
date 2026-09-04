@@ -11,8 +11,8 @@ path. It validates both inputs, publishes one atomic object-log update, and
 recovers a standard bare Git repository from object storage. The adapter uses
 only the public `object-log` API.
 
-The separate `object-log-git-http` crate proves smart HTTP over this storage
-adapter. Git protocol code and Git libraries do not belong in the core WAL.
+The separate `object-log-git-http` crate tests smart HTTP over this storage
+adapter. The core WAL does not contain Git protocol code or Git libraries.
 
 This goal follows the local SQLite demonstration. The cross-example API review
 in issue #13 follows this goal.
@@ -104,7 +104,7 @@ response waits for object-log to confirm publication. A conflict or unresolved
 result returns a protocol error.
 
 The current HTTP tranche implements protocol v0 for the four smart HTTP
-operations. Its native loopback test proves clone, fetch, push, branch and tag
+operations. Its native loopback test covers clone, fetch, push, branch and tag
 creation and deletion, and non-fast-forward rejection with an unmodified Git
 client. Product code does not invoke Git. The test client uses the standard Git
 program.
@@ -155,9 +155,9 @@ unreachable bytes from a pack that also contains live objects.
 ## Current status
 
 The native storage proof, request audit, benchmarks, pinned `MinIO` lifecycle,
-checkpoint, collection, and local evidence are complete. The protocol v0 HTTP
-proof is also complete for SHA-1. Its unmodified-client loopback covers the
-accepted operations and passes strict Git validation.
+checkpoint, collection, and local evidence are complete. The local protocol v0
+proof passes for SHA-1. Its unmodified-client loopback covers the accepted
+operations and passes strict Git validation.
 
 The next product tranche is the cross-example API and simplicity review in
 issue #13. Issue #14 tracks the deployable HTTP host.
@@ -165,9 +165,10 @@ issue #13. Issue #14 tracks the deployable HTTP host.
 ## Limits
 
 Keep Git policy outside the generic log. Use one repository for each log and one
-push for each publication. The HTTP crate is a protocol service, not a
-deployable server. Its host must provide routing, authentication, repository
-selection, bounded gzip decoding, chunked transfer, and HTTP error mapping.
+push for each publication. The HTTP crate is a verified protocol service proof,
+not a deployable server. Its host must provide routing, authentication,
+repository selection, bounded gzip decoding, chunked transfer, and HTTP error
+mapping.
 
 The current fetch path ignores `have` lines and returns all reachable objects.
 Protocol v2, SHA-256 HTTP, pack rewriting, global deduplication,

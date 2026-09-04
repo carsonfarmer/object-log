@@ -96,8 +96,9 @@ Smart HTTP is a separate proof crate. The core WAL does not depend on Git
 protocol code or Git libraries. The current HTTP tranche uses protocol v0 and
 all four smart HTTP operations for SHA-1. Its loopback test uses an unmodified
 client for clone, fetch, push, branch and tag creation and deletion, and
-non-fast-forward rejection. The protocol service is complete. A deployable HTTP
-host and advanced protocol work remain separate follow-ons.
+non-fast-forward rejection. This is a verified protocol service proof, not a
+deployable HTTP server. The HTTP host and advanced protocol work remain separate
+follow-ons.
 
 The native adapter can run in Linux serverless functions and containers with
 disposable local storage. Current `gix` pack storage cannot run as a WASI guest

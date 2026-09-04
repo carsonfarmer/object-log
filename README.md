@@ -60,9 +60,9 @@ The separate `object-log-git-http` crate implements the four Git smart HTTP
 protocol v0 operations for SHA-1 repositories. An unmodified Git client pushes,
 clones, fetches, creates and deletes branches and tags, rejects a
 non-fast-forward push, and passes `git fsck --strict` over its loopback server.
-This is a verified Git service proof, not a deployable HTTP server. A host must
-provide routing, authentication, bounded gzip decoding, chunked transfer, and
-HTTP error mapping.
+This is a verified protocol service proof, not a deployable HTTP server. A host
+must provide routing, authentication, bounded gzip decoding, chunked transfer,
+and HTTP error mapping.
 
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the

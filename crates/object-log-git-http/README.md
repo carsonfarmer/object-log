@@ -1,8 +1,8 @@
 # object-log-git-http
 
-This crate is a small Git smart HTTP proof for `object-log-git`. It keeps web
-framework, routing, repository selection, and authentication outside the
-library.
+This crate is a verified protocol service proof for `object-log-git`, not a
+deployable HTTP server. It keeps web framework, routing, repository selection,
+and authentication outside the library.
 
 `SmartHttp` implements these protocol operations:
 
@@ -25,7 +25,7 @@ It currently ignores `have` lines and returns the complete reachable object
 set after the client sends `done`. Pack input and output are limited to 512
 MiB.
 
-This crate is not an HTTP server. A host must map its four Git routes to the
-corresponding methods and apply the media types and cache policy from
-`Service`. The host must also decompress a bounded gzip request body before it
-calls this crate.
+A host must map the four Git routes to the corresponding methods and apply the
+media types and cache policy from `Service`. It must also provide bounded gzip
+decoding, chunked transfer, HTTP error mapping, and service-level resource
+limits.
