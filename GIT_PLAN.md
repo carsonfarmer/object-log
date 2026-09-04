@@ -2,14 +2,13 @@
 
 ## Outcome
 
-`object-log-git` must prove that the generic WAL can support a complete Git
-repository. The durable authority is object storage. Local files are optional
-cache data.
+`object-log-git` must prove that the generic WAL can support Git smart HTTP
+discovery, clone, incremental fetch, atomic push, and cold recovery. The
+durable authority is object storage. Local files are optional cache data.
 
-The first runnable host can be native. The Git protocol, pack, object lookup,
-and publication code must compile for `wasm32-wasip2`. A later Spin component
-must only adapt HTTP and object-store input and output. It must not contain a
-second Git implementation.
+The first runnable host can be native. The protocol, pack, object-lookup, and
+publication code must compile for `wasm32-wasip2`, so a later Spin component
+only adapts HTTP and object storage.
 
 The core `object-log` crate remains independent from Git.
 
@@ -25,7 +24,9 @@ also sends all reachable objects because it does not use the client's `have`
 set.
 
 The replacement must pass the current storage and client tests before the
-native-only core is deleted.
+native-only core is deleted. The
+[`Git WASI baseline`](docs/evidence/git-wasi-baseline-2026-09-04.md) records the
+reference line counts, tests, protocol trace, request bytes, and local latency.
 
 ## Required design
 
@@ -34,7 +35,7 @@ native-only core is deleted.
 - Large pack and index data use bounded object-log chunks.
 - One object-log publication applies one ordered ref transaction.
 - The object-log head is the only mutable durable authority.
-- A pinned view supplies refs and a pack catalog for one request.
+- A reader retention pins one request-scoped view of refs and the pack catalog.
 - Object lookup reads standard indexes and only the required pack ranges.
 - Push validates pack checksums, deltas, object IDs, connectivity, and ref
   rules before publication.
@@ -51,9 +52,8 @@ development shape.
 ## Small host-neutral boundary
 
 Keep the public API concrete and byte-oriented. Do not add a generic Git engine
-trait. The core must accept bounded asynchronous input, write to bounded
-asynchronous output, and return a publication result that distinguishes
-success, rejection, pending evidence, and expiry.
+trait. The core accepts bounded asynchronous input and output. It preserves
+object-log's committed, conflict, pending, and expired-evidence states.
 
 Expose only values that an HTTP adapter or higher-level storage caller needs.
 Keep packet parsing, pack normalization, graph traversal, and object-log state
@@ -136,8 +136,9 @@ An unchanged Git client must:
 - pass `git fsck --strict` after cold recovery.
 
 Packet traces must show `version 2`, `command=ls-refs`, and `command=fetch`.
-An incremental fetch must subtract valid `have` objects and be materially
-smaller than the current full-reachable response on the fixed fixture.
+The incremental-fetch fixture must contain the new tip and no object reachable
+from an accepted `have`. Record its pack bytes against the current
+full-reachable response.
 
 Two pushes from one view must have one durable winner. A lost response must be
 recoverable after the host and all local cache data are removed. Rejected and
@@ -170,11 +171,10 @@ memory, object-store requests, and transferred bytes for:
 Use one warm-up and ten measured samples. Record raw results and limitations.
 Cold recovery must not download complete pack bodies.
 
-Target 1,000 to 1,540 new product lines and delete at least 1,100 native-only
-product lines. Stop for a simplicity review if new product code exceeds 1,600
-lines or one tranche exceeds its line budget by more than 25 percent. Run a
-Rust review, an adversarial correctness review, a prose review, and a deletion
-review at stable checkpoints.
+Limit new product code to 1,540 lines and aim to delete at least 1,100
+native-only product lines. Stop for a simplicity review above 1,600 new product
+lines. Run a Rust review, an adversarial correctness review, a prose review,
+and a deletion review at stable checkpoints.
 
 GitHub issue [#17](https://github.com/carsonfarmer/object-log/issues/17) tracks
 this work. Issue [#14](https://github.com/carsonfarmer/object-log/issues/14)

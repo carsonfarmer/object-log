@@ -62,11 +62,10 @@ API:
   strict Git validation. The proof also has benchmarks, a request audit, and a
   pinned `MinIO` lifecycle.
 - [`object-log-git-http`](crates/object-log-git-http) is the current native
-  reference host. It implements the four Git smart HTTP protocol v0 operations
-  for SHA-1 repositories. Its tests use an unchanged Git client. The active
-  replacement keeps a native host first, but moves protocol and Git storage
-  into one WASI-compatible core. Fetch will use protocol v2. Push will keep
-  classic receive-pack because protocol v2 does not define a push command.
+  protocol-v0 reference host for SHA-1. Its tests use an unchanged Git client.
+  Issue #17 moves protocol and storage into one WASI-compatible core while the
+  native host remains the first adapter. Upload-pack discovery and fetch use
+  protocol v2. Push remains standard receive-pack.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
@@ -75,7 +74,7 @@ records request counts, transferred bytes, and recovery checks. The
 [`API simplification` evidence](docs/evidence/api-simplification-local-2026-09-03.md)
 records allocation, encoding, line-count, and API changes. The
 [`observed-state API` evidence](docs/evidence/observed-state-api-2026-09-04.md)
-records the final API shape, local measurements, and line counts. The
+records the current accepted API shape, local measurements, and line counts. The
 [`SQLite` evidence](docs/evidence/sqlite-local-2026-09-03.md) records tests,
 local measurements, and remaining qualification work. The
 [`Git` evidence](docs/evidence/git-local-2026-09-03.md) records storage
@@ -83,7 +82,10 @@ measurements and the `MinIO` lifecycle. The
 [`Git HTTP` evidence](docs/evidence/git-http-local-2026-09-03.md) records the
 protocol proof. The
 [`Git server` evidence](docs/evidence/git-server-local-2026-09-03.md) records
-native host tests and limits.
+native host tests and limits. The
+[`Git WASI baseline`](docs/evidence/git-wasi-baseline-2026-09-04.md) records the
+native line count, protocol trace, request bytes, and latency baseline for the
+WASI-compatible replacement.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
 live AWS qualification goals. The [Git proof plan](GIT_PLAN.md) defines one

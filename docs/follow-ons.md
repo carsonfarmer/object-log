@@ -100,10 +100,11 @@ push, branch and tag changes, and non-fast-forward rejection.
 Issue [#17](https://github.com/carsonfarmer/object-log/issues/17) replaces the
 native-only Git core. The first host can remain native. Protocol, pack, object
 lookup, and publication code must compile for `wasm32-wasip2` so a later Spin
-component remains a thin adapter. Fetch must use protocol v2 and subtract valid
-client `have` objects. Push keeps classic receive-pack. The new engine must pass
-the current tests before the native repository materializer and protocol v0
-upload-pack path are deleted. See [`GIT_PLAN.md`](../GIT_PLAN.md).
+component remains a thin adapter. Upload-pack discovery and fetch must use
+protocol v2 and subtract valid client `have` objects. Push keeps classic
+receive-pack. The new engine must pass the current tests before the native
+repository materializer and protocol v0 upload-pack path are deleted. See
+[`GIT_PLAN.md`](../GIT_PLAN.md).
 
 ## 2. WASI filesystem storage
 

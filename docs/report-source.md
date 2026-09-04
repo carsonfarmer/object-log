@@ -231,15 +231,16 @@ tenant scopes without more probe requests.
 The public result model distinguishes committed, definite conflict, pending,
 and expired evidence. A recovery token preserves the exact candidate before
 publication. The key-value, SQLite, and Git crates test the public API.
-Cursor-style bounded garbage collection is locally complete. The current Git
+Epoch-fenced, bounded garbage collection is locally complete. The current Git
 work replaces its native-only core with a WASI-compatible engine. The
 `wasi:filesystem` adapter and live AWS qualification remain separate work.
 
-The final all-feature local gate passes 135 tests. A pinned MinIO rerun passed
-one integrated test, including 1,001 collection candidates. The Criterion
-matrix measures in-memory append, recovery, contention, collection graph
-shapes, fence lookup, and complete-set resume. These results do not prove S3
-latency, multi-process behavior, or the full fault matrix. See [the initial
+At revision `e0a22dd45aa7be19016024238c3677b58b63aa94`, the workspace
+all-feature suite passed 230 tests and ignored nine opt-in tests. A pinned MinIO
+rerun passed one integrated test, including 1,001 collection candidates. The
+Criterion matrix measures in-memory append, recovery, contention, collection
+graph shapes, fence lookup, and complete-set resume. These results do not prove
+S3 latency, multi-process behavior, or the full fault matrix. See [the initial
 baseline](evidence/local-baseline-2026-09-02.md), [GC
 evidence](evidence/gc-local-2026-09-03.md), and [test
 gaps](testing.md#current-matrix-gaps).
