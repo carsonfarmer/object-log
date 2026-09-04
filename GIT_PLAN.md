@@ -110,7 +110,7 @@ Runtime WASI memory measurement remains part of engine integration. The
 current private pack entry point cannot run as a standalone component without
 adding a temporary public API.
 
-### 3. Durable objects
+### 3. Durable objects — sparse reader complete locally
 
 - Store immutable packs and indexes through object-log reference trees.
 - Load refs and the pack catalog without creating a local Git repository.
@@ -129,12 +129,27 @@ or blobs again. The
 [`materialized proof evidence`](docs/evidence/materialized-proofs-2026-09-04.md)
 records the request counts and safety review.
 
-### 4. Protocol
+Pack staging, catalog loading, and sparse object reads are also complete as a
+private module. Catalog loading reads standard indexes without a local Git
+repository. An object miss reads no pack data, and a hit reads only the needed
+durable chunks. The
+[`durable reader evidence`](docs/evidence/git-wasi-durable-reader-2026-09-04.md)
+records the request counts, cache behavior, validation, limits, and remaining
+engine work.
+
+### 4. Protocol — wire framing complete locally
 
 - Implement protocol v2 discovery, `ls-refs`, and have-aware `fetch`.
 - Implement classic receive-pack advertisement, command parsing, and status.
 - Use `gix-packetline` where it removes code.
 - Reject malformed or unsupported requests before object reads or publication.
+
+One private host-neutral module now implements these advertisement, request,
+and response boundaries for SHA-1 and SHA-256. It compiles for WASIp2 without
+default features. It is not yet connected to graph traversal, pack generation,
+publication, HTTP, or Spin. The
+[`wire protocol evidence`](docs/evidence/git-wasi-wire-2026-09-04.md) records
+the exact fixtures, bounds, build proof, and remaining integration work.
 
 ### 5. Integration and deletion
 

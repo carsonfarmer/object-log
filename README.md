@@ -65,12 +65,16 @@ API:
   strict Git validation. The proof also has benchmarks, a request audit, and a
   pinned `MinIO` lifecycle. Its replacement pack engine now compiles for
   `WASIp2`, retains a standard Git index, and applies explicit byte, work,
-  object, and delta-depth limits.
+  object, and delta-depth limits. A private sparse reader loads standard
+  indexes without a local repository and reads only the required durable pack
+  chunks. A private host-neutral wire module implements protocol-v2 `ls-refs`
+  and fetch framing plus classic receive-pack framing.
 - [`object-log-git-http`](crates/object-log-git-http) is the current native
   protocol-v0 reference host for SHA-1. Its tests use an unchanged Git client.
   Issue #17 moves protocol and storage into one WASI-compatible core while the
-  native host remains the first adapter. Upload-pack discovery and fetch use
-  protocol v2. Push remains standard receive-pack.
+  native host remains the first adapter. The replacement wire module uses
+  protocol v2 for upload-pack discovery and fetch. Push remains standard
+  receive-pack.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
@@ -96,7 +100,13 @@ WASI-compatible replacement. The
 [`Git WASI contract`](docs/evidence/git-wasi-contract-2026-09-04.md) records the
 first target boundary, CI gate, dependency graph, and limitations. The
 [`Git WASI pack engine`](docs/evidence/git-wasi-pack-2026-09-04.md) records the
-next tranche's behavior, limits, tests, source size, and local timing.
+pack normalizer's behavior, limits, tests, source size, and local timing. The
+[`Git WASI durable reader`](docs/evidence/git-wasi-durable-reader-2026-09-04.md)
+records durable layout, sparse request counts, cache behavior, limits, and
+remaining engine work. The
+[`Git WASI wire protocol`](docs/evidence/git-wasi-wire-2026-09-04.md) records
+protocol behavior, exact fixtures, limits, WASIp2 checks, and remaining host
+integration work.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
 live AWS qualification goals. The [Git proof plan](GIT_PLAN.md) defines one
