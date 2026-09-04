@@ -11,8 +11,8 @@ path. It validates both inputs, publishes one atomic object-log update, and
 recovers a standard bare Git repository from object storage. The adapter uses
 only the public `object-log` API.
 
-Smart HTTP follows this storage proof. Git protocol code and Git libraries do
-not belong in the core WAL.
+The separate `object-log-git-http` crate proves smart HTTP over this storage
+adapter. Git protocol code and Git libraries do not belong in the core WAL.
 
 This goal follows the local SQLite demonstration. The cross-example API review
 in issue #13 follows this goal.
@@ -94,20 +94,20 @@ later pack-compaction feature rewrites those packs.
 Durable Object behavior, tenancy, routing, and actor or service ownership are
 out of scope. This proof does not add them to the WAL.
 
-## Smart HTTP phase
+## Smart HTTP boundary
 
-Build smart HTTP in a separate proof crate. It parses packet lines,
-capabilities, ref commands, and pack input. It passes parsed commands and a pack
-file to `object-log-git`.
+`object-log-git-http` parses packet lines, capabilities, ref commands, and pack
+input. It passes parsed commands and a pack file to `object-log-git`.
 
 Authentication, routing, and HTTP server policy are out of scope. A push
 response waits for object-log to confirm publication. A conflict or unresolved
 result returns a protocol error.
 
-The first HTTP tranche implements protocol v0 for the four smart HTTP routes. It
-must prove clone, fetch, push, and ref deletion with an unmodified Git client.
-It can use a native loopback server. It must not use an installed Git executable
-to implement server behavior. The test client can use the standard Git program.
+The current HTTP tranche implements protocol v0 for the four smart HTTP
+operations. Its native loopback test proves clone, fetch, push, branch and tag
+creation and deletion, and non-fast-forward rejection with an unmodified Git
+client. Product code does not invoke Git. The test client uses the standard Git
+program.
 
 No reviewed Rust Git server crate exposes the required publication boundary.
 The available crates update local refs before they return success, require a Git
@@ -146,32 +146,39 @@ unreachable bytes from a pack that also contains live objects.
   checkpoint publication.
 - One opt-in MinIO flow uses a disposable bucket and leaves no process or
   container behind.
-- Benchmarks report cold materialization, cold clone, warm fetch, small and large
-  pack push, checkpoint, recovery, object-store requests, bytes, and disk use.
+- Benchmarks report small and large pack publication, checkpoint, recovery,
+  object-store requests, transferred bytes, and recovered disk use.
 - An unmodified client can clone, fetch, create a branch and tag, push a
   fast-forward update, and delete refs through loopback smart HTTP.
-- HTTP acceptance passes for SHA-1 and SHA-256 repositories.
+- The HTTP proof supports SHA-1. The storage adapter also supports SHA-256.
 
 ## Current status
 
-The native proof implements strict records, pure-Rust pack validation and
-normalization, chunk storage, atomic ref publication, lost-response recovery,
-bare-repository recovery, graph and pack provenance checks, conflict tests, and
-SHA-1 and SHA-256 tests. Checkpoints retain live packs. The collection test
-removes a dead pack, preserves the live pack, and passes cold Git validation.
+The native storage proof, request audit, benchmarks, pinned `MinIO` lifecycle,
+checkpoint, collection, and local evidence are complete. The protocol v0 HTTP
+proof is also complete for SHA-1. Its unmodified-client loopback covers the
+accepted operations and passes strict Git validation.
 
-The remaining storage work is benchmarks and request accounting, one pinned
-MinIO lifecycle, and a local evidence record. Smart HTTP is the next product
-tranche.
+The next product tranche is the cross-example API and simplicity review in
+issue #13. Issue #14 tracks the deployable HTTP host.
 
 ## Limits
 
-Keep Git policy outside the generic log. Start with one repository for each log
-and one push for each publication. Defer pack rewriting, global deduplication,
+Keep Git policy outside the generic log. Use one repository for each log and one
+push for each publication. The HTTP crate is a protocol service, not a
+deployable server. Its host must provide routing, authentication, repository
+selection, bounded gzip decoding, chunked transfer, and HTTP error mapping.
+
+The current fetch path ignores `have` lines and returns all reachable objects.
+Protocol v2, SHA-256 HTTP, pack rewriting, global deduplication,
 cross-repository transactions, provider-specific behavior, Spin integration,
-live AWS work, and a WASI Git adapter. A Spin guest is not the first server
-proof. The current Git object database and pack writer do not support its WASI
-path, and the guest has no object-storage backend for this API.
+live AWS work, and a WASI Git adapter remain deferred. Recovery has no aggregate
+byte quota. A later quota needs a maintenance path that can checkpoint or
+collect an oversized repository.
+
+A Spin guest is not the first server proof. The current Git object database and
+pack writer do not support its WASI path, and the guest has no object-storage
+backend for this API.
 
 Durable Object behavior, tenancy, routing, and actor or service ownership are
 not goals for this project.

@@ -89,15 +89,15 @@ open rebuilds a standard bare repository from object storage. The proof uses
 Checkpoint selection and collection acceptance are implemented. A checkpoint
 retains each pack that contains a live object. The acceptance test removes more
 than 100 dead physical objects, preserves the live pack, cold-recovers the
-repository, and passes strict Git validation. Benchmarks, MinIO qualification,
-a local evidence record, and smart HTTP remain incomplete.
+repository, and passes strict Git validation. The request audit, benchmarks,
+pinned `MinIO` lifecycle, and local evidence are complete.
 
 Smart HTTP is a separate proof crate. The core WAL does not depend on Git
-protocol code or Git libraries. The first HTTP tranche uses protocol v0 and all
-four smart HTTP routes. Its test uses an unmodified client for clone, fetch,
-push, and ref deletion. The storage and HTTP evidence must cover SHA-1 and
-SHA-256, collection, MinIO, and the planned benchmarks before the Git proof is
-complete.
+protocol code or Git libraries. The current HTTP tranche uses protocol v0 and
+all four smart HTTP operations for SHA-1. Its loopback test uses an unmodified
+client for clone, fetch, push, branch and tag creation and deletion, and
+non-fast-forward rejection. The protocol service is complete. A deployable HTTP
+host and advanced protocol work remain separate follow-ons.
 
 The native adapter can run in Linux serverless functions and containers with
 disposable local storage. Current `gix` pack storage cannot run as a WASI guest

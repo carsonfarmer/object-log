@@ -53,9 +53,16 @@ normalization, thin-pack normalization, bounded chunk storage, reachable-object
 validation, atomic ref publication, lost-response recovery, and cold recovery
 into a standard bare repository. Its checkpoint keeps each pack that contains a
 live object. Its collection test removes more than 100 dead physical objects,
-then cold-recovers the live repository and passes strict Git validation.
-Benchmarks, `MinIO` qualification, a local evidence record, and smart HTTP
-remain incomplete.
+then cold-recovers the live repository and passes strict Git validation. Its
+benchmarks, request audit, and pinned `MinIO` lifecycle are complete.
+
+The separate `object-log-git-http` crate implements the four Git smart HTTP
+protocol v0 operations for SHA-1 repositories. An unmodified Git client pushes,
+clones, fetches, creates and deletes branches and tags, rejects a
+non-fast-forward push, and passes `git fsck --strict` over its loopback server.
+This is a verified Git service proof, not a deployable HTTP server. A host must
+provide routing, authentication, bounded gzip decoding, chunked transfer, and
+HTTP error mapping.
 
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the
@@ -63,7 +70,11 @@ current contracts. The
 [`StagedObject` local evidence](docs/evidence/staged-objects-local-2026-09-03.md)
 records request counts, transferred bytes, and recovery checks. The
 [`SQLite` local evidence](docs/evidence/sqlite-local-2026-09-03.md) records the
-tests, local measurements, and remaining qualification work.
+tests, local measurements, and remaining qualification work. The
+[`Git` local evidence](docs/evidence/git-local-2026-09-03.md) records its
+storage measurements and `MinIO` lifecycle. The
+[`Git HTTP` evidence](docs/evidence/git-http-local-2026-09-03.md) records the
+protocol proof and its deployment limits.
 
 See [docs/follow-ons.md](docs/follow-ons.md) for the ordered Git, WASI
 filesystem, and live AWS qualification goals. The
@@ -109,6 +120,14 @@ Run the opt-in large garbage-collection acceptance test with:
 
 ```sh
 make gc-acceptance
+```
+
+Run the Git request audit, benchmarks, and pinned `MinIO` lifecycle with:
+
+```sh
+make git-performance-acceptance
+make git-bench
+make git-minio-test
 ```
 
 The `MinIO` targets start a pinned container on a loopback port. They create an
