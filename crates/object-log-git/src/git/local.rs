@@ -58,10 +58,6 @@ pub(crate) fn open(path: &Path, format: ObjectFormat) -> Result<gix::Repository,
     Ok(repo)
 }
 
-pub(super) fn apply(repo: &gix::Repository, updates: &[RefUpdate]) -> Result<(), Error> {
-    apply_at(repo, &snapshot(repo)?, updates)
-}
-
 pub(super) fn apply_at(
     repo: &gix::Repository,
     current: &RefSnapshot,
@@ -146,6 +142,19 @@ pub(crate) fn verify_updates(
         let expected = matches!(kind, RefKind::Branch).then_some(gix::objs::Kind::Commit);
         roots.push((target, expected));
     }
+    verify_graph(repo, roots)
+}
+
+pub(crate) fn validate_snapshot(repo: &gix::Repository, refs: &RefSnapshot) -> Result<(), Error> {
+    let roots = refs
+        .iter()
+        .map(|(name, target)| {
+            let (_, kind) = ref_name(name)?;
+            let target = ObjectId::try_from(*target).map_err(|_| Error::InvalidReference)?;
+            let expected = matches!(kind, RefKind::Branch).then_some(gix::objs::Kind::Commit);
+            Ok((target, expected))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
     verify_graph(repo, roots)
 }
 
@@ -374,6 +383,7 @@ mod tests {
                 (b"refs/heads/main".to_vec(), fixture.first),
                 (b"refs/tags/blob".to_vec(), fixture.blob),
             ]);
+            validate_snapshot(&repo, &desired)?;
             materialize(&repo, &desired)?;
 
             assert_eq!(snapshot(&repo)?, desired);
@@ -398,6 +408,9 @@ mod tests {
             let missing = parse(&fixture.work, ObjectFormat::Sha1, revision)?;
             fs::remove_file(loose_path(&fixture.work, missing))?;
             assert!(verify_main(&fixture).is_err());
+            let repo = gix::open_opts(fixture.work.join(".git"), open_options())?;
+            let refs = RefSnapshot::from([(b"refs/heads/main".to_vec(), fixture.second)]);
+            assert!(validate_snapshot(&repo, &refs).is_err());
         }
 
         let fixture = fixture("sha1", ObjectFormat::Sha1)?;
@@ -455,6 +468,10 @@ mod tests {
         )?;
         assert!(!snapshot(&repo)?.contains_key(&b"refs/tags/blob"[..]));
         Ok(())
+    }
+
+    fn apply(repo: &gix::Repository, updates: &[RefUpdate]) -> Result<(), Error> {
+        apply_at(repo, &snapshot(repo)?, updates)
     }
 
     struct Fixture {

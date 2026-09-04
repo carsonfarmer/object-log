@@ -12,7 +12,7 @@ use crate::{Error as RecordError, ObjectFormat, ObjectId as RecordObjectId};
 mod local;
 
 #[allow(unused_imports, reason = "used by the pending repository adapter")]
-pub(crate) use local::{init, materialize, open, validate_ref_name};
+pub(crate) use local::{init, materialize, open, validate_ref_name, validate_snapshot};
 
 const PACK_HEADER_LEN: usize = 12;
 const MAX_PACK_BYTES: usize = 512 * 1024 * 1024;
@@ -159,32 +159,6 @@ pub(crate) fn install_pack(repo: &gix::Repository, path: &Path) -> Result<Indexe
     let cleanup = remove_keep(outcome.keep_path.as_deref());
     cleanup?;
     indexed
-}
-
-/// List all standard pack indexes and the object IDs in each pack.
-pub(crate) fn list_pack_objects(repo: &gix::Repository) -> Result<Vec<IndexedPack>, Error> {
-    let directory = pack_directory(repo)?;
-    let entries = fs::read_dir(&directory).map_err(|source| Error::Io {
-        path: directory.clone(),
-        source,
-    })?;
-    let mut indexes = Vec::new();
-    for entry in entries {
-        let path = entry
-            .map_err(|source| Error::Io {
-                path: directory.clone(),
-                source,
-            })?
-            .path();
-        if path.extension().is_some_and(|extension| extension == "idx") {
-            indexes.push(path);
-        }
-    }
-    indexes.sort();
-    indexes
-        .into_iter()
-        .map(|path| read_index(&path, repo.object_hash()))
-        .collect()
 }
 
 /// Resolve every object through the repository object database.
@@ -346,7 +320,6 @@ mod tests {
             let result = install_pack(&installed, &normalized.path)?;
             assert_eq!(result.id, normalized.id);
             assert_eq!(result.objects, normalized.objects);
-            assert_eq!(list_pack_objects(&installed)?, vec![result]);
             verify_object_access(&installed, &normalized.objects)?;
         }
         Ok(())
