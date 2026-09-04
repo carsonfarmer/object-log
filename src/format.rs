@@ -721,8 +721,8 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
                     version: wire.storage_version,
                 },
             }),
-            staging_domain: Arc::new(crate::StagingDomain),
         },
+        staging_domain: Arc::new(crate::StagingDomain),
         transaction_id: transaction_id(&wire.transaction_id)?,
         storage_id: storage_id(&wire.storage_id)?,
         operation: Bytes::from(wire.operation),
@@ -1437,8 +1437,8 @@ mod tests {
                         version: Some("version".to_owned()),
                     },
                 }),
-                staging_domain: Arc::new(crate::StagingDomain),
             },
+            staging_domain: Arc::new(crate::StagingDomain),
             transaction_id: crate::TransactionId::new(),
             storage_id: storage_id(),
             operation: Bytes::from_static(b"operation"),
@@ -1478,8 +1478,8 @@ mod tests {
                         version: Some("version".to_owned()),
                     },
                 }),
-                staging_domain: Arc::new(crate::StagingDomain),
             },
+            staging_domain: Arc::new(crate::StagingDomain),
             transaction_id: crate::TransactionId::from_uuid(uuid::Uuid::from_u128(3)),
             storage_id: storage_id(),
             operation: Bytes::from_static(b"operation"),
@@ -1493,7 +1493,7 @@ mod tests {
         };
         let without_proof = encode_recovery_token(&prepared)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
-        prepared.view.staging_domain = Arc::new(crate::StagingDomain);
+        prepared.staging_domain = Arc::new(crate::StagingDomain);
         let with_proof = encode_recovery_token(&prepared)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
 

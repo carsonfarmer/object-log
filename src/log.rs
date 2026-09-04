@@ -415,9 +415,9 @@ impl Log {
             .update(StoreKey::Head, bytes, view.storage_version().clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(
-                self.bound_view(candidate, version),
-            )),
+            Ok(UpdateResult::Updated { version }) => {
+                Ok(RetentionStatus::Applied(Self::view(candidate, version)))
+            }
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
@@ -471,9 +471,9 @@ impl Log {
             .update(StoreKey::Head, bytes, view.storage_version().clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(
-                self.bound_view(candidate, version),
-            )),
+            Ok(UpdateResult::Updated { version }) => {
+                Ok(RetentionStatus::Applied(Self::view(candidate, version)))
+            }
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
@@ -562,7 +562,7 @@ impl Log {
             .await
         {
             Ok(UpdateResult::Updated { version }) => Ok(CollectionStart::Installed(
-                self.bound_view(candidate, version),
+                Self::view(candidate, version),
                 report,
             )),
             Ok(UpdateResult::PreconditionFailed) => {
@@ -638,7 +638,7 @@ impl Log {
             Ok(UpdateResult::Updated { version }) => {
                 self.cleanup_collection_plan(plan_key).await?;
                 Ok(CollectionFinish::Complete(
-                    self.bound_view(candidate, version),
+                    Self::view(candidate, version),
                     report,
                 ))
             }
@@ -815,8 +815,8 @@ impl Log {
 
     /// Checks whether a transaction can be prepared against an observed view.
     ///
-    /// This check performs no I/O and makes no allocation. A later concurrent
-    /// update can still make the view stale.
+    /// The successful path performs no I/O and makes no allocation. A later
+    /// concurrent update can still make the view stale.
     ///
     /// # Errors
     ///
@@ -847,10 +847,9 @@ impl Log {
         self.validate_staged_objects(view, &objects)?;
         self.validate_prepared_sizes(&operation, &result)?;
         self.validate_commit_position(view, transaction_id)?;
-        let mut view = view.clone();
-        view.staging_domain = Arc::clone(&self.staging_domain);
         Ok(PreparedCommit {
-            view,
+            view: view.clone(),
+            staging_domain: Arc::clone(&self.staging_domain),
             transaction_id,
             storage_id: StorageId::new(),
             operation,
@@ -880,12 +879,12 @@ impl Log {
             prepared.view.head(),
             self.commit_immutable_key(&commit_ref),
             &prepared.objects,
-            &prepared.view.staging_domain,
+            &prepared.staging_domain,
         )
         .await?;
         self.create_new_commit(self.commit_key(&commit_ref), commit_bytes)
             .await?;
-        prepared.view.staging_domain = Arc::clone(&self.staging_domain);
+        prepared.staging_domain = Arc::clone(&self.staging_domain);
         let candidate = Self::candidate_head(&prepared, &commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
@@ -900,11 +899,11 @@ impl Log {
             .await
         {
             Ok(UpdateResult::Updated { version }) => {
-                Ok(CommitStatus::Committed(self.bound_view(candidate, version)))
+                Ok(CommitStatus::Committed(Self::view(candidate, version)))
             }
             Ok(UpdateResult::PreconditionFailed) => {
                 let pending = PendingCommit {
-                    prepared,
+                    prepared: Box::new(prepared),
                     commit_ref,
                 };
                 let current = match self.load().await {
@@ -922,7 +921,7 @@ impl Log {
                 }
             }
             Err(Error::Store(_)) => Ok(CommitStatus::Pending(PendingCommit {
-                prepared,
+                prepared: Box::new(prepared),
                 commit_ref,
             })),
             Err(error) => Err(error),
@@ -950,7 +949,7 @@ impl Log {
         if let Some(resolution) = Self::classify_resolution(&pending, current)? {
             if let Resolution::Committed(view) = &resolution
                 && Self::tail_contains(view, &pending.commit_ref)
-                && !self.proof_matches(&pending.prepared.view.staging_domain)
+                && !self.proof_matches(&pending.prepared.staging_domain)
             {
                 match self.verify_published_commit(&pending.commit_ref).await {
                     Ok(()) => {}
@@ -967,7 +966,7 @@ impl Log {
                 pending.prepared.view.head(),
                 self.commit_immutable_key(&pending.commit_ref),
                 &pending.prepared.objects,
-                &pending.prepared.view.staging_domain,
+                &pending.prepared.staging_domain,
             )
             .await
         {
@@ -975,7 +974,7 @@ impl Log {
             Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
             Err(error) => return Err(error),
         }
-        if !self.proof_matches(&pending.prepared.view.staging_domain) {
+        if !self.proof_matches(&pending.prepared.staging_domain) {
             match self
                 .ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
                 .await
@@ -985,7 +984,7 @@ impl Log {
                 Err(error) => return Err(error),
             }
         }
-        pending.prepared.view.staging_domain = Arc::clone(&self.staging_domain);
+        pending.prepared.staging_domain = Arc::clone(&self.staging_domain);
         let candidate = Self::candidate_head(&pending.prepared, &pending.commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
@@ -999,7 +998,7 @@ impl Log {
             .await
         {
             Ok(UpdateResult::Updated { version }) => {
-                Ok(Resolution::Committed(self.bound_view(candidate, version)))
+                Ok(Resolution::Committed(Self::view(candidate, version)))
             }
             Err(Error::Store(_)) => Ok(Resolution::StillPending(pending)),
             Err(error) => Err(error),
@@ -1031,7 +1030,7 @@ impl Log {
         let prepared = format::decode_recovery_token(token)?;
         let (commit_ref, _) = self.encode_prepared(&prepared)?;
         self.resolve(PendingCommit {
-            prepared,
+            prepared: Box::new(prepared),
             commit_ref,
         })
         .await
@@ -1050,7 +1049,7 @@ impl Log {
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
         self.validate_view(view)?;
         let mut reads = stream::iter(view.tail().iter().cloned())
-            .map(|reference| async move { self.read_commit_optional(&reference).await })
+            .map(|reference| self.read_commit_optional(reference))
             .buffered(MAX_CONCURRENT_READS);
         let mut records = Vec::with_capacity(view.tail().len());
         while let Some(record) = reads.try_next().await? {
@@ -1125,8 +1124,9 @@ impl Log {
         let candidate = Self::checkpoint_head(view, through, object.clone())?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
-        let mut pending = PendingCheckpoint {
+        let pending = PendingCheckpoint {
             view: view.clone(),
+            staging_domain: Arc::clone(&self.staging_domain),
             through: through.clone(),
             checkpoint: CheckpointRef {
                 through_sequence: through.sequence,
@@ -1134,7 +1134,6 @@ impl Log {
                 object,
             },
         };
-        pending.view.staging_domain = Arc::clone(&self.staging_domain);
 
         match self
             .store
@@ -1145,9 +1144,9 @@ impl Log {
             )
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(CheckpointStatus::Published(
-                self.bound_view(candidate, version),
-            )),
+            Ok(UpdateResult::Updated { version }) => {
+                Ok(CheckpointStatus::Published(Self::view(candidate, version)))
+            }
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(view) => view,
@@ -1194,12 +1193,14 @@ impl Log {
 
         let current = match self.load().await {
             Ok(view) => view,
-            Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
+            Err(Error::Store(_)) => {
+                return Ok(CheckpointResolution::StillPending(pending));
+            }
             Err(error) => return Err(error),
         };
         match Self::classify_checkpoint(&pending, current)? {
             CheckpointEvidence::Published(view) => {
-                if self.proof_matches(&pending.view.staging_domain) {
+                if self.proof_matches(&pending.staging_domain) {
                     return Ok(CheckpointResolution::Published(view));
                 }
                 return match self.verify_checkpoint(&pending.checkpoint).await {
@@ -1219,15 +1220,19 @@ impl Log {
 
         match self.read_tail(&pending.view).await {
             Ok(_) => {}
-            Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
+            Err(Error::Store(_)) => {
+                return Ok(CheckpointResolution::StillPending(pending));
+            }
             Err(error) => return Err(error),
         }
         match self.verify_checkpoint_publication(&pending).await {
             Ok(()) => {}
-            Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
+            Err(Error::Store(_)) => {
+                return Ok(CheckpointResolution::StillPending(pending));
+            }
             Err(error) => return Err(error),
         }
-        pending.view.staging_domain = Arc::clone(&self.staging_domain);
+        pending.staging_domain = Arc::clone(&self.staging_domain);
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
         match self
@@ -1240,7 +1245,7 @@ impl Log {
             .await
         {
             Ok(UpdateResult::Updated { version }) => Ok(CheckpointResolution::Published(
-                self.bound_view(candidate, version),
+                Self::view(candidate, version),
             )),
             Err(Error::Store(_)) => Ok(CheckpointResolution::StillPending(pending)),
             Err(error) => Err(error),
@@ -1299,13 +1304,13 @@ impl Log {
         &self,
         pending: &PendingCheckpoint,
     ) -> Result<(), Error> {
-        if self.proof_matches(&pending.view.staging_domain) {
+        if self.proof_matches(&pending.staging_domain) {
             return self
                 .verify_publication(
                     pending.view.head(),
                     self.object_immutable_key(&pending.checkpoint.object),
                     &[],
-                    &pending.view.staging_domain,
+                    &pending.staging_domain,
                 )
                 .await;
         }
@@ -1314,7 +1319,7 @@ impl Log {
             pending.view.head(),
             self.object_immutable_key(&pending.checkpoint.object),
             &checkpoint.objects,
-            &pending.view.staging_domain,
+            &pending.staging_domain,
         )
         .await
     }
@@ -1383,13 +1388,12 @@ impl Log {
         if head.options != self.options {
             return Err(Error::ConfigurationMismatch("options"));
         }
-        Ok(self.bound_view(head, stored.version))
+        Ok(Self::view(head, stored.version))
     }
 
-    fn bound_view(&self, head: Head, version: UpdateVersion) -> View {
+    fn view(head: Head, version: UpdateVersion) -> View {
         View {
             observed: Arc::new(ObservedState { head, version }),
-            staging_domain: Arc::clone(&self.staging_domain),
         }
     }
 
@@ -1407,7 +1411,7 @@ impl Log {
         if view.head().options != self.options {
             return Err(Error::ConfigurationMismatch("options"));
         }
-        view.head().validate()
+        Ok(())
     }
 
     fn validate_prepared_sizes(&self, operation: &Bytes, result: &Bytes) -> Result<(), Error> {
@@ -1562,8 +1566,8 @@ impl Log {
             .ok_or_else(|| {
                 Error::InvalidFormat("the checkpoint entry is not in the active tail".to_owned())
             })?;
-        let removed = head.tail.drain(..=through_index).collect::<Vec<_>>();
-        head.recent_outcomes.extend(removed);
+        head.recent_outcomes
+            .extend(head.tail.drain(..=through_index));
         let resolution_window = head.options.resolution_window;
         if head.recent_outcomes.len() > resolution_window {
             let excess = head.recent_outcomes.len().saturating_sub(resolution_window);
@@ -1668,14 +1672,14 @@ impl Log {
     }
 
     async fn read_commit(&self, reference: &CommitRef) -> Result<CommitRecord, Error> {
-        self.read_commit_optional(reference)
+        self.read_commit_optional(reference.clone())
             .await?
             .ok_or_else(|| Error::InvalidFormat("a referenced commit is missing".to_owned()))
     }
 
     async fn read_commit_optional(
         &self,
-        reference: &CommitRef,
+        reference: CommitRef,
     ) -> Result<Option<CommitRecord>, Error> {
         if reference.len
             > u64::try_from(self.options.max_commit_bytes)
@@ -1685,7 +1689,7 @@ impl Log {
         }
         let Some(stored) = self
             .store
-            .read(self.commit_key(reference), self.options.max_commit_bytes)
+            .read(self.commit_key(&reference), self.options.max_commit_bytes)
             .await?
         else {
             return Ok(None);
@@ -1707,7 +1711,7 @@ impl Log {
             ));
         }
         Ok(Some(CommitRecord {
-            reference: reference.clone(),
+            reference,
             expected_tip: commit.expected_tip,
             operation: commit.operation,
             result: commit.result,
@@ -2441,6 +2445,7 @@ mod tests {
         .await?;
         let pending = PendingCheckpoint {
             view: fenced,
+            staging_domain: Arc::clone(&log.staging_domain),
             through: through.clone(),
             checkpoint: CheckpointRef {
                 through_sequence: through.sequence,
@@ -2657,7 +2662,7 @@ mod tests {
         else {
             return Err(Error::InvalidFormat("test plan lost its CAS".into()));
         };
-        Ok(log.bound_view(head, version))
+        Ok(Log::view(head, version))
     }
 
     async fn install_commit(log: &Log, commit: format::Commit) -> Result<View, Error> {

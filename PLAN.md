@@ -49,7 +49,8 @@ v1 layout replace earlier development forms.
 Required value types:
 
 - `LogId`: a validated, non-path tenant resource identifier.
-- `Cursor`: an opaque observed head position and storage version.
+- `View`: one opaque observed head and storage version. Cloning it does not
+  copy the head.
 - `TransactionId`: a caller-supplied stable operation identity.
 - `ObjectRef`: digest, byte length, and object kind.
 - `StagedObject`: process-local proof that one object graph is ready for
@@ -57,7 +58,7 @@ Required value types:
 - `ReferenceNode`: opaque payload and explicit child references.
 - `CommitRef`: public sequence, transaction ID, and digest. The durable value
   also carries an encoded byte length for internal integrity checks.
-- `PreparedCommit`: expected cursor, transaction ID, operation bytes, result
+- `PreparedCommit`: expected view, transaction ID, operation bytes, result
   bytes, and staged object references.
 - `PendingCommit`: enough evidence to resolve or retry one exact publication.
 - `PendingCheckpoint`: enough evidence to resolve one exact maintenance
@@ -70,29 +71,29 @@ Required value types:
 Required operations:
 
 ```rust
-validate_backend(store, prefix) -> ValidatedBackend
-scope(validated_backend, log_id) -> ScopedStore
-open(scoped_store, options) -> Log
+ValidatedBackend::new(store, prefix) -> ValidatedBackend
+Log::open(&validated_backend, &log_id, options) -> Log
 load() -> View
-refresh(cursor) -> Refresh
-put_object(cursor, bytes) -> StagedObject
-put_node(cursor, payload, children: Vec<StagedObject>) -> StagedObject
-stage_objects(cursor, references: Vec<ObjectRef>) -> Vec<StagedObject>
+refresh(&view) -> Option<View>
+preflight(&view, transaction_id) -> ()
+put_object(&view, bytes) -> StagedObject
+put_node(&view, payload, children: Vec<StagedObject>) -> StagedObject
+stage_objects(&view, references: Vec<ObjectRef>) -> Vec<StagedObject>
 staged.reference() -> &ObjectRef
-read_object(view, reference) -> bytes
-read_node(view, reference) -> ReferenceNode
-prepare(cursor, transaction_id, operation, result, objects: Vec<StagedObject>) -> PreparedCommit
+read_object(&view, reference) -> bytes
+read_node(&view, reference) -> ReferenceNode
+prepare(&view, transaction_id, operation, result, objects: Vec<StagedObject>) -> PreparedCommit
 commit(prepared) -> CommitStatus
 resolve(pending) -> Resolution
 resume(recovery_token) -> Resolution
-read_tail(view) -> ordered commit records
-read_checkpoint(view) -> CheckpointRecord
-publish_checkpoint(view, through, snapshot, roots: Vec<StagedObject>) -> CheckpointStatus
+read_tail(&view) -> ordered commit records
+read_checkpoint(&view) -> Option<CheckpointRecord>
+publish_checkpoint(&view, through, snapshot, roots: Vec<StagedObject>) -> CheckpointStatus
 resolve_checkpoint(pending) -> CheckpointResolution
-retain(view, retention_id) -> RetentionStatus
-release_retention(view, retention_id) -> RetentionStatus
-start_collection(view) -> CollectionStart
-resume_collection(view) -> CollectionFinish
+retain(&view, retention_id) -> RetentionStatus
+release_retention(&view, retention_id) -> RetentionStatus
+start_collection(&view) -> CollectionStart
+resume_collection(&view) -> CollectionFinish
 ```
 
 Required result distinctions:
@@ -121,7 +122,7 @@ operation after expiry.
 1. A committed log has one total commit order.
 2. An acknowledged commit references only durable immutable objects.
 3. A stale writer cannot replace a newer head.
-4. A commit based on cursor `C` can publish only from `C`.
+4. A commit based on view `V` can publish only from `V`.
 5. A conflict does not publish the rejected candidate.
 6. A pending commit can be resolved by its transaction ID and commit digest
    while it remains in the declared resolution window.
@@ -132,7 +133,7 @@ operation after expiry.
 11. One log cannot read or publish objects from another log namespace.
 12. Head bytes cannot repeat across updates. A monotonic generation prevents
     ETag ABA when an object store derives ETags from content.
-13. A durable random incarnation binds every cursor, WAL entry, and checkpoint
+13. A durable random incarnation binds every view, WAL entry, and checkpoint
     to one log lifetime. Content digests remain deterministic within it.
 14. Checkpoint roots and reference-node edges enumerate every durable object
     needed by a snapshot.

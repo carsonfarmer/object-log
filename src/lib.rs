@@ -308,7 +308,6 @@ pub(crate) struct ObservedState {
 #[derive(Clone, Debug)]
 pub struct View {
     pub(crate) observed: Arc<ObservedState>,
-    pub(crate) staging_domain: Arc<StagingDomain>,
 }
 
 #[derive(Debug)]
@@ -376,6 +375,7 @@ impl View {
 #[derive(Clone, Debug)]
 pub struct PreparedCommit {
     pub(crate) view: View,
+    pub(crate) staging_domain: Arc<StagingDomain>,
     pub(crate) transaction_id: TransactionId,
     pub(crate) storage_id: StorageId,
     pub(crate) operation: Bytes,
@@ -412,7 +412,7 @@ impl PreparedCommit {
 /// Evidence needed to resolve one uncertain commit publication.
 #[derive(Clone, Debug)]
 pub struct PendingCommit {
-    pub(crate) prepared: PreparedCommit,
+    pub(crate) prepared: Box<PreparedCommit>,
     pub(crate) commit_ref: CommitRef,
 }
 
@@ -437,6 +437,7 @@ impl PendingCommit {
 #[derive(Clone, Debug)]
 pub struct PendingCheckpoint {
     pub(crate) view: View,
+    pub(crate) staging_domain: Arc<StagingDomain>,
     pub(crate) through: CommitRef,
     pub(crate) checkpoint: CheckpointRef,
 }

@@ -22,6 +22,13 @@ The durable model has:
 - Local memory and disk are optional caches.
 - One validated backend handle can open many isolated logs.
 
+`Log::open` takes a `ValidatedBackend` and a `LogId`; the internal scoped store
+is not part of the public API. `load` returns one cheap-clone `View` for reads
+and conditional work. `refresh` returns `None` when that view is still current.
+Adapters can call `preflight` before expensive local work. Its successful path
+does no I/O and makes no allocation. They can then call `prepare` with the final
+operation and staged objects.
+
 Successful immutable creation has one required storage property: the exact
 bytes remain at the same physical key until object-log garbage collection
 deletes them. External lifecycle expiry, deletion, or overwrite violates this

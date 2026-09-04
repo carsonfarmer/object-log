@@ -221,8 +221,7 @@ async fn repeated_first_attempt_requires_the_recovery_path()
 }
 
 #[tokio::test]
-async fn cursor_is_bound_to_one_durable_log_incarnation() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn view_is_bound_to_one_durable_log_incarnation() -> Result<(), Box<dyn std::error::Error>> {
     let first_backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let second_backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let first = open(first_backend, "same-name").await?;
@@ -277,10 +276,10 @@ async fn log_exposes_its_durable_options() -> Result<(), Box<dyn std::error::Err
 }
 
 #[tokio::test]
-async fn stale_cursor_is_rejected_without_publishing_its_candidate()
+async fn stale_view_is_rejected_without_publishing_its_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let log = open(backend, "stale-cursor").await?;
+    let log = open(backend, "stale-view").await?;
     let stale = log.load().await?;
     let first = log.prepare(
         &stale,
