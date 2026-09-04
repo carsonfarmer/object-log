@@ -75,6 +75,8 @@ The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 records request counts, transferred bytes, and recovery checks. The
 [`API simplification` evidence](docs/evidence/api-simplification-local-2026-09-03.md)
 records allocation, encoding, line-count, and API changes. The
+[`observed-state API` evidence](docs/evidence/observed-state-api-2026-09-04.md)
+records the final API shape, local measurements, and line counts. The
 [`SQLite` evidence](docs/evidence/sqlite-local-2026-09-03.md) records tests,
 local measurements, and remaining qualification work. The
 [`Git` evidence](docs/evidence/git-local-2026-09-03.md) records storage
