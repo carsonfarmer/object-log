@@ -170,8 +170,10 @@ the response.
    and add `CommitRef::len()`. This pre-release change lets the engine reserve
    exact checkpoint and tail bytes before concurrent reads and keeps one
    materialization path. Add exact-limit and limit-plus-one tests.
-2. Add compressed-entry inspection and reuse. Cover selected-base `REF_DELTA`,
-   full-object fallback, checksums, order, and self-contained output.
+2. Follow the private
+   [fetch-pack source gate](docs/evidence/git-fetch-pack-source-gate-2026-09-04.md).
+   Keep the format name v1. Avoid unrelated layout work, but allow a layout
+   change that reduces code or improves measured performance.
 3. Load one repository view through the existing `Repository` surface. Retain
    refs, authenticated pack proofs, standard indexes, and one sparse reader.
 4. Add iterative commit, tree, and annotated-tag traversal. Enforce graph,
@@ -279,6 +281,7 @@ Count product and test lines separately from revision `2ee2174`.
 | Tranche | Expected change | Stop gate |
 | --- | ---: | ---: |
 | Pack, durable, wire, and private budgets | Add 260–400; delete 80–160 | Retained product exceeds 2,050 |
+| Task 2 compressed-entry reuse | Add at most 160 net product lines and 450 test lines | Any new dependency, Cargo feature, public API, format-name change, or line-limit excess |
 | Repository, graph, hybrid fetch, and receive | Add 900–1,225 | Added product exceeds 1,275 |
 | Native HTTP and Spin adapters | Add 180–280 | Added product exceeds 300 |
 | Tests | Add 1,600–2,400 | Report separately |
@@ -302,15 +305,19 @@ offset it. Reduce the current tranche before integration.
   delta reuse and the standard pack output used as the performance oracle.
 - [`gix-pack` 0.74.2](https://docs.rs/gix-pack/0.74.2/gix_pack/) supplies the
   low-level pack and index types used by the private foundation.
-- Cursor's [Git at any scale](https://cursor.com/blog/git-at-any-scale) supports
-  the object-storage WAL, immutable pack, atomic publication, and disposable
-  cache model.
+- Cursor's [Git at any scale](https://cursor.com/blog/git-at-any-scale) describes
+  an object-storage WAL, standard Git repositories on local NVMe, conditional
+  reads, CAS publication, and reuse of published compacted packs. Cursor and
+  Micelio use native Git and local repositories.
 - Walgit's [remote reader](https://github.com/tobi/walgit/blob/main/crates/walgit-wal/src/remote.rs)
   is prior art for indexed range reads and a process-wide block cache over
   object storage.
 - Cloudflare documents a [128 MB per-isolate memory limit](https://developers.cloudflare.com/workers/platform/limits/),
   including WebAssembly allocations. This plan uses a 128 MiB process model
   and a lower 120 MiB provisional target.
+- The `git-server` package in `imjasonh/playground` targets Cloudflare Workers.
+  It is not a Cloudflare-owned project. Its root license is unclear, so do not
+  copy its source or structure.
 
 GitHub issue [#17](https://github.com/carsonfarmer/object-log/issues/17) tracks
 this work. Issue [#14](https://github.com/carsonfarmer/object-log/issues/14)
