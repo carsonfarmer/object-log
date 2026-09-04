@@ -74,6 +74,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     assert_eq!(publication.downloaded_bytes(), 0);
     // Chunk blobs, one pack node, one commit, and the mutable head.
     assert_eq!(publication.operation(Operation::Put).requests, chunks + 3);
+    assert_eq!(publication.total_requests(), chunks + 3);
     let durable_after_publication = stored_bytes(&inner, &root).await?;
 
     let checkpoint_cache = directory.path().join("checkpoint");
@@ -87,6 +88,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     assert_eq!(checkpoint.operation(Operation::Put).requests, 2);
     // The tail commit, the pack node, and its chunk blobs.
     assert_eq!(checkpoint.operation(Operation::Get).requests, chunks + 2);
+    assert_eq!(checkpoint.total_requests(), chunks + 4);
     let durable_after_checkpoint = stored_bytes(&inner, &root).await?;
     assert!(durable_after_checkpoint > durable_after_publication);
 
@@ -101,6 +103,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     assert_eq!(recovery.operation(Operation::Put).requests, 0);
     // The head, checkpoint, pack node, and chunk blobs.
     assert_eq!(recovery.operation(Operation::Get).requests, chunks + 3);
+    assert_eq!(recovery.total_requests(), chunks + 3);
     assert_eq!(recovery.uploaded_bytes(), 0);
     assert!(recovery.downloaded_bytes() >= pack_bytes);
     assert_repository(&recovered_cache, &source)?;

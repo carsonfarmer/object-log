@@ -38,7 +38,7 @@ fn publication_benchmarks(criterion: &mut Criterion) {
                         )));
                         black_box((log, directory, view))
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 );
             },
         );
@@ -66,7 +66,7 @@ fn checkpoint_benchmarks(criterion: &mut Criterion) {
                         };
                         black_box((log, directory, view))
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::LargeInput,
                 );
             },
         );
@@ -92,7 +92,7 @@ fn recovery_benchmarks(criterion: &mut Criterion) {
                     )));
                     black_box((repository, directory))
                 },
-                BatchSize::SmallInput,
+                BatchSize::LargeInput,
             );
         });
     }
