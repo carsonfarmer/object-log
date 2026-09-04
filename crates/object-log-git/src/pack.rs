@@ -12,7 +12,7 @@ pub(super) const MAX_INDEX_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const MAX_OBJECTS: u32 = 32_768;
 pub(super) const MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_DELTA_DEPTH: usize = 256;
-const INFLATE_BYTES: usize = 48 * 1024;
+pub(super) const INFLATE_BYTES: usize = 48 * 1024;
 const COMPRESS_BYTES: usize = 416 * 1024;
 const DEFAULT_LIMITS: Limits = Limits {
     input_bytes: MAX_RECEIVE_PACK_BYTES,
@@ -130,7 +130,6 @@ fn normalize_with(
         }
         indexed
     };
-    drop((scan_memory, resolve_memory, compressed_memory));
     let bytes = output.into_inner();
     let (id, index, index_memory) = index(
         operation,
@@ -141,6 +140,7 @@ fn normalize_with(
         limits,
         &stats,
     )?;
+    drop((scan_memory, resolve_memory, compressed_memory));
     Ok(Normalized {
         bytes,
         index,
@@ -267,6 +267,7 @@ fn scan(
             .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
         let pack_offset = usize::try_from(offset)
             .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
+        operation.work(end_in_memory - pack_offset)?;
         memory.grow(end_in_memory - start)?;
         entries.push(InputEntry {
             header: entry.header,
@@ -355,8 +356,8 @@ fn resolve_external(
                     let base_offset = if let Some(offset) = inserted[base_index] {
                         offset
                     } else {
-                        operation.work(data.len())?;
-                        let reserved = compression_memory_bound(data.len())?;
+                        let (reserved, crc) = compression_bounds(data.len())?;
+                        operation.work(total([data.len(), crc])?)?;
                         compression_memory.grow(reserved)?;
                         let base = InputEntry::from_data_obj(
                             &gix_object::Data {
@@ -390,6 +391,7 @@ fn resolve_external(
         entry.pack_offset = next_offset;
         entry.header_size = u16::try_from(entry.header.size(entry.decompressed_size))
             .map_err(|_| Error::InvalidPack("pack entry header is too large".into()))?;
+        operation.work(usize::try_from(entry.bytes_in_pack()).map_err(pack_error)?)?;
         entry.crc32 = Some(entry.compute_crc32());
         stats.has_ref |= matches!(entry.header, gix_pack::data::entry::Header::RefDelta { .. });
         next_offset = push_entry(&mut output, entry, next_offset, limits, trailer_bytes)?;
@@ -411,7 +413,7 @@ fn resolve_external(
     Ok((output, output_bytes, memory, compression_memory))
 }
 
-fn compression_memory_bound(bytes: usize) -> Result<usize, Error> {
+fn compression_bounds(bytes: usize) -> Result<(usize, usize), Error> {
     let quick = total([bytes, 7])? / 8;
     let bound = total([
         bytes,
@@ -425,7 +427,10 @@ fn compression_memory_bound(bytes: usize) -> Result<usize, Error> {
         "compression size overflowed",
     )?
     .max(8);
-    total([product(capacity, 2)?, COMPRESS_BYTES])
+    Ok((
+        total([product(capacity, 2)?, COMPRESS_BYTES])?,
+        total([bound, 12])?,
+    ))
 }
 
 fn push_entry(
@@ -811,10 +816,12 @@ mod tests {
             kind: gix_object::Kind::Blob,
             data,
         };
-        let inflated = entries(&thin, format)?
-            .into_iter()
+        let stored = entries(&thin, format)?;
+        let inflated = stored
+            .iter()
             .map(|(entry, _)| usize::try_from(entry.decompressed_size))
             .sum::<Result<usize, _>>()?;
+        let input_crc = stored.iter().map(|(_, range)| range.len()).sum::<usize>();
         let resolved = fixture
             .blobs
             .iter()
@@ -826,9 +833,17 @@ mod tests {
 
         let probe = operation();
         let normalized = super::normalize(&probe, format, &thin, std::slice::from_ref(&base))?;
+        let rewritten_crc = entries(&normalized.bytes, format)?
+            .into_iter()
+            .filter(|(entry, _)| entry.header.is_delta())
+            .map(|(_, range)| range.len())
+            .sum::<usize>();
         let expected = thin.len()
             + inflated
+            + input_crc
             + 2 * data.len()
+            + compression_bounds(data.len())?.1
+            + rewritten_crc
             + (2 * normalized.bytes.len() - hash_bytes)
             + inflated
             + data.len()

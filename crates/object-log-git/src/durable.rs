@@ -8,8 +8,8 @@ use crate::{
     Error, ObjectFormat, ObjectId,
     format::PackDescriptor,
     pack::{
-        MAX_DELTA_DEPTH, MAX_INDEX_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS, MAX_PACK_BYTES,
-        Normalized,
+        INFLATE_BYTES, MAX_DELTA_DEPTH, MAX_INDEX_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS,
+        MAX_PACK_BYTES, Normalized,
         budget::{Operation, Reservation, hold},
         delta_integer, invalid, object_hash, pack_error,
     },
@@ -111,6 +111,7 @@ pub(crate) async fn load(
         if charged > MAX_CATALOG_BYTES {
             return invalid("catalog exceeds byte limit");
         }
+        operation.work(root_bytes)?;
         operation.io(root_bytes)?;
     }
     let load_memory = operation.reserve(charged)?;
@@ -384,7 +385,9 @@ impl<'a> Reader<'a> {
                 return invalid("delta graph contains a cycle");
             }
             *slot = true;
-            let entry = self.read_entry(location.pack, current).await?;
+            let entry = self
+                .entry(location.pack, current, deltas.is_empty())
+                .await?;
             if entry.header.is_delta() && deltas.len() == MAX_DELTA_DEPTH {
                 return invalid("delta graph is too deep");
             }
@@ -419,7 +422,7 @@ impl<'a> Reader<'a> {
             }
         };
         while let Some(delta) = deltas.pop() {
-            data = apply_delta(&self.catalog.operation, &data, &delta)?;
+            data = apply_delta(&self.catalog.operation, &data, &delta, deltas.is_empty())?;
         }
         let actual = gix_object::compute_hash(object_hash(pack.id.format()), kind, &data)
             .map_err(pack_error)?;
@@ -429,7 +432,7 @@ impl<'a> Reader<'a> {
         Ok(Some(Object { kind, data }))
     }
 
-    async fn read_entry(&mut self, pack: u16, index: u32) -> Result<DecodedEntry, Error> {
+    async fn entry(&mut self, pack: u16, index: u32, hash: bool) -> Result<DecodedEntry, Error> {
         let stored = &self.catalog.packs[usize::from(pack)];
         let range = stored.entry_range(index)?;
         self.catalog
@@ -451,10 +454,13 @@ impl<'a> Reader<'a> {
         if size > MAX_OBJECT_BYTES {
             return invalid("pack entry exceeds object byte limit");
         }
-        self.catalog.operation.work(size)?;
+        self.catalog
+            .operation
+            .work(size * (1 + usize::from(hash && !entry.header.is_delta())))?;
         let memory = self.catalog.operation.reserve(size)?;
         let mut data = vec![0; size];
         let compressed = &bytes[entry.header_size()..];
+        let _inflate_memory = self.catalog.operation.reserve(INFLATE_BYTES)?;
         let (status, consumed, written) = gix_zlib::Inflate::default()
             .once(compressed, &mut data)
             .map_err(pack_error)?;
@@ -512,6 +518,12 @@ impl<'a> Reader<'a> {
             .clone();
         let bytes = usize::try_from(object.len())
             .map_err(|_| Error::InvalidPack("pack chunk exceeds memory".into()))?;
+        while self.cache_bytes + bytes > MAX_CACHE_BYTES {
+            let Some((_, removed)) = self.cache.pop_front() else {
+                break;
+            };
+            self.cache_bytes -= removed.len();
+        }
         self.catalog.operation.io(bytes)?;
         self.catalog.operation.work(bytes)?;
         let memory = self.catalog.operation.reserve(bytes)?;
@@ -520,12 +532,6 @@ impl<'a> Reader<'a> {
             return invalid("pack chunk byte length does not match");
         }
         let value = hold(value, memory);
-        while self.cache_bytes + bytes > MAX_CACHE_BYTES {
-            let Some((_, removed)) = self.cache.pop_front() else {
-                break;
-            };
-            self.cache_bytes -= removed.len();
-        }
         self.cache_bytes += bytes;
         self.cache.push_back(((pack, index), value.clone()));
         Ok(value)
@@ -537,15 +543,15 @@ struct DecodedEntry {
     data: Bytes,
 }
 
-fn apply_delta(operation: &Operation, base: &[u8], delta: &[u8]) -> Result<Bytes, Error> {
+fn apply_delta(op: &Operation, base: &[u8], delta: &[u8], hash: bool) -> Result<Bytes, Error> {
     let (base_size, mut position) = delta_integer(delta)?;
     let (result_size, consumed) = delta_integer(&delta[position..])?;
     position += consumed;
     if base_size != base.len() || result_size > MAX_OBJECT_BYTES {
         return invalid("delta base or result size is invalid");
     }
-    operation.work(result_size)?;
-    let memory = operation.reserve(result_size)?;
+    op.work(result_size * (1 + usize::from(hash)))?;
+    let memory = op.reserve(result_size)?;
     let mut result = Vec::with_capacity(result_size);
     while position < delta.len() {
         let command = delta[position];
@@ -823,6 +829,23 @@ mod tests {
         );
         assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
 
+        store.reset();
+        let blocked = test_operation();
+        let root_bytes = usize::try_from(root.reference().len())?;
+        blocked.work(crate::pack::budget::WORK_BYTES - root_bytes + 1)?;
+        assert!(
+            load(
+                &blocked,
+                &log,
+                &view,
+                format,
+                &[(descriptor.clone(), root.reference().clone())]
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+
         let catalog = load_one(&log, &view, format, descriptor, &root).await?;
         let gets = store.metrics().operation(StoreOperation::Get);
         assert_eq!(gets.requests, 1);
@@ -953,6 +976,14 @@ mod tests {
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let mut reader = Reader::new(&log, &view, &catalog);
         assert!(catalog.packs[0].chunks.len() > MAX_CACHE_BYTES / CHUNK_BYTES);
+        for index in 0..MAX_CACHE_BYTES / CHUNK_BYTES {
+            drop(reader.chunk(0, index).await?);
+        }
+        let pressure = catalog
+            .operation
+            .reserve(LIVE_BYTES - catalog.operation.live_bytes())?;
+        drop(reader.chunk(0, MAX_CACHE_BYTES / CHUNK_BYTES).await?);
+        drop(pressure);
         let first = reader.chunk(0, 0).await?.slice(..16);
         for index in 1..catalog.packs[0].chunks.len() {
             drop(reader.chunk(0, index).await?);
@@ -1164,6 +1195,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inflate_memory_and_hash_work_fail_before_cached_decode() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "hash-work").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 1, true, false)?;
+        let id = fixture.objects[0].0;
+        let size = fixture.objects[0].1.len();
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let operation = test_operation();
+        let catalog = load(
+            &operation,
+            &log,
+            &view,
+            ObjectFormat::Sha1,
+            &[(descriptor.clone(), root.reference().clone())],
+        )
+        .await?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        drop(reader.chunk(0, 0).await?);
+        let allowance = size + INFLATE_BYTES - 1;
+        let pressure = operation.reserve(LIVE_BYTES - operation.live_bytes() - allowance)?;
+        store.reset();
+        assert!(matches!(
+            reader.find(id).await,
+            Err(Error::InvalidPack(message)) if message == "Git live-memory limit exceeded"
+        ));
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        drop(reader);
+        drop(catalog);
+        drop(pressure);
+        drop(operation);
+
+        let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
+        let range = catalog.packs[0].entry_range(0)?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        drop(reader.chunk(0, 0).await?);
+        let required = (range.end - range.start) as usize + size * 2;
+        let used = catalog.operation.work_bytes();
+        catalog
+            .operation
+            .work(crate::pack::budget::WORK_BYTES - used - required + 1)?;
+        store.reset();
+        assert!(matches!(
+            reader.find(id).await,
+            Err(Error::InvalidPack(message)) if message == "Git work limit exceeded"
+        ));
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn indexes_reject_corrupt_checksums_fans_ids_and_offsets() -> TestResult {
         let store = FaultStore::from_arc(Arc::new(InMemory::new()));
         let (log, view) = open(store, "index-corruption").await?;
@@ -1325,7 +1406,7 @@ mod tests {
         )?;
         let compressed = usize::try_from(entry.data_offset)?;
         assert!(delta_integer(&[0xff; 16]).is_err());
-        assert!(apply_delta(&test_operation(), &[], &[0, 1, 1]).is_err());
+        assert!(apply_delta(&test_operation(), &[], &[0, 1, 1], false).is_err());
 
         let mut pack = original_pack.clone();
         pack[compressed] ^= 1;

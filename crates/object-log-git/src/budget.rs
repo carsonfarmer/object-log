@@ -1,6 +1,6 @@
 use std::sync::{
-    Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use bytes::Bytes;
@@ -21,7 +21,7 @@ static POOL: OnceLock<Pool> = OnceLock::new();
 pub(crate) struct Pool(Arc<PoolState>);
 
 struct PoolState {
-    active: Mutex<bool>,
+    active: AtomicBool,
     live: AtomicUsize,
     limit: usize,
 }
@@ -30,7 +30,7 @@ impl Pool {
     pub(crate) fn shared() -> &'static Self {
         POOL.get_or_init(|| {
             Self(Arc::new(PoolState {
-                active: Mutex::new(false),
+                active: AtomicBool::new(false),
                 live: AtomicUsize::new(0),
                 limit: LIVE_BYTES,
             }))
@@ -40,22 +40,21 @@ impl Pool {
     #[cfg(test)]
     pub(crate) fn new(limit: usize) -> Self {
         Self(Arc::new(PoolState {
-            active: Mutex::new(false),
+            active: AtomicBool::new(false),
             live: AtomicUsize::new(0),
             limit,
         }))
     }
 
     pub(crate) fn admit(&self) -> Result<Operation, Error> {
-        let mut active = self
+        if self
             .0
             .active
-            .lock()
-            .map_err(|_| Error::InvalidPack("Git operation pool is poisoned".into()))?;
-        if *active {
-            return invalid("another Git operation is active");
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(Error::InvalidPack("another Git operation is active".into()));
         }
-        *active = true;
         Ok(Operation(Arc::new(OperationState {
             pool: self.0.clone(),
             calls: AtomicUsize::new(0),
@@ -75,14 +74,9 @@ struct OperationState {
     thin_rounds: AtomicUsize,
     retries: AtomicUsize,
 }
-
 impl Drop for OperationState {
     fn drop(&mut self) {
-        *self
-            .pool
-            .active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        self.pool.active.store(false, Ordering::Release);
     }
 }
 
@@ -207,10 +201,6 @@ pub(crate) fn hold(bytes: Bytes, reservation: Reservation) -> Bytes {
         bytes,
         _reservation: reservation,
     })
-}
-
-fn invalid<T>(message: &'static str) -> Result<T, Error> {
-    Err(Error::InvalidPack(message.into()))
 }
 
 #[cfg(test)]
