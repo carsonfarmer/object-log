@@ -3,7 +3,7 @@
 ## Result
 
 The review reduced allocations and removed one core API responsibility. It
-compares base revision `ad7fb39` with `3064006`.
+compares base revision `ad7fb39` with `776d7f8`.
 
 `Materializer` now restores a checkpoint and replays operations. It no longer
 encodes checkpoints. Each domain owns its checkpoint encoding because only the
@@ -28,16 +28,16 @@ The allocation probe measured these changes:
 | Operation | Base allocations | Current allocations | Base allocated bytes | Current allocated bytes |
 |---|---:|---:|---:|---:|
 | Encode a 4,096-key checkpoint | 8,196 | 2 | 4,730,903 | 2,441,208 |
-| Encode a 4 KiB set operation | 7 | 3 | Not recorded | Not recorded |
+| Encode a 4 KiB set operation | 7 | 3 | 8,265 | 4,142 |
 
 The temporary `stats_alloc` probe was removed after the measurement. The
 retained tests check the canonical encoded forms and decoding limits.
 
 ## Core checkpoint encoding
 
-The core encoder borrows checkpoint bytes and object references. Encoding a
-1 MiB checkpoint changed from 8 to 4 allocations and from 5,243,305 to
-4,194,666 allocated bytes.
+The core encoder borrows the snapshot and fixed identity fields. Encoding a 1
+MiB checkpoint changed from 8 to 4 allocations and from 5,243,305 to 4,194,666
+allocated bytes. Object-reference wire values remain owned.
 
 This encoder change added 19 core product lines. Removing checkpoint encoding
 from `Materializer` removed 7, for a net increase of 12 core product lines.
@@ -50,7 +50,7 @@ NOOP checkpoint query and keeps the journal-pointer VFS read.
 
 | Measure | Base | Current |
 |---|---:|---:|
-| SQLite product lines | 1,512 | 1,476 |
+| SQLite product lines | 1,512 | 1,469 |
 | Snapshot descriptor bytes | 15 | 7 |
 | WAL descriptor bytes | 54 | 43 |
 | Lines inside unsafe blocks | 22 | 12 |
@@ -58,6 +58,10 @@ NOOP checkpoint query and keeps the journal-pointer VFS read.
 The focused small-transaction Criterion comparison found no significant
 change. The [SQLite evidence](sqlite-local-2026-09-03.md) records the retained
 benchmark conditions and limits.
+
+The independent verifier found that the first CDDL draft omitted the inner
+array around an inline snapshot. Commit `776d7f8` corrected the schema and added
+exact golden bytes for all four variants.
 
 ## Product line result
 
@@ -68,13 +72,17 @@ The final changed-area product counts are:
 | Key-value | 431 | 434 | +3 |
 | Core changes | n/a | n/a | +12 |
 | Git | 1,855 | 1,844 | -11 |
-| SQLite | 1,512 | 1,476 | -36 |
+| SQLite | 1,512 | 1,469 | -43 |
 | Git HTTP | 1,027 | 1,027 | 0 |
 
-These areas have 32 fewer product lines in total. The key-value crate's final
+These areas have 39 fewer product lines in total. The key-value crate's final
 count includes the inherent checkpoint method that replaced the trait method.
 The Git change removes production checkpoint encoding and keeps a nine-line
 test helper for restore coverage.
+
+The final Rust deletion pass stores key-value values as `Bytes`, so returning a
+prior value no longer copies its payload. It also removed three one-use helpers
+and seven more product lines without changing tests or durable bytes.
 
 ## Focused gates
 
@@ -92,8 +100,10 @@ The following focused checks passed before this document was written:
   Clippy for core, key-value, and Git, 173 regular tests, and doctests. Two
   opt-in tests were ignored.
 
-The root workspace gate remains for final integration. Live AWS and remote
-object-store performance qualification remain separate.
+The final root workspace gate passed at revision `776d7f8`. It completed in
+26.8 seconds and covered formatting, strict workspace Clippy, all regular
+tests, and all documentation tests. Live AWS and remote object-store
+performance qualification remain separate.
 
 ## Follow-up
 
