@@ -37,12 +37,12 @@ contract.
 `put_object` and `put_node` return process-local `StagedObject` proofs.
 `prepare` and `publish_checkpoint` accept those proofs, so the same `Log`
 handle or one of its clones can publish without reading the object graph back.
-`materialize` also creates proofs for references in the authenticated
-checkpoint and tail records of its exact view. An adapter can retain those
-proofs and publish them with that view. `stage_objects` fully verifies arbitrary
-durable references before it creates proofs. Recovery tokens do not contain a
-proof. `resume` and publication from a separately opened handle fully verify
-the referenced graph. A collection-epoch change rejects an older proof.
+`materialize` accepts one loaded `View` and creates proofs for references in
+its authenticated checkpoint and tail records. An adapter can retain those
+proofs and publish them with that exact view. `stage_objects` fully verifies
+arbitrary durable references before it creates proofs. Recovery tokens do not
+contain a proof. `resume` and publication from a separately opened handle fully
+verify the referenced graph. A collection-epoch change rejects an older proof.
 
 The current durable format is v1. Before the first release, its byte layout can
 change when a different layout makes the design smaller or better. The project

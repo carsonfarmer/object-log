@@ -597,6 +597,46 @@ async fn batched_existing_staging_deduplicates_the_object_graph() -> TestResult 
 }
 
 #[tokio::test]
+async fn materialize_uses_the_supplied_view_after_head_advances() -> TestResult {
+    let (_, log, _) = open_model_log(127).await?;
+    let initial = log.load().await?;
+    let first = log
+        .put_object(&initial, Bytes::from_static(b"first"))
+        .await?;
+    let first_reference = first.reference().clone();
+    let prepared = log.prepare(
+        &initial,
+        transaction_id(127, 1),
+        Bytes::new(),
+        Bytes::new(),
+        vec![first],
+    )?;
+    let CommitStatus::Committed(observed) = log.commit(prepared).await? else {
+        return Err(test_error("first materialization commit did not publish").into());
+    };
+
+    let prepared = log.prepare(
+        &observed,
+        transaction_id(127, 2),
+        Bytes::new(),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    let CommitStatus::Committed(current) = log.commit(prepared).await? else {
+        return Err(test_error("second materialization commit did not publish").into());
+    };
+
+    let materialized = materialize(&log, observed, &ProofMachine).await?;
+    assert_eq!(materialized.view().generation(), 1);
+    assert_eq!(materialized.view().tail().len(), 1);
+    assert_eq!(materialized.state().len(), 1);
+    assert_eq!(materialized.state()[0].reference(), &first_reference);
+    assert_eq!(current.generation(), 2);
+    assert_eq!(current.tail().len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResult {
     let (store, log, _) = open_model_log(126).await?;
     let initial = log.load().await?;
@@ -613,20 +653,19 @@ async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResul
         Bytes::new(),
         vec![root.clone()],
     )?;
-    assert!(matches!(
-        log.commit(prepared).await?,
-        CommitStatus::Committed(_)
-    ));
+    let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
+        return Err(test_error("proof commit did not publish").into());
+    };
 
     store.reset();
-    let tail = materialize(&log, &ProofMachine).await?;
+    let tail = materialize(&log, committed, &ProofMachine).await?;
     assert_eq!(tail.state().len(), 1);
     assert_eq!(segment_gets(&store, "nodes"), 0);
     assert_eq!(segment_gets(&store, "blobs"), 0);
 
     let through = tail.view().tail()[0].clone();
     store.reset();
-    let CheckpointStatus::Published(_) = log
+    let CheckpointStatus::Published(checkpoint_view) = log
         .publish_checkpoint(tail.view(), &through, Bytes::new(), tail.state().clone())
         .await?
     else {
@@ -637,7 +676,7 @@ async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResul
     assert_eq!(segment_gets(&store, "blobs"), 0);
 
     store.reset();
-    let checkpoint = materialize(&log, &ProofMachine).await?;
+    let checkpoint = materialize(&log, checkpoint_view, &ProofMachine).await?;
     assert_eq!(checkpoint.state().len(), 1);
     assert_eq!(segment_gets(&store, "nodes"), 0);
     assert_eq!(segment_gets(&store, "blobs"), 0);

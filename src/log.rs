@@ -2150,6 +2150,37 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn commit_ref_len_matches_the_encoded_commit_and_read_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("commit-ref-len", Options::default()).await?;
+        let view = log.load().await?;
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(b"operation"),
+            Bytes::from_static(b"result"),
+            Vec::new(),
+        )?;
+        let (reference, bytes) = log.encode_prepared(&prepared)?;
+        let encoded_len = u64::try_from(bytes.len())?;
+        assert_eq!(reference.len(), encoded_len);
+
+        let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
+            return Err("commit lost its uncontended publication".into());
+        };
+        let published = committed
+            .tail()
+            .last()
+            .ok_or("committed view has no tail")?;
+        assert_eq!(published.len(), encoded_len);
+        assert_eq!(
+            log.read_commit(published).await?.reference().len(),
+            encoded_len
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fresh_staging_reallocates_a_colliding_physical_id()
     -> Result<(), Box<dyn std::error::Error>> {
         let log = test_log("storage-id-collision", Options::default()).await?;

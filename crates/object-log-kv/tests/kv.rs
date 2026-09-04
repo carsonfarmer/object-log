@@ -59,7 +59,10 @@ async fn key_value_commands_have_one_committed_order() -> TestResult {
         KvResult::Swapped(true)
     );
     assert_eq!(
-        materialize(&log, &machine).await?.state().get(b"name"),
+        materialize(&log, log.load().await?, &machine)
+            .await?
+            .state()
+            .get(b"name"),
         Some(b"second".as_slice())
     );
     assert_eq!(
@@ -73,7 +76,12 @@ async fn key_value_commands_have_one_committed_order() -> TestResult {
         .await?,
         KvResult::Previous(Some(Bytes::from_static(b"second")))
     );
-    assert!(materialize(&log, &machine).await?.state().is_empty());
+    assert!(
+        materialize(&log, log.load().await?, &machine)
+            .await?
+            .state()
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -103,7 +111,7 @@ async fn concurrent_increments_return_each_committed_value_once() -> TestResult 
     values.sort_unstable();
     assert_eq!(values, (1..=32).collect::<Vec<_>>());
 
-    let state = materialize(&log, &machine).await?;
+    let state = materialize(&log, log.load().await?, &machine).await?;
     let stored = state.state().get(b"counter").ok_or("counter is missing")?;
     let encoded: [u8; size_of::<i64>()] = stored.try_into()?;
     assert_eq!(i64::from_be_bytes(encoded), 32);
@@ -134,7 +142,7 @@ async fn checkpoint_restore_matches_full_replay() -> TestResult {
     )
     .await?;
 
-    let replayed = materialize(&log, &machine).await?;
+    let replayed = materialize(&log, log.load().await?, &machine).await?;
     let through = replayed
         .view()
         .tail()
@@ -150,7 +158,7 @@ async fn checkpoint_restore_matches_full_replay() -> TestResult {
     };
     assert!(compacted.tail().is_empty());
 
-    let restored = materialize(&log, &machine).await?;
+    let restored = materialize(&log, log.load().await?, &machine).await?;
     assert_eq!(restored.state(), replayed.state());
     assert!(restored.view().checkpoint().is_some());
     Ok(())
@@ -278,7 +286,7 @@ async fn execute(
 ) -> Result<KvResult, Box<dyn StdError>> {
     let transaction_id = TransactionId::new();
     loop {
-        let current = materialize(log, machine).await?;
+        let current = materialize(log, log.load().await?, machine).await?;
         let (operation, result_bytes, result) = match machine.evaluate(current.state(), &command)? {
             KvDecision::NoChange(result) => return Ok(result),
             KvDecision::Commit {

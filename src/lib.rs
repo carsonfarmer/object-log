@@ -268,6 +268,16 @@ impl CommitRef {
     pub const fn digest(&self) -> Digest {
         self.digest
     }
+
+    /// Returns the encoded WAL-entry byte length.
+    #[must_use]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "a commit record cannot be empty"
+    )]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
 }
 
 /// A reference to a snapshot and its exact covered commit.

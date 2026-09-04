@@ -79,7 +79,7 @@ impl Repository {
     }
 
     async fn open_attempt(log: &Log, path: &Path, format: ObjectFormat) -> Result<Self, Error> {
-        let materialized = materialize(log, &Machine::new(format))
+        let materialized = materialize(log, log.load().await?, &Machine::new(format))
             .await
             .map_err(|error| match error {
                 object_log::MaterializeError::Log(error) => Error::ObjectLog(error),

@@ -58,10 +58,10 @@ object graph back. `stage_objects` fully verifies existing durable references
 before it creates proofs. Recovery tokens omit the proof, and recovered or
 separately opened work uses full graph verification.
 
-`materialize` also creates same-handle proofs for references in the
-authenticated checkpoint and tail records of its exact view. An adapter can
-retain them in materialized state and publish a checkpoint without rereading
-the graph. A collection-epoch change invalidates the proofs.
+`materialize` accepts one loaded `View` and creates same-handle proofs for
+references in its authenticated checkpoint and tail records. An adapter can
+retain them in materialized state and publish a checkpoint with that exact view
+without rereading the graph. A collection-epoch change invalidates the proofs.
 
 This fast path requires exact immutable bytes to remain at their physical key
 until object-log garbage collection deletes them. External lifecycle expiry,

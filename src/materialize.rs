@@ -83,7 +83,9 @@ pub enum MaterializeError<E: StdError + 'static> {
     State(E),
 }
 
-/// Reconstructs state from one exact index, its base, and its active WAL tail.
+/// Reconstructs state from one exact observed view.
+///
+/// The returned [`Materialized`] contains the supplied view.
 ///
 /// # Errors
 ///
@@ -91,12 +93,12 @@ pub enum MaterializeError<E: StdError + 'static> {
 /// invalid application snapshot or operation.
 pub async fn materialize<M>(
     log: &Log,
+    view: View,
     materializer: &M,
 ) -> Result<Materialized<M::State>, MaterializeError<M::Error>>
 where
     M: Materializer,
 {
-    let view = log.load().await?;
     let mut state = match log.read_checkpoint(&view).await? {
         Some(checkpoint) => {
             let objects = record_proofs(log, &view, checkpoint.objects());

@@ -133,10 +133,10 @@ the view names.
 clone and for its collection epoch. It lets publication rely on the completed
 create-only write without reading the object graph back. It is not serialized.
 
-`materialize` creates the same type of proof for each ordered object reference
-in the authenticated checkpoint and tail records of its loaded view. An
-adapter can retain these proofs and publish them with that exact view without
-reading the object graph. A changed collection epoch rejects the proof.
+`materialize` accepts one loaded `View` and creates the same type of proof for
+each ordered object reference in its authenticated checkpoint and tail records.
+An adapter can retain these proofs and publish them with that exact view
+without reading the object graph. A changed collection epoch rejects the proof.
 
 `stage_objects` accepts arbitrary durable `ObjectRef` values, verifies each
 complete transitive graph, checks the active collection fence, and returns

@@ -56,8 +56,7 @@ Required value types:
 - `StagedObject`: process-local proof that one object graph is ready for
   publication by this log handle at this collection epoch.
 - `ReferenceNode`: opaque payload and explicit child references.
-- `CommitRef`: public sequence, transaction ID, and digest. The durable value
-  also carries an encoded byte length for internal integrity checks.
+- `CommitRef`: public sequence, transaction ID, digest, and encoded byte length.
 - `PreparedCommit`: expected view, transaction ID, operation bytes, result
   bytes, and staged object references.
 - `PendingCommit`: enough evidence to resolve or retry one exact publication.
