@@ -1,31 +1,23 @@
+mod support;
+
 use std::{
     collections::BTreeSet,
-    error::Error as StdError,
-    fs,
-    path::{Path, PathBuf},
-    process::{Command, Output},
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use futures::TryStreamExt;
 use object_log::{
-    CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus, Log, LogId, Options,
-    TransactionId, ValidatedBackend, View,
+    CheckpointStatus, CollectionFinish, CollectionStart, Log, LogId, Options, ValidatedBackend,
+    View,
 };
-use object_log_git::{ObjectFormat, ObjectId, RefUpdate, Repository};
+use object_log_git::{ObjectFormat, Repository};
 use object_store::{ObjectStore, memory::InMemory, path::Path as StorePath};
+use support::{Fixture, TestResult, assert_repository, fixture, publish};
 
 const DEAD_BYTES: usize = 2 * 1024 * 1024;
 const GC_DEADLINE: Duration = Duration::from_secs(10);
-
-type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
-
-struct Fixture {
-    pack: PathBuf,
-    target: ObjectId,
-    contents: Vec<u8>,
-}
 
 #[tokio::test]
 async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestResult {
@@ -49,12 +41,15 @@ async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestRes
     };
     assert!(empty_view.tail().is_empty());
 
-    let live = fixture(directory.path(), "live", &pseudo_random(4_096, 1))?;
-    let dead = fixture(directory.path(), "dead", &pseudo_random(DEAD_BYTES, 2))?;
+    let live = fixture("live", 4_096, 1)?;
+    let dead = fixture("dead", DEAD_BYTES, 2)?;
+    assert!(dead.pack_bytes > live.pack_bytes);
     let first = repository(&log, directory.path(), "first").await?;
     let first_view = publish(
         first,
-        RefUpdate::new("refs/heads/main", None, Some(live.target))?,
+        "refs/heads/main",
+        None,
+        Some(live.target),
         Some(&live.pack),
     )
     .await?;
@@ -64,7 +59,9 @@ async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestRes
     let second = repository(&log, directory.path(), "second").await?;
     let second_view = publish(
         second,
-        RefUpdate::new("refs/heads/dead", None, Some(dead.target))?,
+        "refs/heads/dead",
+        None,
+        Some(dead.target),
         Some(&dead.pack),
     )
     .await?;
@@ -77,12 +74,7 @@ async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestRes
     assert!(dead_pack.len() >= 100);
 
     let third = repository(&log, directory.path(), "third").await?;
-    publish(
-        third,
-        RefUpdate::new("refs/heads/dead", Some(dead.target), None)?,
-        None,
-    )
-    .await?;
+    publish(third, "refs/heads/dead", Some(dead.target), None, None).await?;
 
     let checkpoint = repository(&log, directory.path(), "checkpoint").await?;
     let CheckpointStatus::Published(checkpoint_view) = checkpoint.checkpoint().await? else {
@@ -93,7 +85,9 @@ async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestRes
     let tail = repository(&log, directory.path(), "tail").await?;
     let current = publish(
         tail,
-        RefUpdate::new("refs/tags/after-checkpoint", None, Some(live.target))?,
+        "refs/tags/after-checkpoint",
+        None,
+        Some(live.target),
         None,
     )
     .await?;
@@ -142,27 +136,7 @@ async fn assert_recovery(log: &Log, root: &Path, live: &Fixture) -> TestResult {
         recovered.refs().get(&b"refs/tags/after-checkpoint"[..]),
         Some(&live.target)
     );
-    command(Some(&path), &["fsck", "--strict", "--no-progress"])?;
-    assert_eq!(
-        command_output(Some(&path), &["show", "refs/heads/main:file"])?.stdout,
-        live.contents
-    );
-    Ok(())
-}
-
-async fn publish(
-    repository: Repository,
-    update: RefUpdate,
-    pack: Option<&Path>,
-) -> TestResult<View> {
-    let push = repository
-        .prepare_push(TransactionId::new(), vec![update], pack)
-        .await?;
-    match push.publish().await? {
-        CommitStatus::Committed(view) => Ok(view),
-        CommitStatus::Conflict(_) => Err("Git push conflicted".into()),
-        CommitStatus::Pending(_) => Err("Git push remained pending".into()),
-    }
+    assert_repository(&path, live)
 }
 
 async fn repository(log: &Log, root: &Path, name: &str) -> TestResult<Repository> {
@@ -194,84 +168,4 @@ fn pack_keys(keys: &BTreeSet<String>) -> BTreeSet<String> {
         .filter(|key| key.contains("/blobs/") || key.contains("/nodes/"))
         .cloned()
         .collect()
-}
-
-fn fixture(root: &Path, name: &str, contents: &[u8]) -> TestResult<Fixture> {
-    let work = root.join(name);
-    command(
-        Some(root),
-        &[
-            "init",
-            "--quiet",
-            "-b",
-            "main",
-            "--object-format=sha1",
-            name,
-        ],
-    )?;
-    fs::write(work.join("file"), contents)?;
-    command(Some(&work), &["add", "file"])?;
-    command(Some(&work), &["commit", "--quiet", "-m", name])?;
-    let target = ObjectId::parse(
-        ObjectFormat::Sha1,
-        output(Some(&work), &["rev-parse", "HEAD"])?.trim(),
-    )?;
-    let pack = root.join(format!("{name}.pack"));
-    fs::write(
-        &pack,
-        command_output(Some(&work), &["pack-objects", "--all", "--stdout"])?.stdout,
-    )?;
-    Ok(Fixture {
-        pack,
-        target,
-        contents: contents.to_vec(),
-    })
-}
-
-fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
-    let mut state = seed;
-    (0..len)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state.to_le_bytes()[0]
-        })
-        .collect()
-}
-
-fn command(directory: Option<&Path>, args: &[&str]) -> TestResult {
-    let result = command_output(directory, args)?;
-    if result.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&result.stderr).into_owned().into())
-    }
-}
-
-fn output(directory: Option<&Path>, args: &[&str]) -> TestResult<String> {
-    let result = command_output(directory, args)?;
-    if result.status.success() {
-        Ok(String::from_utf8(result.stdout)?)
-    } else {
-        Err(String::from_utf8_lossy(&result.stderr).into_owned().into())
-    }
-}
-
-fn command_output(directory: Option<&Path>, args: &[&str]) -> TestResult<Output> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "Object Log")
-        .env("GIT_AUTHOR_EMAIL", "object-log@example.invalid")
-        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
-        .env("GIT_COMMITTER_NAME", "Object Log")
-        .env("GIT_COMMITTER_EMAIL", "object-log@example.invalid")
-        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z");
-    if let Some(directory) = directory {
-        command.current_dir(directory);
-    }
-    Ok(command.output()?)
 }

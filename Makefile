@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-performance-acceptance git-minio-test
 
 check:
 	cargo fmt --all --check
@@ -26,3 +26,12 @@ staged-performance-acceptance:
 gc-acceptance:
 	cargo test --features test-util --test gc_acceptance memory_gc_removes_100k_objects -- --ignored --nocapture
 	./scripts/test-minio.sh gc_acceptance minio_gc_removes_10001_objects
+
+git-bench:
+	cargo bench -p object-log-git --bench git
+
+git-performance-acceptance:
+	cargo test -p object-log-git --test performance_acceptance git_request_and_byte_accounting -- --ignored --exact --nocapture
+
+git-minio-test:
+	./scripts/test-minio.sh minio minio_git_push_checkpoint_collection_and_cold_recovery object-log-git aws

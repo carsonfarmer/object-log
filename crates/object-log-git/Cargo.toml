@@ -7,6 +7,10 @@ description = "Git repository demonstration for object-log"
 license = "Apache-2.0"
 publish = false
 
+[features]
+default = []
+aws = ["object_store/aws"]
+
 [dependencies]
 bytes = "1.10"
 gix = { version = "0.87.1", default-features = false, features = ["revision", "sha1", "sha256"] }
@@ -33,3 +37,7 @@ pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[[bench]]
+name = "git"
+harness = false
