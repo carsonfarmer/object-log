@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use minicbor::{Decode, Encode, Encoder, encode::Write};
+use minicbor::{Decode, Encode, encode::Write};
 
 use crate::{PAGE_SIZE, SqliteError, wal::WAL_FRAME_HEADER_BYTES};
 
@@ -100,18 +100,12 @@ impl Record {
 
     pub(crate) fn decode(bytes: &[u8], objects: usize) -> Result<Self, SqliteError> {
         let record: Self = minicbor::decode(bytes).map_err(codec_error)?;
-        if !is_canonical(&record, bytes) {
+        let mut exact = Exact(bytes);
+        if minicbor::encode(&record, &mut exact).is_err() || !exact.0.is_empty() {
             return Err(invalid("record is not canonical CBOR"));
         }
         record.validate(objects)?;
         Ok(record)
-    }
-
-    pub(crate) const fn is_snapshot(&self) -> bool {
-        match self {
-            Self::SnapshotInline(_) | Self::SnapshotChunks { .. } => true,
-            Self::WalInline { .. } | Self::WalChunks { .. } => false,
-        }
     }
 
     pub(crate) fn payload(&self) -> Result<(usize, Option<&Bytes>), SqliteError> {
@@ -185,11 +179,6 @@ impl Write for Exact<'_> {
         self.0 = self.0.strip_prefix(bytes).ok_or(())?;
         Ok(())
     }
-}
-
-fn is_canonical(value: &Record, bytes: &[u8]) -> bool {
-    let mut exact = Exact(bytes);
-    Encode::encode(value, &mut Encoder::new(&mut exact), &mut ()).is_ok() && exact.0.is_empty()
 }
 
 mod byte_string {

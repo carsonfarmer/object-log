@@ -14,14 +14,14 @@ const KV_FORMAT_VERSION: u32 = 1;
 /// The complete logical key-value state at one log position.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KvState {
-    entries: BTreeMap<Vec<u8>, Vec<u8>>,
+    entries: BTreeMap<Vec<u8>, Bytes>,
 }
 
 impl KvState {
     /// Returns a stored value without copying it.
     #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        self.entries.get(key).map(Vec::as_slice)
+        self.entries.get(key).map(Bytes::as_ref)
     }
 
     /// Returns the number of keys.
@@ -116,9 +116,10 @@ impl KvMachine {
         let integer_bytes;
         let (mutation, result) = match command {
             KvCommand::Set { key, value } => {
-                let previous = state.get(key).map(Bytes::copy_from_slice);
-                if previous.as_ref().is_some_and(|stored| stored == value) {
-                    return Ok(KvDecision::NoChange(KvResult::Previous(previous)));
+                let previous = state.entries.get(key.as_ref()).cloned();
+                if previous.as_deref() == Some(value.as_ref()) {
+                    let result = KvResult::Previous(previous);
+                    return Ok(KvDecision::NoChange(result));
                 }
                 (
                     MutationWire::unconditional(key, Some(value)),
@@ -126,7 +127,7 @@ impl KvMachine {
                 )
             }
             KvCommand::Delete { key } => {
-                let previous = state.get(key).map(Bytes::copy_from_slice);
+                let previous = state.entries.get(key.as_ref()).cloned();
                 let Some(stored) = previous else {
                     return Ok(KvDecision::NoChange(KvResult::Previous(None)));
                 };
@@ -169,8 +170,8 @@ impl KvMachine {
         };
 
         Ok(KvDecision::Commit {
-            operation: encode(&mutation)?.into(),
-            result_bytes: encode(&ResultWire::from(&result))?.into(),
+            operation: encode(&mutation)?,
+            result_bytes: encode(&ResultWire::from(&result))?,
             result,
         })
     }
@@ -208,7 +209,7 @@ impl KvMachine {
                 .map(|(key, value)| EntryWire { key, value })
                 .collect(),
         };
-        Ok(encode(&snapshot)?.into())
+        encode(&snapshot)
     }
 }
 
@@ -236,7 +237,7 @@ impl Materializer for KvMachine {
                 ));
             }
             prior_key = Some(entry.key);
-            entries.insert(entry.key.to_vec(), entry.value.to_vec());
+            entries.insert(entry.key.to_vec(), Bytes::copy_from_slice(entry.value));
         }
         Ok(KvState { entries })
     }
@@ -260,7 +261,9 @@ impl Materializer for KvMachine {
         }
         match mutation.value {
             Some(value) => {
-                state.entries.insert(mutation.key.to_vec(), value.to_vec());
+                state
+                    .entries
+                    .insert(mutation.key.to_vec(), Bytes::copy_from_slice(value));
             }
             None => {
                 state.entries.remove(mutation.key);
@@ -378,8 +381,10 @@ impl<'a> From<&'a KvResult> for ResultWire<'a> {
     }
 }
 
-fn encode(value: &impl Encode<()>) -> Result<Vec<u8>, KvError> {
-    minicbor::to_vec(value).map_err(|error| KvError::InvalidEncoding(error.to_string()))
+fn encode(value: &impl Encode<()>) -> Result<Bytes, KvError> {
+    minicbor::to_vec(value)
+        .map(Bytes::from)
+        .map_err(|error| KvError::InvalidEncoding(error.to_string()))
 }
 
 fn decode<'bytes, T>(bytes: &'bytes [u8]) -> Result<T, KvError>
@@ -395,7 +400,8 @@ where
             "encoded value contains trailing bytes".to_owned(),
         ));
     }
-    if !is_canonical(&value, bytes) {
+    let mut exact = Exact(bytes);
+    if minicbor::encode(&value, &mut exact).is_err() || !exact.0.is_empty() {
         return Err(KvError::InvalidEncoding(
             "encoded value is not canonical key-value format version 1".to_owned(),
         ));
@@ -412,11 +418,6 @@ impl Write for Exact<'_> {
         self.0 = self.0.strip_prefix(bytes).ok_or(())?;
         Ok(())
     }
-}
-
-fn is_canonical(value: &impl Encode<()>, bytes: &[u8]) -> bool {
-    let mut exact = Exact(bytes);
-    minicbor::encode(value, &mut exact).is_ok() && exact.0.is_empty()
 }
 
 fn require_version(version: u32) -> Result<(), KvError> {

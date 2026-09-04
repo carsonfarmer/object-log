@@ -494,7 +494,10 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
 
     if let Some(checkpoint) = checkpoint {
         let descriptor = Record::decode(checkpoint.snapshot(), checkpoint.objects().len())?;
-        if !descriptor.is_snapshot() {
+        if !matches!(
+            &descriptor,
+            Record::SnapshotInline(_) | Record::SnapshotChunks { .. }
+        ) {
             return Err(SqliteError::InvalidRecord(
                 "checkpoint does not contain a snapshot".into(),
             ));
