@@ -2,11 +2,12 @@
 
 ## Outcome
 
-`object-log` is the product. It is a small object-storage WAL for higher-level
-storage systems. The `object-log-git` crate is one proof of its public API.
+`object-log` is the product. It is a small, generic, object-storage-backed WAL
+for higher-level storage systems. The `object-log-git` crate is one proof of
+its public API.
 
-Phase 1 builds a native Git storage adapter. It accepts parsed ref commands and
-a pack. It validates both inputs, publishes one atomic object-log update, and
+The native Git storage adapter accepts parsed ref commands and an optional pack
+path. It validates both inputs, publishes one atomic object-log update, and
 recovers a standard bare Git repository from object storage. The adapter uses
 only the public `object-log` API.
 
@@ -40,28 +41,30 @@ records the library review and compile checks.
 The storage adapter accepts domain values instead of Git wire data:
 
 ```text
-GitRepository::open(log, cache_path, config) -> GitRepository
-GitRepository::prepare_push(commands, pack) -> PreparedPush
-PreparedPush::publish() -> CommitStatus
-GitRepository::resume(recovery_token) -> Resolution
-GitRepository::materialize(path) -> MaterializedRepository
-GitRepository::checkpoint() -> GitCheckpointStatus
+Repository::open(log, work_dir, object_format) -> Result<Repository, Error>
+Repository::refs() -> &RefSnapshot
+Repository::prepare_push(self, transaction_id, updates, Option<&Path>) -> Result<PreparedPush, Error>
+PreparedPush::recovery_token() -> &Bytes
+PreparedPush::publish(self) -> Result<CommitStatus, Error>
 ```
 
-`prepare_push` parses and validates the pack. It checks each ref command against
-the current snapshot. `PreparedPush` is opaque and belongs to the repository
-handle that created it. This prevents callers from claiming that arbitrary pack
-bytes passed validation.
+`open` loads the log and rebuilds a standard bare repository in an empty,
+disposable directory. It installs durable packs, validates their reachable
+object graph, and restores refs. Objects outside the recovered pack set cannot
+support a ref update.
 
-`publish` stages new pack chunks and commits one ref transaction. A conflict or
-unresolved result cannot report success. `resume` resolves a lost publication
-response without another pack upload. `materialize` creates a standard bare
-repository with standard pack files, indexes, refs, and `HEAD`.
+`prepare_push` validates each update against the current snapshot. It normalizes
+an optional pack, validates the target graph against recovered and new pack
+objects, stages pack chunks, and prepares one object-log commit. `PreparedPush`
+is opaque. Its recovery token identifies the exact publication attempt.
+
+`publish` performs the conditional publication. The core `Log::resume` method
+resolves a lost response from the recovery token without another pack upload.
 
 The first crate supports SHA-1 and SHA-256 repositories. It supports direct refs
 under `refs/heads/` and `refs/tags/`, plus one configured symbolic `HEAD`. It
-rejects other symbolic refs, replace refs, shallow state, alternates, hooks,
-partial-clone state, and invalid object graphs.
+rejects other symbolic refs, shallow state, alternates, and invalid object
+graphs. It disables replacement objects and does not run Git hooks.
 
 ## Storage model
 
@@ -83,10 +86,12 @@ object-log collection deletes that key. External expiry, deletion, or overwrite
 violates this contract. A reopened handle verifies existing object graphs before
 it republishes their references.
 
-The layout follows Cursor's immutable WAL and CAS publication model. It omits
-warm-owner routing, replication, batching, and physical pack compaction.
-Checkpoints bound ref-log replay. Live pack count and recovery bytes can still
-grow until a later pack-compaction stage.
+The layout follows Cursor's immutable WAL and CAS publication model. Git
+checkpoints and physical pack compaction are not implemented. Live pack count,
+replay work, and recovery bytes can grow.
+
+Durable Object behavior, tenancy, routing, and actor or service ownership are
+out of scope. This proof does not add them to the WAL.
 
 ## Smart HTTP phase
 
@@ -94,9 +99,9 @@ Build smart HTTP only after phase 1 proves the storage API. Keep it in a separat
 crate. The adapter parses packet lines, capabilities, ref commands, and pack
 input. It passes parsed commands and pack bytes to `object-log-git`.
 
-Authentication, tenant routing, and HTTP server policy stay outside both the
-core WAL and the Git storage adapter. A push response waits for object-log to
-confirm publication. A conflict or unresolved result returns a protocol error.
+Authentication, routing, and HTTP server policy are out of scope. A push
+response waits for object-log to confirm publication. A conflict or unresolved
+result returns a protocol error.
 
 The HTTP phase must prove clone, fetch, and push with an unmodified Git client.
 It can use a native loopback server. It must not use an installed Git executable
@@ -143,22 +148,16 @@ unreachable bytes from a pack that also contains live objects.
   fast-forward update, and delete refs through loopback smart HTTP.
 - HTTP acceptance passes for SHA-1 and SHA-256 repositories.
 
-## Fixed tranche
+## Current status
 
-1. Define strict ref, object-ID, pack, transaction, and checkpoint records.
-2. Add the pure-Rust `gix` and `gix-pack` feature set.
-3. Implement pack validation and self-contained pack normalization.
-4. Implement pack chunk staging and atomic ref publication.
-5. Implement pending resolution without another pack upload.
-6. Materialize standard bare repositories and rebuild pack indexes.
-7. Implement live-pack checkpoint selection.
-8. Add state, corruption, race, and collection tests.
-9. Add SHA-1 and SHA-256 coverage.
-10. Add adapter benchmarks and request and byte accounting.
-11. Add one opt-in pinned MinIO lifecycle.
-12. Record local evidence and run independent correctness and deletion reviews.
+The native proof implements strict records, pure-Rust pack validation and
+normalization, chunk storage, atomic ref publication, lost-response recovery,
+bare-repository recovery, graph and pack provenance checks, conflict tests, and
+SHA-1 and SHA-256 tests.
 
-Smart HTTP starts as a separate tranche after these tasks pass.
+The remaining work is live-pack checkpoint selection, collection tests,
+benchmarks and request accounting, one pinned MinIO lifecycle, and a local
+evidence record. Smart HTTP starts after this storage proof is complete.
 
 ## Limits
 
@@ -167,5 +166,5 @@ and one push for each publication. Defer pack rewriting, global deduplication,
 cross-repository transactions, provider-specific behavior, Spin integration,
 live AWS work, and a WASI Git adapter.
 
-Preferred-owner routing and Durable-Object behavior are later performance and
-deployment work. They are not a core object-log goal now.
+Durable Object behavior, tenancy, routing, and actor or service ownership are
+not goals for this project.

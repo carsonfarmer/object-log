@@ -2,8 +2,12 @@
 
 [![Rust CI](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml/badge.svg)](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml)
 
-`object-log` is an experimental Rust library for a linearizable log over
-conditional object storage.
+`object-log` is an experimental Rust library for a small, generic,
+object-storage-backed write-ahead log. Higher-level storage systems use its
+public API. The key-value, `SQLite`, and Git crates are API proofs.
+
+Durable Object behavior, tenancy, routing, and actor or service ownership are
+out of scope.
 
 The durable model is small:
 
@@ -16,7 +20,7 @@ The durable model is small:
 - A durable positive deletion plan as the collection fence.
 - Explicit conflict and uncertain-result states.
 - Local memory and disk are optional caches.
-- One validated backend handle serves many isolated tenant logs.
+- One validated backend handle can open many isolated logs.
 
 Successful immutable creation has one required storage property: the exact
 bytes remain at the same physical key until object-log garbage collection
@@ -35,18 +39,21 @@ change when a different layout makes the design smaller or better. The project
 does not provide compatibility readers for earlier development layouts.
 
 The project is independent from Spin. The
-[`object-log-kv`](crates/object-log-kv) and
-[`object-log-sqlite`](crates/object-log-sqlite) crates use only the public core
-API. The `SQLite` adapter stores a complete first snapshot and later committed
-WAL ranges in the same log contract. Its 43 regular tests include in-memory
-storage, injected faults, and garbage collection. A separate local acceptance
-test recovers an exact 1,000-record WAL tail. The repository also has
-`Criterion` benchmarks and an opt-in loopback `MinIO` test.
+[`object-log-kv`](crates/object-log-kv),
+[`object-log-sqlite`](crates/object-log-sqlite), and
+[`object-log-git`](crates/object-log-git) proof crates use only the public core
+API. The `SQLite` proof stores a complete first snapshot and later committed WAL
+ranges in the same log contract. Its tests include in-memory storage, injected
+faults, and garbage collection. A separate local acceptance test recovers an
+exact 1,000-record WAL tail. The repository also has Criterion benchmarks and
+an opt-in loopback `MinIO` test.
 
-The `object-log-git` crate implements strict durable records, SHA-1 and
-SHA-256 pack normalization and installation, and thin-pack normalization
-against existing repository bases. Pack chunk storage and recovery, repository
-materialization, and transaction orchestration remain active work.
+The Git proof implements strict refs and records, SHA-1 and SHA-256 pack
+normalization, thin-pack normalization, bounded chunk storage, reachable-object
+validation, atomic ref publication, lost-response recovery, and cold recovery
+into a standard bare repository. Git checkpoints and collection, benchmarks,
+`MinIO` qualification, a local evidence record, and smart HTTP remain
+incomplete.
 
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the

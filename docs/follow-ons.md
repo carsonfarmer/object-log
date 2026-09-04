@@ -1,8 +1,13 @@
 # Ordered follow-on goals
 
 The local log, checkpoint, key-value proof, bounded garbage collection, and
-SQLite demonstration are implemented. Each next goal keeps object storage as
-the durable authority.
+SQLite proof are implemented. `object-log` remains a small, generic,
+object-storage-backed WAL for higher-level storage systems. Git, key-value, and
+SQLite are proof crates. Each next goal keeps object storage as the durable
+authority.
+
+Durable Object behavior, tenancy, routing, and actor or service ownership are
+out of scope.
 
 ## Completed: garbage collection
 
@@ -38,10 +43,10 @@ bounds, and ordered object transfers.
   measures a remote service.
 
 The same WAL-access proof passed on macOS and Linux with SQLite's public
-journal-pointer control. Before multi-tenant use, add aggregate recovery and
-transfer-byte limits, bound recovery retries, and isolate synchronous SQLite
-work on a capped owner executor. Recovery can stream validated WAL ranges after
-those limits are in place. Windows, other VFS implementations, a native
+journal-pointer control. Before production use, add aggregate recovery and
+transfer-byte limits, bound recovery retries, and isolate synchronous `SQLite`
+work on a capped blocking executor. Recovery can stream validated WAL ranges
+after those limits are in place. Windows, other VFS implementations, a native
 memory-safety sanitizer, live AWS, and Spin integration remain.
 
 ## Core performance decision
@@ -69,14 +74,20 @@ verification, performance, and live AWS qualification.
 
 ## 1. Git storage API proof
 
-`object-log` is the product. It is a small object-storage WAL for higher-level
-storage systems. `object-log-git` is a separate proof of its public API.
+`object-log` is the product. It is a small, generic, object-storage-backed WAL
+for higher-level storage systems. `object-log-git` is a separate proof of its
+public API.
 
-Phase 1 builds a pure-Rust native storage adapter. It accepts parsed ref
-commands and a pack, validates them, publishes one atomic ref transaction, and
-recovers a standard bare repository. It uses `gix` and `gix-pack`. It does not
-run a Git executable or call a C library. See [`GIT_PLAN.md`](../GIT_PLAN.md)
-and the [library review](evidence/git-library-selection-2026-09-03.md).
+The native storage proof is implemented. It accepts parsed ref commands and an
+optional pack path. It validates refs, pack bytes, reachable objects, and pack
+provenance. It then prepares and publishes one atomic ref transaction. Cold
+open rebuilds a standard bare repository from object storage. The proof uses
+`gix` and `gix-pack`. It does not run a Git executable or call a C library. See
+[`GIT_PLAN.md`](../GIT_PLAN.md) and the
+[library review](evidence/git-library-selection-2026-09-03.md).
+
+Checkpoint selection, collection tests, benchmarks, MinIO qualification, a
+local evidence record, and smart HTTP remain incomplete.
 
 Smart HTTP is a later, separate adapter. The core WAL does not depend on Git
 protocol code or Git libraries. The eventual HTTP test still uses an unmodified
@@ -88,9 +99,6 @@ disposable local storage. Current `gix` pack storage cannot run as a WASI guest
 because it uses unsupported memory maps, and its `wasm` feature removes the
 high-level pack writer. A later WASI adapter can use lower-level streaming pack
 APIs if its added code and trust cost are justified.
-
-Preferred-owner routing and Durable-Object behavior remain deferred. They are
-not the current core goal.
 
 ## 2. WASI filesystem storage
 
@@ -111,7 +119,7 @@ not the current core goal.
 - The WASI filesystem conformance surface passes for supported operations.
 - Generated operation traces compare the adapter with its reference model.
 - Tests cover rename races, removed open files, large files, partial writes,
-  crash recovery, and tenant separation.
+  crash recovery, and namespace isolation.
 - Benchmarks report metadata latency, sequential and random I/O, cold restore,
   write amplification, and object-store requests.
 
