@@ -29,6 +29,7 @@ pub struct Repository {
     refs: RefSnapshot,
     packs: BTreeMap<ObjectId, Pack>,
     objects: git::ObjectSet,
+    reachable: git::ObjectKinds,
 }
 
 #[derive(Debug)]
@@ -111,6 +112,7 @@ impl Repository {
             refs,
             packs,
             objects,
+            reachable,
         })
     }
 
@@ -118,6 +120,56 @@ impl Repository {
     #[must_use]
     pub const fn refs(&self) -> &RefSnapshot {
         &self.refs
+    }
+
+    /// Returns annotated tag refs mapped to fully peeled targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a durable tag cannot resolve.
+    pub fn peeled_tags(&self) -> Result<RefSnapshot, Error> {
+        let repo = git::open(&self.path, self.format)?;
+        let mut peeled = RefSnapshot::new();
+        for (name, &target) in &self.refs {
+            if let Some(target) = git::peel_tag(&repo, target)? {
+                peeled.insert(name.clone(), target);
+            }
+        }
+        Ok(peeled)
+    }
+
+    /// Writes the complete reachable set for advertised SHA-1 wants.
+    /// Output is bounded to 512 MiB and can be partial on error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid wants, objects, or output.
+    pub async fn write_fetch_pack(
+        &self,
+        wants: &[ObjectId],
+        output: impl AsRef<Path>,
+    ) -> Result<(), Error> {
+        if self.format != ObjectFormat::Sha1 || wants.is_empty() {
+            return Err(Error::InvalidReference);
+        }
+        let peeled = self.peeled_tags()?;
+        if wants.iter().any(|want| {
+            !self
+                .refs
+                .values()
+                .chain(peeled.values())
+                .any(|id| id == want)
+        }) {
+            return Err(Error::InvalidReference);
+        }
+        let path = self.path.clone();
+        let output = output.as_ref().to_owned();
+        let objects = self.reachable.keys().copied().collect();
+        blocking(move || {
+            git::write_fetch_pack(&path, objects, &output)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Validates and stages one atomic ref update against this exact snapshot.

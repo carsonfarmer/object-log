@@ -1,12 +1,20 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::{BufReader, Read, Seek},
+    io::{BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
 };
 
-use gix::hash::{Kind, ObjectId};
+use gix::{
+    hash::{Kind, ObjectId},
+    objs::FindHeader,
+    parallel::{InOrderIter, reduce::Finalize},
+};
+use gix_pack::data::{
+    Version,
+    output::{Count, bytes::FromEntriesIter, entry},
+};
 
 use crate::{Error as RecordError, ObjectFormat, ObjectId as RecordObjectId};
 
@@ -126,6 +134,126 @@ pub(crate) fn extend_objects(
         }
     }
     Ok(())
+}
+
+pub(crate) fn peel_tag(
+    repo: &gix::Repository,
+    id: RecordObjectId,
+) -> Result<Option<RecordObjectId>, Error> {
+    let id = ObjectId::try_from(id).map_err(|_| Error::InvalidReference)?;
+    let object = repo.find_object(id).map_err(repository_error)?;
+    if object.kind != gix::objs::Kind::Tag {
+        return Ok(None);
+    }
+    object
+        .peel_tags_to_end()
+        .map_err(repository_error)?
+        .id
+        .try_into()
+        .map(Some)
+        .map_err(|_| Error::InvalidReference)
+}
+
+pub(crate) fn write_fetch_pack(
+    repo_path: &Path,
+    object_ids: Vec<ObjectId>,
+    output: &Path,
+) -> Result<(), Error> {
+    let repo = open(repo_path, crate::ObjectFormat::Sha1)?;
+    let object_hash = repo.object_hash();
+    let compression = repo.pack_compression().map_err(repository_error)?;
+    let store = repo.into_sync().objects.into_shared_arc();
+    let mut objects = store.to_cache_arc();
+    objects.prevent_pack_unload();
+    FindHeader::try_header(&objects, &ObjectId::null(object_hash)).map_err(repository_error)?;
+    objects.refresh_never();
+    objects.ignore_replacements = true;
+
+    let count = u32::try_from(object_ids.len())
+        .map_err(|_| Error::InvalidPack("too many objects".into()))?;
+    let counts = object_ids
+        .into_iter()
+        .map(|id| Count::from_data(id, None))
+        .collect();
+    let entries = entry::iter_from_counts(
+        counts,
+        objects,
+        Box::new(gix::progress::Discard),
+        entry::iter_from_counts::Options {
+            thread_limit: Some(1),
+            mode: entry::iter_from_counts::Mode::PackCopyAndBaseObjects,
+            allow_thin_pack: false,
+            chunk_size: 64,
+            version: Version::V2,
+            compression,
+        },
+    );
+    let mut entries = InOrderIter::from(entries);
+    let file = fs::File::create(output).map_err(|source| Error::Io {
+        path: output.to_owned(),
+        source,
+    })?;
+    let writer = LimitWriter::new(file, MAX_PACK_BYTES as u64);
+    let mut pack = FromEntriesIter::new(&mut entries, writer, count, Version::V2, object_hash);
+    for result in &mut pack {
+        result.map_err(|error| Error::Pack(error.to_string()))?;
+    }
+    if pack.digest().is_none() {
+        return Err(Error::Pack(
+            "pack writer stopped before its checksum".into(),
+        ));
+    }
+    pack.into_write()
+        .flush()
+        .map_err(|error| Error::Pack(error.to_string()))?;
+    let stats = entries
+        .inner
+        .finalize()
+        .map_err(|error| Error::Pack(error.to_string()))?;
+    if stats.missing_objects != 0 {
+        return Err(Error::Pack("an object disappeared while writing".into()));
+    }
+    Ok(())
+}
+
+struct LimitWriter<W> {
+    inner: W,
+    remaining: u64,
+}
+
+impl<W> LimitWriter<W> {
+    const fn new(inner: W, remaining: u64) -> Self {
+        Self { inner, remaining }
+    }
+}
+
+impl<W: Write> Write for LimitWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| std::io::Error::other("pack output length is invalid"))?;
+        let available = usize::try_from(self.remaining.min(length))
+            .map_err(|_| std::io::Error::other("pack output limit is invalid"))?;
+        if available == 0 {
+            return Err(std::io::Error::other("pack output exceeds byte limit"));
+        }
+        let written = self.inner.write(&bytes[..available])?;
+        self.remaining = self
+            .remaining
+            .checked_sub(
+                u64::try_from(written)
+                    .map_err(|_| std::io::Error::other("pack output length is invalid"))?,
+            )
+            .ok_or_else(|| std::io::Error::other("pack output accounting failed"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn repository_error(value: impl std::fmt::Display) -> Error {
+    Error::Repository(value.to_string())
 }
 
 /// Validate and normalize a received pack. Thin-pack bases come from `repo`.
