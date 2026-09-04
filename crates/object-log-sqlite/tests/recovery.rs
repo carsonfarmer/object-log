@@ -330,18 +330,7 @@ async fn commit_record(
 
 fn snapshot_record() -> TestResult<Bytes> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder
-        .map(5)?
-        .u8(0)?
-        .u32(1)?
-        .u8(1)?
-        .u8(0)?
-        .u8(2)?
-        .u32(4_096)?
-        .u8(3)?
-        .u64(4_096)?
-        .u8(5)?
-        .u32(1)?;
+    encoder.array(2)?.u8(1)?.array(2)?.u64(4_096)?.u32(1)?;
     Ok(Bytes::from(encoder.into_writer()))
 }
 

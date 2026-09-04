@@ -14,7 +14,7 @@ use rusqlite::{Connection, MAIN_DB};
 use uuid::Uuid;
 
 use crate::connection::open as open_connection;
-use crate::format::{Record, RecordKind};
+use crate::format::Record;
 use crate::policy::Policy;
 use crate::wal::{self, WAL_FRAME_HEADER_BYTES, WAL_HEADER_BYTES, WalCapture, WalPosition};
 use crate::{PAGE_SIZE, SqliteError};
@@ -494,7 +494,7 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
 
     if let Some(checkpoint) = checkpoint {
         let descriptor = Record::decode(checkpoint.snapshot(), checkpoint.objects().len())?;
-        if !matches!(descriptor.kind(), RecordKind::Snapshot) {
+        if !descriptor.is_snapshot() {
             return Err(SqliteError::InvalidRecord(
                 "checkpoint does not contain a snapshot".into(),
             ));
@@ -512,15 +512,19 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
     }
     for commit in tail {
         let descriptor = Record::decode(commit.operation(), commit.objects().len())?;
-        match descriptor.kind() {
-            RecordKind::Snapshot if snapshot.is_none() && position.frames == 0 => {
+        match &descriptor {
+            Record::SnapshotInline(_) | Record::SnapshotChunks { .. }
+                if snapshot.is_none() && position.frames == 0 =>
+            {
                 let payload =
                     load_payload(log, view, &descriptor, commit.objects(), PAGE_SIZE as usize)
                         .await?;
                 validate_snapshot(&payload)?;
                 snapshot = Some(payload);
             }
-            RecordKind::Wal { header, prior, .. } if snapshot.is_some() => {
+            Record::WalInline { header, prior, .. } | Record::WalChunks { header, prior, .. }
+                if snapshot.is_some() =>
+            {
                 if *prior != position.frames {
                     return Err(SqliteError::InvalidRecord(
                         "WAL records do not form one continuous epoch".into(),
@@ -562,7 +566,8 @@ async fn load_payload(
     objects: &[ObjectRef],
     unit: usize,
 ) -> Result<Bytes, SqliteError> {
-    if let Some(payload) = record.inline() {
+    let (payload_len, inline) = record.payload()?;
+    if let Some(payload) = inline {
         return Ok(payload.clone());
     }
     let options = log.options();
@@ -589,14 +594,14 @@ async fn load_payload(
             .checked_add(object_len)
             .ok_or(SqliteError::PayloadLimit)?;
     }
-    if declared_len != record.payload_len() {
+    if declared_len != payload_len {
         return Err(SqliteError::InvalidRecord(
             "record chunks do not match the declared length".into(),
         ));
     }
     let mut payload = Vec::new();
     payload
-        .try_reserve_exact(record.payload_len())
+        .try_reserve_exact(payload_len)
         .map_err(|_| SqliteError::PayloadLimit)?;
     let payload = stream::iter(objects)
         .map(|object| log.read_object(view, object))

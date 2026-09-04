@@ -27,19 +27,7 @@ pub(crate) struct WalCapture {
 }
 
 pub(crate) fn committed_frames(conn: &Connection) -> Result<u32, SqliteError> {
-    let mut frames: c_int = 0;
-    // SAFETY: `conn` stays alive and no other SQLite call runs in this scope.
-    let db = unsafe { conn.handle() };
-    // SAFETY: The database name is static. SQLite writes the frame count.
-    check(unsafe {
-        ffi::sqlite3_wal_checkpoint_v2(
-            db,
-            c"main".as_ptr(),
-            ffi::SQLITE_CHECKPOINT_NOOP,
-            &raw mut frames,
-            ptr::null_mut(),
-        )
-    })?;
+    let frames: i64 = conn.query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| row.get(1))?;
     u32::try_from(frames).map_err(|_| invalid("SQLite returned a negative frame count"))
 }
 

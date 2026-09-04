@@ -663,18 +663,7 @@ async fn sum(database: &mut Database) -> Result<i64, SqliteError> {
 
 fn malicious_snapshot_record(payload_len: u64) -> Result<Bytes, Box<dyn StdError>> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder
-        .map(5)?
-        .u8(0)?
-        .u32(1)?
-        .u8(1)?
-        .u8(0)?
-        .u8(2)?
-        .u32(4_096)?
-        .u8(3)?
-        .u64(payload_len)?
-        .u8(5)?
-        .u8(1)?;
+    encoder.array(2)?.u8(1)?.array(2)?.u64(payload_len)?.u8(1)?;
     Ok(Bytes::from(encoder.into_writer()))
 }
 

@@ -3,30 +3,45 @@ use minicbor::{Decode, Encode, Encoder, encode::Write};
 
 use crate::{PAGE_SIZE, SqliteError, wal::WAL_FRAME_HEADER_BYTES};
 
-const FORMAT_VERSION: u32 = 1;
 const WAL_HEADER_BYTES: usize = 32;
 const WAL_FRAME_BYTES: usize = PAGE_SIZE as usize + WAL_FRAME_HEADER_BYTES;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Record {
-    kind: RecordKind,
-    payload: Payload,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RecordKind {
-    Snapshot,
-    Wal {
+#[derive(Clone, Debug, Eq, PartialEq, Decode, Encode)]
+#[cbor(array)]
+pub(crate) enum Record {
+    #[n(0)]
+    SnapshotInline(#[cbor(n(0), with = "byte_string")] Bytes),
+    #[n(1)]
+    SnapshotChunks {
+        #[n(0)]
+        len: u64,
+        #[n(1)]
+        count: u32,
+    },
+    #[n(2)]
+    WalInline {
+        #[cbor(n(0), with = "byte_string")]
+        payload: Bytes,
+        #[cbor(n(1), with = "minicbor::bytes")]
         header: [u8; WAL_HEADER_BYTES],
+        #[n(2)]
         prior: u32,
+        #[n(3)]
         current: u32,
     },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Payload {
-    Inline(Bytes),
-    Chunks { len: usize, count: u32 },
+    #[n(3)]
+    WalChunks {
+        #[n(0)]
+        len: u64,
+        #[n(1)]
+        count: u32,
+        #[cbor(n(2), with = "minicbor::bytes")]
+        header: [u8; WAL_HEADER_BYTES],
+        #[n(3)]
+        prior: u32,
+        #[n(4)]
+        current: u32,
+    },
 }
 
 impl Record {
@@ -35,10 +50,18 @@ impl Record {
         inline: Option<Bytes>,
         chunks: usize,
     ) -> Result<Self, SqliteError> {
-        Ok(Self {
-            kind: RecordKind::Snapshot,
-            payload: Payload::new(len, inline, chunks, PAGE_SIZE as usize)?,
-        })
+        let record = match inline {
+            Some(payload) => Self::SnapshotInline(payload),
+            None => Self::SnapshotChunks {
+                len: u64::try_from(len)?,
+                count: u32::try_from(chunks)?,
+            },
+        };
+        if record.payload()?.0 != len {
+            return Err(invalid("record payload length is inconsistent"));
+        }
+        record.validate(chunks)?;
+        Ok(record)
     }
 
     pub(crate) fn wal(
@@ -49,145 +72,96 @@ impl Record {
         prior: u32,
         current: u32,
     ) -> Result<Self, SqliteError> {
-        validate_wal_range(u64::try_from(len)?, prior, current)?;
-        Ok(Self {
-            kind: RecordKind::Wal {
+        let record = match inline {
+            Some(payload) => Self::WalInline {
+                payload,
                 header,
                 prior,
                 current,
             },
-            payload: Payload::new(len, inline, chunks, WAL_FRAME_BYTES)?,
-        })
-    }
-
-    pub(crate) fn encode(&self) -> Result<Bytes, SqliteError> {
-        minicbor::to_vec(self.wire()?)
-            .map(Bytes::from)
-            .map_err(codec_error)
-    }
-
-    pub(crate) fn decode(bytes: &[u8], objects: usize) -> Result<Self, SqliteError> {
-        let wire: RecordWire<'_> = minicbor::decode(bytes).map_err(codec_error)?;
-        if !is_canonical(&wire, bytes) {
-            return Err(invalid("record is not canonical CBOR"));
-        }
-        if wire.version != FORMAT_VERSION || wire.page_size != PAGE_SIZE {
-            return Err(invalid("record has an unsupported version or page size"));
-        }
-
-        let kind = match (
-            wire.kind,
-            wire.wal_header,
-            wire.prior_mx_frame,
-            wire.mx_frame,
-        ) {
-            (0, None, None, None) => RecordKind::Snapshot,
-            (1, Some(header), Some(prior), Some(current)) => {
-                validate_wal_range(wire.payload_len, prior, current)?;
-                RecordKind::Wal {
-                    header: header
-                        .try_into()
-                        .map_err(|_| invalid("WAL header is not 32 bytes"))?,
-                    prior,
-                    current,
-                }
-            }
-            (0, ..) => return Err(invalid("snapshot contains WAL fields")),
-            (1, ..) => return Err(invalid("WAL record lacks its boundary")),
-            _ => return Err(invalid("record has an unknown kind")),
-        };
-        let unit = match kind {
-            RecordKind::Snapshot => PAGE_SIZE as usize,
-            RecordKind::Wal { .. } => WAL_FRAME_BYTES,
-        };
-        Ok(Self {
-            kind,
-            payload: Payload::decode(&wire, objects, unit)?,
-        })
-    }
-
-    pub(crate) const fn kind(&self) -> &RecordKind {
-        &self.kind
-    }
-
-    pub(crate) const fn payload_len(&self) -> usize {
-        match &self.payload {
-            Payload::Inline(bytes) => bytes.len(),
-            Payload::Chunks { len, .. } => *len,
-        }
-    }
-
-    pub(crate) const fn inline(&self) -> Option<&Bytes> {
-        match &self.payload {
-            Payload::Inline(bytes) => Some(bytes),
-            Payload::Chunks { .. } => None,
-        }
-    }
-
-    fn wire(&self) -> Result<RecordWire<'_>, SqliteError> {
-        let (inline_payload, chunk_count) = match &self.payload {
-            Payload::Inline(bytes) => (Some(bytes.as_ref()), None),
-            Payload::Chunks { count, .. } => (None, Some(*count)),
-        };
-        let (kind, wal_header, prior_mx_frame, mx_frame) = match &self.kind {
-            RecordKind::Snapshot => (0, None, None, None),
-            RecordKind::Wal {
+            None => Self::WalChunks {
+                len: u64::try_from(len)?,
+                count: u32::try_from(chunks)?,
                 header,
                 prior,
                 current,
-            } => (1, Some(header.as_slice()), Some(*prior), Some(*current)),
+            },
         };
-        Ok(RecordWire {
-            version: FORMAT_VERSION,
-            kind,
-            page_size: PAGE_SIZE,
-            payload_len: u64::try_from(self.payload_len())?,
-            inline_payload,
-            chunk_count,
-            wal_header,
-            prior_mx_frame,
-            mx_frame,
-        })
-    }
-}
-
-impl Payload {
-    fn new(
-        len: usize,
-        inline: Option<Bytes>,
-        chunks: usize,
-        unit: usize,
-    ) -> Result<Self, SqliteError> {
-        if len == 0 || !len.is_multiple_of(unit) {
-            return Err(invalid("record payload is empty or misaligned"));
+        if record.payload()?.0 != len {
+            return Err(invalid("record payload length is inconsistent"));
         }
-        match (inline, chunks) {
-            (Some(bytes), 0) if bytes.len() == len => Ok(Self::Inline(bytes)),
-            (None, count) if count > 0 => Ok(Self::Chunks {
+        record.validate(chunks)?;
+        Ok(record)
+    }
+
+    pub(crate) fn encode(&self) -> Result<Bytes, SqliteError> {
+        minicbor::to_vec(self).map(Bytes::from).map_err(codec_error)
+    }
+
+    pub(crate) fn decode(bytes: &[u8], objects: usize) -> Result<Self, SqliteError> {
+        let record: Self = minicbor::decode(bytes).map_err(codec_error)?;
+        if !is_canonical(&record, bytes) {
+            return Err(invalid("record is not canonical CBOR"));
+        }
+        record.validate(objects)?;
+        Ok(record)
+    }
+
+    pub(crate) const fn is_snapshot(&self) -> bool {
+        match self {
+            Self::SnapshotInline(_) | Self::SnapshotChunks { .. } => true,
+            Self::WalInline { .. } | Self::WalChunks { .. } => false,
+        }
+    }
+
+    pub(crate) fn payload(&self) -> Result<(usize, Option<&Bytes>), SqliteError> {
+        match self {
+            Self::SnapshotInline(payload) | Self::WalInline { payload, .. } => {
+                Ok((payload.len(), Some(payload)))
+            }
+            Self::SnapshotChunks { len, .. } | Self::WalChunks { len, .. } => {
+                let len = usize::try_from(*len)
+                    .map_err(|_| invalid("record payload length is too large"))?;
+                Ok((len, None))
+            }
+        }
+    }
+
+    fn validate(&self, objects: usize) -> Result<(), SqliteError> {
+        let (len, inline) = self.payload()?;
+        let (count, unit) = match self {
+            Self::SnapshotInline(_) => (0, PAGE_SIZE as usize),
+            Self::SnapshotChunks { count, .. } => (usize::try_from(*count)?, PAGE_SIZE as usize),
+            Self::WalInline {
+                payload,
+                prior,
+                current,
+                ..
+            } => {
+                validate_wal_range(u64::try_from(payload.len())?, *prior, *current)?;
+                (0, WAL_FRAME_BYTES)
+            }
+            Self::WalChunks {
+                count,
+                prior,
+                current,
                 len,
-                count: u32::try_from(count)?,
-            }),
-            _ => Err(invalid("record payload form is inconsistent")),
-        }
-    }
-
-    fn decode(wire: &RecordWire<'_>, objects: usize, unit: usize) -> Result<Self, SqliteError> {
-        let len = usize::try_from(wire.payload_len)
-            .map_err(|_| invalid("record payload length is too large"))?;
-        if len == 0 || !len.is_multiple_of(unit) {
-            return Err(invalid("record payload is empty or misaligned"));
-        }
-        match (wire.inline_payload, wire.chunk_count) {
-            (Some(bytes), None) if objects == 0 && bytes.len() == len => {
-                Ok(Self::Inline(Bytes::copy_from_slice(bytes)))
+                ..
+            } => {
+                validate_wal_range(*len, *prior, *current)?;
+                (usize::try_from(*count)?, WAL_FRAME_BYTES)
             }
-            (None, Some(count)) if count > 0 && usize::try_from(count).ok() == Some(objects) => {
-                Ok(Self::Chunks { len, count })
-            }
-            _ => Err(invalid(
+        };
+        if len == 0
+            || !len.is_multiple_of(unit)
+            || count != objects
+            || (inline.is_none() && count == 0)
+        {
+            return Err(invalid(
                 "record payload form or object count is inconsistent",
-            )),
+            ));
         }
+        Ok(())
     }
 }
 
@@ -202,29 +176,6 @@ fn validate_wal_range(len: u64, prior: u32, current: u32) -> Result<(), SqliteEr
     Ok(())
 }
 
-#[derive(Clone, Copy, Decode, Encode)]
-#[cbor(map)]
-struct RecordWire<'a> {
-    #[n(0)]
-    version: u32,
-    #[n(1)]
-    kind: u8,
-    #[n(2)]
-    page_size: u32,
-    #[n(3)]
-    payload_len: u64,
-    #[cbor(n(4), with = "minicbor::bytes")]
-    inline_payload: Option<&'a [u8]>,
-    #[n(5)]
-    chunk_count: Option<u32>,
-    #[cbor(n(6), with = "minicbor::bytes")]
-    wal_header: Option<&'a [u8]>,
-    #[n(7)]
-    prior_mx_frame: Option<u32>,
-    #[n(8)]
-    mx_frame: Option<u32>,
-}
-
 struct Exact<'a>(&'a [u8]);
 
 impl Write for Exact<'_> {
@@ -236,9 +187,29 @@ impl Write for Exact<'_> {
     }
 }
 
-fn is_canonical(value: &RecordWire<'_>, bytes: &[u8]) -> bool {
+fn is_canonical(value: &Record, bytes: &[u8]) -> bool {
     let mut exact = Exact(bytes);
-    value.encode(&mut Encoder::new(&mut exact), &mut ()).is_ok() && exact.0.is_empty()
+    Encode::encode(value, &mut Encoder::new(&mut exact), &mut ()).is_ok() && exact.0.is_empty()
+}
+
+mod byte_string {
+    use bytes::Bytes;
+    use minicbor::{Decoder, Encoder};
+
+    pub(super) fn decode<C>(
+        decoder: &mut Decoder<'_>,
+        _: &mut C,
+    ) -> Result<Bytes, minicbor::decode::Error> {
+        decoder.bytes().map(Bytes::copy_from_slice)
+    }
+
+    pub(super) fn encode<C, W: minicbor::encode::Write>(
+        value: &Bytes,
+        encoder: &mut Encoder<W>,
+        _: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        encoder.bytes(value).map(|_| ())
+    }
 }
 
 fn invalid(message: &str) -> SqliteError {
@@ -262,11 +233,11 @@ mod tests {
         let records = [
             (
                 Record::snapshot(PAGE_SIZE as usize, None, 1)?,
-                "a50001010002191000031910000501",
+                "82018219100001",
             ),
             (
                 Record::wal(WAL_FRAME_BYTES, None, 1, [0x11; 32], 2, 3)?,
-                "a80001010102191000031910180501065820111111111111111111111111111111111111111111111111111111111111111107020803",
+                "82038519101801582011111111111111111111111111111111111111111111111111111111111111110203",
             ),
         ];
         for (record, golden) in records {
@@ -279,25 +250,47 @@ mod tests {
 
     #[test]
     fn decoder_rejects_invalid_record_classes() -> TestResult {
-        for (bytes, objects) in [
-            ("a600010100021910000319100005010900", 1),
-            ("a5001801010002191000031910000501", 1),
-            ("a5000101000219100003191000050100", 1),
-            ("a50001010002191000031910000501", 0),
-            ("a60001010002191000031910000441000501", 1),
-            ("a50001010002192000031910000501", 1),
-            ("a5000101000219100003000501", 1),
-            ("a5000101000219100003010501", 1),
+        let valid = Record::snapshot(PAGE_SIZE as usize, None, 1)?.encode()?;
+        let mut trailing = valid.to_vec();
+        trailing.push(0);
+        assert!(Record::decode(&trailing, 1).is_err());
+        for bytes in [
+            "8218018219100001",
+            "82048219100001",
+            "8201831910000100",
+            "820181191000",
+        ] {
+            assert!(Record::decode(&hex::decode(bytes)?, 1).is_err());
+        }
+
+        for (record, objects) in [
             (
-                "a80001010002191000031910000501065820000000000000000000000000000000000000000000000000000000000000000007000801",
-                1,
+                Record::SnapshotChunks {
+                    len: u64::from(PAGE_SIZE),
+                    count: 0,
+                },
+                0,
             ),
             (
-                "a80001010102191000031910180501065820000000000000000000000000000000000000000000000000000000000000000007020802",
+                Record::SnapshotChunks {
+                    len: u64::from(PAGE_SIZE),
+                    count: 1,
+                },
+                0,
+            ),
+            (Record::SnapshotChunks { len: 1, count: 1 }, 1),
+            (
+                Record::WalChunks {
+                    len: u64::try_from(WAL_FRAME_BYTES)?,
+                    count: 1,
+                    header: [0; WAL_HEADER_BYTES],
+                    prior: 2,
+                    current: 2,
+                },
                 1,
             ),
         ] {
-            let bytes = hex::decode(bytes)?;
+            let bytes = record.encode()?;
             assert!(Record::decode(&bytes, objects).is_err());
         }
         Ok(())
