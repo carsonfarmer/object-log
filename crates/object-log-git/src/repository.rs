@@ -138,7 +138,7 @@ impl Repository {
         Ok(peeled)
     }
 
-    /// Writes the complete reachable set for advertised SHA-1 wants.
+    /// Writes the complete reachable set for currently reachable SHA-1 wants.
     /// Output is bounded to 512 MiB and can be partial on error.
     ///
     /// # Errors
@@ -152,15 +152,11 @@ impl Repository {
         if self.format != ObjectFormat::Sha1 || wants.is_empty() {
             return Err(Error::InvalidReference);
         }
-        let peeled = self.peeled_tags()?;
-        if wants.iter().any(|want| {
-            !self
-                .refs
-                .values()
-                .chain(peeled.values())
-                .any(|id| id == want)
-        }) {
-            return Err(Error::InvalidReference);
+        for &want in wants {
+            let want = gix::hash::ObjectId::try_from(want)?;
+            if !self.reachable.contains_key(&want) {
+                return Err(Error::InvalidReference);
+            }
         }
         let path = self.path.clone();
         let output = output.as_ref().to_owned();
@@ -595,6 +591,81 @@ mod tests {
             delete.publish().await?,
             CommitStatus::Committed(_)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stateless_fetch_accepts_an_old_reachable_tip() -> TestResult {
+        let fixture = fixture(ObjectFormat::Sha1, b"one")?;
+        let (log, _, _) = test_log("repository-stateless-fetch").await?;
+        let old = fixture.target;
+        let cache = fixture.directory.path().join("initial");
+        let repository = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
+        let push = repository
+            .prepare_push(
+                TransactionId::new(),
+                vec![RefUpdate::new("refs/heads/main", None, Some(old))?],
+                Some(&fixture.pack),
+            )
+            .await?;
+        assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
+
+        let source = fixture.directory.path().join("source");
+        fs::write(source.join("file"), b"two")?;
+        command(Some(&source), &["commit", "--quiet", "-am", "two"])?;
+        let new = ObjectId::parse(
+            ObjectFormat::Sha1,
+            output(Some(&source), &["rev-parse", "HEAD"])?.trim(),
+        )?;
+        let pack = fixture.directory.path().join("update.pack");
+        fs::write(
+            &pack,
+            command_output(Some(&source), &["pack-objects", "--all", "--stdout"])?.stdout,
+        )?;
+        let repository = Repository::open(
+            &log,
+            fixture.directory.path().join("update"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        let push = repository
+            .prepare_push(
+                TransactionId::new(),
+                vec![RefUpdate::new("refs/heads/main", Some(old), Some(new))?],
+                Some(&pack),
+            )
+            .await?;
+        assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
+
+        let repository = Repository::open(
+            &log,
+            fixture.directory.path().join("fetch"),
+            ObjectFormat::Sha1,
+        )
+        .await?;
+        let output = fixture.directory.path().join("fetch.pack");
+        repository.write_fetch_pack(&[old], &output).await?;
+        let receiving = git::init(
+            &fixture.directory.path().join("receiving"),
+            ObjectFormat::Sha1,
+        )?;
+        let indexed = git::install_pack(&receiving, &output)?;
+        assert!(
+            indexed
+                .objects
+                .contains(&gix::hash::ObjectId::try_from(old)?)
+        );
+
+        let unreachable = ObjectId::from_bytes(ObjectFormat::Sha1, &[9; 20])?;
+        assert!(
+            repository
+                .write_fetch_pack(
+                    &[unreachable],
+                    fixture.directory.path().join("invalid.pack")
+                )
+                .await
+                .is_err()
+        );
         Ok(())
     }
 
