@@ -1,0 +1,272 @@
+use std::{
+    ops::Deref,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+use bytes::Bytes;
+
+use crate::Error;
+
+pub(crate) const LIVE_BYTES: usize = 88 * 1024 * 1024;
+pub(crate) const CALLS: usize = 512;
+pub(crate) const TRANSFER_BYTES: usize = 96 * 1024 * 1024;
+pub(crate) const WORK_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const THIN_ROUNDS: usize = 32;
+pub(crate) const RETRIES: usize = 1;
+
+static POOL: OnceLock<Pool> = OnceLock::new();
+
+#[derive(Clone)]
+pub(crate) struct Pool(Arc<PoolState>);
+
+struct PoolState {
+    active: Mutex<bool>,
+    live: AtomicUsize,
+    limit: usize,
+}
+
+impl Pool {
+    pub(crate) fn shared() -> &'static Self {
+        POOL.get_or_init(|| Self::new(LIVE_BYTES))
+    }
+
+    pub(crate) fn new(limit: usize) -> Self {
+        Self(Arc::new(PoolState {
+            active: Mutex::new(false),
+            live: AtomicUsize::new(0),
+            limit,
+        }))
+    }
+
+    pub(crate) fn admit(&self) -> Result<Operation, Error> {
+        let mut active = self
+            .0
+            .active
+            .lock()
+            .map_err(|_| Error::InvalidPack("Git operation pool is poisoned".into()))?;
+        if *active {
+            return invalid("another Git operation is active");
+        }
+        *active = true;
+        Ok(Operation(Arc::new(OperationState {
+            pool: self.0.clone(),
+            calls: AtomicUsize::new(0),
+            transfer: AtomicUsize::new(0),
+            work: AtomicUsize::new(0),
+            thin_rounds: AtomicUsize::new(0),
+            retries: AtomicUsize::new(0),
+        })))
+    }
+}
+
+struct OperationState {
+    pool: Arc<PoolState>,
+    calls: AtomicUsize,
+    transfer: AtomicUsize,
+    work: AtomicUsize,
+    thin_rounds: AtomicUsize,
+    retries: AtomicUsize,
+}
+
+impl Drop for OperationState {
+    fn drop(&mut self) {
+        *self
+            .pool
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Operation(Arc<OperationState>);
+
+impl Operation {
+    pub(crate) fn io(&self, bytes: usize) -> Result<(), Error> {
+        charge(&self.0.calls, 1, CALLS, "object-log call limit exceeded")?;
+        charge(
+            &self.0.transfer,
+            bytes,
+            TRANSFER_BYTES,
+            "object-log transfer limit exceeded",
+        )
+    }
+
+    pub(crate) fn work(&self, bytes: usize) -> Result<(), Error> {
+        charge(&self.0.work, bytes, WORK_BYTES, "Git work limit exceeded")
+    }
+
+    pub(crate) fn thin_round(&self) -> Result<(), Error> {
+        charge(
+            &self.0.thin_rounds,
+            1,
+            THIN_ROUNDS,
+            "thin-pack round limit exceeded",
+        )
+    }
+
+    pub(crate) fn retry(&self) -> Result<(), Error> {
+        charge(&self.0.retries, 1, RETRIES, "Git retry limit exceeded")
+    }
+
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation, Error> {
+        charge(
+            &self.0.pool.live,
+            bytes,
+            self.0.pool.limit,
+            "Git live-memory limit exceeded",
+        )?;
+        Ok(Reservation(Arc::new(ReservationState {
+            operation: self.0.clone(),
+            bytes,
+        })))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn calls(&self) -> usize {
+        self.0.calls.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn work_bytes(&self) -> usize {
+        self.0.work.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_bytes(&self) -> usize {
+        self.0.pool.live.load(Ordering::Relaxed)
+    }
+}
+
+fn charge(
+    counter: &AtomicUsize,
+    amount: usize,
+    limit: usize,
+    message: &'static str,
+) -> Result<(), Error> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(amount).filter(|next| *next <= limit)
+        })
+        .map(|_| ())
+        .map_err(|_| Error::InvalidPack(message.into()))
+}
+
+#[derive(Clone)]
+pub(crate) struct Reservation(Arc<ReservationState>);
+
+struct ReservationState {
+    operation: Arc<OperationState>,
+    bytes: usize,
+}
+
+impl Drop for ReservationState {
+    fn drop(&mut self) {
+        self.operation
+            .pool
+            .live
+            .fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct LiveBytes {
+    bytes: Bytes,
+    reservation: Reservation,
+}
+
+impl std::fmt::Debug for LiveBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.bytes.fmt(formatter)
+    }
+}
+
+impl LiveBytes {
+    pub(crate) fn new(bytes: Bytes, reservation: Reservation) -> Self {
+        Self { bytes, reservation }
+    }
+
+    pub(crate) fn slice(&self, range: impl std::ops::RangeBounds<usize>) -> Self {
+        Self::new(self.bytes.slice(range), self.reservation.clone())
+    }
+}
+
+impl Deref for LiveBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+fn invalid<T>(message: &'static str) -> Result<T, Error> {
+    Err(Error::InvalidPack(message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_reservations_and_slices_release_on_last_drop() -> Result<(), Error> {
+        let pool = Pool::new(4);
+        let operation = pool.admit()?;
+        assert!(pool.admit().is_err());
+        let bytes = LiveBytes::new(Bytes::from_static(b"1234"), operation.reserve(4)?);
+        assert!(operation.reserve(1).is_err());
+        let slice = bytes.slice(1..3);
+        drop(bytes);
+        assert!(operation.reserve(1).is_err());
+        drop(operation);
+        assert!(pool.admit().is_err());
+        drop(slice);
+        let next = pool.admit()?;
+        assert!(next.reserve(4).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn counters_accept_exact_limits_and_reject_the_next_unit() -> Result<(), Error> {
+        let operation = Pool::new(1).admit()?;
+        operation.io(TRANSFER_BYTES)?;
+        for _ in 1..CALLS {
+            operation.io(0)?;
+        }
+        assert!(operation.io(0).is_err());
+        operation.work(WORK_BYTES)?;
+        assert!(operation.work(1).is_err());
+        for _ in 0..THIN_ROUNDS {
+            operation.thin_round()?;
+        }
+        assert!(operation.thin_round().is_err());
+        operation.retry()?;
+        assert!(operation.retry().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_admission_and_reserved_memory() -> Result<(), Error> {
+        let pool = Pool::new(4);
+        let operation = pool.admit()?;
+        let (ready, observed) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _memory = operation.reserve(4)?;
+            ready
+                .send(())
+                .map_err(|()| Error::InvalidPack("test receiver stopped".into()))?;
+            std::future::pending::<()>().await;
+            Ok::<(), Error>(())
+        });
+        observed
+            .await
+            .map_err(|_| Error::InvalidPack("test operation stopped".into()))?;
+        assert!(pool.admit().is_err());
+        task.abort();
+        let _ = task.await;
+        assert!(pool.admit()?.reserve(4).is_ok());
+        Ok(())
+    }
+}

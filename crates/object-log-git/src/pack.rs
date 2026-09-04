@@ -9,17 +9,19 @@ use gix_pack::data::{Version, input::EntriesToBytesIter};
 
 use crate::{Error, ObjectFormat, ObjectId};
 
-pub(super) const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
-pub(super) const MAX_PACK_BYTES: usize = 64 * 1024 * 1024;
-pub(super) const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
-pub(super) const MAX_OBJECTS: u32 = 65_535;
-pub(super) const MAX_OBJECT_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const MAX_WORK_BYTES: usize = 256 * 1024 * 1024;
-// Git's pack generator documents 4095 as its maximum delta depth.
-pub(super) const MAX_DELTA_DEPTH: usize = 4095;
+#[path = "budget.rs"]
+pub(super) mod budget;
+
+pub(super) const MAX_RECEIVE_PACK_BYTES: usize = 9 * 1024 * 1024;
+pub(super) const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_INDEX_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const MAX_OBJECTS: u32 = 32_768;
+pub(super) const MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_WORK_BYTES: usize = budget::WORK_BYTES;
+pub(super) const MAX_DELTA_DEPTH: usize = 256;
 
 const DEFAULT_LIMITS: Limits = Limits {
-    input_bytes: MAX_INPUT_BYTES,
+    input_bytes: MAX_RECEIVE_PACK_BYTES,
     output_bytes: MAX_PACK_BYTES,
     object_bytes: MAX_OBJECT_BYTES,
     work_bytes: MAX_WORK_BYTES,
@@ -48,17 +50,20 @@ pub(crate) struct Normalized {
     pub(crate) bytes: Vec<u8>,
     pub(crate) index: Vec<u8>,
     pub(crate) id: ObjectId,
+    pub(crate) _memory: [budget::Reservation; 2],
 }
 
 pub(crate) fn normalize(
+    operation: &budget::Operation,
     format: ObjectFormat,
     input: &[u8],
     external_bases: &[ExternalBase<'_>],
 ) -> Result<Normalized, Error> {
-    normalize_with(format, input, external_bases, DEFAULT_LIMITS)
+    normalize_with(operation, format, input, external_bases, DEFAULT_LIMITS)
 }
 
 fn normalize_with(
+    operation: &budget::Operation,
     format: ObjectFormat,
     input: &[u8],
     external_bases: &[ExternalBase<'_>],
@@ -68,12 +73,13 @@ fn normalize_with(
         return invalid("input exceeds byte limit");
     }
     let hash = object_hash(format);
-    let (entries, input_work) = scan(input, hash, limits)?;
+    let (entries, input_work) = scan(operation, input, hash, limits)?;
 
-    let bases = ExternalBases::new(hash, external_bases, limits, input_work)?;
+    let bases = ExternalBases::new(operation, hash, external_bases, limits, input_work)?;
     let (entries, output_bytes) = resolve_external(entries, &bases, limits, hash.len_in_bytes())?;
     let object_count = entries.len();
     let entries = entries.into_iter().map(Ok);
+    let output_memory = operation.reserve(output_bytes)?;
     let mut output = Cursor::new(Vec::with_capacity(output_bytes));
     let indexed_entries = {
         let mut writer = EntriesToBytesIter::new(entries, &mut output, Version::V2, hash);
@@ -84,8 +90,14 @@ fn normalize_with(
         indexed
     };
     let bytes = output.into_inner();
-    let (id, index) = index(&bytes, format, hash, indexed_entries, limits)?;
-    Ok(Normalized { bytes, index, id })
+    let (id, index, index_memory) =
+        index(operation, &bytes, format, hash, indexed_entries, limits)?;
+    Ok(Normalized {
+        bytes,
+        index,
+        id,
+        _memory: [output_memory, index_memory],
+    })
 }
 
 struct ExternalBases<'a> {
@@ -94,6 +106,7 @@ struct ExternalBases<'a> {
 
 impl<'a> ExternalBases<'a> {
     fn new(
+        operation: &budget::Operation,
         hash: gix_hash::Kind,
         bases: &[ExternalBase<'a>],
         limits: Limits,
@@ -117,6 +130,7 @@ impl<'a> ExternalBases<'a> {
             if work > limits.work_bytes {
                 return invalid("decoded work exceeds limit");
             }
+            operation.work(base.data.len())?;
             if values.len() > limits.objects as usize {
                 return invalid("external base count exceeds limit");
             }
@@ -126,6 +140,7 @@ impl<'a> ExternalBases<'a> {
 }
 
 fn scan(
+    operation: &budget::Operation,
     input: &[u8],
     hash: gix_hash::Kind,
     limits: Limits,
@@ -194,6 +209,7 @@ fn scan(
         if work > limits.work_bytes {
             return invalid("decoded work exceeds limit");
         }
+        operation.work(result_size + inflated_work)?;
         let end = entry
             .data_offset
             .checked_add(u64::try_from(compressed).map_err(|_| {
@@ -356,12 +372,13 @@ fn push_entry(
 }
 
 fn index(
+    operation: &budget::Operation,
     pack: &[u8],
     format: ObjectFormat,
     hash: gix_hash::Kind,
     entries: Vec<gix_pack::data::input::Entry>,
     limits: Limits,
-) -> Result<(ObjectId, Vec<u8>), Error> {
+) -> Result<(ObjectId, Vec<u8>, budget::Reservation), Error> {
     let object_count = entries.len();
     let relationships = entries
         .iter()
@@ -375,6 +392,7 @@ fn index(
     if index_bytes > limits.index_bytes {
         return invalid("pack index exceeds byte limit");
     }
+    let index_memory = operation.reserve(index_bytes)?;
     let mut progress = gix_features::progress::Discard;
     let mut index = Vec::with_capacity(index_bytes);
     let interrupt = AtomicBool::new(false);
@@ -403,7 +421,7 @@ fn index(
     }
     validate_delta_depth(&relationships, &file)?;
     let id = ObjectId::from_bytes(format, outcome.data_hash.as_slice())?;
-    Ok((id, index))
+    Ok((id, index, index_memory))
 }
 
 fn validate_delta_depth(
@@ -507,6 +525,38 @@ mod tests {
     };
 
     use super::*;
+
+    fn operation() -> budget::Operation {
+        let Ok(operation) = budget::Pool::new(budget::LIVE_BYTES).admit() else {
+            unreachable!("new test pool must admit its first operation")
+        };
+        operation
+    }
+
+    fn normalize(
+        format: ObjectFormat,
+        input: &[u8],
+        external_bases: &[ExternalBase<'_>],
+    ) -> Result<Normalized, Error> {
+        super::normalize(&operation(), format, input, external_bases)
+    }
+
+    fn normalize_with(
+        format: ObjectFormat,
+        input: &[u8],
+        external_bases: &[ExternalBase<'_>],
+        limits: Limits,
+    ) -> Result<Normalized, Error> {
+        super::normalize_with(&operation(), format, input, external_bases, limits)
+    }
+
+    fn scan(
+        input: &[u8],
+        hash: gix_hash::Kind,
+        limits: Limits,
+    ) -> Result<(Vec<gix_pack::data::input::Entry>, usize), Error> {
+        super::scan(&operation(), input, hash, limits)
+    }
 
     struct Fixture {
         dir: tempfile::TempDir,

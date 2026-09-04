@@ -2,15 +2,14 @@ use std::io::{self, Write};
 
 use gix_packetline::{Channel, PacketLineRef, blocking_io::encode, decode};
 
-use crate::{
-    ObjectFormat, ObjectId, RefUpdate,
-    pack::{MAX_INPUT_BYTES, MAX_PACK_BYTES},
-};
+use crate::{ObjectFormat, ObjectId, RefUpdate, pack::MAX_RECEIVE_PACK_BYTES};
 
-const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES: usize = 9 * 1024 * 1024;
 const MAX_RECEIVE_BYTES: usize = 1024 * 1024;
+const MAX_FETCH_PACK_BYTES: usize = 9_437_184;
+const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
 const MAX_COMMANDS: usize = 1_024;
-const MAX_ITEMS: usize = 65_535;
+const MAX_ITEMS: usize = 32_768;
 const MAX_PACKET_PAYLOAD: usize = 65_515;
 const UPLOAD_SHA1: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n000afetch\n0017object-format=sha1\n0000";
 const UPLOAD_SHA256: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n000afetch\n0019object-format=sha256\n0000";
@@ -255,7 +254,12 @@ pub(crate) fn write_fetch(
             }
         }
         FetchReply::Pack(pack) => {
-            within(pack.len(), MAX_PACK_BYTES, "pack bytes")?;
+            within(pack.len(), MAX_FETCH_PACK_BYTES, "pack bytes")?;
+            within(
+                fetch_response_len(pack.len())?,
+                MAX_FETCH_RESPONSE_BYTES,
+                "fetch response bytes",
+            )?;
             write_pack(output, pack)?;
         }
     }
@@ -361,7 +365,7 @@ pub(crate) fn parse_receive(
         return Err(Error::Protocol("duplicate ref command"));
     }
     let pack = packets;
-    within(pack.len(), MAX_INPUT_BYTES, "pack bytes")?;
+    within(pack.len(), MAX_RECEIVE_PACK_BYTES, "pack bytes")?;
     let needs_pack = updates.iter().any(|update| update.target.is_some());
     if needs_pack && (pack.is_empty() || !pack.starts_with(b"PACK")) {
         return Err(Error::Protocol("create or update has no Git pack"));
@@ -548,6 +552,12 @@ fn write_pack(output: &mut impl Write, pack: &[u8]) -> Result<(), Error> {
         encode::band_to_write(Channel::Data, chunk, &mut *output)?;
     }
     Ok(())
+}
+
+fn fetch_response_len(pack: usize) -> Result<usize, Error> {
+    let chunks = pack.div_ceil(MAX_PACKET_PAYLOAD);
+    pack.checked_add(17 + chunks * 5)
+        .ok_or(Error::Limit("fetch response bytes"))
 }
 
 fn flush(output: &mut impl Write) -> Result<(), Error> {
@@ -944,12 +954,16 @@ mod tests {
         assert!(packets.is_empty());
         assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD)?, 1);
         assert_eq!(sideband_chunks(MAX_PACKET_PAYLOAD + 1)?, 2);
+        assert_eq!(
+            fetch_response_len(MAX_FETCH_PACK_BYTES)?,
+            MAX_FETCH_RESPONSE_BYTES
+        );
 
-        let pack = vec![0; MAX_PACK_BYTES + 1];
+        let pack = vec![0; MAX_FETCH_PACK_BYTES + 1];
         write_fetch(
             &mut io::sink(),
             ObjectFormat::Sha1,
-            FetchReply::Pack(&pack[..MAX_PACK_BYTES]),
+            FetchReply::Pack(&pack[..MAX_FETCH_PACK_BYTES]),
         )?;
         output.clear();
         limit(write_fetch(
@@ -1218,12 +1232,12 @@ mod tests {
         let excessive = sized_receive(MAX_RECEIVE_BYTES + 1, EMPTY_SHA1_PACK)?;
         limit(parse_receive(&excessive, ObjectFormat::Sha1));
 
-        let mut pack = vec![0; MAX_INPUT_BYTES];
+        let mut pack = vec![0; MAX_RECEIVE_PACK_BYTES];
         pack[..4].copy_from_slice(b"PACK");
         let input = receive(b"report-status object-format=sha1", 1, &pack)?;
         assert_eq!(
             parse_receive(&input, ObjectFormat::Sha1)?.pack.len(),
-            MAX_INPUT_BYTES
+            MAX_RECEIVE_PACK_BYTES
         );
         pack.push(0);
         limit(parse_receive(

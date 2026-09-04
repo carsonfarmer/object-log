@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, mem::size_of, path::PathBuf};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    mem::size_of,
+    path::PathBuf,
+};
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt, stream};
@@ -9,21 +13,23 @@ use crate::{
     format::PackDescriptor,
     pack::{
         MAX_DELTA_DEPTH, MAX_INDEX_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS, MAX_PACK_BYTES,
-        MAX_WORK_BYTES, Normalized, delta_integer, invalid, object_hash, pack_error,
+        Normalized,
+        budget::{LiveBytes, Operation, Reservation},
+        delta_integer, invalid, object_hash, pack_error,
     },
 };
 
 const CHUNK_BYTES: usize = 1024 * 1024;
-// Canonical CBOR adds 4,022 bytes for the envelope and 64 maximum-size chunk references.
-const MAX_PACK_ROOT_BYTES: u64 = MAX_INDEX_BYTES as u64 + 4_022;
-const MAX_CATALOG_BYTES: usize = 64 * CHUNK_BYTES;
-const MAX_CACHE_BYTES: usize = 32 * CHUNK_BYTES;
+// Canonical CBOR adds 1,045 bytes for the envelope and 16 chunk references.
+const MAX_PACK_ROOT_BYTES: usize = MAX_INDEX_BYTES + 1_045;
+const MAX_CATALOG_BYTES: usize = 24 * CHUNK_BYTES;
+const MAX_CACHE_BYTES: usize = 8 * CHUNK_BYTES;
 const MAX_TRANSFERS: usize = 8;
-const MAX_READ_REQUESTS: usize = 256;
 
 type PackIndex = gix_pack::index::File<Bytes>;
 
 pub(crate) async fn stage(
+    operation: &Operation,
     log: &Log,
     view: &View,
     normalized: Normalized,
@@ -35,11 +41,15 @@ pub(crate) async fn stage(
     }
     let children = stream::iter((0..count).map(|index| {
         let chunk = bytes.slice(index * CHUNK_BYTES..bytes.len().min((index + 1) * CHUNK_BYTES));
-        async move { log.put_object(view, chunk).await }
+        async move {
+            operation.io(chunk.len())?;
+            Ok::<_, Error>(log.put_object(view, chunk).await?)
+        }
     }))
     .buffered(MAX_TRANSFERS)
     .try_collect()
     .await?;
+    operation.io(MAX_PACK_ROOT_BYTES)?;
     let root = log
         .put_node(view, Bytes::from(normalized.index), children)
         .await?;
@@ -55,6 +65,8 @@ pub(crate) async fn stage(
 pub(crate) struct Catalog {
     packs: Box<[Pack]>,
     directory: Box<[Location]>,
+    operation: Operation,
+    _directory_memory: Reservation,
 }
 
 struct Pack {
@@ -64,6 +76,8 @@ struct Pack {
     index_bytes: usize,
     offsets: Box<[OffsetEntry]>,
     chunks: Box<[ObjectRef]>,
+    _root_memory: Reservation,
+    _offset_memory: Reservation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,6 +93,7 @@ struct OffsetEntry {
 }
 
 pub(crate) async fn load(
+    operation: &Operation,
     log: &Log,
     view: &View,
     format: ObjectFormat,
@@ -88,7 +103,7 @@ pub(crate) async fn load(
         return invalid("catalog has too many packs");
     }
     let loads = stream::iter(roots.iter().map(|(descriptor, root)| async move {
-        load_pack(log, view, format, descriptor, root).await
+        load_pack(operation, log, view, format, descriptor, root).await
     }))
     .buffered(MAX_TRANSFERS);
     futures::pin_mut!(loads);
@@ -112,12 +127,12 @@ pub(crate) async fn load(
         packs.push(pack);
     }
 
-    let mut directory = Vec::with_capacity(
-        packs
-            .iter()
-            .map(|pack| pack.index.num_objects() as usize)
-            .sum::<usize>(),
-    );
+    let entries = packs
+        .iter()
+        .map(|pack| pack.index.num_objects() as usize)
+        .sum::<usize>();
+    let directory_memory = operation.reserve(entries * size_of::<Location>())?;
+    let mut directory = Vec::with_capacity(entries);
     for (pack, stored) in packs.iter().enumerate() {
         let pack = u16::try_from(pack)
             .map_err(|_| Error::InvalidPack("catalog has too many packs".into()))?;
@@ -137,10 +152,13 @@ pub(crate) async fn load(
     Ok(Catalog {
         packs: packs.into_boxed_slice(),
         directory: directory.into_boxed_slice(),
+        operation: operation.clone(),
+        _directory_memory: directory_memory,
     })
 }
 
 async fn load_pack(
+    operation: &Operation,
     log: &Log,
     view: &View,
     format: ObjectFormat,
@@ -150,7 +168,7 @@ async fn load_pack(
     if root.kind() != ObjectKind::Node || descriptor.id.format() != format {
         return invalid("pack root or object format is invalid");
     }
-    if root.len() > MAX_PACK_ROOT_BYTES {
+    if root.len() > MAX_PACK_ROOT_BYTES as u64 {
         return invalid("pack root exceeds byte limit");
     }
     let bytes = usize::try_from(descriptor.bytes)
@@ -159,6 +177,10 @@ async fn load_pack(
     if bytes > MAX_PACK_BYTES || bytes < 12 + hash_len {
         return invalid("pack byte length is out of range");
     }
+    let root_bytes = usize::try_from(root.len())
+        .map_err(|_| Error::InvalidPack("pack root exceeds memory".into()))?;
+    operation.io(root_bytes)?;
+    let root_memory = operation.reserve(root_bytes)?;
     let node = log.read_node(view, root).await?;
     let chunks = node.children();
     if chunks.len() != bytes.div_ceil(CHUNK_BYTES) {
@@ -175,7 +197,8 @@ async fn load_pack(
         }
     }
     let index_bytes = node.payload().len();
-    let (index, offsets) = validate_index(node.payload(), format, descriptor)?;
+    let (index, offsets, offset_memory) =
+        validate_index(operation, node.payload(), format, descriptor)?;
     Ok(Pack {
         id: descriptor.id,
         bytes: u32::try_from(bytes)
@@ -184,14 +207,17 @@ async fn load_pack(
         index_bytes,
         offsets,
         chunks: chunks.to_vec().into_boxed_slice(),
+        _root_memory: root_memory,
+        _offset_memory: offset_memory,
     })
 }
 
 fn validate_index(
+    operation: &Operation,
     bytes: &Bytes,
     format: ObjectFormat,
     descriptor: &PackDescriptor,
-) -> Result<(PackIndex, Box<[OffsetEntry]>), Error> {
+) -> Result<(PackIndex, Box<[OffsetEntry]>, Reservation), Error> {
     if bytes.len() > MAX_INDEX_BYTES {
         return invalid("pack index exceeds byte limit");
     }
@@ -219,6 +245,7 @@ fn validate_index(
     let mut exact_fan = [0_u32; 256];
     let mut previous = None;
     let pack_end = descriptor.bytes - hash_len as u64;
+    let offset_memory = operation.reserve(count as usize * size_of::<OffsetEntry>())?;
     let mut offsets = Vec::with_capacity(count as usize);
     for (position, entry) in index.iter().enumerate() {
         if entry.oid.as_slice().iter().all(|byte| *byte == 0)
@@ -257,7 +284,7 @@ fn validate_index(
     {
         return invalid("pack index offsets are not unique");
     }
-    Ok((index, offsets.into_boxed_slice()))
+    Ok((index, offsets.into_boxed_slice(), offset_memory))
 }
 
 fn oid(packs: &[Pack], location: Location) -> &[u8] {
@@ -300,20 +327,16 @@ impl Pack {
 
 pub(crate) struct Object {
     pub(crate) kind: gix_object::Kind,
-    pub(crate) data: Bytes,
+    pub(crate) data: LiveBytes,
 }
 
 pub(crate) struct Reader<'a> {
     log: &'a Log,
     view: &'a View,
     catalog: &'a Catalog,
-    cache: BTreeMap<(u16, u16), Bytes>,
+    cache: BTreeMap<(u16, u16), LiveBytes>,
+    cache_order: VecDeque<(u16, u16)>,
     cache_bytes: usize,
-    work_limit: usize,
-    request_limit: usize,
-    depth_limit: usize,
-    work: usize,
-    requests: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -323,12 +346,8 @@ impl<'a> Reader<'a> {
             view,
             catalog,
             cache: BTreeMap::new(),
+            cache_order: VecDeque::new(),
             cache_bytes: 0,
-            work_limit: MAX_WORK_BYTES,
-            request_limit: MAX_READ_REQUESTS,
-            depth_limit: MAX_DELTA_DEPTH,
-            work: 0,
-            requests: 0,
         }
     }
 
@@ -344,16 +363,24 @@ impl<'a> Reader<'a> {
         let pack = &self.catalog.packs[usize::from(location.pack)];
         let mut current = location.index;
         let mut visited = vec![false; pack.index.num_objects() as usize];
-        let mut deltas = Vec::new();
+        let delta_capacity = MAX_DELTA_DEPTH.min(pack.index.num_objects() as usize);
+        let _read_memory = self
+            .catalog
+            .operation
+            .reserve(pack.index.num_objects() as usize + delta_capacity * size_of::<LiveBytes>())?;
+        let mut deltas = Vec::with_capacity(delta_capacity);
         let (kind, mut data) = loop {
             let slot = visited
                 .get_mut(current as usize)
                 .ok_or_else(|| Error::InvalidPack("delta base index is invalid".into()))?;
-            if *slot || deltas.len() > self.depth_limit {
-                return invalid("delta graph contains a cycle or is too deep");
+            if *slot {
+                return invalid("delta graph contains a cycle");
             }
             *slot = true;
             let entry = self.read_entry(location.pack, current).await?;
+            if entry.header.is_delta() && deltas.len() == MAX_DELTA_DEPTH {
+                return invalid("delta graph is too deep");
+            }
             match entry.header {
                 gix_pack::data::entry::Header::OfsDelta { base_distance } => {
                     let offset = u64::from(pack.offset(current)?);
@@ -385,7 +412,7 @@ impl<'a> Reader<'a> {
             }
         };
         while let Some(delta) = deltas.pop() {
-            data = Bytes::from(apply_delta(&data, &delta, |bytes| self.charge(bytes))?);
+            data = apply_delta(&self.catalog.operation, &data, &delta)?;
         }
         let actual = gix_object::compute_hash(object_hash(pack.id.format()), kind, &data)
             .map_err(pack_error)?;
@@ -398,7 +425,9 @@ impl<'a> Reader<'a> {
     async fn read_entry(&mut self, pack: u16, index: u32) -> Result<DecodedEntry, Error> {
         let stored = &self.catalog.packs[usize::from(pack)];
         let range = stored.entry_range(index)?;
-        self.charge((range.end - range.start) as usize)?;
+        self.catalog
+            .operation
+            .work((range.end - range.start) as usize)?;
         let bytes = self.read_range(pack, range).await?;
         if gix_features::hash::crc32(&bytes) != stored.crc(index)? {
             return invalid("pack entry CRC does not match");
@@ -415,7 +444,8 @@ impl<'a> Reader<'a> {
         if size > MAX_OBJECT_BYTES {
             return invalid("pack entry exceeds object byte limit");
         }
-        self.charge(size)?;
+        self.catalog.operation.work(size)?;
+        let memory = self.catalog.operation.reserve(size)?;
         let mut data = vec![0; size];
         let compressed = &bytes[entry.header_size()..];
         let (status, consumed, written) = gix_zlib::Inflate::default()
@@ -427,11 +457,15 @@ impl<'a> Reader<'a> {
         }
         Ok(DecodedEntry {
             header: entry.header,
-            data: Bytes::from(data),
+            data: LiveBytes::new(Bytes::from(data), memory),
         })
     }
 
-    async fn read_range(&mut self, pack: u16, range: std::ops::Range<u32>) -> Result<Bytes, Error> {
+    async fn read_range(
+        &mut self,
+        pack: u16,
+        range: std::ops::Range<u32>,
+    ) -> Result<LiveBytes, Error> {
         let first = range.start as usize / CHUNK_BYTES;
         let last = (range.end as usize - 1) / CHUNK_BYTES;
         if first == last {
@@ -441,7 +475,9 @@ impl<'a> Reader<'a> {
                 range.start as usize % CHUNK_BYTES..if end == 0 { chunk.len() } else { end },
             ));
         }
-        let mut bytes = BytesMut::with_capacity((range.end - range.start) as usize);
+        let length = (range.end - range.start) as usize;
+        let memory = self.catalog.operation.reserve(length)?;
+        let mut bytes = BytesMut::with_capacity(length);
         for chunk_index in first..=last {
             let chunk = self.chunk(pack, chunk_index).await?;
             let start = if chunk_index == first {
@@ -457,10 +493,10 @@ impl<'a> Reader<'a> {
             };
             bytes.extend_from_slice(&chunk[start..end]);
         }
-        Ok(bytes.freeze())
+        Ok(LiveBytes::new(bytes.freeze(), memory))
     }
 
-    async fn chunk(&mut self, pack: u16, index: usize) -> Result<Bytes, Error> {
+    async fn chunk(&mut self, pack: u16, index: usize) -> Result<LiveBytes, Error> {
         let index = u16::try_from(index)
             .map_err(|_| Error::InvalidPack("pack chunk index exceeds u16".into()))?;
         if let Some(bytes) = self.cache.get(&(pack, index)) {
@@ -473,51 +509,43 @@ impl<'a> Reader<'a> {
             .clone();
         let bytes = usize::try_from(object.len())
             .map_err(|_| Error::InvalidPack("pack chunk exceeds memory".into()))?;
-        if self.requests >= self.request_limit {
-            return invalid("pack read request limit exceeded");
-        }
-        self.requests += 1;
-        self.charge(bytes)?;
+        self.catalog.operation.io(bytes)?;
+        self.catalog.operation.work(bytes)?;
+        let memory = self.catalog.operation.reserve(bytes)?;
         let value = self.log.read_object(self.view, &object).await?;
         if value.len() != bytes {
             return invalid("pack chunk byte length does not match");
         }
-        if self.cache_bytes + bytes <= MAX_CACHE_BYTES {
-            self.cache_bytes += bytes;
-            self.cache.insert((pack, index), value.clone());
+        let value = LiveBytes::new(value, memory);
+        while self.cache_bytes + bytes > MAX_CACHE_BYTES {
+            let Some(oldest) = self.cache_order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.cache.remove(&oldest) {
+                self.cache_bytes -= removed.len();
+            }
         }
+        self.cache_bytes += bytes;
+        self.cache_order.push_back((pack, index));
+        self.cache.insert((pack, index), value.clone());
         Ok(value)
-    }
-
-    fn charge(&mut self, bytes: usize) -> Result<(), Error> {
-        self.work = self
-            .work
-            .checked_add(bytes)
-            .ok_or_else(|| Error::InvalidPack("pack read work overflowed".into()))?;
-        if self.work > self.work_limit {
-            return invalid("pack read work limit exceeded");
-        }
-        Ok(())
     }
 }
 
 struct DecodedEntry {
     header: gix_pack::data::entry::Header,
-    data: Bytes,
+    data: LiveBytes,
 }
 
-fn apply_delta(
-    base: &[u8],
-    delta: &[u8],
-    mut charge: impl FnMut(usize) -> Result<(), Error>,
-) -> Result<Vec<u8>, Error> {
+fn apply_delta(operation: &Operation, base: &[u8], delta: &[u8]) -> Result<LiveBytes, Error> {
     let (base_size, mut position) = delta_integer(delta)?;
     let (result_size, consumed) = delta_integer(&delta[position..])?;
     position += consumed;
     if base_size != base.len() || result_size > MAX_OBJECT_BYTES {
         return invalid("delta base or result size is invalid");
     }
-    charge(result_size)?;
+    operation.work(result_size)?;
+    let memory = operation.reserve(result_size)?;
     let mut result = Vec::with_capacity(result_size);
     while position < delta.len() {
         let command = delta[position];
@@ -571,7 +599,7 @@ fn apply_delta(
     if result.len() != result_size {
         return invalid("delta result size does not match");
     }
-    Ok(result)
+    Ok(LiveBytes::new(Bytes::from(result), memory))
 }
 
 const _: () = assert!(size_of::<Location>() == 8);
@@ -588,14 +616,32 @@ mod tests {
     use object_log::{
         CollectionFinish, CollectionStart, CommitStatus, LogId, Options, TransactionId,
         ValidatedBackend,
-        sim::{FaultStore, Operation},
+        sim::{FaultStore, Operation as StoreOperation},
     };
     use object_store::{memory::InMemory, path::Path as StorePath};
 
     use super::*;
-    use crate::pack::{ExternalBase, normalize};
+    use crate::pack::{
+        ExternalBase,
+        budget::{LIVE_BYTES, Pool},
+    };
 
     type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
+
+    fn test_operation() -> Operation {
+        let Ok(operation) = Pool::new(LIVE_BYTES).admit() else {
+            unreachable!("new test pool must admit its first operation")
+        };
+        operation
+    }
+
+    fn normalize(
+        format: ObjectFormat,
+        input: &[u8],
+        bases: &[ExternalBase<'_>],
+    ) -> Result<Normalized, Error> {
+        crate::pack::normalize(&test_operation(), format, input, bases)
+    }
 
     struct Fixture {
         normalized: Normalized,
@@ -709,7 +755,14 @@ mod tests {
         descriptor: PackDescriptor,
         root: &StagedObject,
     ) -> Result<Catalog, Error> {
-        load(log, view, format, &[(descriptor, root.reference().clone())]).await
+        load(
+            &test_operation(),
+            log,
+            view,
+            format,
+            &[(descriptor, root.reference().clone())],
+        )
+        .await
     }
 
     async fn stage_load_find(format: ObjectFormat) -> TestResult {
@@ -717,7 +770,7 @@ mod tests {
         let (log, view) = open(store.clone(), "round-trip").await?;
         let empty = pack_fixture(format, Vec::new(), false, false)?;
         assert_eq!(empty.normalized.bytes.len(), 12 + format.digest_len());
-        let (descriptor, root) = stage(&log, &view, empty.normalized).await?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, empty.normalized).await?;
         let empty = load_one(&log, &view, format, descriptor, &root).await?;
         assert!(empty.directory.is_empty());
 
@@ -726,8 +779,9 @@ mod tests {
         let first_id = fixture.objects[0].0;
 
         store.reset();
-        let (descriptor, root) = stage(&log, &view, fixture.normalized.clone()).await?;
-        let puts = store.metrics().operation(Operation::Put);
+        let (descriptor, root) =
+            stage(&test_operation(), &log, &view, fixture.normalized.clone()).await?;
+        let puts = store.metrics().operation(StoreOperation::Put);
         assert_eq!(puts.requests, (chunks + 1) as u64);
         assert_eq!(
             puts.uploaded_bytes,
@@ -735,8 +789,23 @@ mod tests {
         );
 
         store.reset();
+        let blocked = test_operation();
+        blocked.io(crate::pack::budget::TRANSFER_BYTES)?;
+        assert!(
+            load(
+                &blocked,
+                &log,
+                &view,
+                format,
+                &[(descriptor.clone(), root.reference().clone())]
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+
         let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-        let gets = store.metrics().operation(Operation::Get);
+        let gets = store.metrics().operation(StoreOperation::Get);
         assert_eq!(gets.requests, 1);
         assert_eq!(gets.downloaded_bytes, root.reference().len());
 
@@ -744,7 +813,7 @@ mod tests {
         store.reset();
         let missing = ObjectId::from_bytes(format, &vec![0xfe; format.digest_len()])?;
         assert!(reader.find(missing).await?.is_none());
-        let gets = store.metrics().operation(Operation::Get);
+        let gets = store.metrics().operation(StoreOperation::Get);
         assert_eq!(gets.requests, 0);
         assert_eq!(gets.downloaded_bytes, 0);
         for (id, expected) in fixture.objects {
@@ -752,11 +821,15 @@ mod tests {
             assert_eq!(object.kind, gix_object::Kind::Blob);
             assert_eq!(&object.data[..], expected);
         }
-        let mut requests = Reader::new(&log, &view, &catalog);
-        requests.cache_bytes = MAX_CACHE_BYTES;
-        requests.request_limit = 1;
-        assert!(requests.find(first_id).await?.is_some());
-        assert!(requests.find(first_id).await.is_err());
+        let mut shared = Reader::new(&log, &view, &catalog);
+        assert!(shared.find(first_id).await?.is_some());
+        while catalog.operation.calls() < crate::pack::budget::CALLS {
+            catalog.operation.io(0)?;
+        }
+        let mut second = Reader::new(&log, &view, &catalog);
+        store.reset();
+        assert!(second.find(first_id).await.is_err());
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
         Ok(())
     }
 
@@ -779,15 +852,15 @@ mod tests {
         )?;
         let right = pack_fixture(ObjectFormat::Sha1, vec![shared, vec![1]], true, false)?;
         let shared_id = left.objects[0].0;
-        let (left, left_root) = stage(&log, &view, left.normalized).await?;
-        let (right, right_root) = stage(&log, &view, right.normalized).await?;
+        let (left, left_root) = stage(&test_operation(), &log, &view, left.normalized).await?;
+        let (right, right_root) = stage(&test_operation(), &log, &view, right.normalized).await?;
         let expected = left.id.min(right.id);
         let roots = vec![
             (left, left_root.reference().clone()),
             (right, right_root.reference().clone()),
         ];
         for roots in [roots.clone(), roots.into_iter().rev().collect()] {
-            let catalog = load(&log, &view, ObjectFormat::Sha1, &roots).await?;
+            let catalog = load(&test_operation(), &log, &view, ObjectFormat::Sha1, &roots).await?;
             let position = catalog
                 .directory
                 .binary_search_by(|location| {
@@ -813,30 +886,63 @@ mod tests {
         )?;
         assert!(range.start < CHUNK_BYTES && range.end > CHUNK_BYTES);
         let expected = fixture.normalized.bytes.clone();
-        let (descriptor, root) = stage(&log, &view, fixture.normalized).await?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let pack_bytes = usize::try_from(descriptor.bytes)?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let mut reader = Reader::new(&log, &view, &catalog);
         let boundary = u32::try_from(CHUNK_BYTES)?;
         store.reset();
         assert_eq!(
-            reader.read_range(0, 12..boundary).await?,
-            expected[12..CHUNK_BYTES]
+            &reader.read_range(0, 12..boundary).await?[..],
+            &expected[12..CHUNK_BYTES]
         );
-        let gets = store.metrics().operation(Operation::Get);
+        let gets = store.metrics().operation(StoreOperation::Get);
         assert_eq!(gets.requests, 1);
         assert_eq!(gets.downloaded_bytes, CHUNK_BYTES as u64);
         store.reset();
         assert_eq!(
-            reader.read_range(0, boundary - 1..boundary + 1).await?,
-            expected[(CHUNK_BYTES - 1)..=CHUNK_BYTES]
+            &reader.read_range(0, boundary - 1..boundary + 1).await?[..],
+            &expected[(CHUNK_BYTES - 1)..=CHUNK_BYTES]
         );
-        let gets = store.metrics().operation(Operation::Get);
+        let gets = store.metrics().operation(StoreOperation::Get);
         assert_eq!(gets.requests, 1);
         assert_eq!(gets.downloaded_bytes, (pack_bytes - CHUNK_BYTES) as u64);
         store.reset();
         reader.find(fixture.objects[0].0).await?;
-        assert_eq!(store.metrics().operation(Operation::Get).requests, 0);
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_evicts_at_eight_mib_while_slices_keep_their_reservation() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store, "cache-eviction").await?;
+        let data = (1_u64..=8)
+            .map(|mut state| {
+                (0..1_100_000)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        state.to_le_bytes()[0]
+                    })
+                    .collect()
+            })
+            .collect();
+        let fixture = pack_fixture(ObjectFormat::Sha1, data, false, true)?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        assert!(catalog.packs[0].chunks.len() > MAX_CACHE_BYTES / CHUNK_BYTES);
+        let first = reader.chunk(0, 0).await?.slice(..16);
+        for index in 1..catalog.packs[0].chunks.len() {
+            drop(reader.chunk(0, index).await?);
+        }
+        assert!(reader.cache_bytes <= MAX_CACHE_BYTES);
+        assert!(!reader.cache.contains_key(&(0, 0)));
+        let retained = catalog.operation.live_bytes();
+        drop(first);
+        assert_eq!(retained - catalog.operation.live_bytes(), CHUNK_BYTES);
         Ok(())
     }
 
@@ -847,13 +953,20 @@ mod tests {
         index: Vec<u8>,
     ) -> TestResult<(PackDescriptor, StagedObject)> {
         let id = ObjectId::from_bytes(ObjectFormat::Sha1, &pack[pack.len() - 20..])?;
+        let operation = test_operation();
+        let memory = [
+            operation.reserve(pack.len())?,
+            operation.reserve(index.len())?,
+        ];
         Ok(stage(
+            &operation,
             log,
             view,
             Normalized {
                 bytes: pack,
                 index,
                 id,
+                _memory: memory,
             },
         )
         .await?)
@@ -867,9 +980,15 @@ mod tests {
         root: StagedObject,
     ) -> TestResult {
         assert!(
-            load(log, view, format, &[(descriptor, root.reference().clone())])
-                .await
-                .is_err()
+            load(
+                &test_operation(),
+                log,
+                view,
+                format,
+                &[(descriptor, root.reference().clone())]
+            )
+            .await
+            .is_err()
         );
         Ok(())
     }
@@ -1006,22 +1125,22 @@ mod tests {
         let (log, view) = open(store.clone(), "empty").await?;
         let fixture = pack_fixture(ObjectFormat::Sha1, vec![Vec::new()], true, false)?;
         let id = fixture.objects[0].0;
-        let (descriptor, root) = stage(&log, &view, fixture.normalized).await?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let mut reader = Reader::new(&log, &view, &catalog);
         let object = reader.find(id).await?.ok_or("empty object is missing")?;
         assert!(object.data.is_empty());
-        let before = reader.work;
         store.reset();
         assert!(reader.find(id).await?.is_some());
-        let repeated = reader.work - before;
-        assert!(repeated > 0);
-        reader.work_limit = reader.work + repeated - 1;
+        let used = catalog.operation.work_bytes();
+        catalog
+            .operation
+            .work(crate::pack::budget::WORK_BYTES - used)?;
         assert!(matches!(
             reader.find(id).await,
-            Err(Error::InvalidPack(message)) if message == "pack read work limit exceeded"
+            Err(Error::InvalidPack(message)) if message == "Git work limit exceeded"
         ));
-        assert_eq!(store.metrics().operation(Operation::Get).requests, 0);
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
         Ok(())
     }
 
@@ -1037,7 +1156,15 @@ mod tests {
             bytes: pack.len() as u64,
         };
         let oversized = Bytes::from(vec![0; MAX_INDEX_BYTES + 1]);
-        assert!(validate_index(&oversized, ObjectFormat::Sha1, &descriptor).is_err());
+        assert!(
+            validate_index(
+                &test_operation(),
+                &oversized,
+                ObjectFormat::Sha1,
+                &descriptor
+            )
+            .is_err()
+        );
 
         let mut corrupt = index.clone();
         corrupt[7] = 1;
@@ -1117,7 +1244,7 @@ mod tests {
                 vec![child; MAX_PACK_BYTES / CHUNK_BYTES],
             )
             .await?;
-        assert_eq!(oversized.reference().len(), MAX_PACK_ROOT_BYTES + 1);
+        assert_eq!(oversized.reference().len(), MAX_PACK_ROOT_BYTES as u64 + 1);
         store.reset();
         assert_load_fails(
             &log,
@@ -1127,7 +1254,7 @@ mod tests {
             oversized,
         )
         .await?;
-        assert_eq!(store.metrics().operation(Operation::Get).requests, 0);
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
 
         let blob = log.put_object(&view, pack.clone()).await?;
         let child_node = log.put_node(&view, Bytes::new(), vec![blob]).await?;
@@ -1179,7 +1306,7 @@ mod tests {
         )?;
         let compressed = usize::try_from(entry.data_offset)?;
         assert!(delta_integer(&[0xff; 16]).is_err());
-        assert!(apply_delta(&[], &[0, 1, 1], |_| Ok(())).is_err());
+        assert!(apply_delta(&test_operation(), &[], &[0, 1, 1]).is_err());
 
         let mut pack = original_pack.clone();
         pack[compressed] ^= 1;
@@ -1326,25 +1453,13 @@ mod tests {
             ObjectFormat::Sha1,
             position,
         )?;
-        let (descriptor, root) = stage(&log, &view, fixture.normalized).await?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let mut reader = Reader::new(&log, &view, &catalog);
         for (id, expected) in fixture.objects {
-            assert_eq!(
-                reader.find(id).await?.ok_or("object is missing")?.data,
-                expected
-            );
+            let found = reader.find(id).await?.ok_or("object is missing")?;
+            assert_eq!(&found.data[..], expected);
         }
-        reader.depth_limit = 0;
-        assert!(reader.find(deep_id).await.is_err());
-        let mut limited = Reader::new(&log, &view, &catalog);
-        limited.request_limit = 0;
-        assert!(limited.find(deep_id).await.is_err());
-        limited.request_limit = MAX_READ_REQUESTS;
-        limited.work_limit = 1;
-        store.reset();
-        assert!(limited.find(deep_id).await.is_err());
-        assert_eq!(store.metrics().operation(Operation::Get).requests, 0);
         assert_find_raw_fails(&log, &view, corrupt_pack, corrupt_index, deep_id).await?;
         Ok(())
     }
@@ -1361,10 +1476,12 @@ mod tests {
         let (log, view) = open(store, "collection").await?;
         let live = fixture(ObjectFormat::Sha1, 1, true, false)?;
         let live_id = live.objects[0].0;
-        let (live_descriptor, live_root) = stage(&log, &view, live.normalized).await?;
+        let (live_descriptor, live_root) =
+            stage(&test_operation(), &log, &view, live.normalized).await?;
         let live_ref = live_root.reference().clone();
         let dead = fixture(ObjectFormat::Sha1, 1, true, false)?;
-        let (dead_descriptor, dead_root) = stage(&log, &view, dead.normalized).await?;
+        let (dead_descriptor, dead_root) =
+            stage(&test_operation(), &log, &view, dead.normalized).await?;
         let dead_ref = dead_root.reference().clone();
         let prepared = log.prepare(
             &view,
@@ -1383,6 +1500,7 @@ mod tests {
             return Err("collection did not complete".into());
         };
         let live = load(
+            &test_operation(),
             &log,
             &current,
             ObjectFormat::Sha1,
@@ -1397,6 +1515,7 @@ mod tests {
         );
         assert!(
             load(
+                &test_operation(),
                 &log,
                 &current,
                 ObjectFormat::Sha1,
