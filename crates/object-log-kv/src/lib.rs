@@ -193,6 +193,23 @@ impl KvMachine {
             )),
         }
     }
+
+    /// Encodes one key-value state as a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state cannot be encoded.
+    pub fn checkpoint(&self, state: &KvState) -> Result<Bytes, KvError> {
+        let snapshot = SnapshotWire {
+            version: KV_FORMAT_VERSION,
+            entries: state
+                .entries
+                .iter()
+                .map(|(key, value)| EntryWire { key, value })
+                .collect(),
+        };
+        Ok(encode(&snapshot)?.into())
+    }
 }
 
 impl Materializer for KvMachine {
@@ -250,18 +267,6 @@ impl Materializer for KvMachine {
             }
         }
         Ok(())
-    }
-
-    fn checkpoint(&self, state: &Self::State) -> Result<Vec<u8>, Self::Error> {
-        let snapshot = SnapshotWire {
-            version: KV_FORMAT_VERSION,
-            entries: state
-                .entries
-                .iter()
-                .map(|(key, value)| EntryWire { key, value })
-                .collect(),
-        };
-        encode(&snapshot)
     }
 }
 

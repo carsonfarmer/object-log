@@ -34,13 +34,6 @@ pub trait Materializer {
         operation: &[u8],
         objects: &[ObjectRef],
     ) -> Result<(), Self::Error>;
-
-    /// Encodes one application snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns a domain error when the state cannot be encoded.
-    fn checkpoint(&self, state: &Self::State) -> Result<Vec<u8>, Self::Error>;
 }
 
 /// One state value reconstructed from one exact durable view.

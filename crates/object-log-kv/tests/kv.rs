@@ -143,7 +143,7 @@ async fn checkpoint_restore_matches_full_replay() -> TestResult {
         .ok_or("materialized view has no tail")?;
     let snapshot = machine.checkpoint(replayed.state())?;
     let CheckpointStatus::Published(compacted) = log
-        .publish_checkpoint(replayed.view(), &through, Bytes::from(snapshot), Vec::new())
+        .publish_checkpoint(replayed.view(), &through, snapshot, Vec::new())
         .await?
     else {
         return Err("key-value checkpoint returned a conflict".into());
@@ -233,7 +233,7 @@ fn operations_results_and_checkpoints_have_stable_bytes() -> TestResult {
     let mut state = KvState::default();
     machine.apply(&mut state, 0, &operation, &[])?;
     assert_eq!(
-        machine.checkpoint(&state)?,
+        machine.checkpoint(&state)?.as_ref(),
         b"\xa2\x01\x01\x02\x81\xa2\x01\x41k\x02\x41v"
     );
     Ok(())

@@ -272,9 +272,10 @@ content-addressed cycle cannot be formed without breaking digest verification.
 
 ## Materializer
 
-The optional helper has a narrow role. It receives the explicit object
+The optional helper restores typed state. It receives the explicit object
 references with each opaque snapshot or operation. It can keep those references
-for lazy adapter reads.
+for lazy adapter reads. Each domain encodes and publishes its own checkpoints
+because only the domain knows which objects the snapshot retains.
 
 ```rust
 trait Materializer {
@@ -294,7 +295,6 @@ trait Materializer {
         operation: &[u8],
         objects: &[ObjectRef],
     ) -> Result<(), Self::Error>;
-    fn checkpoint(&self, state: &Self::State) -> Result<Vec<u8>, Self::Error>;
 }
 ```
 

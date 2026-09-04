@@ -88,17 +88,6 @@ impl Materializer for Machine {
         state.packs.extend(zip(record.packs, objects));
         Ok(())
     }
-
-    fn checkpoint(&self, state: &Self::State) -> Result<Vec<u8>, Self::Error> {
-        let packs = state
-            .packs
-            .iter()
-            .map(|(&id, (bytes, _))| PackDescriptor { id, bytes: *bytes })
-            .collect();
-        Ok(Record::snapshot(self.0, state.refs.clone(), packs)?
-            .encode()?
-            .to_vec())
-    }
 }
 
 fn zip(
@@ -131,6 +120,15 @@ mod tests {
             id: id(byte),
             bytes: 4,
         }
+    }
+
+    fn checkpoint(machine: Machine, state: &State) -> Result<Bytes, Error> {
+        let packs = state
+            .packs
+            .iter()
+            .map(|(&id, (bytes, _))| PackDescriptor { id, bytes: *bytes })
+            .collect();
+        Record::snapshot(machine.0, state.refs.clone(), packs)?.encode()
     }
 
     #[test]
@@ -180,7 +178,7 @@ mod tests {
             vec![],
         )?;
         machine.apply(&mut state, 1, &operation, &[])?;
-        let restored = machine.restore(&machine.checkpoint(&state)?, &[])?;
+        let restored = machine.restore(&checkpoint(machine, &state)?, &[])?;
         assert_eq!(restored.refs, state.refs);
         assert!(restored.packs.is_empty());
         Ok(())
@@ -217,7 +215,7 @@ mod tests {
         );
 
         let restored =
-            machine.restore(&machine.checkpoint(&state)?, std::slice::from_ref(&object))?;
+            machine.restore(&checkpoint(machine, &state)?, std::slice::from_ref(&object))?;
         assert_eq!(restored.packs[&descriptor.id], (descriptor.bytes, object));
         Ok(())
     }
