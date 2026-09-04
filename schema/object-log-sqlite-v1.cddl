@@ -4,7 +4,7 @@
 
 sqlite-record = snapshot-inline / snapshot-chunked / wal-inline / wal-chunked
 
-snapshot-inline = [0, bstr]        ; complete snapshot
+snapshot-inline = [0, [bstr]]      ; complete snapshot
 
 snapshot-chunked = [1, [payload-length, chunk-count]]
 

@@ -163,7 +163,7 @@ arrays:
 
 | Tag | Form | Fields |
 |---:|---|---|
-| 0 | snapshot inline | `[0, payload]` |
+| 0 | snapshot inline | `[0, [payload]]` |
 | 1 | snapshot chunks | `[1, [payload_len, chunk_count]]` |
 | 2 | WAL inline | `[2, [payload, wal_header, prior_mx_frame, mx_frame]]` |
 | 3 | WAL chunks | `[3, [payload_len, chunk_count, wal_header, prior_mx_frame, mx_frame]]` |

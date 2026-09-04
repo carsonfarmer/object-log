@@ -219,6 +219,34 @@ mod tests {
 
     #[test]
     fn snapshot_and_wal_have_stable_canonical_bytes() -> TestResult {
+        let snapshot_inline = Record::snapshot(
+            PAGE_SIZE as usize,
+            Some(Bytes::from(vec![0; PAGE_SIZE as usize])),
+            0,
+        )?;
+        let mut golden = b"\x82\x00\x81\x59\x10\x00".to_vec();
+        golden.resize(PAGE_SIZE as usize + 6, 0);
+        let encoded = snapshot_inline.encode()?;
+        assert_eq!(encoded, golden);
+        assert_eq!(Record::decode(&encoded, 0)?, snapshot_inline);
+
+        let wal_inline = Record::wal(
+            WAL_FRAME_BYTES,
+            Some(Bytes::from(vec![0x22; WAL_FRAME_BYTES])),
+            0,
+            [0x11; 32],
+            2,
+            3,
+        )?;
+        let mut golden = b"\x82\x02\x84\x59\x10\x18".to_vec();
+        golden.extend([0x22; WAL_FRAME_BYTES]);
+        golden.extend(b"\x58\x20");
+        golden.extend([0x11; 32]);
+        golden.extend(b"\x02\x03");
+        let encoded = wal_inline.encode()?;
+        assert_eq!(encoded, golden);
+        assert_eq!(Record::decode(&encoded, 0)?, wal_inline);
+
         let records = [
             (
                 Record::snapshot(PAGE_SIZE as usize, None, 1)?,
