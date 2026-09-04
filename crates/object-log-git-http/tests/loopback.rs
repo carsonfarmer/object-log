@@ -36,11 +36,7 @@ async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> Tes
         StorePath::from("git-http-loopback"),
     )
     .await?;
-    let log = Log::open(
-        backend.scope(&LogId::new("repository")?),
-        Options::default(),
-    )
-    .await?;
+    let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
     let scratch = root.path().join("scratch");
     let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?).router();
     let (url, server) = serve(app).await?;
@@ -225,7 +221,7 @@ async fn minio_host_pushes_and_cold_clones() -> TestResult {
     let namespace = StorePath::from(format!("git-http-{}", TransactionId::new()));
     let log_id = LogId::new("repository")?;
     let backend = ValidatedBackend::new(Arc::new(build_minio()?), namespace.clone()).await?;
-    let log = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let log = Log::open(&backend, &log_id, Options::default()).await?;
     let first_scratch = root.path().join("first-scratch");
     let first_app = GitHttpServer::new(
         SmartHttp::new(log, &first_scratch),
@@ -247,7 +243,7 @@ async fn minio_host_pushes_and_cold_clones() -> TestResult {
     let _ = first_server.await;
 
     let backend = ValidatedBackend::new(Arc::new(build_minio()?), namespace).await?;
-    let log = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let log = Log::open(&backend, &log_id, Options::default()).await?;
     let second_scratch = root.path().join("second-scratch");
     let second_app = GitHttpServer::new(
         SmartHttp::new(log, &second_scratch),
@@ -276,11 +272,7 @@ async fn repository_server(
 ) -> TestResult<(String, std::path::PathBuf, JoinHandle<()>, ReceiveGate)> {
     let backend =
         ValidatedBackend::new(Arc::new(InMemory::new()), StorePath::from(namespace)).await?;
-    let log = Log::open(
-        backend.scope(&LogId::new("repository")?),
-        Options::default(),
-    )
-    .await?;
+    let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
     let scratch = root.path().join(format!("{namespace}-scratch"));
     let gate = ReceiveGate::new();
     let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?)

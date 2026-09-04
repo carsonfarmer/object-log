@@ -30,7 +30,7 @@ async fn minio_sqlite_recovers_before_and_after_collection() -> TestResult {
         max_object_bytes: 8_240,
         ..Options::default()
     };
-    let log = Log::open(backend.scope(&log_id), options).await?;
+    let log = Log::open(&backend, &log_id, options).await?;
     let directory = tempfile::tempdir()?;
     let first = directory.path().join("first/cache.sqlite3");
     let second = directory.path().join("second/cache.sqlite3");
@@ -99,7 +99,7 @@ async fn minio_sqlite_recovers_before_and_after_collection() -> TestResult {
 
     fs::remove_dir_all(first.parent().ok_or("first cache has no parent")?)?;
     drop(log);
-    let log = Log::open(backend.scope(&log_id), options).await?;
+    let log = Log::open(&backend, &log_id, options).await?;
     let mut recovered = Database::open(log.clone(), &second).await?;
     assert_state(&mut recovered, 3, 131_072).await?;
     drop(recovered);
@@ -120,7 +120,7 @@ async fn minio_sqlite_recovers_before_and_after_collection() -> TestResult {
 
     fs::remove_dir_all(second.parent().ok_or("second cache has no parent")?)?;
     drop(log);
-    let log = Log::open(backend.scope(&log_id), options).await?;
+    let log = Log::open(&backend, &log_id, options).await?;
     let mut collected = Database::open(log, &third).await?;
     assert_state(&mut collected, 3, 131_072).await?;
     drop(collected);

@@ -7,8 +7,7 @@ use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
 use object_log::{
     CheckpointResolution, CheckpointStatus, CommitStatus, Error as LogError, Log, ObjectKind,
-    ObjectRef, PendingCheckpoint, PreparedCommit, Refresh, Resolution, StagedObject, TransactionId,
-    View,
+    ObjectRef, PendingCheckpoint, PreparedCommit, Resolution, StagedObject, TransactionId, View,
 };
 use rusqlite::{Connection, MAIN_DB};
 use uuid::Uuid;
@@ -95,7 +94,7 @@ impl StagedWrite<'_> {
             recovery_token: _,
             wal,
         } = self;
-        let source_generation = prepared.cursor().generation();
+        let source_generation = prepared.view().generation();
         let status = database.log.commit(*prepared).await?;
         if let CommitStatus::Committed(view) = &status {
             if is_next_generation(source_generation, view) {
@@ -168,13 +167,7 @@ impl Database {
         callback: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<Bytes>,
     ) -> Result<StageStatus<'_>, SqliteError> {
         self.ensure_current().await?;
-        let _preflight = self.log.prepare(
-            self.view.cursor(),
-            transaction_id,
-            Bytes::new(),
-            Bytes::new(),
-            Vec::new(),
-        )?;
+        self.log.preflight(&self.view, transaction_id)?;
         let first = self.view.checkpoint().is_none() && self.view.tail().is_empty();
         let prior = self.wal;
         let policy = &self.policy;
@@ -228,9 +221,9 @@ impl Database {
                 .await?;
             (record, objects, Some(current.position))
         };
-        let prepared =
-            self.log
-                .prepare(self.view.cursor(), transaction_id, record, result, objects)?;
+        let prepared = self
+            .log
+            .prepare(&self.view, transaction_id, record, result, objects)?;
         let recovery_token = prepared.recovery_token()?;
         Ok(StageStatus::Staged(StagedWrite {
             database: self,
@@ -288,7 +281,7 @@ impl Database {
         )?;
         let (snapshot, objects) = self.stage_snapshot(payload).await?;
         self.state = CacheState::Dirty;
-        let source_generation = self.view.cursor().generation();
+        let source_generation = self.view.generation();
         match self
             .log
             .publish_checkpoint(&self.view, &through, snapshot, objects)
@@ -311,10 +304,10 @@ impl Database {
     }
 
     async fn ensure_current(&mut self) -> Result<(), SqliteError> {
-        match self.log.refresh(self.view.cursor()).await? {
-            Refresh::NotModified if matches!(self.state, CacheState::Clean) => {}
-            Refresh::NotModified => self.rebuild(self.view.clone()).await?,
-            Refresh::Updated(current) => self.rebuild(*current).await?,
+        match self.log.refresh(&self.view).await? {
+            None if matches!(self.state, CacheState::Clean) => {}
+            None => self.rebuild(self.view.clone()).await?,
+            Some(current) => self.rebuild(current).await?,
         }
         Ok(())
     }
@@ -426,8 +419,7 @@ impl Database {
             .map_err(|_| SqliteError::PayloadLimit)?;
         let uploads = (0..payload_len).step_by(chunk_size).map(|offset| {
             let end = offset.saturating_add(chunk_size).min(payload_len);
-            self.log
-                .put_object(self.view.cursor(), payload.slice(offset..end))
+            self.log.put_object(&self.view, payload.slice(offset..end))
         });
         let objects = stream::iter(uploads)
             .buffered(MAX_CONCURRENT_OBJECTS)
@@ -736,7 +728,7 @@ impl CacheLease {
 fn is_next_generation(source: u64, current: &View) -> bool {
     source
         .checked_add(1)
-        .is_some_and(|generation| current.cursor().generation() == generation)
+        .is_some_and(|generation| current.generation() == generation)
 }
 
 fn validate_options(log: &Log) -> Result<(), SqliteError> {

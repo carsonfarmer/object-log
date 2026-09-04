@@ -12,9 +12,9 @@ use crate::store::{
     StoreKey, UpdateResult,
 };
 use crate::{
-    CheckpointRef, CommitRef, Cursor, Digest, Error, LogId, ObjectKind, ObjectRef,
+    CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, ObservedState,
     PendingCheckpoint, PendingCommit, PreparedCommit, RetentionId, StagedObject, StagingDomain,
-    StorageId, TransactionId,
+    StorageId, TransactionId, ValidatedBackend, View,
 };
 
 const MAX_CONCURRENT_READS: usize = 32;
@@ -65,53 +65,6 @@ impl Default for Options {
             max_collection_plan_bytes: 16 * 1024 * 1024,
         }
     }
-}
-
-/// One observed durable head.
-#[derive(Clone, Debug)]
-pub struct View {
-    pub(crate) cursor: Cursor,
-}
-
-impl View {
-    /// Returns the opaque cursor for conditional work against this view.
-    #[must_use]
-    pub const fn cursor(&self) -> &Cursor {
-        &self.cursor
-    }
-
-    /// Returns the log identity bound to this view.
-    #[must_use]
-    pub const fn log_id(&self) -> &LogId {
-        &self.cursor.head.log_id
-    }
-
-    /// Returns the current checkpoint reference, when present.
-    #[must_use]
-    pub const fn checkpoint(&self) -> Option<&CheckpointRef> {
-        self.cursor.head.checkpoint.as_ref()
-    }
-
-    /// Returns the ordered active commit references.
-    #[must_use]
-    pub fn tail(&self) -> &[CommitRef] {
-        &self.cursor.head.tail
-    }
-
-    /// Returns the current garbage-collection epoch.
-    #[must_use]
-    pub const fn collection_epoch(&self) -> u64 {
-        self.cursor.head.collection_epoch
-    }
-}
-
-/// The result of a conditional head refresh.
-#[derive(Debug)]
-pub enum Refresh {
-    /// The durable head still matches the supplied cursor.
-    NotModified,
-    /// The durable head changed and this is its current view.
-    Updated(Box<View>),
 }
 
 /// The immediate result of publishing one prepared commit.
@@ -349,7 +302,12 @@ impl Log {
     ///
     /// Returns an error when the head cannot be created or read, or an existing
     /// head is invalid.
-    pub async fn open(store: ScopedStore, options: Options) -> Result<Self, Error> {
+    pub async fn open(
+        backend: &ValidatedBackend,
+        log_id: &LogId,
+        options: Options,
+    ) -> Result<Self, Error> {
+        let store = backend.scope(log_id);
         let initial = Head::empty(store.log_id().clone(), uuid::Uuid::new_v4(), options);
         let initial_bytes = format::encode_head(&initial)?;
         Self::validate_head_size(options, &initial_bytes)?;
@@ -392,27 +350,25 @@ impl Log {
         self.view_from_stored(stored)
     }
 
-    /// Conditionally loads the head when it changed after `cursor`.
+    /// Conditionally loads the head when it changed after `view`.
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign cursor, a missing head, invalid durable
+    /// Returns an error for a foreign view, a missing head, invalid durable
     /// bytes, or a backend failure.
-    pub async fn refresh(&self, cursor: &Cursor) -> Result<Refresh, Error> {
-        self.validate_cursor(cursor)?;
+    pub async fn refresh(&self, view: &View) -> Result<Option<View>, Error> {
+        self.validate_view(view)?;
         match self
             .store
             .read_if_changed(
                 StoreKey::Head,
-                cursor.storage_version(),
+                view.storage_version(),
                 self.options.max_head_bytes,
             )
             .await?
         {
-            ConditionalRead::NotModified => Ok(Refresh::NotModified),
-            ConditionalRead::Modified(stored) => {
-                Ok(Refresh::Updated(Box::new(self.view_from_stored(stored)?)))
-            }
+            ConditionalRead::NotModified => Ok(None),
+            ConditionalRead::Modified(stored) => Ok(Some(self.view_from_stored(stored)?)),
             ConditionalRead::Missing => Err(Error::InvalidFormat(
                 "the opened log has no durable head".to_owned(),
             )),
@@ -429,48 +385,48 @@ impl Log {
     /// Returns an error for a foreign view, a durable limit, invalid head data,
     /// or a backend failure that cannot hide a successful update.
     pub async fn retain(&self, view: &View, id: RetentionId) -> Result<RetentionStatus, Error> {
-        self.validate_cursor(view.cursor())?;
-        if view.cursor.head.retention_ids.contains(&id) || view.cursor.head.active_plan.is_some() {
-            return match self.refresh(view.cursor()).await? {
-                Refresh::NotModified if view.cursor.head.retention_ids.contains(&id) => {
+        self.validate_view(view)?;
+        if view.head().retention_ids.contains(&id) || view.head().active_plan.is_some() {
+            return match self.refresh(view).await? {
+                None if view.head().retention_ids.contains(&id) => {
                     Ok(RetentionStatus::Applied(view.clone()))
                 }
-                Refresh::NotModified => Ok(RetentionStatus::ActiveCollection(view.clone())),
-                Refresh::Updated(current) if current.cursor.head.retention_ids.contains(&id) => {
-                    Ok(RetentionStatus::Applied(*current))
+                None => Ok(RetentionStatus::ActiveCollection(view.clone())),
+                Some(current) if current.head().retention_ids.contains(&id) => {
+                    Ok(RetentionStatus::Applied(current))
                 }
-                Refresh::Updated(current) if current.cursor.head.active_plan.is_some() => {
-                    Ok(RetentionStatus::ActiveCollection(*current))
+                Some(current) if current.head().active_plan.is_some() => {
+                    Ok(RetentionStatus::ActiveCollection(current))
                 }
-                Refresh::Updated(current) => Ok(RetentionStatus::Conflict(*current)),
+                Some(current) => Ok(RetentionStatus::Conflict(current)),
             };
         }
-        if view.cursor.head.retention_ids.len() >= self.options.max_retention_ids {
+        if view.head().retention_ids.len() >= self.options.max_retention_ids {
             return Err(Error::LimitExceeded("retention IDs"));
         }
 
-        let mut candidate = view.cursor.head.clone();
+        let mut candidate = view.head().clone();
         candidate.retention_ids.insert(id);
         candidate.advance_generation()?;
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
         match self
             .store
-            .update(StoreKey::Head, bytes, view.cursor.version.clone())
+            .update(StoreKey::Head, bytes, view.storage_version().clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(View {
-                cursor: self.bound_cursor(candidate, version),
-            })),
+            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(
+                self.bound_view(candidate, version),
+            )),
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
                     Err(Error::Store(_)) => return Ok(RetentionStatus::Pending),
                     Err(error) => return Err(error),
                 };
-                if current.cursor.head.retention_ids.contains(&id) {
+                if current.head().retention_ids.contains(&id) {
                     Ok(RetentionStatus::Applied(current))
-                } else if current.cursor.head.active_plan.is_some() {
+                } else if current.head().active_plan.is_some() {
                     Ok(RetentionStatus::ActiveCollection(current))
                 } else {
                     Ok(RetentionStatus::Conflict(current))
@@ -494,37 +450,37 @@ impl Log {
         view: &View,
         id: RetentionId,
     ) -> Result<RetentionStatus, Error> {
-        self.validate_cursor(view.cursor())?;
-        if !view.cursor.head.retention_ids.contains(&id) {
-            return match self.refresh(view.cursor()).await? {
-                Refresh::NotModified => Ok(RetentionStatus::Applied(view.clone())),
-                Refresh::Updated(current) if !current.cursor.head.retention_ids.contains(&id) => {
-                    Ok(RetentionStatus::Applied(*current))
+        self.validate_view(view)?;
+        if !view.head().retention_ids.contains(&id) {
+            return match self.refresh(view).await? {
+                None => Ok(RetentionStatus::Applied(view.clone())),
+                Some(current) if !current.head().retention_ids.contains(&id) => {
+                    Ok(RetentionStatus::Applied(current))
                 }
-                Refresh::Updated(current) => Ok(RetentionStatus::Conflict(*current)),
+                Some(current) => Ok(RetentionStatus::Conflict(current)),
             };
         }
 
-        let mut candidate = view.cursor.head.clone();
+        let mut candidate = view.head().clone();
         candidate.retention_ids.remove(&id);
         candidate.advance_generation()?;
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
         match self
             .store
-            .update(StoreKey::Head, bytes, view.cursor.version.clone())
+            .update(StoreKey::Head, bytes, view.storage_version().clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(View {
-                cursor: self.bound_cursor(candidate, version),
-            })),
+            Ok(UpdateResult::Updated { version }) => Ok(RetentionStatus::Applied(
+                self.bound_view(candidate, version),
+            )),
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
                     Err(Error::Store(_)) => return Ok(RetentionStatus::Pending),
                     Err(error) => return Err(error),
                 };
-                if current.cursor.head.retention_ids.contains(&id) {
+                if current.head().retention_ids.contains(&id) {
                     Ok(RetentionStatus::Conflict(current))
                 } else {
                     Ok(RetentionStatus::Applied(current))
@@ -545,11 +501,11 @@ impl Log {
     /// Returns an error for a foreign view, invalid live data, a configured
     /// bound, or a storage failure before the head update.
     pub async fn start_collection(&self, view: &View) -> Result<CollectionStart, Error> {
-        self.validate_cursor(view.cursor())?;
-        if view.cursor.head.active_plan.is_some() {
+        self.validate_view(view)?;
+        if view.head().active_plan.is_some() {
             return Ok(CollectionStart::Active(view.clone()));
         }
-        if !view.cursor.head.retention_ids.is_empty() {
+        if !view.head().retention_ids.is_empty() {
             return Ok(CollectionStart::Retained(view.clone()));
         }
 
@@ -594,7 +550,7 @@ impl Log {
         };
         let plan_ref = self.create_collection_plan(&plan).await?;
         let plan_key = Self::collection_plan_key(self.incarnation, &plan_ref);
-        let mut candidate = view.cursor.head.clone();
+        let mut candidate = view.head().clone();
         candidate.advance_generation()?;
         candidate.collection_epoch = epoch;
         candidate.active_plan = Some(plan_ref);
@@ -602,13 +558,11 @@ impl Log {
         self.validate_encoded_head(&bytes)?;
         match self
             .store
-            .update(StoreKey::Head, bytes, view.cursor.version.clone())
+            .update(StoreKey::Head, bytes, view.storage_version().clone())
             .await
         {
             Ok(UpdateResult::Updated { version }) => Ok(CollectionStart::Installed(
-                View {
-                    cursor: self.bound_cursor(candidate, version),
-                },
+                self.bound_view(candidate, version),
                 report,
             )),
             Ok(UpdateResult::PreconditionFailed) => {
@@ -635,12 +589,12 @@ impl Log {
     ///
     /// Returns an error for a foreign view or invalid durable plan data.
     pub async fn resume_collection(&self, view: &View) -> Result<CollectionFinish, Error> {
-        self.validate_cursor(view.cursor())?;
-        let requested_plan = view.cursor.head.active_plan.as_ref();
+        self.validate_view(view)?;
+        let requested_plan = view.head().active_plan.as_ref();
         let current = self.load().await?;
-        let Some(plan_ref) = current.cursor.head.active_plan.as_ref() else {
+        let Some(plan_ref) = current.head().active_plan.as_ref() else {
             if let Some(requested_plan) = requested_plan {
-                let key = Self::collection_plan_key(view.cursor.head.incarnation, requested_plan);
+                let key = Self::collection_plan_key(view.head().incarnation, requested_plan);
                 self.cleanup_collection_plan(key).await?;
             }
             return Ok(CollectionFinish::Complete(
@@ -654,10 +608,8 @@ impl Log {
                 CollectionReport::new(0, 0, 0),
             ));
         }
-        let plan_key = Self::collection_plan_key(current.cursor.head.incarnation, plan_ref);
-        let plan = self
-            .read_collection_plan(&current.cursor.head, plan_ref)
-            .await?;
+        let plan_key = Self::collection_plan_key(current.head().incarnation, plan_ref);
+        let plan = self.read_collection_plan(current.head(), plan_ref).await?;
         let candidate_bytes = plan.candidate_bytes()?;
         let mut report = CollectionReport::new(plan.candidates.len(), candidate_bytes, 0);
         for batch in plan.candidates.chunks(MAX_DELETE_BATCH) {
@@ -673,22 +625,20 @@ impl Log {
             }
         }
 
-        let mut candidate = current.cursor.head.clone();
+        let mut candidate = current.head().clone();
         candidate.active_plan = None;
         candidate.advance_generation()?;
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
         match self
             .store
-            .update(StoreKey::Head, bytes, current.cursor.version.clone())
+            .update(StoreKey::Head, bytes, current.storage_version().clone())
             .await
         {
             Ok(UpdateResult::Updated { version }) => {
                 self.cleanup_collection_plan(plan_key).await?;
                 Ok(CollectionFinish::Complete(
-                    View {
-                        cursor: self.bound_cursor(candidate, version),
-                    },
+                    self.bound_view(candidate, version),
                     report,
                 ))
             }
@@ -698,7 +648,7 @@ impl Log {
                     Err(Error::Store(_)) => return Ok(CollectionFinish::Pending(report)),
                     Err(error) => return Err(error),
                 };
-                if current.cursor.head.active_plan.is_none() {
+                if current.head().active_plan.is_none() {
                     self.cleanup_collection_plan(plan_key).await?;
                     Ok(CollectionFinish::Complete(current, report))
                 } else {
@@ -719,19 +669,19 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign cursor, an active collection fence, a
+    /// Returns an error for a foreign view, an active collection fence, a
     /// configured limit, or a backend failure. A physical identity collision
     /// is retried with a new ID.
-    pub async fn put_object(&self, cursor: &Cursor, bytes: Bytes) -> Result<StagedObject, Error> {
-        self.validate_cursor(cursor)?;
+    pub async fn put_object(&self, view: &View, bytes: Bytes) -> Result<StagedObject, Error> {
+        self.validate_view(view)?;
         if bytes.len() > self.options.max_object_bytes {
             return Err(Error::LimitExceeded("object bytes"));
         }
-        let blocked = self.active_collection_candidates(&cursor.head).await?;
+        let blocked = self.active_collection_candidates(view.head()).await?;
         let object = self
             .create_fresh_object_with(ObjectKind::Blob, bytes, blocked.as_deref(), StorageId::new)
             .await?;
-        Ok(self.staged_object(cursor, object))
+        Ok(self.staged_object(view, object))
     }
 
     /// Stores one immutable reference node after its direct children exist.
@@ -742,15 +692,15 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign cursor, an invalid or stale child proof,
+    /// Returns an error for a foreign view, an invalid or stale child proof,
     /// an active collection fence, a configured limit, or a backend failure.
     pub async fn put_node(
         &self,
-        cursor: &Cursor,
+        view: &View,
         payload: Bytes,
         children: Vec<StagedObject>,
     ) -> Result<StagedObject, Error> {
-        self.validate_staged_objects(cursor, &children)?;
+        self.validate_staged_objects(view, &children)?;
         let children = children
             .into_iter()
             .map(|child| child.object)
@@ -760,31 +710,31 @@ impl Log {
         if bytes.len() > self.options.max_object_bytes {
             return Err(Error::LimitExceeded("object bytes"));
         }
-        let blocked = self.active_collection_candidates(&cursor.head).await?;
+        let blocked = self.active_collection_candidates(view.head()).await?;
         let object = self
             .create_fresh_object_with(ObjectKind::Node, bytes, blocked.as_deref(), StorageId::new)
             .await?;
-        Ok(self.staged_object(cursor, object))
+        Ok(self.staged_object(view, object))
     }
 
     /// Verifies existing object graphs and creates publication proofs.
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign cursor, an invalid reference graph, an
+    /// Returns an error for a foreign view, an invalid reference graph, an
     /// active collection fence, a configured limit, or a backend failure.
     pub async fn stage_objects(
         &self,
-        cursor: &Cursor,
+        view: &View,
         objects: Vec<ObjectRef>,
     ) -> Result<Vec<StagedObject>, Error> {
-        self.validate_cursor(cursor)?;
+        self.validate_view(view)?;
         self.validate_dependencies(&objects)?;
-        self.verify_publication_dependencies(&cursor.head, &objects)
+        self.verify_publication_dependencies(view.head(), &objects)
             .await?;
         Ok(objects
             .into_iter()
-            .map(|object| self.staged_object(cursor, object))
+            .map(|object| self.staged_object(view, object))
             .collect())
     }
 
@@ -795,7 +745,7 @@ impl Log {
     /// Returns expiry when a missing object belongs to an older unretained
     /// view. A missing object in the current epoch is corruption.
     pub async fn read_object(&self, view: &View, object: &ObjectRef) -> Result<Bytes, Error> {
-        self.validate_cursor(view.cursor())?;
+        self.validate_view(view)?;
         if object.kind != ObjectKind::Blob {
             return Err(Error::InvalidFormat(
                 "a payload read requires a blob reference".to_owned(),
@@ -814,7 +764,7 @@ impl Log {
     /// Returns expiry when a missing node belongs to an older unretained view.
     /// A missing node in the current epoch is corruption.
     pub async fn read_node(&self, view: &View, object: &ObjectRef) -> Result<ReferenceNode, Error> {
-        self.validate_cursor(view.cursor())?;
+        self.validate_view(view)?;
         if object.kind != ObjectKind::Node {
             return Err(Error::InvalidFormat(
                 "a node read requires a reference-node object".to_owned(),
@@ -863,43 +813,44 @@ impl Log {
             .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))
     }
 
-    /// Builds one immutable candidate against an exact observed cursor.
+    /// Checks whether a transaction can be prepared against an observed view.
     ///
-    /// This operation does not access storage and does not rebase the opaque
-    /// operation onto a newer cursor.
+    /// This check performs no I/O and makes no allocation. A later concurrent
+    /// update can still make the view stale.
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign cursor, an invalid or stale object proof,
+    /// Returns an error for a foreign view, a full tail, or a transaction ID
+    /// that is already committed.
+    pub fn preflight(&self, view: &View, transaction_id: TransactionId) -> Result<(), Error> {
+        self.validate_view(view)?;
+        self.validate_commit_position(view, transaction_id)
+    }
+
+    /// Builds one immutable candidate against an exact observed view.
+    ///
+    /// This operation does not access storage and does not rebase the opaque
+    /// operation onto a newer view.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view, an invalid or stale object proof,
     /// or a configured size or tail limit.
     pub fn prepare(
         &self,
-        cursor: &Cursor,
+        view: &View,
         transaction_id: TransactionId,
         operation: Bytes,
         result: Bytes,
         objects: Vec<StagedObject>,
     ) -> Result<PreparedCommit, Error> {
-        self.validate_staged_objects(cursor, &objects)?;
+        self.validate_staged_objects(view, &objects)?;
         self.validate_prepared_sizes(&operation, &result)?;
-        if cursor.head.tail.len() >= self.options.max_tail_entries {
-            return Err(Error::LimitExceeded("active tail entries"));
-        }
-        if cursor
-            .head
-            .tail
-            .iter()
-            .chain(&cursor.head.recent_outcomes)
-            .any(|entry| entry.transaction_id == transaction_id)
-        {
-            return Err(Error::InvalidFormat(
-                "the transaction ID is already committed".to_owned(),
-            ));
-        }
-        let mut cursor = cursor.clone();
-        cursor.staging_domain = Arc::clone(&self.staging_domain);
+        self.validate_commit_position(view, transaction_id)?;
+        let mut view = view.clone();
+        view.staging_domain = Arc::clone(&self.staging_domain);
         Ok(PreparedCommit {
-            cursor,
+            view,
             transaction_id,
             storage_id: StorageId::new(),
             operation,
@@ -926,15 +877,15 @@ impl Log {
         self.validate_prepared(&prepared)?;
         let (commit_ref, commit_bytes) = self.encode_prepared(&prepared)?;
         self.verify_publication(
-            &prepared.cursor.head,
+            prepared.view.head(),
             self.commit_immutable_key(&commit_ref),
             &prepared.objects,
-            &prepared.cursor.staging_domain,
+            &prepared.view.staging_domain,
         )
         .await?;
         self.create_new_commit(self.commit_key(&commit_ref), commit_bytes)
             .await?;
-        prepared.cursor.staging_domain = Arc::clone(&self.staging_domain);
+        prepared.view.staging_domain = Arc::clone(&self.staging_domain);
         let candidate = Self::candidate_head(&prepared, &commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
@@ -944,13 +895,13 @@ impl Log {
             .update(
                 StoreKey::Head,
                 candidate_bytes,
-                prepared.cursor.version.clone(),
+                prepared.view.storage_version().clone(),
             )
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(CommitStatus::Committed(View {
-                cursor: self.bound_cursor(candidate, version),
-            })),
+            Ok(UpdateResult::Updated { version }) => {
+                Ok(CommitStatus::Committed(self.bound_view(candidate, version)))
+            }
             Ok(UpdateResult::PreconditionFailed) => {
                 let pending = PendingCommit {
                     prepared,
@@ -999,7 +950,7 @@ impl Log {
         if let Some(resolution) = Self::classify_resolution(&pending, current)? {
             if let Resolution::Committed(view) = &resolution
                 && Self::tail_contains(view, &pending.commit_ref)
-                && !self.proof_matches(&pending.prepared.cursor.staging_domain)
+                && !self.proof_matches(&pending.prepared.view.staging_domain)
             {
                 match self.verify_published_commit(&pending.commit_ref).await {
                     Ok(()) => {}
@@ -1013,10 +964,10 @@ impl Log {
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
         match self
             .verify_publication(
-                &pending.prepared.cursor.head,
+                pending.prepared.view.head(),
                 self.commit_immutable_key(&pending.commit_ref),
                 &pending.prepared.objects,
-                &pending.prepared.cursor.staging_domain,
+                &pending.prepared.view.staging_domain,
             )
             .await
         {
@@ -1024,7 +975,7 @@ impl Log {
             Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
             Err(error) => return Err(error),
         }
-        if !self.proof_matches(&pending.prepared.cursor.staging_domain) {
+        if !self.proof_matches(&pending.prepared.view.staging_domain) {
             match self
                 .ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
                 .await
@@ -1034,7 +985,7 @@ impl Log {
                 Err(error) => return Err(error),
             }
         }
-        pending.prepared.cursor.staging_domain = Arc::clone(&self.staging_domain);
+        pending.prepared.view.staging_domain = Arc::clone(&self.staging_domain);
         let candidate = Self::candidate_head(&pending.prepared, &pending.commit_ref)?;
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
@@ -1043,13 +994,13 @@ impl Log {
             .update(
                 StoreKey::Head,
                 candidate_bytes,
-                pending.prepared.cursor.version.clone(),
+                pending.prepared.view.storage_version().clone(),
             )
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(Resolution::Committed(View {
-                cursor: self.bound_cursor(candidate, version),
-            })),
+            Ok(UpdateResult::Updated { version }) => {
+                Ok(Resolution::Committed(self.bound_view(candidate, version)))
+            }
             Err(Error::Store(_)) => Ok(Resolution::StillPending(pending)),
             Err(error) => Err(error),
             Ok(UpdateResult::PreconditionFailed) => {
@@ -1097,19 +1048,17 @@ impl Log {
     /// Returns expiry for missing commits in an older unretained view. A
     /// missing commit in the current epoch is corruption.
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
-        self.validate_cursor(view.cursor())?;
-        let log = Arc::new(self.clone());
-        let records = stream::iter(view.tail().to_vec().into_iter().map(move |reference| {
-            let log = Arc::clone(&log);
-            async move { log.read_commit_optional(&reference).await }
-        }))
-        .buffered(MAX_CONCURRENT_READS)
-        .try_collect::<Vec<Option<CommitRecord>>>()
-        .await?;
-        if records.iter().any(Option::is_none) {
-            return Err(self.missing_read_error(view).await?);
+        self.validate_view(view)?;
+        let mut reads = stream::iter(view.tail().iter().cloned())
+            .map(|reference| async move { self.read_commit_optional(&reference).await })
+            .buffered(MAX_CONCURRENT_READS);
+        let mut records = Vec::with_capacity(view.tail().len());
+        while let Some(record) = reads.try_next().await? {
+            let Some(record) = record else {
+                return Err(self.missing_read_error(view).await?);
+            };
+            records.push(record);
         }
-        let records = records.into_iter().flatten().collect::<Vec<_>>();
 
         let mut expected_tip = view
             .checkpoint()
@@ -1149,7 +1098,7 @@ impl Log {
         objects: Vec<StagedObject>,
     ) -> Result<CheckpointStatus, Error> {
         self.read_tail(view).await?;
-        self.validate_staged_objects(view.cursor(), &objects)?;
+        self.validate_staged_objects(view, &objects)?;
         let objects = objects
             .into_iter()
             .map(|staged| staged.object)
@@ -1164,7 +1113,7 @@ impl Log {
         };
         let bytes = format::encode_checkpoint(&checkpoint)?;
         self.validate_checkpoint_bytes(bytes.len())?;
-        let blocked = self.active_collection_candidates(&view.cursor.head).await?;
+        let blocked = self.active_collection_candidates(view.head()).await?;
         let object = self
             .create_fresh_object_with(
                 ObjectKind::Checkpoint,
@@ -1185,16 +1134,20 @@ impl Log {
                 object,
             },
         };
-        pending.view.cursor.staging_domain = Arc::clone(&self.staging_domain);
+        pending.view.staging_domain = Arc::clone(&self.staging_domain);
 
         match self
             .store
-            .update(StoreKey::Head, candidate_bytes, view.cursor.version.clone())
+            .update(
+                StoreKey::Head,
+                candidate_bytes,
+                view.storage_version().clone(),
+            )
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(CheckpointStatus::Published(View {
-                cursor: self.bound_cursor(candidate, version),
-            })),
+            Ok(UpdateResult::Updated { version }) => Ok(CheckpointStatus::Published(
+                self.bound_view(candidate, version),
+            )),
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(view) => view,
@@ -1227,7 +1180,7 @@ impl Log {
         pending: PendingCheckpoint,
     ) -> Result<CheckpointResolution, Error> {
         let mut pending = pending;
-        self.validate_cursor(pending.view.cursor())?;
+        self.validate_view(&pending.view)?;
         let candidate = Self::checkpoint_head(
             &pending.view,
             &pending.through,
@@ -1246,7 +1199,7 @@ impl Log {
         };
         match Self::classify_checkpoint(&pending, current)? {
             CheckpointEvidence::Published(view) => {
-                if self.proof_matches(&pending.view.cursor.staging_domain) {
+                if self.proof_matches(&pending.view.staging_domain) {
                     return Ok(CheckpointResolution::Published(view));
                 }
                 return match self.verify_checkpoint(&pending.checkpoint).await {
@@ -1274,7 +1227,7 @@ impl Log {
             Err(Error::Store(_)) => return Ok(CheckpointResolution::StillPending(pending)),
             Err(error) => return Err(error),
         }
-        pending.view.cursor.staging_domain = Arc::clone(&self.staging_domain);
+        pending.view.staging_domain = Arc::clone(&self.staging_domain);
         let candidate_bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&candidate_bytes)?;
         match self
@@ -1282,13 +1235,13 @@ impl Log {
             .update(
                 StoreKey::Head,
                 candidate_bytes,
-                pending.view.cursor.version.clone(),
+                pending.view.storage_version().clone(),
             )
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(CheckpointResolution::Published(View {
-                cursor: self.bound_cursor(candidate, version),
-            })),
+            Ok(UpdateResult::Updated { version }) => Ok(CheckpointResolution::Published(
+                self.bound_view(candidate, version),
+            )),
             Err(Error::Store(_)) => Ok(CheckpointResolution::StillPending(pending)),
             Err(error) => Err(error),
             Ok(UpdateResult::PreconditionFailed) => {
@@ -1323,7 +1276,7 @@ impl Log {
     /// Returns expiry for a missing checkpoint in an older unretained view. A
     /// missing checkpoint in the current epoch is corruption.
     pub async fn read_checkpoint(&self, view: &View) -> Result<Option<CheckpointRecord>, Error> {
-        self.validate_cursor(view.cursor())?;
+        self.validate_view(view)?;
         let Some(reference) = view.checkpoint() else {
             return Ok(None);
         };
@@ -1346,22 +1299,22 @@ impl Log {
         &self,
         pending: &PendingCheckpoint,
     ) -> Result<(), Error> {
-        if self.proof_matches(&pending.view.cursor.staging_domain) {
+        if self.proof_matches(&pending.view.staging_domain) {
             return self
                 .verify_publication(
-                    &pending.view.cursor.head,
+                    pending.view.head(),
                     self.object_immutable_key(&pending.checkpoint.object),
                     &[],
-                    &pending.view.cursor.staging_domain,
+                    &pending.view.staging_domain,
                 )
                 .await;
         }
         let checkpoint = self.load_checkpoint(&pending.checkpoint).await?;
         self.verify_publication(
-            &pending.view.cursor.head,
+            pending.view.head(),
             self.object_immutable_key(&pending.checkpoint.object),
             &checkpoint.objects,
-            &pending.view.cursor.staging_domain,
+            &pending.view.staging_domain,
         )
         .await
     }
@@ -1430,34 +1383,31 @@ impl Log {
         if head.options != self.options {
             return Err(Error::ConfigurationMismatch("options"));
         }
-        Ok(View {
-            cursor: self.bound_cursor(head, stored.version),
-        })
+        Ok(self.bound_view(head, stored.version))
     }
 
-    fn bound_cursor(&self, head: Head, version: UpdateVersion) -> Cursor {
-        Cursor {
-            head,
-            version,
+    fn bound_view(&self, head: Head, version: UpdateVersion) -> View {
+        View {
+            observed: Arc::new(ObservedState { head, version }),
             staging_domain: Arc::clone(&self.staging_domain),
         }
     }
 
-    fn validate_cursor(&self, cursor: &Cursor) -> Result<(), Error> {
-        if cursor.head.log_id != *self.store.log_id() {
+    fn validate_view(&self, view: &View) -> Result<(), Error> {
+        if view.head().log_id != *self.store.log_id() {
             return Err(Error::InvalidFormat(
-                "the cursor belongs to another log".to_owned(),
+                "the view belongs to another log".to_owned(),
             ));
         }
-        if cursor.head.incarnation != self.incarnation {
+        if view.head().incarnation != self.incarnation {
             return Err(Error::InvalidFormat(
-                "the cursor belongs to another log incarnation".to_owned(),
+                "the view belongs to another log incarnation".to_owned(),
             ));
         }
-        if cursor.head.options != self.options {
+        if view.head().options != self.options {
             return Err(Error::ConfigurationMismatch("options"));
         }
-        cursor.head.validate()
+        view.head().validate()
     }
 
     fn validate_prepared_sizes(&self, operation: &Bytes, result: &Bytes) -> Result<(), Error> {
@@ -1490,26 +1440,22 @@ impl Log {
         Ok(())
     }
 
-    fn staged_object(&self, cursor: &Cursor, object: ObjectRef) -> StagedObject {
+    fn staged_object(&self, view: &View, object: ObjectRef) -> StagedObject {
         StagedObject {
             object,
             domain: Arc::clone(&self.staging_domain),
-            collection_epoch: cursor.head.collection_epoch,
+            collection_epoch: view.collection_epoch(),
         }
     }
 
-    fn validate_staged_objects(
-        &self,
-        cursor: &Cursor,
-        objects: &[StagedObject],
-    ) -> Result<(), Error> {
-        self.validate_cursor(cursor)?;
+    fn validate_staged_objects(&self, view: &View, objects: &[StagedObject]) -> Result<(), Error> {
+        self.validate_view(view)?;
         if objects.len() > self.options.max_object_refs {
             return Err(Error::LimitExceeded("object references"));
         }
         if objects.iter().any(|object| {
             !Arc::ptr_eq(&object.domain, &self.staging_domain)
-                || object.collection_epoch != cursor.head.collection_epoch
+                || object.collection_epoch != view.collection_epoch()
         }) {
             return Err(Error::InvalidStagedObject);
         }
@@ -1542,11 +1488,30 @@ impl Log {
     }
 
     fn validate_prepared(&self, prepared: &PreparedCommit) -> Result<(), Error> {
-        self.validate_cursor(&prepared.cursor)?;
+        self.validate_view(&prepared.view)?;
         self.validate_prepared_sizes(&prepared.operation, &prepared.result)?;
         self.validate_dependencies(&prepared.objects)?;
-        if prepared.cursor.head.tail.len() >= self.options.max_tail_entries {
+        self.validate_commit_position(&prepared.view, prepared.transaction_id)
+    }
+
+    fn validate_commit_position(
+        &self,
+        view: &View,
+        transaction_id: TransactionId,
+    ) -> Result<(), Error> {
+        if view.tail().len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
+        }
+        if view
+            .head()
+            .tail
+            .iter()
+            .chain(&view.head().recent_outcomes)
+            .any(|entry| entry.transaction_id == transaction_id)
+        {
+            return Err(Error::InvalidFormat(
+                "the transaction ID is already committed".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -1556,7 +1521,7 @@ impl Log {
             log_id: self.store.log_id().clone(),
             incarnation: self.incarnation,
             transaction_id: prepared.transaction_id,
-            expected_tip: prepared.cursor.head.tip(),
+            expected_tip: prepared.view.head().tip(),
             operation: prepared.operation.clone(),
             result: prepared.result.clone(),
             objects: prepared.objects.clone(),
@@ -1568,7 +1533,7 @@ impl Log {
         let len =
             u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("commit byte length"))?;
         let reference = CommitRef {
-            sequence: prepared.cursor.head.next_sequence,
+            sequence: prepared.view.head().next_sequence,
             transaction_id: prepared.transaction_id,
             storage_id: prepared.storage_id,
             digest: Digest::of(&bytes),
@@ -1578,7 +1543,7 @@ impl Log {
     }
 
     fn candidate_head(prepared: &PreparedCommit, commit_ref: &CommitRef) -> Result<Head, Error> {
-        let mut head = prepared.cursor.head.clone();
+        let mut head = prepared.view.head().clone();
         head.advance_generation()?;
         head.next_sequence = head
             .next_sequence
@@ -1589,7 +1554,7 @@ impl Log {
     }
 
     fn checkpoint_head(view: &View, through: &CommitRef, object: ObjectRef) -> Result<Head, Error> {
-        let mut head = view.cursor.head.clone();
+        let mut head = view.head().clone();
         let through_index = head
             .tail
             .iter()
@@ -1618,7 +1583,7 @@ impl Log {
         current: View,
     ) -> Result<Option<Resolution>, Error> {
         let target = &pending.commit_ref;
-        let head = &current.cursor.head;
+        let head = current.head();
         if Self::contains_commit(&current, target) {
             return Ok(Some(Resolution::Committed(current)));
         }
@@ -1640,24 +1605,23 @@ impl Log {
             ));
         }
 
-        let source = &pending.prepared.cursor;
-        if head == &source.head && current.cursor.version == source.version {
+        let source = &pending.prepared.view;
+        if head == source.head() && current.storage_version() == source.storage_version() {
             return Ok(None);
         }
         Ok(Some(Resolution::NotCommitted(current)))
     }
 
     fn contains_commit(view: &View, target: &CommitRef) -> bool {
-        view.cursor
-            .head
+        view.head()
             .tail
             .iter()
-            .chain(&view.cursor.head.recent_outcomes)
+            .chain(&view.head().recent_outcomes)
             .any(|entry| entry == target)
     }
 
     fn tail_contains(view: &View, target: &CommitRef) -> bool {
-        view.cursor.head.tail.iter().any(|entry| entry == target)
+        view.tail().iter().any(|entry| entry == target)
     }
 
     fn classify_checkpoint(
@@ -1667,19 +1631,18 @@ impl Log {
         if current.checkpoint() == Some(&pending.checkpoint) {
             return Ok(CheckpointEvidence::Published(current));
         }
-        if current.cursor.head == pending.view.cursor.head
-            && current.cursor.version == pending.view.cursor.version
+        if current.head() == pending.view.head()
+            && current.storage_version() == pending.view.storage_version()
         {
             return Ok(CheckpointEvidence::Retry);
         }
         let next_generation = pending
             .view
-            .cursor
-            .head
+            .head()
             .generation
             .checked_add(1)
             .ok_or(Error::LimitExceeded("head generation"))?;
-        match current.cursor.head.generation.cmp(&next_generation) {
+        match current.generation().cmp(&next_generation) {
             std::cmp::Ordering::Less => Err(Error::InvalidFormat(
                 "the head precedes pending checkpoint evidence".to_owned(),
             )),
@@ -1689,10 +1652,10 @@ impl Log {
     }
 
     fn validate_pending(&self, pending: &PendingCommit) -> Result<(), Error> {
-        self.validate_cursor(&pending.prepared.cursor)?;
+        self.validate_view(&pending.prepared.view)?;
         self.validate_prepared_sizes(&pending.prepared.operation, &pending.prepared.result)?;
         self.validate_dependencies(&pending.prepared.objects)?;
-        if pending.prepared.cursor.head.tail.len() >= self.options.max_tail_entries {
+        if pending.prepared.view.tail().len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
         let (expected_ref, _) = self.encode_prepared(&pending.prepared)?;
@@ -2175,8 +2138,8 @@ impl Log {
 mod tests {
     use std::sync::Arc;
 
-    use crate::ValidatedBackend;
     use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
+    use crate::{LogId, ValidatedBackend};
     use object_store::memory::InMemory;
     use object_store::path::Path;
 
@@ -2220,7 +2183,8 @@ mod tests {
         )
         .await?;
         let log = Log::open(
-            backend.scope(&LogId::new("ambiguous-storage-id-collision")?),
+            &backend,
+            &LogId::new("ambiguous-storage-id-collision")?,
             Options::default(),
         )
         .await?;
@@ -2258,7 +2222,7 @@ mod tests {
         let log = test_log("commit-storage-id-collision", Options::default()).await?;
         let view = log.load().await?;
         let mut prepared = log.prepare(
-            view.cursor(),
+            &view,
             TransactionId::new(),
             Bytes::from_static(b"operation"),
             Bytes::new(),
@@ -2364,7 +2328,7 @@ mod tests {
         let log = test_log("conflicting-lengths", Options::default()).await?;
         let source = log.load().await?;
         let object = log
-            .put_object(source.cursor(), Bytes::from_static(b"object"))
+            .put_object(&source, Bytes::from_static(b"object"))
             .await?;
         let mut conflicting = object.reference().clone();
         conflicting.len = conflicting.len.saturating_add(1);
@@ -2382,7 +2346,7 @@ mod tests {
         )
         .await?;
         assert!(matches!(
-            log.stage_objects(fenced.cursor(), vec![conflicting]).await,
+            log.stage_objects(&fenced, vec![conflicting]).await,
             Err(Error::CorruptObject)
         ));
         Ok(())
@@ -2396,7 +2360,7 @@ mod tests {
         let transaction_id = TransactionId::new();
         let storage_id = StorageId::from_uuid(uuid::Uuid::from_u128(41));
         let mut predicted = log.prepare(
-            source.cursor(),
+            &source,
             transaction_id,
             Bytes::from_static(b"operation"),
             Bytes::new(),
@@ -2414,7 +2378,7 @@ mod tests {
         )
         .await?;
         let mut prepared = log.prepare(
-            fenced.cursor(),
+            &fenced,
             transaction_id,
             Bytes::from_static(b"operation"),
             Bytes::new(),
@@ -2440,7 +2404,7 @@ mod tests {
         let log = test_log("checkpoint-retry-fence", Options::default()).await?;
         let source = log.load().await?;
         let prepared = log.prepare(
-            source.cursor(),
+            &source,
             TransactionId::new(),
             Bytes::from_static(b"commit"),
             Bytes::new(),
@@ -2533,7 +2497,7 @@ mod tests {
         let log = test_log("old-incarnation-delete", Options::default()).await?;
         let source = log.load().await?;
         let bytes = Bytes::from_static(b"same content");
-        let current = log.put_object(source.cursor(), bytes.clone()).await?;
+        let current = log.put_object(&source, bytes.clone()).await?;
         let old_key = ImmutableKey {
             incarnation: uuid::Uuid::from_u128(61),
             kind: ImmutableKind::Blob,
@@ -2573,11 +2537,7 @@ mod tests {
         let backend =
             ValidatedBackend::new(Arc::new(faults.clone()), Path::from("different-plan-tests"))
                 .await?;
-        let log = Log::open(
-            backend.scope(&LogId::new("different-plan")?),
-            Options::default(),
-        )
-        .await?;
+        let log = Log::open(&backend, &LogId::new("different-plan")?, Options::default()).await?;
         let source = log.load().await?;
         let first = install_plan(
             &log,
@@ -2597,7 +2557,7 @@ mod tests {
             }],
         };
         let second_ref = log.create_collection_plan(&second_plan).await?;
-        let mut head = first.cursor.head.clone();
+        let mut head = first.head().clone();
         head.generation = head
             .generation
             .checked_add(1)
@@ -2606,7 +2566,7 @@ mod tests {
         head.active_plan = Some(second_ref);
         let encoded = format::encode_head(&head)?;
         log.store
-            .update(StoreKey::Head, encoded, first.cursor.version.clone())
+            .update(StoreKey::Head, encoded, first.storage_version().clone())
             .await?;
         faults.reset();
 
@@ -2629,7 +2589,7 @@ mod tests {
         let backend =
             ValidatedBackend::new(Arc::new(faults.clone()), Path::from("oversized-live-tests"))
                 .await?;
-        let log = Log::open(backend.scope(&LogId::new("oversized-live")?), options).await?;
+        let log = Log::open(&backend, &LogId::new("oversized-live")?, options).await?;
         let view = install_commit(
             &log,
             format::Commit {
@@ -2663,8 +2623,7 @@ mod tests {
     async fn test_log(id: &str, options: Options) -> Result<Log, Error> {
         let backend =
             ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("log-tests")).await?;
-        let store = backend.scope(&LogId::new(id)?);
-        Log::open(store, options).await
+        Log::open(&backend, &LogId::new(id)?, options).await
     }
 
     async fn install_plan(
@@ -2683,7 +2642,7 @@ mod tests {
             candidates,
         };
         let plan_ref = log.create_collection_plan(&plan).await?;
-        let mut head = source.cursor.head.clone();
+        let mut head = source.head().clone();
         head.generation = head
             .generation
             .checked_add(1)
@@ -2693,14 +2652,12 @@ mod tests {
         let bytes = format::encode_head(&head)?;
         let UpdateResult::Updated { version } = log
             .store
-            .update(StoreKey::Head, bytes, source.cursor.version.clone())
+            .update(StoreKey::Head, bytes, source.storage_version().clone())
             .await?
         else {
             return Err(Error::InvalidFormat("test plan lost its CAS".into()));
         };
-        Ok(View {
-            cursor: log.bound_cursor(head, version),
-        })
+        Ok(log.bound_view(head, version))
     }
 
     async fn install_commit(log: &Log, commit: format::Commit) -> Result<View, Error> {
@@ -2715,13 +2672,13 @@ mod tests {
                 .map_err(|_| Error::LimitExceeded("commit byte length"))?,
         };
         log.store.create(log.commit_key(&reference), bytes).await?;
-        let mut head = source.cursor.head.clone();
+        let mut head = source.head().clone();
         head.generation = 1;
         head.next_sequence = 1;
         head.tail.push(reference);
         let encoded = format::encode_head(&head)?;
         log.store
-            .update(StoreKey::Head, encoded, source.cursor.version)
+            .update(StoreKey::Head, encoded, source.storage_version().clone())
             .await?;
         log.load().await
     }

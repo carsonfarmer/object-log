@@ -30,7 +30,6 @@ pub trait Materializer {
     fn apply(
         &self,
         state: &mut Self::State,
-        sequence: u64,
         operation: &[u8],
         objects: &[ObjectRef],
     ) -> Result<(), Self::Error>;
@@ -96,12 +95,7 @@ where
     };
     for record in log.read_tail(&view).await? {
         materializer
-            .apply(
-                &mut state,
-                record.reference().sequence(),
-                record.operation(),
-                record.objects(),
-            )
+            .apply(&mut state, record.operation(), record.objects())
             .map_err(MaterializeError::State)?;
     }
     Ok(Materialized { view, state })

@@ -58,7 +58,7 @@ active_collection_plan
 integrity_digest
 ```
 
-`incarnation_id` is random and durable. It prevents a cursor from one deleted
+`incarnation_id` is random and durable. It prevents a view from one deleted
 or independent log from authorizing writes to another log with the same text
 identifier. It is only a namespace salt. WAL entries, payloads, and bases use
 deterministic BLAKE3 content identities within that namespace.
@@ -107,10 +107,10 @@ Object-store ETags are concurrency tokens and are not content-integrity hashes.
 
 ## Open and refresh
 
-`ValidatedBackend::new` validates one backend and root once. It returns a typed
-handle that derives tenant scopes without storage requests. `Log::open` creates
-the initial index when needed. It does not probe the backend or load all log
-data. This keeps tenant open and close cheap.
+`ValidatedBackend::new` validates one backend and root once. `Log::open` takes
+that handle and a `LogId`, then derives the private tenant scope without a
+storage request. It creates the initial index when needed. It does not probe
+the backend or load all log data. This keeps tenant open and close cheap.
 
 The capability probe writes and deletes one private object when the backend
 handle is created. Provisioning and collection credentials need delete
@@ -122,9 +122,9 @@ their complete ordered references. It does not fetch referenced payloads or
 nodes. An adapter reads only the objects that it needs. The materializer uses
 these operations to restore the complete state.
 
-`refresh` uses a conditional read. An unchanged index returns `NotModified`. A
-changed index returns its new view. The caller then reads the base and active
-tail that the view names.
+`refresh` uses a conditional read. An unchanged index returns `None`. A changed
+index returns `Some(View)`. The caller then reads the base and active tail that
+the view names.
 
 ## Object staging
 
@@ -144,10 +144,10 @@ can publish.
 
 ## Commit
 
-The caller prepares one candidate against one cursor.
+The caller prepares one candidate against one view.
 
 1. Validate all sizes, staged proofs, log identities, collection epochs, and
-   the expected cursor.
+   the expected view.
 2. Check the active collection fence.
 3. Create the immutable commit object.
 4. Build a new head that appends the commit reference.
@@ -165,7 +165,7 @@ The result is:
   includes an ambiguous update result and a rejected update followed by a
   failed read of the winner.
 
-The core never retries a candidate against a newer cursor. The application must
+The core never retries a candidate against a newer view. The application must
 read the winning operations, validate its intent again, and prepare a new
 candidate. The transaction ID can remain stable. The commit digest changes
 because its expected position changes.
@@ -187,7 +187,7 @@ the evidence incomplete. `Expired` is indeterminate. It does not prove that the
 operation failed. An application must not submit a non-idempotent operation as
 new work after this result.
 
-`PreparedCommit::recovery_token` encodes the exact source cursor, operation,
+`PreparedCommit::recovery_token` encodes the exact source view, operation,
 result, object references, and transaction ID. It excludes the process-local
 staging proof. The caller must persist this token before publication if
 process-loss recovery is required. `Log::resume` fully verifies the referenced
@@ -288,7 +288,6 @@ trait Materializer {
     fn apply(
         &self,
         state: &mut Self::State,
-        sequence: u64,
         operation: &[u8],
         objects: &[ObjectRef],
     ) -> Result<(), Self::Error>;
@@ -305,7 +304,7 @@ log. Requests normally route to it. Ownership is advisory.
 
 The owner keeps:
 
-- The current cursor and materialized state.
+- The current view and materialized state.
 - A bounded request queue.
 - One active commit builder.
 - A short batch timer and a maximum batch size.

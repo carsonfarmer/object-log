@@ -3,8 +3,8 @@
 use crate::log::Options;
 use crate::store::{ImmutableKey, ImmutableKind};
 use crate::{
-    CheckpointRef, CommitRef, Cursor, Digest, Error, LogId, ObjectKind, ObjectRef, PreparedCommit,
-    RetentionId, StorageId, TransactionId,
+    CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, ObservedState,
+    PreparedCommit, RetentionId, StorageId, TransactionId, View,
 };
 use bytes::Bytes;
 use minicbor::bytes::ByteVec;
@@ -698,9 +698,9 @@ pub(crate) fn decode_node(bytes: &[u8]) -> Result<Node, Error> {
 pub(crate) fn encode_recovery_token(prepared: &PreparedCommit) -> Result<Bytes, Error> {
     encode_envelope(&RecoveryTokenWire {
         format_version: FORMAT_VERSION,
-        head: encode_head(&prepared.cursor.head)?.to_vec(),
-        e_tag: prepared.cursor.version.e_tag.clone(),
-        storage_version: prepared.cursor.version.version.clone(),
+        head: encode_head(prepared.view.head())?.to_vec(),
+        e_tag: prepared.view.storage_version().e_tag.clone(),
+        storage_version: prepared.view.storage_version().version.clone(),
         transaction_id: prepared.transaction_id.as_uuid().as_bytes().to_vec(),
         operation: prepared.operation.to_vec(),
         result: prepared.result.to_vec(),
@@ -713,12 +713,14 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
     let wire: RecoveryTokenWire = decode_envelope(bytes)?;
     require_version(wire.format_version)?;
     let prepared = PreparedCommit {
-        cursor: Cursor {
-            head: decode_head(&wire.head)?,
-            version: UpdateVersion {
-                e_tag: wire.e_tag,
-                version: wire.storage_version,
-            },
+        view: View {
+            observed: Arc::new(ObservedState {
+                head: decode_head(&wire.head)?,
+                version: UpdateVersion {
+                    e_tag: wire.e_tag,
+                    version: wire.storage_version,
+                },
+            }),
             staging_domain: Arc::new(crate::StagingDomain),
         },
         transaction_id: transaction_id(&wire.transaction_id)?,
@@ -1427,12 +1429,14 @@ mod tests {
     #[test]
     fn recovery_token_round_trip_preserves_the_exact_candidate() {
         let prepared = crate::PreparedCommit {
-            cursor: crate::Cursor {
-                head: Head::empty(log_id(), incarnation(), Options::default()),
-                version: object_store::UpdateVersion {
-                    e_tag: Some("etag".to_owned()),
-                    version: Some("version".to_owned()),
-                },
+            view: crate::View {
+                observed: Arc::new(crate::ObservedState {
+                    head: Head::empty(log_id(), incarnation(), Options::default()),
+                    version: object_store::UpdateVersion {
+                        e_tag: Some("etag".to_owned()),
+                        version: Some("version".to_owned()),
+                    },
+                }),
                 staging_domain: Arc::new(crate::StagingDomain),
             },
             transaction_id: crate::TransactionId::new(),
@@ -1451,8 +1455,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
         let decoded = decode_recovery_token(&encoded)
             .unwrap_or_else(|error| panic!("decode failed: {error}"));
-        assert_eq!(decoded.cursor.head, prepared.cursor.head);
-        assert_eq!(decoded.cursor.version, prepared.cursor.version);
+        assert_eq!(decoded.view.head(), prepared.view.head());
+        assert_eq!(
+            decoded.view.storage_version(),
+            prepared.view.storage_version()
+        );
         assert_eq!(decoded.transaction_id, prepared.transaction_id);
         assert_eq!(decoded.storage_id, prepared.storage_id);
         assert_eq!(decoded.operation, prepared.operation);
@@ -1463,12 +1470,14 @@ mod tests {
     #[test]
     fn recovery_token_excludes_staging_proof() {
         let mut prepared = crate::PreparedCommit {
-            cursor: crate::Cursor {
-                head: Head::empty(log_id(), incarnation(), Options::default()),
-                version: object_store::UpdateVersion {
-                    e_tag: Some("etag".to_owned()),
-                    version: Some("version".to_owned()),
-                },
+            view: crate::View {
+                observed: Arc::new(crate::ObservedState {
+                    head: Head::empty(log_id(), incarnation(), Options::default()),
+                    version: object_store::UpdateVersion {
+                        e_tag: Some("etag".to_owned()),
+                        version: Some("version".to_owned()),
+                    },
+                }),
                 staging_domain: Arc::new(crate::StagingDomain),
             },
             transaction_id: crate::TransactionId::from_uuid(uuid::Uuid::from_u128(3)),
@@ -1484,7 +1493,7 @@ mod tests {
         };
         let without_proof = encode_recovery_token(&prepared)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
-        prepared.cursor.staging_domain = Arc::new(crate::StagingDomain);
+        prepared.view.staging_domain = Arc::new(crate::StagingDomain);
         let with_proof = encode_recovery_token(&prepared)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
 
@@ -1501,7 +1510,7 @@ mod tests {
             crate::ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("format-tests"))
                 .await
                 .unwrap_or_else(|error| panic!("backend validation failed: {error}"));
-        let log = crate::Log::open(backend.scope(&id), Options::default())
+        let log = crate::Log::open(&backend, &id, Options::default())
             .await
             .unwrap_or_else(|error| panic!("open failed: {error}"));
         let view = log
@@ -1510,7 +1519,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("load failed: {error}"));
         let prepared = log
             .prepare(
-                view.cursor(),
+                &view,
                 crate::TransactionId::new(),
                 Bytes::from_static(b"operation"),
                 Bytes::new(),
@@ -1523,7 +1532,11 @@ mod tests {
                 .unwrap_or_else(|error| panic!("token failed: {error}")),
         )
         .unwrap_or_else(|error| panic!("decode failed: {error}"));
-        tampered.cursor.head.options.max_tail_entries = 1;
+        Arc::get_mut(&mut tampered.view.observed)
+            .unwrap_or_else(|| panic!("decoded view is unexpectedly shared"))
+            .head
+            .options
+            .max_tail_entries = 1;
         let token = encode_recovery_token(&tampered)
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
 

@@ -73,7 +73,7 @@ async fn read_only_transactions_do_not_publish() -> TestResult {
     let log = open_log("sqlite-read-only").await?;
     let directory = tempfile::tempdir()?;
     let mut database = Database::open(log.clone(), directory.path().join("cache.sqlite3")).await?;
-    let generation = log.load().await?.cursor().generation();
+    let generation = log.load().await?.generation();
 
     let StageStatus::ReadOnly(result) = database
         .stage_write(TransactionId::new(), |transaction| {
@@ -85,7 +85,7 @@ async fn read_only_transactions_do_not_publish() -> TestResult {
         return Err("a read-only transaction produced WAL data".into());
     };
     assert_eq!(result.as_ref(), 42_i64.to_be_bytes());
-    assert_eq!(log.load().await?.cursor().generation(), generation);
+    assert_eq!(log.load().await?.generation(), generation);
     Ok(())
 }
 
@@ -578,13 +578,11 @@ async fn open_rejects_options_that_cannot_hold_one_wal_frame() -> TestResult {
 async fn declared_payload_length_is_checked_before_allocation() -> TestResult {
     let log = open_log("sqlite-malicious-length").await?;
     let view = log.load().await?;
-    let object = log
-        .put_object(view.cursor(), Bytes::from(vec![0; 4_096]))
-        .await?;
+    let object = log.put_object(&view, Bytes::from(vec![0; 4_096])).await?;
     assert_eq!(object.reference().kind(), ObjectKind::Blob);
     let operation = malicious_snapshot_record(u64::MAX - 4_095)?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         TransactionId::new(),
         operation,
         Bytes::new(),
@@ -626,14 +624,14 @@ async fn open_log(id: &str) -> Result<Log, Box<dyn StdError>> {
 async fn open_log_with(id: &str, options: Options) -> Result<Log, Box<dyn StdError>> {
     let backend =
         ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("sqlite-tests")).await?;
-    Ok(Log::open(backend.scope(&LogId::new(id)?), options).await?)
+    Ok(Log::open(&backend, &LogId::new(id)?, options).await?)
 }
 
 async fn open_fault_log(id: &str) -> Result<(FaultStore, Log), Box<dyn StdError>> {
     let store = FaultStore::new(InMemory::new());
     let backend =
         ValidatedBackend::new(Arc::new(store.clone()), Path::from("sqlite-fault-tests")).await?;
-    let log = Log::open(backend.scope(&LogId::new(id)?), Options::default()).await?;
+    let log = Log::open(&backend, &LogId::new(id)?, Options::default()).await?;
     Ok((store, log))
 }
 

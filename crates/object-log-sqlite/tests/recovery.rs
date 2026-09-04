@@ -184,9 +184,7 @@ async fn corrupt_descriptors_and_referenced_blobs_fail_closed() -> TestResult {
     for (id, corrupt) in [("missing-blob", false), ("corrupt-blob", true)] {
         let (raw, log) = open_log(id, Options::default()).await?;
         let view = log.load().await?;
-        let object = log
-            .put_object(view.cursor(), Bytes::from(vec![0; 4_096]))
-            .await?;
+        let object = log.put_object(&view, Bytes::from(vec![0; 4_096])).await?;
         let path = object_path(&raw, id, object.reference().digest()).await?;
         commit_record(&log, snapshot_record()?, vec![object]).await?;
         if corrupt {
@@ -289,7 +287,7 @@ async fn callback_policy_allows_main_sql_and_rejects_escape_paths() -> TestResul
 async fn open_log(id: &str, options: Options) -> TestResult<(Arc<InMemory>, Log)> {
     let raw = Arc::new(InMemory::new());
     let backend = ValidatedBackend::new(raw.clone(), Path::from("sqlite-recovery-tests")).await?;
-    let log = Log::open(backend.scope(&LogId::new(id)?), options).await?;
+    let log = Log::open(&backend, &LogId::new(id)?, options).await?;
     Ok((raw, log))
 }
 
@@ -316,7 +314,7 @@ async fn commit_record(
 ) -> TestResult {
     let view = log.load().await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         TransactionId::new(),
         operation,
         Bytes::new(),

@@ -498,11 +498,7 @@ mod tests {
             StorePath::from("git-http-server-tests"),
         )
         .await?;
-        let log = Log::open(
-            backend.scope(&LogId::new("repository")?),
-            Options::default(),
-        )
-        .await?;
+        let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
         let scratch = tempfile::tempdir()?;
         let concurrency = "2".parse()?;
         Ok((

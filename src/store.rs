@@ -74,9 +74,7 @@ impl ValidatedBackend {
         &self.capabilities
     }
 
-    /// Derives an isolated logical-log scope without further storage requests.
-    #[must_use]
-    pub fn scope(&self, log_id: &LogId) -> ScopedStore {
+    pub(crate) fn scope(&self, log_id: &LogId) -> ScopedStore {
         ScopedStore::unvalidated(Arc::clone(&self.store), self.root.clone(), log_id)
     }
 }
@@ -224,7 +222,7 @@ pub(crate) enum UpdateResult {
 /// Every protocol key is derived from the root prefix and validated [`LogId`].
 /// No operation accepts a caller-supplied object path.
 #[derive(Clone, Debug)]
-pub struct ScopedStore {
+pub(crate) struct ScopedStore {
     store: Arc<dyn ObjectStore>,
     scope: Path,
     log_id: LogId,

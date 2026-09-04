@@ -215,7 +215,8 @@ async fn fresh_adapter(payload_bytes: usize) -> AdapterState {
 async fn fresh_adapter_with_options(payload_bytes: usize, options: Options) -> AdapterState {
     let backend =
         require(ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("sqlite-bench")).await);
-    let log = require(Log::open(backend.scope(&require(LogId::new("database"))), options).await);
+    let id = require(LogId::new("database"));
+    let log = require(Log::open(&backend, &id, options).await);
     let directory = require(tempfile::tempdir());
     let mut database =
         require(Database::open(log.clone(), directory.path().join("active.sqlite3")).await);

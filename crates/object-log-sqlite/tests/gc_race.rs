@@ -20,7 +20,8 @@ async fn cold_open_retries_when_collection_deletes_its_old_snapshot() -> TestRes
     let backend =
         ValidatedBackend::new(Arc::new(store.clone()), Path::from("sqlite-gc-race-tests")).await?;
     let log = Log::open(
-        backend.scope(&LogId::new("materialization")?),
+        &backend,
+        &LogId::new("materialization")?,
         Options {
             max_inline_operation_bytes: 1_024,
             max_object_bytes: 8_240,

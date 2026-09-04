@@ -30,11 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (store, prefix) = parse_url_opts(&store_url, env::vars())?;
     let backend = ValidatedBackend::new(Arc::from(store), prefix).await?;
-    let log = Log::open(
-        backend.scope(&LogId::new("repository")?),
-        Options::default(),
-    )
-    .await?;
+    let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
     let endpoint = SmartHttp::new(log, &scratch);
     let host = GitHttpServer::new(endpoint, scratch, concurrency);
     let app = host.clone().router();

@@ -32,7 +32,7 @@ async fn minio_git_push_checkpoint_collection_and_cold_recovery() -> TestResult 
         max_collection_objects: 10_000,
         ..Options::default()
     };
-    let log = Log::open(backend.scope(&log_id), options).await?;
+    let log = Log::open(&backend, &log_id, options).await?;
     let directory = tempfile::tempdir()?;
     let live_bytes = 64 * KIB;
     let live = fixture("live", live_bytes, u64::try_from(live_bytes)?)?;
@@ -82,7 +82,7 @@ async fn minio_git_push_checkpoint_collection_and_cold_recovery() -> TestResult 
     assert_eq!(finish.delete_attempts(), start.candidate_count());
 
     drop(log);
-    let log = Log::open(backend.scope(&log_id), options).await?;
+    let log = Log::open(&backend, &log_id, options).await?;
     let recovered_path = directory.path().join("recovered");
     let recovered = Repository::open(&log, &recovered_path, ObjectFormat::Sha1).await?;
     assert_eq!(recovered.refs().len(), 1);

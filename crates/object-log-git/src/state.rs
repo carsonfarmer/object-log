@@ -56,7 +56,6 @@ impl Materializer for Machine {
     fn apply(
         &self,
         state: &mut Self::State,
-        _sequence: u64,
         operation: &[u8],
         objects: &[ObjectRef],
     ) -> Result<(), Self::Error> {
@@ -142,7 +141,7 @@ mod tests {
             ],
             vec![],
         )?;
-        machine.apply(&mut state, 1, &operation, &[])?;
+        machine.apply(&mut state, &operation, &[])?;
         assert_eq!(
             state.refs.get(&b"refs/heads/main"[..]).copied(),
             Some(id(1))
@@ -158,7 +157,7 @@ mod tests {
             vec![],
         )?;
         assert!(matches!(
-            machine.apply(&mut state, 2, &invalid, &[]),
+            machine.apply(&mut state, &invalid, &[]),
             Err(Error::StateDiverged)
         ));
         assert_eq!(state.refs, before);
@@ -177,7 +176,7 @@ mod tests {
             )?],
             vec![],
         )?;
-        machine.apply(&mut state, 1, &operation, &[])?;
+        machine.apply(&mut state, &operation, &[])?;
         let restored = machine.restore(&checkpoint(machine, &state)?, &[])?;
         assert_eq!(restored.refs, state.refs);
         assert!(restored.packs.is_empty());
@@ -189,14 +188,10 @@ mod tests {
         let backend =
             ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("git-format-tests"))
                 .await?;
-        let log = Log::open(
-            backend.scope(&LogId::new("pack-alignment")?),
-            Options::default(),
-        )
-        .await?;
+        let log = Log::open(&backend, &LogId::new("pack-alignment")?, Options::default()).await?;
         let view = log.load().await?;
         let object = log
-            .put_object(view.cursor(), Bytes::from_static(b"PACK"))
+            .put_object(&view, Bytes::from_static(b"PACK"))
             .await?
             .reference()
             .clone();
@@ -207,8 +202,8 @@ mod tests {
             vec![RefUpdate::new("refs/heads/main", None, Some(id(1)))?],
             vec![descriptor.clone()],
         )?;
-        assert!(machine.apply(&mut state, 1, &operation, &[]).is_err());
-        machine.apply(&mut state, 1, &operation, std::slice::from_ref(&object))?;
+        assert!(machine.apply(&mut state, &operation, &[]).is_err());
+        machine.apply(&mut state, &operation, std::slice::from_ref(&object))?;
         assert_eq!(
             state.packs[&descriptor.id],
             (descriptor.bytes, object.clone())

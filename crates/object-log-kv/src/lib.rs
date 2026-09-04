@@ -245,7 +245,6 @@ impl Materializer for KvMachine {
     fn apply(
         &self,
         state: &mut Self::State,
-        _sequence: u64,
         operation: &[u8],
         _objects: &[ObjectRef],
     ) -> Result<(), Self::Error> {

@@ -200,15 +200,7 @@ impl Repository {
         updates: Vec<RefUpdate>,
         pack: Option<&Path>,
     ) -> Result<PreparedPush, Error> {
-        let machine = Machine::new(self.format);
-        let operation = machine.transaction(updates.clone(), Vec::new())?;
-        let preflight = self.log.prepare(
-            self.view.cursor(),
-            transaction_id,
-            operation,
-            Bytes::new(),
-            Vec::new(),
-        )?;
+        self.log.preflight(&self.view, transaction_id)?;
 
         let path = self.path.clone();
         let input = pack.map(Path::to_owned);
@@ -227,29 +219,25 @@ impl Repository {
         })
         .await?;
 
-        let prepared = if let Some(pack) = normalized {
+        let mut objects = Vec::new();
+        let packs = if let Some(pack) = normalized {
             let id = ObjectId::try_from(pack.id)?;
             if self.packs.contains_key(&id) {
                 return Err(Error::InvalidRecord("pack is already present"));
             }
             let staged = storage::stage_pack(&self.log, &self.view, &pack.path, id).await?;
-            let operation = machine.transaction(
-                updates,
-                vec![PackDescriptor {
-                    id,
-                    bytes: staged.bytes,
-                }],
-            )?;
-            self.log.prepare(
-                self.view.cursor(),
-                transaction_id,
-                operation,
-                Bytes::new(),
-                vec![staged.root],
-            )?
+            objects.push(staged.root);
+            vec![PackDescriptor {
+                id,
+                bytes: staged.bytes,
+            }]
         } else {
-            preflight
+            Vec::new()
         };
+        let operation = Machine::new(self.format).transaction(updates, packs)?;
+        let prepared =
+            self.log
+                .prepare(&self.view, transaction_id, operation, Bytes::new(), objects)?;
         let recovery_token = prepared.recovery_token()?;
         Ok(PreparedPush {
             log: self.log,
@@ -286,7 +274,7 @@ impl Repository {
         }
 
         let snapshot = Record::snapshot(self.format, self.refs, packs)?.encode()?;
-        let objects = self.log.stage_objects(self.view.cursor(), roots).await?;
+        let objects = self.log.stage_objects(&self.view, roots).await?;
         Ok(self
             .log
             .publish_checkpoint(&self.view, &through, snapshot, objects)
@@ -412,16 +400,15 @@ mod tests {
         target: ObjectId,
     }
 
-    async fn test_log(name: &str) -> TestResult<(Log, FaultStore, object_log::ScopedStore)> {
+    async fn test_log(name: &str) -> TestResult<(Log, FaultStore, ValidatedBackend)> {
         let faults = FaultStore::new(InMemory::new());
         let backend = ValidatedBackend::new(
             std::sync::Arc::new(faults.clone()),
             StorePath::from("git-repository-tests"),
         )
         .await?;
-        let scoped = backend.scope(&LogId::new(name)?);
-        let log = Log::open(scoped.clone(), Options::default()).await?;
-        Ok((log, faults, scoped))
+        let log = Log::open(&backend, &LogId::new(name)?, Options::default()).await?;
+        Ok((log, faults, backend))
     }
 
     fn fixture(format: ObjectFormat, contents: &[u8]) -> TestResult<Fixture> {
@@ -697,7 +684,7 @@ mod tests {
     #[tokio::test]
     async fn lost_response_resumes_without_restaging_the_pack() -> TestResult {
         let fixture = fixture(ObjectFormat::Sha1, b"resume")?;
-        let (log, faults, scoped) = test_log("repository-resume").await?;
+        let (log, faults, backend) = test_log("repository-resume").await?;
         faults.reset();
         let cache = fixture.directory.path().join("pending");
         let repository = Repository::open(&log, &cache, ObjectFormat::Sha1).await?;
@@ -716,7 +703,12 @@ mod tests {
         let staged_puts = pack_puts(&faults);
 
         fs::remove_dir_all(&cache)?;
-        let reopened = Log::open(scoped, Options::default()).await?;
+        let reopened = Log::open(
+            &backend,
+            &LogId::new("repository-resume")?,
+            Options::default(),
+        )
+        .await?;
         assert!(matches!(
             reopened.resume(&token).await?,
             object_log::Resolution::Committed(_)

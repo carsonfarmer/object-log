@@ -71,7 +71,8 @@ async fn run(
 ) -> TestResult<Duration> {
     let backend = ValidatedBackend::new(Arc::clone(&raw), root.clone()).await?;
     let log = Log::open(
-        backend.scope(&id),
+        &backend,
+        &id,
         Options {
             max_collection_objects: candidate_count
                 .checked_add(100)
@@ -82,17 +83,13 @@ async fn run(
     .await?;
     let initial = log.load().await?;
     let leaf = log
-        .put_object(initial.cursor(), Bytes::from_static(b"live"))
+        .put_object(&initial, Bytes::from_static(b"live"))
         .await?;
     let node = log
-        .put_node(
-            initial.cursor(),
-            Bytes::from_static(b"root"),
-            vec![leaf.clone()],
-        )
+        .put_node(&initial, Bytes::from_static(b"root"), vec![leaf.clone()])
         .await?;
     let prepared = log.prepare(
-        initial.cursor(),
+        &initial,
         TransactionId::new(),
         Bytes::from_static(b"live graph"),
         Bytes::new(),
@@ -129,14 +126,14 @@ async fn run(
         Bytes::from_static(b"live")
     );
 
-    let generation = current.cursor().generation();
+    let generation = current.generation();
     let epoch = current.collection_epoch();
     let CollectionStart::Empty(empty) = log.start_collection(&current).await? else {
         return Err("the second collection was not empty".into());
     };
     assert_eq!(empty.candidate_count(), 0);
     let unchanged = log.load().await?;
-    assert_eq!(unchanged.cursor().generation(), generation);
+    assert_eq!(unchanged.generation(), generation);
     assert_eq!(unchanged.collection_epoch(), epoch);
 
     let scope = root.join("v1").join("logs").join(id.as_str());
@@ -152,9 +149,9 @@ async fn run(
 }
 
 async fn put_unreachable(log: &Log, count: usize, concurrency: usize) -> TestResult {
-    let cursor = log.load().await?.cursor().clone();
+    let view = log.load().await?;
     stream::iter(0..count)
-        .map(|_| log.put_object(&cursor, Bytes::from_static(b"x")))
+        .map(|_| log.put_object(&view, Bytes::from_static(b"x")))
         .buffer_unordered(concurrency)
         .try_for_each(|_| future::ready(Ok(())))
         .await?;

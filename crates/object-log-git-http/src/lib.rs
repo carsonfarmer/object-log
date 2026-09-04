@@ -652,7 +652,7 @@ mod tests {
             StorePath::from("upload-negotiation-test"),
         )
         .await?;
-        let log = Log::open(backend.scope(&LogId::new("repo")?), Options::default()).await?;
+        let log = Log::open(&backend, &LogId::new("repo")?, Options::default()).await?;
         let scratch = tempfile::tempdir()?;
         let endpoint = SmartHttp::new(log, scratch.path());
         let id = "11".repeat(20);

@@ -79,9 +79,9 @@ pub(crate) async fn stage_pack(
             .checked_add(len_u64)
             .ok_or(Error::InvalidPack("pack is too large"))?;
         let log = log.clone();
-        let cursor = view.cursor().clone();
+        let view = view.clone();
         uploads.spawn(async move {
-            let object = log.put_object(&cursor, Bytes::from(chunk)).await?;
+            let object = log.put_object(&view, Bytes::from(chunk)).await?;
             Ok((index, object))
         });
         if uploads.len() == MAX_TRANSFERS || index + 1 == chunks {
@@ -100,7 +100,7 @@ pub(crate) async fn stage_pack(
     {
         return Err(Error::InvalidPack("pack checksum does not match"));
     }
-    let root = log.put_node(view.cursor(), Bytes::new(), children).await?;
+    let root = log.put_node(view, Bytes::new(), children).await?;
     Ok(StagedPack { root, bytes })
 }
 
@@ -196,7 +196,7 @@ mod tests {
             StorePath::from("git-storage-tests"),
         )
         .await?;
-        let log = Log::open(backend.scope(&LogId::new("repo")?), options).await?;
+        let log = Log::open(&backend, &LogId::new("repo")?, options).await?;
         let view = log.load().await?;
         faults.reset();
         Ok((log, view, faults, inner))

@@ -7,7 +7,8 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use object_log::{
-    CommitStatus, Digest, Log, LogId, Options, Refresh, Resolution, TransactionId, ValidatedBackend,
+    CommitRef, CommitStatus, Digest, Log, LogId, Options, Resolution, TransactionId,
+    ValidatedBackend,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -36,29 +37,20 @@ async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it(
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let log_id = LogId::new("concurrent-open")?;
     let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
-    let first_store = backend.scope(&log_id);
-    let second_store = backend.scope(&log_id);
     let (first, second) = tokio::join!(
-        Log::open(first_store, Options::default()),
-        Log::open(second_store, Options::default())
+        Log::open(&backend, &log_id, Options::default()),
+        Log::open(&backend, &log_id, Options::default())
     );
     let first = first?;
     let second = second?;
     let first_view = first.load().await?;
     let second_view = second.load().await?;
-    assert_eq!(first_view.cursor().generation(), 0);
-    assert!(matches!(
-        first.refresh(second_view.cursor()).await?,
-        Refresh::NotModified
-    ));
+    assert_eq!(first_view.generation(), 0);
+    assert!(first.refresh(&second_view).await?.is_none());
 
-    let third_store = backend.scope(&log_id);
-    let third = Log::open(third_store, Options::default()).await?;
-    assert_eq!(third.load().await?.cursor().generation(), 0);
-    assert!(matches!(
-        first.refresh(first_view.cursor()).await?,
-        Refresh::NotModified
-    ));
+    let third = Log::open(&backend, &log_id, Options::default()).await?;
+    assert_eq!(third.load().await?.generation(), 0);
+    assert!(first.refresh(&first_view).await?.is_none());
     Ok(())
 }
 
@@ -69,13 +61,10 @@ async fn refresh_distinguishes_current_and_changed_heads() -> Result<(), Box<dyn
     let first = open(Arc::clone(&backend), "refresh").await?;
     let second = open(backend, "refresh").await?;
     let stale = first.load().await?;
-    assert!(matches!(
-        first.refresh(stale.cursor()).await?,
-        Refresh::NotModified
-    ));
+    assert!(first.refresh(&stale).await?.is_none());
 
     let prepared = second.prepare(
-        stale.cursor(),
+        &stale,
         TransactionId::new(),
         Bytes::from_static(b"change"),
         Bytes::new(),
@@ -84,14 +73,14 @@ async fn refresh_distinguishes_current_and_changed_heads() -> Result<(), Box<dyn
     let CommitStatus::Committed(committed) = second.commit(prepared).await? else {
         return Err("the refresh test candidate did not commit".into());
     };
-    let Refresh::Updated(updated) = first.refresh(stale.cursor()).await? else {
+    let Some(updated) = first.refresh(&stale).await? else {
         return Err("a changed head was reported as not modified".into());
     };
-    assert_eq!(updated.cursor().tip(), committed.cursor().tip());
-    assert!(matches!(
-        first.refresh(updated.cursor()).await?,
-        Refresh::NotModified
-    ));
+    assert_eq!(
+        updated.tail().last().map(CommitRef::digest),
+        committed.tail().last().map(CommitRef::digest)
+    );
+    assert!(first.refresh(&updated).await?.is_none());
     Ok(())
 }
 
@@ -113,15 +102,14 @@ async fn encoded_commit_limit_fails_before_publication() -> Result<(), Box<dyn s
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let log_id = LogId::new("commit-limit")?;
     let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
-    let scoped = backend.scope(&log_id);
     let options = Options {
         max_commit_bytes: 1,
         ..Options::default()
     };
-    let log = Log::open(scoped, options).await?;
+    let log = Log::open(&backend, &log_id, options).await?;
     let before = log.load().await?;
     let candidate = log.prepare(
-        before.cursor(),
+        &before,
         TransactionId::new(),
         Bytes::from_static(b"larger than one encoded byte"),
         Bytes::new(),
@@ -147,14 +135,14 @@ async fn two_writers_publish_one_order_and_require_explicit_reprepare()
     let first_transaction = TransactionId::new();
     let second_transaction = TransactionId::new();
     let first_candidate = first.prepare(
-        first_view.cursor(),
+        &first_view,
         first_transaction,
         Bytes::from_static(b"first"),
         Bytes::from_static(b"first-result"),
         Vec::new(),
     )?;
     let second_candidate = second.prepare(
-        second_view.cursor(),
+        &second_view,
         second_transaction,
         Bytes::from_static(b"second"),
         Bytes::from_static(b"second-result"),
@@ -182,15 +170,15 @@ async fn two_writers_publish_one_order_and_require_explicit_reprepare()
             _ => return Err("two writers did not produce one winner and one conflict".into()),
         };
 
-    assert_eq!(winner.cursor().generation(), 1);
-    assert_eq!(winner.cursor().next_sequence(), 1);
-    assert_eq!(conflict.cursor().generation(), 1);
+    assert_eq!(winner.generation(), 1);
+    assert_eq!(winner.tail().len(), 1);
+    assert_eq!(conflict.generation(), 1);
     let tail = first.read_tail(&winner).await?;
     assert_eq!(tail.len(), 1);
     assert_ne!(tail[0].operation(), &losing_operation);
 
     let retried = first.prepare(
-        conflict.cursor(),
+        &conflict,
         losing_transaction,
         losing_operation.clone(),
         Bytes::new(),
@@ -213,7 +201,7 @@ async fn repeated_first_attempt_requires_the_recovery_path()
     let log = open(backend, "duplicate-candidate").await?;
     let view = log.load().await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         TransactionId::new(),
         Bytes::from_static(b"same candidate"),
         Bytes::from_static(b"same result"),
@@ -243,7 +231,7 @@ async fn cursor_is_bound_to_one_durable_log_incarnation() -> Result<(), Box<dyn 
 
     assert!(matches!(
         second.prepare(
-            foreign.cursor(),
+            &foreign,
             TransactionId::new(),
             Bytes::from_static(b"must not cross stores"),
             Bytes::new(),
@@ -261,14 +249,13 @@ async fn open_rejects_options_that_differ_from_the_durable_contract()
     let first = open(Arc::clone(&backend), "durable-options").await?;
     let log_id = LogId::new("durable-options")?;
     let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
-    let scoped = backend.scope(&log_id);
     let changed = Options {
         resolution_window: 0,
         ..Options::default()
     };
 
     assert!(matches!(
-        Log::open(scoped, changed).await,
+        Log::open(&backend, &log_id, changed).await,
         Err(object_log::Error::ConfigurationMismatch("options"))
     ));
     assert!(first.load().await?.tail().is_empty());
@@ -283,7 +270,7 @@ async fn log_exposes_its_durable_options() -> Result<(), Box<dyn std::error::Err
     };
     let backend =
         ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("protocol-tests")).await?;
-    let log = Log::open(backend.scope(&LogId::new("options-getter")?), options).await?;
+    let log = Log::open(&backend, &LogId::new("options-getter")?, options).await?;
 
     assert_eq!(log.options(), options);
     Ok(())
@@ -296,14 +283,14 @@ async fn stale_cursor_is_rejected_without_publishing_its_candidate()
     let log = open(backend, "stale-cursor").await?;
     let stale = log.load().await?;
     let first = log.prepare(
-        stale.cursor(),
+        &stale,
         TransactionId::new(),
         Bytes::from_static(b"winner"),
         Bytes::new(),
         Vec::new(),
     )?;
     let stale_candidate = log.prepare(
-        stale.cursor(),
+        &stale,
         TransactionId::new(),
         Bytes::from_static(b"stale"),
         Bytes::new(),
@@ -316,7 +303,10 @@ async fn stale_cursor_is_rejected_without_publishing_its_candidate()
     let CommitStatus::Conflict(conflict) = log.commit(stale_candidate).await? else {
         return Err("the stale candidate did not return a conflict".into());
     };
-    assert_eq!(conflict.cursor().tip(), current.cursor().tip());
+    assert_eq!(
+        conflict.tail().last().map(CommitRef::digest),
+        current.tail().last().map(CommitRef::digest)
+    );
     let tail = log.read_tail(&conflict).await?;
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].operation(), &Bytes::from_static(b"winner"));
@@ -333,12 +323,12 @@ async fn referenced_objects_are_durable_before_head_publication()
 
     let payload = Bytes::from_static(b"immutable payload");
     let before = log.load().await?;
-    let object = log.put_object(before.cursor(), payload.clone()).await?;
+    let object = log.put_object(&before, payload.clone()).await?;
     assert_eq!(log.read_object(&before, object.reference()).await?, payload);
     assert!(before.tail().is_empty());
 
     let prepared = log.prepare(
-        before.cursor(),
+        &before,
         TransactionId::new(),
         Bytes::from_static(b"references payload"),
         Bytes::new(),
@@ -360,10 +350,10 @@ async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std:
     let log = open(erased, "missing-object").await?;
     let view = log.load().await?;
     let object = log
-        .put_object(view.cursor(), Bytes::from_static(b"payload"))
+        .put_object(&view, Bytes::from_static(b"payload"))
         .await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         TransactionId::new(),
         Bytes::from_static(b"operation"),
         Bytes::new(),
@@ -401,10 +391,10 @@ async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn
     let log = open(erased, "changed-object").await?;
     let view = log.load().await?;
     let object = log
-        .put_object(view.cursor(), Bytes::from_static(b"payload"))
+        .put_object(&view, Bytes::from_static(b"payload"))
         .await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         TransactionId::new(),
         Bytes::from_static(b"operation"),
         Bytes::new(),
@@ -446,7 +436,7 @@ async fn lost_success_response_resolves_to_the_original_commit()
     let view = log.load().await?;
     let transaction_id = TransactionId::new();
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id,
         Bytes::from_static(b"uncertain"),
         Bytes::from_static(b"accepted"),
@@ -473,9 +463,9 @@ async fn cancelled_head_update_resumes_after_reopen() -> Result<(), Box<dyn std:
     let store: Arc<dyn ObjectStore> = observed.clone();
     let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
     let log_id = LogId::new("cancelled-update")?;
-    let log = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let log = Log::open(&backend, &log_id, Options::default()).await?;
     let prepared = log.prepare(
-        log.load().await?.cursor(),
+        &log.load().await?,
         TransactionId::new(),
         Bytes::from_static(b"cancelled request"),
         Bytes::from_static(b"recorded result"),
@@ -496,7 +486,7 @@ async fn cancelled_head_update_resumes_after_reopen() -> Result<(), Box<dyn std:
     assert!(cancelled.is_cancelled());
 
     drop(log);
-    let reopened = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let reopened = Log::open(&backend, &log_id, Options::default()).await?;
     let Resolution::Committed(view) = reopened.resume(&token).await? else {
         return Err("cancelled publication did not resolve as committed".into());
     };
@@ -511,14 +501,15 @@ async fn tail_order_survives_out_of_order_read_completion() -> Result<(), Box<dy
     let store: Arc<dyn ObjectStore> = observed.clone();
     let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
     let log = Log::open(
-        backend.scope(&LogId::new("out-of-order-reads")?),
+        &backend,
+        &LogId::new("out-of-order-reads")?,
         Options::default(),
     )
     .await?;
     let mut view = log.load().await?;
     for operation in [b"first".as_slice(), b"second".as_slice()] {
         let prepared = log.prepare(
-            view.cursor(),
+            &view,
             TransactionId::new(),
             Bytes::copy_from_slice(operation),
             Bytes::new(),
@@ -547,14 +538,14 @@ async fn pending_candidate_resolves_not_committed_after_another_writer_wins()
     let second = open(backend, "pending-loser").await?;
     let source = first.load().await?;
     let pending_candidate = first.prepare(
-        source.cursor(),
+        &source,
         TransactionId::new(),
         Bytes::from_static(b"pending loser"),
         Bytes::new(),
         Vec::new(),
     )?;
     let winning_candidate = second.prepare(
-        source.cursor(),
+        &source,
         TransactionId::new(),
         Bytes::from_static(b"winner"),
         Bytes::new(),
@@ -571,7 +562,10 @@ async fn pending_candidate_resolves_not_committed_after_another_writer_wins()
     let Resolution::NotCommitted(current) = first.resolve(pending).await? else {
         return Err("the losing pending candidate did not resolve as not committed".into());
     };
-    assert_eq!(current.cursor().tip(), winner.cursor().tip());
+    assert_eq!(
+        current.tail().last().map(CommitRef::digest),
+        winner.tail().last().map(CommitRef::digest)
+    );
     let tail = first.read_tail(&current).await?;
     assert_eq!(tail.len(), 1);
     assert_eq!(tail[0].operation(), &Bytes::from_static(b"winner"));
@@ -587,14 +581,14 @@ async fn rejected_candidate_remains_pending_when_the_winner_read_fails()
     let second = open(backend, "rejected-without-view").await?;
     let source = first.load().await?;
     let loser = first.prepare(
-        source.cursor(),
+        &source,
         TransactionId::new(),
         Bytes::from_static(b"loser"),
         Bytes::new(),
         Vec::new(),
     )?;
     let winner = second.prepare(
-        source.cursor(),
+        &source,
         TransactionId::new(),
         Bytes::from_static(b"winner"),
         Bytes::new(),
@@ -619,8 +613,7 @@ async fn rejected_candidate_remains_pending_when_the_winner_read_fails()
 async fn open(store: Arc<dyn ObjectStore>, id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
     let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
-    let scoped = backend.scope(&log_id);
-    Log::open(scoped, Options::default()).await
+    Log::open(&backend, &log_id, Options::default()).await
 }
 
 async fn immutable_location<S: ObjectStore + ?Sized>(

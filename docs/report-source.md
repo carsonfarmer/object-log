@@ -195,7 +195,7 @@ and thousands of logical operations on one resource can use group commit.
 A preferred in-memory owner is an optimization, not a new authority:
 
 - Rendezvous hashing selects the normal process for each resource.
-- That process retains the current cursor and materialized state.
+- That process retains the current view and materialized state.
 - It accepts work into a bounded queue.
 - It validates and applies operations in queue order to tentative state.
 - It writes one WAL entry for a bounded batch and performs one index CAS.
@@ -219,7 +219,7 @@ WAL and checkpoint store in that design.
 The current library keeps one mutable `index.cbor`. WAL entries, payloads,
 reference nodes, checkpoints, and collection plans are immutable. Each
 deletable key combines a random physical ID with its deterministic BLAKE3
-content identity. The random durable incarnation prevents a cursor from one
+content identity. The random durable incarnation prevents a view from one
 log lifetime from authorizing another lifetime.
 
 Checkpoints expose their declared roots. Reference nodes have opaque payloads

@@ -12,11 +12,11 @@ pub mod sim;
 
 pub use log::{
     CheckpointRecord, CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionReport,
-    CollectionStart, CommitRecord, CommitStatus, Log, Options, ReferenceNode, Refresh, Resolution,
-    RetentionStatus, View,
+    CollectionStart, CommitRecord, CommitStatus, Log, Options, ReferenceNode, Resolution,
+    RetentionStatus,
 };
 pub use materialize::{MaterializeError, Materialized, Materializer, materialize};
-pub use store::{BackendCapabilities, BackendCapability, ScopedStore, ValidatedBackend};
+pub use store::{BackendCapabilities, BackendCapability, ValidatedBackend};
 
 /// Current durable object-log format version.
 pub const FORMAT_VERSION: u32 = format::FORMAT_VERSION;
@@ -298,11 +298,16 @@ impl CheckpointRef {
     }
 }
 
-/// An opaque observed position used for conditional publication.
-#[derive(Clone, Debug)]
-pub struct Cursor {
+#[derive(Debug)]
+pub(crate) struct ObservedState {
     pub(crate) head: format::Head,
     pub(crate) version: UpdateVersion,
+}
+
+/// One exact observed durable state used for reads and conditional publication.
+#[derive(Clone, Debug)]
+pub struct View {
+    pub(crate) observed: Arc<ObservedState>,
     pub(crate) staging_domain: Arc<StagingDomain>,
 }
 
@@ -332,35 +337,45 @@ impl StagedObject {
     }
 }
 
-impl Cursor {
+impl View {
     /// Returns the count of published head updates.
     #[must_use]
-    pub const fn generation(&self) -> u64 {
-        self.head.generation
+    pub fn generation(&self) -> u64 {
+        self.observed.head.generation
     }
 
-    /// Returns the sequence number for the next commit.
+    /// Returns the current checkpoint reference, when present.
     #[must_use]
-    pub const fn next_sequence(&self) -> u64 {
-        self.head.next_sequence
+    pub fn checkpoint(&self) -> Option<&CheckpointRef> {
+        self.observed.head.checkpoint.as_ref()
     }
 
-    /// Returns the current commit tip, if one exists.
+    /// Returns the ordered active commit references.
     #[must_use]
-    pub fn tip(&self) -> Option<Digest> {
-        self.head.tip()
+    pub fn tail(&self) -> &[CommitRef] {
+        &self.observed.head.tail
+    }
+
+    /// Returns the current garbage-collection epoch.
+    #[must_use]
+    pub fn collection_epoch(&self) -> u64 {
+        self.observed.head.collection_epoch
+    }
+
+    pub(crate) fn head(&self) -> &format::Head {
+        &self.observed.head
     }
 
     #[must_use]
-    pub(crate) const fn storage_version(&self) -> &UpdateVersion {
-        &self.version
+    pub(crate) fn storage_version(&self) -> &UpdateVersion {
+        &self.observed.version
     }
 }
 
-/// One exact commit candidate prepared against an observed cursor.
+/// One exact commit candidate prepared against an observed view.
 #[derive(Clone, Debug)]
 pub struct PreparedCommit {
-    pub(crate) cursor: Cursor,
+    pub(crate) view: View,
     pub(crate) transaction_id: TransactionId,
     pub(crate) storage_id: StorageId,
     pub(crate) operation: Bytes,
@@ -369,34 +384,16 @@ pub struct PreparedCommit {
 }
 
 impl PreparedCommit {
-    /// Returns the cursor on which this candidate depends.
+    /// Returns the observed state on which this candidate depends.
     #[must_use]
-    pub const fn cursor(&self) -> &Cursor {
-        &self.cursor
-    }
-
-    /// Returns the stable operation identity.
-    #[must_use]
-    pub const fn transaction_id(&self) -> TransactionId {
-        self.transaction_id
-    }
-
-    /// Returns the opaque operation bytes.
-    #[must_use]
-    pub fn operation(&self) -> &Bytes {
-        &self.operation
+    pub const fn view(&self) -> &View {
+        &self.view
     }
 
     /// Returns the opaque recorded result bytes.
     #[must_use]
     pub fn result(&self) -> &Bytes {
         &self.result
-    }
-
-    /// Returns the immutable objects required by this commit.
-    #[must_use]
-    pub fn objects(&self) -> &[ObjectRef] {
-        &self.objects
     }
 
     /// Encodes the exact candidate for recovery after process loss.

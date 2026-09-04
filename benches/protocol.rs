@@ -57,7 +57,7 @@ fn benchmark_batch_size(criterion: &mut Criterion) {
                     |(mut state, operation)| {
                         runtime.block_on(async move {
                             let prepared = require(state.log.prepare(
-                                state.view.cursor(),
+                                &state.view,
                                 TransactionId::new(),
                                 operation,
                                 Bytes::new(),
@@ -94,7 +94,7 @@ fn benchmark_inline_bytes(criterion: &mut Criterion) {
                     |(mut state, operation)| {
                         runtime.block_on(async move {
                             let prepared = require(state.log.prepare(
-                                state.view.cursor(),
+                                &state.view,
                                 TransactionId::new(),
                                 operation,
                                 Bytes::new(),
@@ -153,10 +153,9 @@ fn benchmark_staged_bytes(criterion: &mut Criterion) {
                     },
                     |(mut state, payload)| {
                         runtime.block_on(async move {
-                            let object =
-                                require(state.log.put_object(state.view.cursor(), payload).await);
+                            let object = require(state.log.put_object(&state.view, payload).await);
                             let prepared = require(state.log.prepare(
-                                state.view.cursor(),
+                                &state.view,
                                 TransactionId::new(),
                                 Bytes::from_static(b"staged payload"),
                                 Bytes::new(),
@@ -189,7 +188,7 @@ fn benchmark_writer_contention(criterion: &mut Criterion) {
                         let candidates = (0..writer_count)
                             .map(|writer| {
                                 require(state.log.prepare(
-                                    state.view.cursor(),
+                                    &state.view,
                                     TransactionId::new(),
                                     Bytes::from(vec![u8::try_from(writer).unwrap_or_default(); 32]),
                                     Bytes::new(),
@@ -262,11 +261,7 @@ fn benchmark_collection(criterion: &mut Criterion) {
     group.bench_function("fence_lookup/planned_ref_100k", |bencher| {
         bencher.iter(|| {
             if !matches!(
-                runtime.block_on(
-                    state
-                        .log
-                        .stage_objects(state.view.cursor(), vec![blocked.clone()]),
-                ),
+                runtime.block_on(state.log.stage_objects(&state.view, vec![blocked.clone()]),),
                 Err(Error::CollectionFence)
             ) {
                 std::process::abort();
@@ -314,14 +309,14 @@ async fn collection_state(shape: CollectionShape) -> BenchLog {
             let mut root = require(
                 state
                     .log
-                    .put_object(state.view.cursor(), Bytes::from_static(b"x"))
+                    .put_object(&state.view, Bytes::from_static(b"x"))
                     .await,
             );
             for _ in 1..998 {
                 root = require(
                     state
                         .log
-                        .put_node(state.view.cursor(), Bytes::new(), vec![root])
+                        .put_node(&state.view, Bytes::new(), vec![root])
                         .await,
                 );
             }
@@ -334,7 +329,7 @@ async fn collection_state(shape: CollectionShape) -> BenchLog {
                 roots.push(require(
                     state
                         .log
-                        .put_node(state.view.cursor(), Bytes::new(), children.to_vec())
+                        .put_node(&state.view, Bytes::new(), children.to_vec())
                         .await,
                 ));
             }
@@ -390,8 +385,7 @@ async fn put_blobs(log: &Log, view: &View, count: usize) -> Vec<StagedObject> {
     let mut objects = Vec::with_capacity(count);
     for _ in 0..count {
         objects.push(require(
-            log.put_object(view.cursor(), Bytes::from_static(b"x"))
-                .await,
+            log.put_object(view, Bytes::from_static(b"x")).await,
         ));
     }
     objects
@@ -399,7 +393,7 @@ async fn put_blobs(log: &Log, view: &View, count: usize) -> Vec<StagedObject> {
 
 async fn append_objects(state: &mut BenchLog, objects: Vec<StagedObject>) {
     let prepared = require(state.log.prepare(
-        state.view.cursor(),
+        &state.view,
         TransactionId::new(),
         Bytes::new(),
         Bytes::new(),
@@ -415,8 +409,7 @@ async fn fresh_log(options: Options) -> BenchLog {
     let log_id = require(LogId::new(format!("criterion-{number:016x}")));
     let backend =
         require(ValidatedBackend::new(Arc::new(store.clone()), Path::from("criterion")).await);
-    let scoped = backend.scope(&log_id);
-    let log = require(Log::open(scoped, options).await);
+    let log = require(Log::open(&backend, &log_id, options).await);
     let view = require(log.load().await);
     store.reset();
     store.record_events(false);
@@ -431,7 +424,7 @@ async fn log_with_tail(tail_length: usize) -> BenchLog {
     let mut state = fresh_log(options).await;
     for sequence in 0..tail_length {
         let prepared = require(state.log.prepare(
-            state.view.cursor(),
+            &state.view,
             TransactionId::new(),
             Bytes::from(vec![u8::try_from(sequence % 251).unwrap_or_default(); 32]),
             Bytes::new(),

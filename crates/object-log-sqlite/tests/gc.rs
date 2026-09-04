@@ -28,7 +28,8 @@ async fn collection_removes_sqlite_history_and_preserves_cold_recovery() -> Test
     let id = LogId::new("checkpoint-history")?;
     let backend = ValidatedBackend::new(raw.clone(), root.clone()).await?;
     let log = Log::open(
-        backend.scope(&id),
+        &backend,
+        &id,
         Options {
             max_inline_operation_bytes: 1_024,
             max_object_bytes: 8_240,
@@ -86,14 +87,14 @@ async fn collection_removes_sqlite_history_and_preserves_cold_recovery() -> Test
     drop(recovered);
     assert_integrity(&cache)?;
 
-    let generation_before = current.cursor().generation();
+    let generation_before = current.generation();
     let epoch_before = current.collection_epoch();
     let CollectionStart::Empty(report) = log.start_collection(&current).await? else {
         return Err("the second collection was not empty".into());
     };
     assert_eq!(report.candidate_count(), 0);
     let unchanged = log.load().await?;
-    assert_eq!(unchanged.cursor().generation(), generation_before);
+    assert_eq!(unchanged.generation(), generation_before);
     assert_eq!(unchanged.collection_epoch(), epoch_before);
     assert_eq!(list(&raw, &scope).await?.len(), after.len());
 

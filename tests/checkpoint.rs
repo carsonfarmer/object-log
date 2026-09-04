@@ -78,7 +78,7 @@ async fn append_before_checkpoint_preserves_both_entries() -> TestResult {
     let one = append(&first, &empty, b"one").await?;
     let through = one.tail()[0].clone();
     let append_candidate = second.prepare(
-        one.cursor(),
+        &one,
         TransactionId::new(),
         Bytes::from_static(b"two"),
         Bytes::new(),
@@ -112,7 +112,7 @@ async fn checkpoint_before_append_preserves_the_base() -> TestResult {
     let one = append(&first, &first.load().await?, b"one").await?;
     let through = one.tail()[0].clone();
     let append_candidate = second.prepare(
-        one.cursor(),
+        &one,
         TransactionId::new(),
         Bytes::from_static(b"two"),
         Bytes::new(),
@@ -167,10 +167,7 @@ async fn stale_checkpoint_returns_the_current_view() -> TestResult {
     else {
         return Err("stale checkpoint did not conflict".into());
     };
-    assert_eq!(
-        current.cursor().generation(),
-        published.cursor().generation()
-    );
+    assert_eq!(current.generation(), published.generation());
     assert_eq!(
         current.checkpoint().map(|base| base.object().digest()),
         published.checkpoint().map(|base| base.object().digest())
@@ -214,7 +211,7 @@ async fn checkpoint_root_limit_fails_before_index_publication() -> TestResult {
     .await?;
     let initial = log.load().await?;
     let object = log
-        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .put_object(&initial, Bytes::from_static(b"page"))
         .await?;
     let one = append(&log, &initial, b"one").await?;
     let through = one.tail()[0].clone();
@@ -240,7 +237,7 @@ async fn checkpoint_declares_live_objects_for_lazy_restore() -> TestResult {
     let log = open(store, "checkpoint-objects", Options::default()).await?;
     let initial = log.load().await?;
     let object = log
-        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .put_object(&initial, Bytes::from_static(b"page"))
         .await?;
     let one = append(&log, &initial, b"one").await?;
     let through = one.tail()[0].clone();
@@ -292,18 +289,18 @@ async fn checkpoint_can_root_a_traversable_object_tree() -> TestResult {
     .await?;
     let initial = log.load().await?;
     let page = log
-        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .put_object(&initial, Bytes::from_static(b"page"))
         .await?;
     let node = log
         .put_node(
-            initial.cursor(),
+            &initial,
             Bytes::from_static(b"page map"),
             vec![page.clone()],
         )
         .await?;
     let same = log
         .put_node(
-            initial.cursor(),
+            &initial,
             Bytes::from_static(b"page map"),
             vec![page.clone()],
         )
@@ -342,7 +339,7 @@ async fn staging_rejects_missing_and_corrupt_existing_objects() -> TestResult {
     let log = open(store, "invalid-node-child", Options::default()).await?;
     let view = log.load().await?;
     let missing = log
-        .put_object(view.cursor(), Bytes::from_static(b"missing"))
+        .put_object(&view, Bytes::from_static(b"missing"))
         .await?;
     backend
         .delete(
@@ -356,13 +353,13 @@ async fn staging_rejects_missing_and_corrupt_existing_objects() -> TestResult {
         )
         .await?;
     assert!(matches!(
-        log.stage_objects(view.cursor(), vec![missing.reference().clone()])
+        log.stage_objects(&view, vec![missing.reference().clone()])
             .await,
         Err(object_log::Error::InvalidFormat(_))
     ));
 
     let corrupt = log
-        .put_object(view.cursor(), Bytes::from_static(b"correct"))
+        .put_object(&view, Bytes::from_static(b"correct"))
         .await?;
     backend
         .put(
@@ -377,7 +374,7 @@ async fn staging_rejects_missing_and_corrupt_existing_objects() -> TestResult {
         )
         .await?;
     assert!(matches!(
-        log.stage_objects(view.cursor(), vec![corrupt.reference().clone()])
+        log.stage_objects(&view, vec![corrupt.reference().clone()])
             .await,
         Err(object_log::Error::CorruptObject)
     ));
@@ -391,7 +388,7 @@ async fn checkpoint_staging_rejects_missing_declared_object() -> TestResult {
     let log = open(store, "checkpoint-missing-object", Options::default()).await?;
     let initial = log.load().await?;
     let object = log
-        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .put_object(&initial, Bytes::from_static(b"page"))
         .await?;
     backend
         .delete(
@@ -406,7 +403,7 @@ async fn checkpoint_staging_rejects_missing_declared_object() -> TestResult {
         .await?;
 
     assert!(matches!(
-        log.stage_objects(initial.cursor(), vec![object.reference().clone()])
+        log.stage_objects(&initial, vec![object.reference().clone()])
             .await,
         Err(object_log::Error::InvalidFormat(_))
     ));
@@ -421,7 +418,7 @@ async fn checkpoint_staging_rejects_corrupt_declared_object() -> TestResult {
     let log = open(store, "checkpoint-corrupt-object", Options::default()).await?;
     let initial = log.load().await?;
     let object = log
-        .put_object(initial.cursor(), Bytes::from_static(b"page"))
+        .put_object(&initial, Bytes::from_static(b"page"))
         .await?;
     backend
         .put(
@@ -437,7 +434,7 @@ async fn checkpoint_staging_rejects_corrupt_declared_object() -> TestResult {
         .await?;
 
     assert!(matches!(
-        log.stage_objects(initial.cursor(), vec![object.reference().clone()])
+        log.stage_objects(&initial, vec![object.reference().clone()])
             .await,
         Err(object_log::Error::CorruptObject)
     ));
@@ -528,11 +525,11 @@ async fn reopened_checkpoint_resolution_rejects_invalid_descendants() -> TestRes
         let log = open(Arc::new(faults.clone()), &id, Options::default()).await?;
         let initial = log.load().await?;
         let child = log
-            .put_object(initial.cursor(), Bytes::from_static(b"page"))
+            .put_object(&initial, Bytes::from_static(b"page"))
             .await?;
         let node = log
             .put_node(
-                initial.cursor(),
+                &initial,
                 Bytes::from_static(b"page map"),
                 vec![child.clone()],
             )
@@ -756,7 +753,7 @@ async fn exact_recovery_does_not_report_conflict_after_evidence_expires() -> Tes
     let log = open(Arc::new(InMemory::new()), "expired-duplicate", options).await?;
     let view = log.load().await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         TransactionId::new(),
         Bytes::from_static(b"operation"),
         Bytes::new(),
@@ -829,8 +826,7 @@ async fn open(
 ) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
     let backend = ValidatedBackend::new(store, Path::from("checkpoint-tests")).await?;
-    let scoped = backend.scope(&log_id);
-    Log::open(scoped, options).await
+    Log::open(&backend, &log_id, options).await
 }
 
 async fn immutable_location<S: ObjectStore + ?Sized>(
@@ -860,7 +856,7 @@ async fn append(
     operation: &'static [u8],
 ) -> Result<View, Box<dyn StdError>> {
     let prepared = log.prepare(
-        view.cursor(),
+        view,
         TransactionId::new(),
         Bytes::from_static(operation),
         Bytes::new(),
@@ -880,7 +876,7 @@ async fn append_with_lost_response(
 ) -> Result<PendingCommit, Box<dyn StdError>> {
     let view = log.load().await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         TransactionId::new(),
         Bytes::from_static(b"pending operation"),
         Bytes::new(),

@@ -185,7 +185,7 @@ fn tiny_options() -> Options {
 async fn open_log(id: &str, options: Options) -> Result<Log, Box<dyn StdError>> {
     let backend =
         ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("sqlite-bound-tests")).await?;
-    Ok(Log::open(backend.scope(&LogId::new(id)?), options).await?)
+    Ok(Log::open(&backend, &LogId::new(id)?, options).await?)
 }
 
 async fn commit_sql(

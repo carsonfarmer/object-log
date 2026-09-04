@@ -47,7 +47,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     let faults = FaultStore::from_arc(inner.clone());
     let root = Path::from(format!("git-performance-{label}"));
     let backend = ValidatedBackend::new(Arc::new(faults.clone()), root.clone()).await?;
-    let log = Log::open(backend.scope(&LogId::new("repository")?), options).await?;
+    let log = Log::open(&backend, &LogId::new("repository")?, options).await?;
     let directory = tempfile::tempdir()?;
     let source = fixture("source", payload_bytes, u64::try_from(payload_bytes)?)?;
     let pack_bytes = source.pack_bytes;

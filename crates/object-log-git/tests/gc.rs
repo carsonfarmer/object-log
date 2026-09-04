@@ -31,7 +31,8 @@ async fn cold_open_retries_from_an_empty_cache_after_its_view_expires() -> TestR
     )
     .await?;
     let log = Log::open(
-        backend.scope(&LogId::new("repository")?),
+        &backend,
+        &LogId::new("repository")?,
         Options {
             max_object_bytes: 8_240,
             max_collection_objects: 10_000,
@@ -127,7 +128,8 @@ async fn cold_open_does_not_retry_current_epoch_corruption() -> TestResult {
     let store = FaultStore::from_arc(raw.clone());
     let backend = ValidatedBackend::new(Arc::new(store.clone()), root.clone()).await?;
     let log = Log::open(
-        backend.scope(&LogId::new("repository")?),
+        &backend,
+        &LogId::new("repository")?,
         Options {
             max_object_bytes: 8_240,
             ..Options::default()
@@ -181,7 +183,8 @@ async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestRes
     let root = StorePath::from("git-gc-tests");
     let backend = ValidatedBackend::new(raw.clone(), root.clone()).await?;
     let log = Log::open(
-        backend.scope(&LogId::new("repository")?),
+        &backend,
+        &LogId::new("repository")?,
         Options {
             max_object_bytes: 16 * 1024,
             max_collection_objects: 10_000,
@@ -265,14 +268,14 @@ async fn checkpoint_makes_dead_pack_collectable_and_keeps_live_pack() -> TestRes
 
     assert_recovery(&log, directory.path(), &live).await?;
 
-    let generation = current.cursor().generation();
+    let generation = current.generation();
     let epoch = current.collection_epoch();
     let CollectionStart::Empty(report) = log.start_collection(&current).await? else {
         return Err("the second collection was not empty".into());
     };
     assert_eq!(report.candidate_count(), 0);
     let unchanged = log.load().await?;
-    assert_eq!(unchanged.cursor().generation(), generation);
+    assert_eq!(unchanged.generation(), generation);
     assert_eq!(unchanged.collection_epoch(), epoch);
     eprintln!(
         "Git GC: {candidates} objects removed in {elapsed:?}; {} pack objects remain",

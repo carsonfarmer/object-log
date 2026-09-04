@@ -30,7 +30,7 @@ async fn key_value_commands_have_one_committed_order() -> TestResult {
         .await?,
         KvResult::Previous(None)
     );
-    let before_failed_swap = log.load().await?.cursor().generation();
+    let before_failed_swap = log.load().await?.generation();
     assert_eq!(
         execute(
             &log,
@@ -44,7 +44,7 @@ async fn key_value_commands_have_one_committed_order() -> TestResult {
         .await?,
         KvResult::Swapped(false)
     );
-    assert_eq!(log.load().await?.cursor().generation(), before_failed_swap);
+    assert_eq!(log.load().await?.generation(), before_failed_swap);
     assert_eq!(
         execute(
             &log,
@@ -168,9 +168,9 @@ fn replay_rejects_a_mutation_applied_to_the_wrong_state() -> TestResult {
         return Err("increment did not require a commit".into());
     };
     let mut state = KvState::default();
-    machine.apply(&mut state, 0, &operation, &[])?;
+    machine.apply(&mut state, &operation, &[])?;
     assert!(matches!(
-        machine.apply(&mut state, 1, &operation, &[]),
+        machine.apply(&mut state, &operation, &[]),
         Err(KvError::StateDiverged)
     ));
     Ok(())
@@ -231,7 +231,7 @@ fn operations_results_and_checkpoints_have_stable_bytes() -> TestResult {
     assert_eq!(result_bytes.as_ref(), b"\xa2\x01\x01\x02\x01");
 
     let mut state = KvState::default();
-    machine.apply(&mut state, 0, &operation, &[])?;
+    machine.apply(&mut state, &operation, &[])?;
     assert_eq!(
         machine.checkpoint(&state)?.as_ref(),
         b"\xa2\x01\x01\x02\x81\xa2\x01\x41k\x02\x41v"
@@ -249,7 +249,7 @@ fn decoders_reject_unknown_trailing_noncanonical_and_oversized_shapes() {
         b"\xa4\x01\x18\x01\x02\x41k\x03\xf4\x05\x41v".as_slice(),
         b"\xa5\x01\x01\x02\x41k\x03\xf4\x04\x40\x05\x41v".as_slice(),
     ] {
-        assert!(machine.apply(&mut state, 0, operation, &[]).is_err());
+        assert!(machine.apply(&mut state, operation, &[]).is_err());
     }
 
     assert!(
@@ -268,8 +268,7 @@ fn decoders_reject_unknown_trailing_noncanonical_and_oversized_shapes() {
 async fn open(id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
     let backend = ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("kv-tests")).await?;
-    let scoped = backend.scope(&log_id);
-    Log::open(scoped, Options::default()).await
+    Log::open(&backend, &log_id, Options::default()).await
 }
 
 async fn execute(
@@ -289,7 +288,7 @@ async fn execute(
             } => (operation, result_bytes, result),
         };
         let prepared = log.prepare(
-            current.view().cursor(),
+            current.view(),
             transaction_id,
             operation,
             result_bytes,

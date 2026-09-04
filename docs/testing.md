@@ -71,9 +71,9 @@ not yet prove every listed case. Current gaps appear below the matrix.
 - `stage_objects` fully verifies and deduplicates an existing transitive graph.
 - Recovery tokens omit process-local proofs and require full graph
   verification.
-- Two writers from one cursor produce one winner and one conflict.
+- Two writers from one view produce one winner and one conflict.
 - A loser refreshes and can prepare a new candidate.
-- A stale cursor cannot publish after any head update.
+- A stale view cannot publish after any head update.
 - A generation cannot decrease or repeat.
 
 ### Ambiguous outcomes
@@ -102,7 +102,7 @@ creation before/after failures remains qualification work.
 
 - Remove all process state and reconstruct from durable objects.
 - Start from a current checkpoint and replay its tail.
-- Start from an old cached cursor after the base has advanced.
+- Start from an old cached view after the base has advanced.
 - Fetch tail commits in arbitrary completion order and apply them in sequence.
 - Keep payload and node reads lazy during metadata recovery.
 - Detect a missing or changed object when the adapter reads it.

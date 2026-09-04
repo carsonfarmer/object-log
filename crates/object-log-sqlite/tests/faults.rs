@@ -312,7 +312,7 @@ async fn open_fault_log(
     let store = FaultStore::new(InMemory::new());
     let backend =
         ValidatedBackend::new(Arc::new(store.clone()), Path::from("sqlite-fault-cases")).await?;
-    let log = Log::open(backend.scope(&LogId::new(id)?), options).await?;
+    let log = Log::open(&backend, &LogId::new(id)?, options).await?;
     Ok((store, log))
 }
 

@@ -20,7 +20,7 @@ async fn memory_backend_conforms() -> Result<(), Box<dyn StdError>> {
             .supports(BackendCapability::ConditionalUpdate)
     );
     let log_id = LogId::new("test-log")?;
-    Log::open(backend.scope(&log_id), Options::default()).await?;
+    Log::open(&backend, &log_id, Options::default()).await?;
     Ok(())
 }
 
@@ -40,16 +40,14 @@ async fn log_namespaces_are_isolated() -> Result<(), Box<dyn StdError>> {
     let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let root = Path::from("shared-root");
     let backend = ValidatedBackend::new(backend, root).await?;
-    let first = Log::open(backend.scope(&LogId::new("tenant-a")?), Options::default()).await?;
-    let second = Log::open(backend.scope(&LogId::new("tenant-b")?), Options::default()).await?;
+    let first = Log::open(&backend, &LogId::new("tenant-a")?, Options::default()).await?;
+    let second = Log::open(&backend, &LogId::new("tenant-b")?, Options::default()).await?;
 
     let bytes = Bytes::from_static(b"same logical object");
     let first_view = first.load().await?;
     let second_view = second.load().await?;
-    let first_object = first.put_object(first_view.cursor(), bytes.clone()).await?;
-    let second_object = second
-        .put_object(second_view.cursor(), bytes.clone())
-        .await?;
+    let first_object = first.put_object(&first_view, bytes.clone()).await?;
+    let second_object = second.put_object(&second_view, bytes.clone()).await?;
     assert_ne!(first_object.reference(), second_object.reference());
     assert_eq!(
         first_object.reference().kind(),

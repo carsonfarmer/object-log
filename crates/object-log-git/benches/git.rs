@@ -117,7 +117,8 @@ async fn fresh_repository(options: Options) -> RepositoryState {
     let backend = require(
         ValidatedBackend::new(Arc::new(InMemory::new()), StorePath::from("git-bench")).await,
     );
-    let log = require(Log::open(backend.scope(&require(LogId::new("repository"))), options).await);
+    let id = require(LogId::new("repository"));
+    let log = require(Log::open(&backend, &id, options).await);
     let directory = require(tempfile::tempdir());
     let repository =
         require(Repository::open(&log, directory.path().join("cache"), ObjectFormat::Sha1).await);

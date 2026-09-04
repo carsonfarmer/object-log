@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation, RequestOutcome};
 use object_log::{
-    CommitRef, CommitStatus, Log, LogId, Options, PendingCommit, Refresh, Resolution,
-    TransactionId, ValidatedBackend, View,
+    CommitRef, CommitStatus, Log, LogId, Options, PendingCommit, Resolution, TransactionId,
+    ValidatedBackend, View,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -24,13 +24,30 @@ async fn validated_backend_opens_tenants_without_more_probes() -> TestResult {
     store.reset();
 
     for id in ["tenant-a", "tenant-b"] {
-        Log::open(backend.scope(&LogId::new(id)?), Options::default()).await?;
+        Log::open(&backend, &LogId::new(id)?, Options::default()).await?;
     }
 
     let metrics = store.metrics();
     assert_eq!(metrics.operation(Operation::Put).requests, 2);
     assert_eq!(metrics.operation(Operation::Get).requests, 0);
     assert_eq!(metrics.operation(Operation::Delete).requests, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn preflight_has_no_store_requests_and_reserves_nothing() -> TestResult {
+    let store = FaultStore::new(InMemory::new());
+    let backend =
+        ValidatedBackend::new(Arc::new(store.clone()), Path::from("preflight-tests")).await?;
+    let log = Log::open(&backend, &LogId::new("preflight")?, Options::default()).await?;
+    let view = log.load().await?;
+    let transaction_id = TransactionId::new();
+    store.reset();
+
+    log.preflight(&view, transaction_id)?;
+    log.preflight(&view, transaction_id)?;
+
+    assert_eq!(store.metrics().total_requests(), 0);
     Ok(())
 }
 
@@ -233,14 +250,14 @@ async fn concurrent_writers_have_one_winner_and_one_definite_loser() -> TestResu
     let left_id = transaction_id(7, 1);
     let right_id = transaction_id(7, 2);
     let left = log.prepare(
-        initial.cursor(),
+        &initial,
         left_id,
         Bytes::from_static(b"left"),
         Bytes::new(),
         Vec::new(),
     )?;
     let right = log.prepare(
-        initial.cursor(),
+        &initial,
         right_id,
         Bytes::from_static(b"right"),
         Bytes::new(),
@@ -280,7 +297,7 @@ async fn pending_evidence_survives_reopen_and_failed_resolution_read() -> TestRe
     store.reset();
     let view = log.load().await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id(11, 1),
         Bytes::from_static(b"operation"),
         Bytes::from_static(b"result"),
@@ -325,7 +342,7 @@ async fn recovery_token_can_stage_and_publish_after_process_loss() -> TestResult
     let (store, log, log_id) = open_model_log(14).await?;
     let view = log.load().await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id(14, 1),
         Bytes::from_static(b"operation"),
         Bytes::from_static(b"result"),
@@ -352,10 +369,10 @@ async fn recovery_token_survives_failed_referenced_object_validation() -> TestRe
     store.reset();
     let view = log.load().await?;
     let object = log
-        .put_object(view.cursor(), Bytes::from_static(b"referenced object"))
+        .put_object(&view, Bytes::from_static(b"referenced object"))
         .await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id(12, 1),
         Bytes::from_static(b"operation"),
         Bytes::new(),
@@ -394,19 +411,17 @@ async fn recovery_token_survives_failed_referenced_object_validation() -> TestRe
 async fn staged_blob_and_node_publish_without_dependency_reads() -> TestResult {
     let (store, log, _) = open_model_log(120).await?;
     let view = log.load().await?;
-    let child = log
-        .put_object(view.cursor(), Bytes::from_static(b"child"))
-        .await?;
+    let child = log.put_object(&view, Bytes::from_static(b"child")).await?;
 
     store.reset();
     let node = log
-        .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+        .put_node(&view, Bytes::from_static(b"node"), vec![child])
         .await?;
     assert_eq!(store.metrics().operation(Operation::Get).requests, 0);
 
     store.reset();
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id(120, 1),
         Bytes::new(),
         Bytes::new(),
@@ -425,10 +440,10 @@ async fn recovery_token_discards_staging_proof_and_verifies_the_blob() -> TestRe
     let (store, log, _) = open_model_log(121).await?;
     let view = log.load().await?;
     let object = log
-        .put_object(view.cursor(), Bytes::from_static(b"recover me"))
+        .put_object(&view, Bytes::from_static(b"recover me"))
         .await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id(121, 1),
         Bytes::new(),
         Bytes::new(),
@@ -451,11 +466,11 @@ async fn recovery_token_rejects_missing_and_corrupt_blobs_before_head_update() -
         let (store, log, _) = open_model_log(seed).await?;
         let view = log.load().await?;
         let object = log
-            .put_object(view.cursor(), Bytes::from_static(b"original"))
+            .put_object(&view, Bytes::from_static(b"original"))
             .await?;
         let blob_path = segment_path(&store, "blobs")?;
         let prepared = log.prepare(
-            view.cursor(),
+            &view,
             transaction_id(seed, 1),
             Bytes::new(),
             Bytes::new(),
@@ -487,15 +502,13 @@ async fn decoded_published_commit_rejects_missing_and_corrupt_descendants() -> T
     for (seed, corrupt) in [(128, false), (129, true)] {
         let (store, log, log_id) = open_model_log(seed).await?;
         let view = log.load().await?;
-        let child = log
-            .put_object(view.cursor(), Bytes::from_static(b"child"))
-            .await?;
+        let child = log.put_object(&view, Bytes::from_static(b"child")).await?;
         let blob_path = segment_path(&store, "blobs")?;
         let node = log
-            .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+            .put_node(&view, Bytes::from_static(b"node"), vec![child])
             .await?;
         let prepared = log.prepare(
-            view.cursor(),
+            &view,
             transaction_id(seed, 1),
             Bytes::new(),
             Bytes::new(),
@@ -536,17 +549,15 @@ async fn decoded_published_commit_rejects_missing_and_corrupt_descendants() -> T
 async fn batched_existing_staging_deduplicates_the_object_graph() -> TestResult {
     let (store, log, _) = open_model_log(122).await?;
     let view = log.load().await?;
-    let child = log
-        .put_object(view.cursor(), Bytes::from_static(b"child"))
-        .await?;
+    let child = log.put_object(&view, Bytes::from_static(b"child")).await?;
     let node = log
-        .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+        .put_node(&view, Bytes::from_static(b"node"), vec![child])
         .await?;
 
     store.reset();
     let staged = log
         .stage_objects(
-            view.cursor(),
+            &view,
             vec![node.reference().clone(), node.reference().clone()],
         )
         .await?;
@@ -561,14 +572,14 @@ async fn separately_opened_handle_rejects_new_work_with_foreign_proof() -> TestR
     let (store, first, log_id) = open_model_log(123).await?;
     let first_view = first.load().await?;
     let object = first
-        .put_object(first_view.cursor(), Bytes::from_static(b"isolated proof"))
+        .put_object(&first_view, Bytes::from_static(b"isolated proof"))
         .await?;
     let second = reopen_model_log(&store, &log_id).await?;
     let second_view = second.load().await?;
 
     assert!(matches!(
         second.prepare(
-            second_view.cursor(),
+            &second_view,
             transaction_id(123, 1),
             Bytes::new(),
             Bytes::new(),
@@ -584,10 +595,10 @@ async fn separately_opened_handle_verifies_prepared_and_pending_work() -> TestRe
     let (store, first, log_id) = open_model_log(124).await?;
     let view = first.load().await?;
     let object = first
-        .put_object(view.cursor(), Bytes::from_static(b"verify on reopen"))
+        .put_object(&view, Bytes::from_static(b"verify on reopen"))
         .await?;
     let prepared = first.prepare(
-        view.cursor(),
+        &view,
         transaction_id(124, 1),
         Bytes::new(),
         Bytes::new(),
@@ -604,10 +615,10 @@ async fn separately_opened_handle_verifies_prepared_and_pending_work() -> TestRe
 
     let next = reopened.load().await?;
     let object = reopened
-        .put_object(next.cursor(), Bytes::from_static(b"pending verify"))
+        .put_object(&next, Bytes::from_static(b"pending verify"))
         .await?;
     let prepared = reopened.prepare(
-        next.cursor(),
+        &next,
         transaction_id(124, 2),
         Bytes::new(),
         Bytes::new(),
@@ -632,14 +643,12 @@ async fn separately_opened_handle_verifies_prepared_and_pending_work() -> TestRe
 async fn same_handle_pending_resolution_keeps_staging_proof() -> TestResult {
     let (store, log, _) = open_model_log(125).await?;
     let view = log.load().await?;
-    let child = log
-        .put_object(view.cursor(), Bytes::from_static(b"child"))
-        .await?;
+    let child = log.put_object(&view, Bytes::from_static(b"child")).await?;
     let node = log
-        .put_node(view.cursor(), Bytes::from_static(b"node"), vec![child])
+        .put_node(&view, Bytes::from_static(b"node"), vec![child])
         .await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id(125, 1),
         Bytes::new(),
         Bytes::new(),
@@ -668,7 +677,7 @@ async fn pending_evidence_survives_failed_published_commit_verification() -> Tes
     store.reset();
     let view = log.load().await?;
     let prepared = log.prepare(
-        view.cursor(),
+        &view,
         transaction_id(13, 1),
         Bytes::from_static(b"operation"),
         Bytes::new(),
@@ -834,7 +843,7 @@ impl Scenario {
         operation.extend_from_slice(&self.next_transaction.to_le_bytes());
         operation.extend_from_slice(&[0_u64, 1][writer].to_le_bytes());
         let prepared = self.log.prepare(
-            view.cursor(),
+            view,
             transaction_id,
             Bytes::from(operation),
             Bytes::copy_from_slice(&self.next_transaction.to_le_bytes()),
@@ -916,9 +925,9 @@ impl Scenario {
             self.reader = Some(self.log.load().await?);
             return Ok(());
         };
-        match self.log.refresh(view.cursor()).await? {
-            Refresh::NotModified => {}
-            Refresh::Updated(updated) => self.reader = Some(*updated),
+        match self.log.refresh(view).await? {
+            None => {}
+            Some(updated) => self.reader = Some(updated),
         }
         Ok(())
     }
@@ -1005,8 +1014,7 @@ async fn open_model_log(seed: u64) -> Result<(FaultStore, Log, LogId), Box<dyn S
 
 async fn reopen_model_log(store: &FaultStore, log_id: &LogId) -> Result<Log, object_log::Error> {
     let backend = ValidatedBackend::new(Arc::new(store.clone()), Path::from("model-tests")).await?;
-    let scoped = backend.scope(log_id);
-    Log::open(scoped, Options::default()).await
+    Log::open(&backend, log_id, Options::default()).await
 }
 
 fn schedule_head_fault(store: &FaultStore, phase: FailurePhase) {

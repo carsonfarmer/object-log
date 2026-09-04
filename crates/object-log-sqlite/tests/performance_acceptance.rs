@@ -78,7 +78,7 @@ async fn measure_checkpoint() -> TestResult<Metrics> {
 async fn open_log(id: &str) -> TestResult<(FaultStore, Log)> {
     let store = FaultStore::new(InMemory::new());
     let backend = ValidatedBackend::new(Arc::new(store.clone()), Path::from("accounting")).await?;
-    let log = Log::open(backend.scope(&LogId::new(id)?), Options::default()).await?;
+    let log = Log::open(&backend, &LogId::new(id)?, Options::default()).await?;
     Ok((store, log))
 }
 
