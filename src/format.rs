@@ -421,17 +421,6 @@ struct CheckpointEncodeWire<'a> {
     objects: Vec<ObjectRefWire>,
 }
 
-#[derive(Encode)]
-#[cbor(map)]
-struct NodeWire {
-    #[n(1)]
-    format_version: u32,
-    #[cbor(n(2), with = "minicbor::bytes")]
-    payload: Vec<u8>,
-    #[n(3)]
-    children: Vec<ObjectRefWire>,
-}
-
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
 #[cbor(map)]
 struct RecoveryTokenWire {
@@ -673,12 +662,81 @@ pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, Error> {
     Ok(checkpoint)
 }
 
-pub(crate) fn encode_node(node: &Node) -> Result<Bytes, Error> {
-    encode_envelope(&NodeWire {
-        format_version: FORMAT_VERSION,
-        payload: node.payload.to_vec(),
-        children: node.children.iter().map(ObjectRefWire::from).collect(),
-    })
+pub(crate) fn encode_node(node: &Node, options: Options) -> Result<Bytes, Error> {
+    if node.children.len() > options.max_object_refs {
+        return Err(Error::LimitExceeded("object references"));
+    }
+    let payload_len =
+        u64::try_from(node.payload.len()).map_err(|_| Error::LimitExceeded("object bytes"))?;
+    let child_count = u64::try_from(node.children.len())
+        .map_err(|_| Error::LimitExceeded("object references"))?;
+    let children_len = node.children.iter().try_fold(0_usize, |sum, child| {
+        checked_node_len(sum, checked_node_len(57, cbor_head_len(child.len))?)
+    })?;
+    let inner_len = [
+        5,
+        cbor_head_len(payload_len),
+        node.payload.len(),
+        cbor_head_len(child_count),
+        children_len,
+    ]
+    .into_iter()
+    .try_fold(0, checked_node_len)?;
+    let inner = u64::try_from(inner_len).map_err(|_| Error::LimitExceeded("object bytes"))?;
+    let outer_len = [37, cbor_head_len(inner), inner_len]
+        .into_iter()
+        .try_fold(0, checked_node_len)?;
+    if outer_len > options.max_object_bytes {
+        return Err(Error::LimitExceeded("object bytes"));
+    }
+    let mut bytes = Vec::with_capacity(outer_len);
+    {
+        let mut encoder = minicbor::Encoder::new(&mut bytes);
+        let result: Result<_, minicbor::encode::Error<std::convert::Infallible>> = (|| {
+            encoder.map(2)?.u8(1)?.bytes_len(inner)?;
+            encoder.map(3)?.u8(1)?.u32(FORMAT_VERSION)?;
+            encoder.u8(2)?.bytes(&node.payload)?;
+            encoder.u8(3)?.array(child_count)?;
+            for child in &node.children {
+                let kind = match child.kind {
+                    ObjectKind::Blob => ObjectKindWire::Blob,
+                    ObjectKind::Checkpoint => ObjectKindWire::Checkpoint,
+                    ObjectKind::Node => ObjectKindWire::Node,
+                };
+                encoder.map(4)?.u8(1)?.u8(kind as u8)?;
+                encoder.u8(2)?.bytes(child.digest.as_bytes())?;
+                encoder.u8(3)?.u64(child.len)?;
+                let storage_id = child.storage_id.as_uuid().as_bytes();
+                encoder.u8(4)?.bytes(storage_id)?;
+            }
+            Ok(())
+        })();
+        result.map_err(|error| Error::InvalidFormat(format!("CBOR encoding failed: {error}")))?;
+    }
+    let inner_start = 2 + cbor_head_len(inner);
+    let digest = Digest::of(&bytes[inner_start..]);
+    let mut encoder = minicbor::Encoder::new(&mut bytes);
+    encoder
+        .u8(2)
+        .and_then(|encoder| encoder.bytes(digest.as_bytes()))
+        .map_err(|error| Error::InvalidFormat(format!("CBOR encoding failed: {error}")))?;
+    debug_assert_eq!(bytes.len(), outer_len);
+    Ok(Bytes::from(bytes))
+}
+
+fn checked_node_len(left: usize, right: usize) -> Result<usize, Error> {
+    left.checked_add(right)
+        .ok_or(Error::LimitExceeded("object bytes"))
+}
+
+const fn cbor_head_len(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
 }
 
 pub(crate) fn decode_node(bytes: &Bytes, options: Options) -> Result<Node, Error> {
@@ -1208,14 +1266,25 @@ mod tests {
     use super::{
         Checkpoint, CheckpointWire, CollectionCandidate, CollectionCandidateWire, CollectionPlan,
         CollectionPlanRef, CollectionPlanWire, Commit, EnvelopeWire, FORMAT_VERSION, Head,
-        HeadWire, Node, NodeWire, ObjectRefWire, OptionsWire, decode_checkpoint,
-        decode_collection_plan, decode_commit, decode_head, decode_node, decode_recovery_token,
-        encode_checkpoint, encode_collection_plan, encode_commit, encode_envelope, encode_head,
-        encode_node, encode_recovery_token,
+        HeadWire, Node, ObjectRefWire, OptionsWire, decode_checkpoint, decode_collection_plan,
+        decode_commit, decode_head, decode_node, decode_recovery_token, encode_checkpoint,
+        encode_collection_plan, encode_commit, encode_envelope, encode_head,
+        encode_node as encode_node_with_options, encode_recovery_token,
     };
     use crate::store::{ImmutableKey, ImmutableKind};
     use crate::{CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, Options};
     use bytes::Bytes;
+
+    #[derive(minicbor::Encode)]
+    #[cbor(map)]
+    struct NodeWire {
+        #[n(1)]
+        format_version: u32,
+        #[cbor(n(2), with = "minicbor::bytes")]
+        payload: Vec<u8>,
+        #[n(3)]
+        children: Vec<ObjectRefWire>,
+    }
 
     fn log_id() -> LogId {
         LogId::new("tenant.resource").unwrap_or_else(|error| panic!("valid ID failed: {error}"))
@@ -1236,6 +1305,22 @@ mod tests {
             digest: Digest::of(b"page"),
             len,
         }
+    }
+
+    fn node(payload: Bytes, children: Vec<ObjectRef>) -> Node {
+        Node { payload, children }
+    }
+
+    fn encode_node(node: &Node) -> Result<Bytes, Error> {
+        encode_node_with_options(node, Options::default())
+    }
+
+    fn derived_node(node: &Node) -> Result<Bytes, Error> {
+        encode_envelope(&NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: node.payload.to_vec(),
+            children: node.children.iter().map(ObjectRefWire::from).collect(),
+        })
     }
 
     fn wrap_node_payload(payload: Vec<u8>) -> Bytes {
@@ -1565,6 +1650,64 @@ mod tests {
             hex::encode(encoded),
             "a201585ca3010102581a756e69717565206f7061717565206e6f6465207061796c6f61640381a40101025820cad079fe52fa1b162e375eceec083d82ed9ac94420e05934969828aee170249103040450000000000000000000000000000000020258202488ddf0fe738ebed3830755cf0142dba307002f8c3cab0e5e94c95ba99b833b"
         );
+    }
+
+    #[test]
+    fn reference_node_encoder_matches_derive_at_cbor_boundaries() {
+        for boundary in [0_u64, 23, 24, 255, 256, 65_535, 65_536] {
+            let value =
+                usize::try_from(boundary).unwrap_or_else(|_| panic!("boundary exceeds usize"));
+            let payload_node = node(Bytes::from(vec![7; value]), Vec::new());
+            let length_node = node(Bytes::new(), vec![object_ref(ObjectKind::Blob, boundary)]);
+            let count_node = node(Bytes::new(), vec![object_ref(ObjectKind::Node, 0); value]);
+            for (node, options) in [
+                (payload_node, Options::default()),
+                (length_node, Options::default()),
+                (
+                    count_node,
+                    Options {
+                        max_object_refs: value,
+                        ..Options::default()
+                    },
+                ),
+            ] {
+                let encoded = encode_node_with_options(&node, options)
+                    .unwrap_or_else(|error| panic!("encode failed: {error}"));
+                let derived =
+                    derived_node(&node).unwrap_or_else(|error| panic!("derive failed: {error}"));
+                assert_eq!(encoded, derived);
+            }
+        }
+    }
+
+    #[test]
+    fn reference_node_encoder_bounds_the_maximum_git_root() {
+        const MAX_GIT_ROOT_BYTES: usize = 2_098_197;
+        let root = node(
+            Bytes::from(vec![0; 2_097_152]),
+            vec![object_ref(ObjectKind::Blob, 1_048_576); 16],
+        );
+        let options = Options {
+            max_object_refs: 16,
+            max_object_bytes: MAX_GIT_ROOT_BYTES,
+            ..Options::default()
+        };
+        let empty = node(Bytes::new(), Vec::new());
+        let empty = encode_node_with_options(&empty, options)
+            .unwrap_or_else(|error| panic!("empty encode failed: {error}"));
+        let maximum = encode_node_with_options(&root, options)
+            .unwrap_or_else(|error| panic!("max encode failed: {error}"));
+        assert_eq!((empty.len(), maximum.len()), (45, MAX_GIT_ROOT_BYTES));
+        assert!(matches!(
+            encode_node_with_options(
+                &root,
+                Options {
+                    max_object_bytes: MAX_GIT_ROOT_BYTES - 1,
+                    ..options
+                }
+            ),
+            Err(Error::LimitExceeded("object bytes"))
+        ));
     }
 
     #[test]

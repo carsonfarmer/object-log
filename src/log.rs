@@ -706,10 +706,7 @@ impl Log {
             .map(|child| child.object)
             .collect::<Vec<_>>();
         let node = format::Node { payload, children };
-        let bytes = format::encode_node(&node)?;
-        if bytes.len() > self.options.max_object_bytes {
-            return Err(Error::LimitExceeded("object bytes"));
-        }
+        let bytes = format::encode_node(&node, self.options)?;
         let blocked = self.active_collection_candidates(view.head()).await?;
         let object = self
             .create_fresh_object_with(ObjectKind::Node, bytes, blocked.as_deref(), StorageId::new)
