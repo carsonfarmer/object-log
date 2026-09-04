@@ -61,13 +61,12 @@ API:
   than 100 dead physical objects, cold-recovers the live repository, and passes
   strict Git validation. The proof also has benchmarks, a request audit, and a
   pinned `MinIO` lifecycle.
-- [`object-log-git-http`](crates/object-log-git-http) implements the four Git
-  smart HTTP protocol v0 operations for SHA-1 repositories. Its native Axum
-  server has one fixed `/repo` mapping, bounded gzip and identity request
-  streams, chunked upload responses, explicit HTTP errors, and S3-compatible
-  configuration. An unchanged Git client pushes, clones, fetches, creates and
-  deletes branches and tags, rejects a non-fast-forward push, and passes
-  `git fsck --strict`.
+- [`object-log-git-http`](crates/object-log-git-http) is the current native
+  reference host. It implements the four Git smart HTTP protocol v0 operations
+  for SHA-1 repositories. Its tests use an unchanged Git client. The active
+  replacement keeps a native host first, but moves protocol and Git storage
+  into one WASI-compatible core. Fetch will use protocol v2. Push will keep
+  classic receive-pack because protocol v2 does not define a push command.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
@@ -87,8 +86,8 @@ protocol proof. The
 native host tests and limits.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
-live AWS qualification goals. The [Git example plan](GIT_PLAN.md) defines a
-minimal serverless repository over immutable packs and atomic ref transactions.
+live AWS qualification goals. The [Git proof plan](GIT_PLAN.md) defines one
+WASI-compatible Git engine over immutable packs and atomic ref transactions.
 
 [GitHub issue #11](https://github.com/carsonfarmer/object-log/issues/11) is the
 current index of active limitations and follow-on work. Each linked issue has

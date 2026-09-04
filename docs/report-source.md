@@ -230,9 +230,10 @@ tenant scopes without more probe requests.
 
 The public result model distinguishes committed, definite conflict, pending,
 and expired evidence. A recovery token preserves the exact candidate before
-publication. The local key-value module proves atomic commands and recorded
-results. Cursor-style bounded garbage collection is locally complete. SQLite
-is next, then `wasi:filesystem`. Live AWS qualification is separate.
+publication. The key-value, SQLite, and Git crates test the public API.
+Cursor-style bounded garbage collection is locally complete. The current Git
+work replaces its native-only core with a WASI-compatible engine. The
+`wasi:filesystem` adapter and live AWS qualification remain separate work.
 
 The final all-feature local gate passes 135 tests. A pinned MinIO rerun passed
 one integrated test, including 1,001 collection candidates. The Criterion

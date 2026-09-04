@@ -93,21 +93,17 @@ repository, and passes strict Git validation. The request audit, benchmarks,
 pinned `MinIO` lifecycle, and local evidence are complete.
 
 Smart HTTP is a separate proof crate. The core WAL does not depend on Git
-protocol code or Git libraries. The current HTTP tranche uses protocol v0 and
-all four smart HTTP operations for SHA-1. Its loopback test uses an unmodified
-client for clone, fetch, push, branch and tag creation and deletion, and
-non-fast-forward rejection. A native Axum host serves one fixed repository at
-`/repo`. A pinned MinIO test stops the first host, opens a new backend and
-scratch directory, and cold-clones the exact durable state. Authentication,
-TLS, repository routing, protocol v2, have-aware fetch, live AWS, and the
-remaining HTTP hardening work are separate follow-ons.
+protocol code or Git libraries. The current protocol v0 Axum host is a native
+test reference. Its loopback tests use an unchanged client for clone, fetch,
+push, branch and tag changes, and non-fast-forward rejection.
 
-The native adapter can run in Linux serverless functions and containers with
-disposable local storage. Current `gix` pack storage cannot run as a WASI guest
-because it uses unsupported memory maps, and its `wasm` feature removes the
-high-level pack writer. A Spin guest also needs an object-storage bridge. A
-later native Spin factor or different Git object database requires a separate
-architecture review.
+Issue [#17](https://github.com/carsonfarmer/object-log/issues/17) replaces the
+native-only Git core. The first host can remain native. Protocol, pack, object
+lookup, and publication code must compile for `wasm32-wasip2` so a later Spin
+component remains a thin adapter. Fetch must use protocol v2 and subtract valid
+client `have` objects. Push keeps classic receive-pack. The new engine must pass
+the current tests before the native repository materializer and protocol v0
+upload-pack path are deleted. See [`GIT_PLAN.md`](../GIT_PLAN.md).
 
 ## 2. WASI filesystem storage
 

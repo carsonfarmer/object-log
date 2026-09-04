@@ -1,179 +1,182 @@
-# Git storage adapter plan
+# Git proof plan
 
 ## Outcome
 
-`object-log` is a small, generic, object-storage-backed WAL for higher-level
-storage systems. The `object-log-git` crate tests its public API.
+`object-log-git` must prove that the generic WAL can support a complete Git
+repository. The durable authority is object storage. Local files are optional
+cache data.
 
-The native Git storage adapter accepts parsed ref commands and an optional pack
-path. It validates both inputs, publishes one atomic object-log update, and
-recovers a standard bare Git repository from object storage. The adapter uses
-only the public `object-log` API.
+The first runnable host can be native. The Git protocol, pack, object lookup,
+and publication code must compile for `wasm32-wasip2`. A later Spin component
+must only adapt HTTP and object-store input and output. It must not contain a
+second Git implementation.
 
-The separate `object-log-git-http` crate tests smart HTTP over this storage
-adapter. The core WAL does not contain Git protocol code or Git libraries.
+The core `object-log` crate remains independent from Git.
 
-## Library choice
+## Current reference implementation
 
-Use `gix` and `gix-pack` with pure-Rust features. They provide pack parsing,
-object access, reference validation, and repository materialization. The
-adapter does not run a Git executable and does not use C FFI.
+The current native proof supports SHA-1 and SHA-256 pack storage, atomic ref
+transactions, cold recovery, checkpoints, collection, and Git smart HTTP
+protocol v0. It uses a disposable bare repository and high-level `gix` APIs.
 
-The current target is a native serverless function or container with disposable
-local storage. This includes Linux services with a temporary directory. The
-adapter can perform blocking pack and repository work on a bounded worker.
+This implementation is a temporary test reference. Its memory-mapped object
+database and filesystem pack writer are not WASI-compatible. Its fetch path
+also sends all reachable objects because it does not use the client's `have`
+set.
 
-The current `gix` storage path does not work as a WASI guest. Its high-level
-pack path uses memory maps, which `memmap2` does not support on WASI. The
-`gix-pack` `wasm` feature also removes its high-level pack writer. A future WASI
-adapter needs lower-level streaming pack APIs and a different object lookup.
-Do not add that work to phase 1.
+The replacement must pass the current storage and client tests before the
+native-only core is deleted.
 
-[`docs/evidence/git-library-selection-2026-09-03.md`](docs/evidence/git-library-selection-2026-09-03.md)
-records the library review and compile checks.
-
-## Adapter boundary
-
-The storage adapter accepts domain values instead of Git wire data:
-
-```text
-Repository::open(log, work_dir, object_format) -> Result<Repository, Error>
-Repository::refs() -> &RefSnapshot
-Repository::prepare_push(self, transaction_id, updates, Option<&Path>) -> Result<PreparedPush, Error>
-PreparedPush::recovery_token() -> &Bytes
-PreparedPush::publish(self) -> Result<CommitStatus, Error>
-```
-
-`open` loads the log and rebuilds a standard bare repository in an empty,
-disposable directory. It installs durable packs, validates their reachable
-object graph, and restores refs. Objects outside the recovered pack set cannot
-support a ref update.
-
-`prepare_push` validates each update against the current snapshot. It normalizes
-an optional pack, validates the target graph against recovered and new pack
-objects, stages pack chunks, and prepares one object-log commit. `PreparedPush`
-is opaque. Its recovery token identifies the exact publication attempt.
-
-`publish` performs the conditional publication. The core `Log::resume` method
-resolves a lost response from the recovery token without another pack upload.
-
-The adapter supports SHA-1 and SHA-256 repositories. It supports direct refs
-under `refs/heads/` and `refs/tags/`, plus one configured symbolic `HEAD`. It
-rejects other symbolic refs, shallow state, alternates, and invalid object
-graphs. It disables replacement objects and does not run Git hooks.
-
-## Storage model
+## Required design
 
 - One object log owns one Git repository.
-- Git objects stay in standard immutable pack files.
-- A large pack is a reference node over fixed-size blob chunks.
-- A commit contains one ordered ref transaction and its new pack roots.
-- The object-log index is the only mutable authority.
-- A checkpoint contains the direct-ref map and selected live pack descriptors.
-- A cold request rebuilds pack indexes and refs in a new bare repository.
-- Local configuration, hooks, reflogs, and temporary files are cache state.
+- Standard immutable packs and indexes contain Git objects.
+- Large pack and index data use bounded object-log chunks.
+- One object-log publication applies one ordered ref transaction.
+- The object-log head is the only mutable durable authority.
+- A pinned view supplies refs and a pack catalog for one request.
+- Object lookup reads standard indexes and only the required pack ranges.
+- Push validates pack checksums, deltas, object IDs, connectivity, and ref
+  rules before publication.
+- Thin input packs become self-contained durable packs.
+- Fetch returns a self-contained pack for
+  `reachable(wants) - reachable(valid haves)`.
+- Checkpoints retain packs that contain live objects. Collection removes dead
+  pack and index chunks.
 
-Normalize each thin input pack into a self-contained pack. Check pack checksums,
-object IDs, deltas, object availability, and connectivity. Reject invalid ref
-names and non-fast-forward branch updates.
+The pre-release storage format can change if a new shape removes code or makes
+the runtime better. Do not add a compatibility reader for an earlier
+development shape.
 
-The pack store keeps the exact bytes at each immutable physical key until
-object-log collection deletes that key. External expiry, deletion, or overwrite
-violates this contract. A reopened handle verifies existing object graphs before
-it republishes their references.
+## Small host-neutral boundary
 
-The layout follows Cursor's immutable WAL and CAS publication model. Git
-checkpoints remove dead packs from durable state. They do not rewrite mixed
-live and dead packs. Live pack count and recovery bytes can still grow until a
-later pack-compaction feature rewrites those packs.
+Keep the public API concrete and byte-oriented. Do not add a generic Git engine
+trait. The core must accept bounded asynchronous input, write to bounded
+asynchronous output, and return a publication result that distinguishes
+success, rejection, pending evidence, and expiry.
 
-Durable Object behavior, tenancy, routing, and actor or service ownership remain
-outside this work.
+Expose only values that an HTTP adapter or higher-level storage caller needs.
+Keep packet parsing, pack normalization, graph traversal, and object-log state
+inside `object-log-git`.
 
-## Smart HTTP boundary
+The core owns all protocol limits. HTTP adapters can add stricter transport
+limits. A declared content length permits early rejection but never replaces
+counting the received bytes.
 
-`object-log-git-http` parses packet lines, capabilities, ref commands, and pack
-input. It passes parsed commands and a pack file to `object-log-git`.
+## Git wire behavior
 
-The native Axum host maps one log to `/repo`. Authentication and tenant routing
-stay outside this proof. A push response waits for object-log to classify
-publication. A conflict returns a Git rejection. An uncertain result returns
-HTTP `503`, and the client must fetch current refs before it acts again.
+Upload-pack discovery and fetch use Git protocol version 2. The server supports
+`ls-refs` and `fetch`. It does not fall back to a protocol v0 upload-pack
+advertisement when the client requests version 2.
 
-The current HTTP tranche implements protocol v0 for the four smart HTTP
-operations. Its native loopback test covers clone, fetch, push, branch and tag
-creation and deletion, and non-fast-forward rejection with an unmodified Git
-client. Product code does not invoke Git. The test client uses the standard Git
-program.
+Push uses classic receive-pack. Git protocol version 2 does not define a new
+push command. The receive-pack path keeps the current atomic publication and
+per-ref result behavior.
 
-None of the reviewed Rust Git server crates exposes the required publication
-boundary. They update local refs before they return success, require a Git
-process, support only SHA-1, or include a much larger server policy surface. The
-HTTP proof uses `gix-packetline` for framing and the existing `gix` and
-`gix-pack` crates for Git data. Re-evaluate server libraries when one can return
-a parsed receive plan without publishing refs.
+The first protocol set excludes shallow clones, filters, ref-in-want, packfile
+URIs, and sideband-all. Add a capability only with a test for its complete
+behavior.
 
-## Checkpoints and collection
+## Implementation tranches
 
-A checkpoint keeps each pack that contains at least one object reachable from
-the current refs. It can omit a pack with no reachable object. The selected pack
-set must cover every reachable object before publication.
+### 1. WASI contract
 
-Conservative pack selection leaves each pack unchanged. Collection can remove a
-feature-only pack after all refs to that feature are deleted. It cannot remove
-unreachable bytes from a pack that also contains live objects.
+- Separate the host-neutral core from the temporary native engine.
+- Add only the service, protocol, and limit values required by later work.
+- Reject unsupported service and protocol combinations.
+- Compile `object-log-git` for `wasm32-wasip2` without native features.
+- Keep Tokio filesystem, temporary files, memory maps, and high-level
+  `gix::Repository` out of the WASI dependency graph.
 
-## Required evidence
+### 2. Pack engine
 
-### Phase 1 storage proof
+- Use low-level Gitoxide crates for pack parsing, validation, delta resolution,
+  normalization, and index generation.
+- Support base objects, `OFS_DELTA`, in-pack `REF_DELTA`, and thin packs whose
+  external bases exist in the pinned view.
+- Bound input bytes, decoded object bytes, object count, work, and delta depth.
+- Produce packs that pass `git index-pack --strict` and `git fsck --strict`.
 
-- Empty creation and cold recovery need no retained local files.
-- Parsed ref commands and pack bytes publish one atomic update.
-- Recovery creates a standard repository with the same refs and reachable IDs.
-- Invalid packs, missing objects, invalid refs, and non-fast-forward updates fail
-  before object-log publication.
-- Two pushes from one view produce one winner. The loser publishes no pack ref.
-- A lost response resolves the transaction without another pack upload.
-- A checkpoint plus tail matches full replay.
-- The same lifecycle passes for SHA-1 and SHA-256 repositories.
+The first implementation can hold one explicitly bounded incoming pack in
+memory. Select its limit from measured native and WASI memory use. Do not infer
+the limit from an object-store or Spin default.
 
-### Qualification and HTTP
+### 3. Durable objects
 
-- Collection preserves current packs and removes an unreachable-only pack after
-  checkpoint publication.
-- One opt-in MinIO flow uses a disposable bucket and leaves no process or
-  container behind.
-- Benchmarks report small and large pack publication, checkpoint, recovery,
-  object-store requests, transferred bytes, and recovered disk use.
-- An unmodified client can clone, fetch, create a branch and tag, push a
-  fast-forward update, and delete refs through loopback smart HTTP.
-- The HTTP proof supports SHA-1. The storage adapter also supports SHA-256.
+- Store immutable packs and indexes through object-log reference trees.
+- Load refs and the pack catalog without creating a local Git repository.
+- Find blobs, trees, commits, and tags through standard indexes.
+- Traverse commits, trees, and annotated tags with explicit bounds.
+- Preserve object-log recovery, checkpoint, and collection behavior.
 
-## Current status
+### 4. Protocol
 
-The native storage proof has a request audit, benchmarks, a pinned `MinIO`
-lifecycle, checkpoint and collection tests, and local evidence. The local
-protocol v0 proof passes for SHA-1. Its unmodified-client loopback covers the
-accepted operations and passes strict Git validation.
+- Implement protocol v2 discovery, `ls-refs`, and have-aware `fetch`.
+- Implement classic receive-pack advertisement, command parsing, and status.
+- Use `gix-packetline` where it removes code.
+- Reject malformed or unsupported requests before object reads or publication.
 
-The native HTTP host passes the accepted local tests. Issue #13 tracks the next
-cross-example API and simplicity review. Live provider qualification remains
-separate.
+### 5. Integration and deletion
 
-## Limits
+- Connect protocol, pack, durable lookup, and publication through one engine.
+- Keep Axum as a thin native routing and transport adapter.
+- Add a thin `wasm32-wasip2` Spin example that calls the same engine.
+- Compare the new engine with the native reference on the same fixtures.
+- Delete the native repository materializer, protocol v0 upload-pack engine,
+  and native-only core dependencies after acceptance passes.
 
-Keep Git policy outside the generic log. Use one repository for each log and one
-push for each publication. The current host has one fixed repository. It does
-not provide authentication, TLS, or tenant routing. A front proxy must limit
-header bytes before Hyper parses them.
+## Acceptance
 
-The current fetch path ignores `have` lines and returns all reachable objects.
-Protocol v2, SHA-256 HTTP, pack rewriting, global deduplication,
-cross-repository transactions, provider-specific behavior, Spin integration,
-live AWS work, and a WASI Git adapter remain deferred. Recovery has no aggregate
-byte quota. A later quota needs a maintenance path that can checkpoint or
-collect an oversized repository.
+An unchanged Git client must:
 
-The first server proof uses native Rust. The current Git object database and
-pack writer do not support its WASI path. A Spin guest also has no
-object-storage backend for this API.
+- discover an empty and a populated repository with protocol v2;
+- clone, fetch, and list refs;
+- push a new branch, annotated tag, fast-forward update, and deletions;
+- receive a clear rejection for stale and non-fast-forward updates; and
+- pass `git fsck --strict` after cold recovery.
+
+Packet traces must show `version 2`, `command=ls-refs`, and `command=fetch`.
+An incremental fetch must subtract valid `have` objects and be materially
+smaller than the current full-reachable response on the fixed fixture.
+
+Two pushes from one view must have one durable winner. A lost response must be
+recoverable after the host and all local cache data are removed. Rejected and
+losing packs must become collectable.
+
+The same checkpoint, collection, and cold-clone lifecycle must pass with memory
+storage and local MinIO. Live AWS qualification remains separate.
+
+Required build gates include:
+
+```sh
+cargo +1.97.1 check -p object-log-git --lib \
+  --target wasm32-wasip2 --no-default-features
+cargo +1.97.1 build -p object-log-git-spin \
+  --target wasm32-wasip2 --release
+```
+
+## Performance and size control
+
+Compare the native reference and replacement with the same revision, Git
+client, machine, and fixtures. Measure p50 and p95 time, wire bytes, peak
+memory, object-store requests, and transferred bytes for:
+
+- a 4 KiB one-commit push and clone;
+- an 8 MiB deterministic pack;
+- a 384-commit full clone;
+- one incremental fetch after those 384 commits; and
+- a thin incremental push.
+
+Use one warm-up and ten measured samples. Record raw results and limitations.
+Cold recovery must not download complete pack bodies.
+
+Target 1,000 to 1,540 new product lines and delete at least 1,100 native-only
+product lines. Stop for a simplicity review if new product code exceeds 1,600
+lines or one tranche exceeds its line budget by more than 25 percent. Run a
+Rust review, an adversarial correctness review, a prose review, and a deletion
+review at stable checkpoints.
+
+GitHub issue [#17](https://github.com/carsonfarmer/object-log/issues/17) tracks
+this work. Issue [#14](https://github.com/carsonfarmer/object-log/issues/14)
+tracks only native-host hardening that remains useful after the shared engine
+exists.
