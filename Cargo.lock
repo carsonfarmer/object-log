@@ -2238,6 +2238,7 @@ dependencies = [
  "gix-hash",
  "gix-object",
  "gix-pack",
+ "gix-packetline",
  "gix-validate",
  "gix-zlib",
  "minicbor",

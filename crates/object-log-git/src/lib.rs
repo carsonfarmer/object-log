@@ -25,6 +25,8 @@ mod repository;
 mod state;
 #[cfg(feature = "native-oracle")]
 mod storage;
+#[allow(dead_code, reason = "the next Git engine tranche consumes this module")]
+mod wire;
 
 #[cfg(feature = "native-oracle")]
 pub use repository::{PreparedPush, Repository};
