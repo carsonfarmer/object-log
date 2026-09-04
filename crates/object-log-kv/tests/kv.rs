@@ -209,6 +209,62 @@ fn stored_results_round_trip_through_the_public_decoder() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn operations_results_and_checkpoints_have_stable_bytes() -> TestResult {
+    let machine = KvMachine;
+    let command = KvCommand::Set {
+        key: Bytes::from_static(b"k"),
+        value: Bytes::from_static(b"v"),
+    };
+    let KvDecision::Commit {
+        operation,
+        result_bytes,
+        ..
+    } = machine.evaluate(&KvState::default(), &command)?
+    else {
+        return Err("set did not require a commit".into());
+    };
+    assert_eq!(
+        operation.as_ref(),
+        b"\xa4\x01\x01\x02\x41k\x03\xf4\x05\x41v"
+    );
+    assert_eq!(result_bytes.as_ref(), b"\xa2\x01\x01\x02\x01");
+
+    let mut state = KvState::default();
+    machine.apply(&mut state, 0, &operation, &[])?;
+    assert_eq!(
+        machine.checkpoint(&state)?,
+        b"\xa2\x01\x01\x02\x81\xa2\x01\x41k\x02\x41v"
+    );
+    Ok(())
+}
+
+#[test]
+fn decoders_reject_unknown_trailing_noncanonical_and_oversized_shapes() {
+    let machine = KvMachine;
+    let mut state = KvState::default();
+    for operation in [
+        b"\xa5\x01\x01\x02\x41k\x03\xf4\x05\x41v\x06\x00".as_slice(),
+        b"\xa4\x01\x01\x02\x41k\x03\xf4\x05\x41v\x00".as_slice(),
+        b"\xa4\x01\x18\x01\x02\x41k\x03\xf4\x05\x41v".as_slice(),
+        b"\xa5\x01\x01\x02\x41k\x03\xf4\x04\x40\x05\x41v".as_slice(),
+    ] {
+        assert!(machine.apply(&mut state, 0, operation, &[]).is_err());
+    }
+
+    assert!(
+        machine
+            .restore(b"\xa2\x01\x01\x02\x9b\xff\xff\xff\xff\xff\xff\xff\xff", &[])
+            .is_err()
+    );
+    assert!(machine.decode_result(b"\xa2\x01\x01\x02\x01\x00").is_err());
+    assert!(
+        machine
+            .decode_result(b"\xa3\x01\x01\x02\x01\x04\x00")
+            .is_err()
+    );
+}
+
 async fn open(id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
     let backend = ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("kv-tests")).await?;

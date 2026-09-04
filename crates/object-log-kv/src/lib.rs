@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use minicbor::{Decode, Encode};
+use minicbor::{Decode, Encode, encode::Write};
 
 use object_log::{Materializer, ObjectRef};
 
@@ -113,6 +113,7 @@ impl KvMachine {
     /// Returns an error for invalid integer data, arithmetic overflow, or a
     /// value that cannot be encoded.
     pub fn evaluate(&self, state: &KvState, command: &KvCommand) -> Result<KvDecision, KvError> {
+        let integer_bytes;
         let (mutation, result) = match command {
             KvCommand::Set { key, value } => {
                 let previous = state.get(key).map(Bytes::copy_from_slice);
@@ -143,9 +144,9 @@ impl KvMachine {
                 if next == current {
                     return Ok(KvDecision::NoChange(KvResult::Integer(current)));
                 }
-                let next_bytes = next.to_be_bytes();
+                integer_bytes = next.to_be_bytes();
                 (
-                    MutationWire::conditional(key, prior, Some(next_bytes.as_slice())),
+                    MutationWire::conditional(key, prior, Some(integer_bytes.as_slice())),
                     KvResult::Integer(next),
                 )
             }
@@ -168,8 +169,8 @@ impl KvMachine {
         };
 
         Ok(KvDecision::Commit {
-            operation: encode(&mutation)?,
-            result_bytes: encode(&ResultWire::from(&result))?,
+            operation: encode(&mutation)?.into(),
+            result_bytes: encode(&ResultWire::from(&result))?.into(),
             result,
         })
     }
@@ -181,10 +182,10 @@ impl KvMachine {
     /// Returns an error when the result uses an unsupported version, is not
     /// canonical, or contains fields that do not match its result kind.
     pub fn decode_result(&self, bytes: &[u8]) -> Result<KvResult, KvError> {
-        let result: ResultWire = decode(bytes)?;
+        let result: ResultWire<'_> = decode(bytes)?;
         require_version(result.version)?;
         match (result.kind, result.value, result.integer, result.swapped) {
-            (1, value, None, None) => Ok(KvResult::Previous(value.map(Bytes::from))),
+            (1, value, None, None) => Ok(KvResult::Previous(value.map(Bytes::copy_from_slice))),
             (2, None, Some(value), None) => Ok(KvResult::Integer(value)),
             (3, None, None, Some(value)) => Ok(KvResult::Swapped(value)),
             _ => Err(KvError::InvalidEncoding(
@@ -207,25 +208,18 @@ impl Materializer for KvMachine {
         checkpoint: &[u8],
         _objects: &[ObjectRef],
     ) -> Result<Self::State, Self::Error> {
-        let snapshot: SnapshotWire = decode(checkpoint)?;
+        let snapshot: SnapshotWire<'_> = decode(checkpoint)?;
         require_version(snapshot.version)?;
         let mut entries = BTreeMap::new();
-        let mut prior_key: Option<Vec<u8>> = None;
+        let mut prior_key: Option<&[u8]> = None;
         for entry in snapshot.entries {
-            if prior_key
-                .as_deref()
-                .is_some_and(|prior| prior >= entry.key.as_slice())
-            {
+            if prior_key.is_some_and(|prior| prior >= entry.key) {
                 return Err(KvError::InvalidEncoding(
                     "snapshot keys are not in strict byte order".to_owned(),
                 ));
             }
-            prior_key = Some(entry.key.clone());
-            if entries.insert(entry.key, entry.value).is_some() {
-                return Err(KvError::InvalidEncoding(
-                    "snapshot contains a duplicate key".to_owned(),
-                ));
-            }
+            prior_key = Some(entry.key);
+            entries.insert(entry.key.to_vec(), entry.value.to_vec());
         }
         Ok(KvState { entries })
     }
@@ -237,22 +231,22 @@ impl Materializer for KvMachine {
         operation: &[u8],
         _objects: &[ObjectRef],
     ) -> Result<(), Self::Error> {
-        let mutation: MutationWire = decode(operation)?;
+        let mutation: MutationWire<'_> = decode(operation)?;
         require_version(mutation.version)?;
         if !mutation.check_expected && mutation.expected.is_some() {
             return Err(KvError::InvalidEncoding(
                 "an unconditional mutation contains an expected value".to_owned(),
             ));
         }
-        if mutation.check_expected && state.get(&mutation.key) != mutation.expected.as_deref() {
+        if mutation.check_expected && state.get(mutation.key) != mutation.expected {
             return Err(KvError::StateDiverged);
         }
         match mutation.value {
             Some(value) => {
-                state.entries.insert(mutation.key, value);
+                state.entries.insert(mutation.key.to_vec(), value.to_vec());
             }
             None => {
-                state.entries.remove(&mutation.key);
+                state.entries.remove(mutation.key);
             }
         }
         Ok(())
@@ -264,13 +258,10 @@ impl Materializer for KvMachine {
             entries: state
                 .entries
                 .iter()
-                .map(|(key, value)| EntryWire {
-                    key: key.clone(),
-                    value: value.clone(),
-                })
+                .map(|(key, value)| EntryWire { key, value })
                 .collect(),
         };
-        Ok(encode(&snapshot)?.to_vec())
+        encode(&snapshot)
     }
 }
 
@@ -291,108 +282,99 @@ pub enum KvError {
     StateDiverged,
 }
 
-#[derive(Clone, Debug, Decode, Encode)]
+#[derive(Decode, Encode)]
 #[cbor(map)]
-struct MutationWire {
+struct MutationWire<'a> {
     #[n(1)]
     version: u32,
     #[cbor(n(2), with = "minicbor::bytes")]
-    key: Vec<u8>,
+    key: &'a [u8],
     #[n(3)]
     check_expected: bool,
     #[cbor(n(4), with = "minicbor::bytes")]
-    expected: Option<Vec<u8>>,
+    expected: Option<&'a [u8]>,
     #[cbor(n(5), with = "minicbor::bytes")]
-    value: Option<Vec<u8>>,
+    value: Option<&'a [u8]>,
 }
 
-impl MutationWire {
-    fn unconditional(key: &[u8], value: Option<&[u8]>) -> Self {
+impl<'a> MutationWire<'a> {
+    const fn unconditional(key: &'a [u8], value: Option<&'a [u8]>) -> Self {
         Self {
             version: KV_FORMAT_VERSION,
-            key: key.to_vec(),
+            key,
             check_expected: false,
             expected: None,
-            value: value.map(<[u8]>::to_vec),
+            value,
         }
     }
 
-    fn conditional(key: &[u8], expected: Option<&[u8]>, value: Option<&[u8]>) -> Self {
+    const fn conditional(
+        key: &'a [u8],
+        expected: Option<&'a [u8]>,
+        value: Option<&'a [u8]>,
+    ) -> Self {
         Self {
             version: KV_FORMAT_VERSION,
-            key: key.to_vec(),
+            key,
             check_expected: true,
-            expected: expected.map(<[u8]>::to_vec),
-            value: value.map(<[u8]>::to_vec),
+            expected,
+            value,
         }
     }
 }
 
-#[derive(Clone, Debug, Decode, Encode)]
+#[derive(Decode, Encode)]
 #[cbor(map)]
-struct SnapshotWire {
+struct SnapshotWire<'a> {
     #[n(1)]
     version: u32,
-    #[n(2)]
-    entries: Vec<EntryWire>,
+    #[b(2)]
+    entries: Vec<EntryWire<'a>>,
 }
 
-#[derive(Clone, Debug, Decode, Encode)]
+#[derive(Decode, Encode)]
 #[cbor(map)]
-struct EntryWire {
+struct EntryWire<'a> {
     #[cbor(n(1), with = "minicbor::bytes")]
-    key: Vec<u8>,
+    key: &'a [u8],
     #[cbor(n(2), with = "minicbor::bytes")]
-    value: Vec<u8>,
+    value: &'a [u8],
 }
 
-#[derive(Clone, Debug, Decode, Encode)]
+#[derive(Decode, Encode)]
 #[cbor(map)]
-struct ResultWire {
+struct ResultWire<'a> {
     #[n(1)]
     version: u32,
     #[n(2)]
     kind: u8,
     #[cbor(n(3), with = "minicbor::bytes")]
-    value: Option<Vec<u8>>,
+    value: Option<&'a [u8]>,
     #[n(4)]
     integer: Option<i64>,
     #[n(5)]
     swapped: Option<bool>,
 }
 
-impl From<&KvResult> for ResultWire {
-    fn from(result: &KvResult) -> Self {
-        match result {
-            KvResult::Previous(value) => Self {
-                version: KV_FORMAT_VERSION,
-                kind: 1,
-                value: value.as_ref().map(|bytes| bytes.to_vec()),
-                integer: None,
-                swapped: None,
-            },
-            KvResult::Integer(value) => Self {
-                version: KV_FORMAT_VERSION,
-                kind: 2,
-                value: None,
-                integer: Some(*value),
-                swapped: None,
-            },
-            KvResult::Swapped(value) => Self {
-                version: KV_FORMAT_VERSION,
-                kind: 3,
-                value: None,
-                integer: None,
-                swapped: Some(*value),
-            },
+impl<'a> From<&'a KvResult> for ResultWire<'a> {
+    fn from(result: &'a KvResult) -> Self {
+        let (kind, value, integer, swapped) = match result {
+            KvResult::Previous(value) => (1, value.as_deref(), None, None),
+            KvResult::Integer(value) => (2, None, Some(*value), None),
+            KvResult::Swapped(value) => (3, None, None, Some(*value)),
+        };
+        Self {
+            version: KV_FORMAT_VERSION,
+            kind,
+            value,
+            integer,
+            swapped,
         }
     }
 }
 
-fn encode(value: &impl Encode<()>) -> Result<Bytes, KvError> {
-    minicbor::to_vec(value)
-        .map(Bytes::from)
-        .map_err(|error| KvError::InvalidEncoding(error.to_string()))
+fn encode(value: &impl Encode<()>) -> Result<Vec<u8>, KvError> {
+    minicbor::to_vec(value).map_err(|error| KvError::InvalidEncoding(error.to_string()))
 }
 
 fn decode<'bytes, T>(bytes: &'bytes [u8]) -> Result<T, KvError>
@@ -408,12 +390,28 @@ where
             "encoded value contains trailing bytes".to_owned(),
         ));
     }
-    if encode(&value)?.as_ref() != bytes {
+    if !is_canonical(&value, bytes) {
         return Err(KvError::InvalidEncoding(
             "encoded value is not canonical key-value format version 1".to_owned(),
         ));
     }
     Ok(value)
+}
+
+struct Exact<'a>(&'a [u8]);
+
+impl Write for Exact<'_> {
+    type Error = ();
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.0 = self.0.strip_prefix(bytes).ok_or(())?;
+        Ok(())
+    }
+}
+
+fn is_canonical(value: &impl Encode<()>, bytes: &[u8]) -> bool {
+    let mut exact = Exact(bytes);
+    minicbor::encode(value, &mut exact).is_ok() && exact.0.is_empty()
 }
 
 fn require_version(version: u32) -> Result<(), KvError> {
