@@ -60,7 +60,9 @@ API:
   keeps each pack that contains a live object. Its collection test removes more
   than 100 dead physical objects, cold-recovers the live repository, and passes
   strict Git validation. The proof also has benchmarks, a request audit, and a
-  pinned `MinIO` lifecycle.
+  pinned `MinIO` lifecycle. Its replacement pack engine now compiles for
+  `WASIp2`, retains a standard Git index, and applies explicit byte, work,
+  object, and delta-depth limits.
 - [`object-log-git-http`](crates/object-log-git-http) is the current native
   protocol-v0 reference host for SHA-1. Its tests use an unchanged Git client.
   Issue #17 moves protocol and storage into one WASI-compatible core while the
@@ -87,7 +89,9 @@ native host tests and limits. The
 native line count, protocol trace, request bytes, and latency baseline for the
 WASI-compatible replacement. The
 [`Git WASI contract`](docs/evidence/git-wasi-contract-2026-09-04.md) records the
-first target boundary, CI gate, dependency graph, and limitations.
+first target boundary, CI gate, dependency graph, and limitations. The
+[`Git WASI pack engine`](docs/evidence/git-wasi-pack-2026-09-04.md) records the
+next tranche's behavior, limits, tests, source size, and local timing.
 
 [docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
 live AWS qualification goals. The [Git proof plan](GIT_PLAN.md) defines one

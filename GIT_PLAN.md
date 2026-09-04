@@ -35,7 +35,9 @@ reference line counts, tests, protocol trace, request bytes, and local latency.
 - Large pack and index data use bounded object-log chunks.
 - One object-log publication applies one ordered ref transaction.
 - The object-log head is the only mutable durable authority.
-- A reader retention pins one request-scoped view of refs and the pack catalog.
+- A bounded read builds its complete response against one view. If collection
+  expires that view, the engine discards all partial state and retries once
+  before it writes response bytes.
 - Object lookup reads standard indexes and only the required pack ranges.
 - Push validates pack checksums, deltas, object IDs, connectivity, and ref
   rules before publication.
@@ -88,7 +90,7 @@ behavior.
 - Keep Tokio filesystem, temporary files, memory maps, and high-level
   `gix::Repository` out of the WASI dependency graph.
 
-### 2. Pack engine
+### 2. Pack engine — complete locally
 
 - Use low-level Gitoxide crates for pack parsing, validation, delta resolution,
   normalization, and index generation.
@@ -97,17 +99,29 @@ behavior.
 - Bound input bytes, decoded object bytes, object count, work, and delta depth.
 - Produce packs that pass `git index-pack --strict` and `git fsck --strict`.
 
-The first implementation can hold one explicitly bounded incoming pack in
-memory. Select its limit from measured native and WASI memory use. Do not infer
-the limit from an object-store or Spin default.
+The first implementation holds one explicitly bounded incoming pack in memory.
+It accepts pack version 2, SHA-1 and SHA-256 objects, in-pack `REF_DELTA`,
+`OFS_DELTA`, and exact external bases for thin packs. It produces and retains a
+standard version 2 index. The
+[`pack-engine evidence`](docs/evidence/git-wasi-pack-2026-09-04.md) records the
+limits, tests, source size, and local timing.
+
+Runtime WASI memory measurement remains part of engine integration. The
+current private pack entry point cannot run as a standalone component without
+adding a temporary public API.
 
 ### 3. Durable objects
 
 - Store immutable packs and indexes through object-log reference trees.
 - Load refs and the pack catalog without creating a local Git repository.
+- Build one compact in-memory object directory from the standard indexes.
 - Find blobs, trees, commits, and tags through standard indexes.
 - Traverse commits, trees, and annotated tags with explicit bounds.
 - Preserve object-log recovery, checkpoint, and collection behavior.
+- Reuse authenticated materialization proofs when a checkpoint retains an
+  existing pack. Do not download complete pack graphs during checkpointing.
+- Reject a state with more live pack roots than one checkpoint can retain.
+  Repacking is the required follow-on for that limit.
 
 ### 4. Protocol
 
