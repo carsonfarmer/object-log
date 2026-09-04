@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-performance-acceptance git-minio-test
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-performance-acceptance git-minio-test git-http-minio-test
 
 check:
 	cargo fmt --all --check
@@ -35,3 +35,6 @@ git-performance-acceptance:
 
 git-minio-test:
 	./scripts/test-minio.sh minio minio_git_push_checkpoint_collection_and_cold_recovery object-log-git aws
+
+git-http-minio-test:
+	./scripts/test-minio.sh loopback minio_host_pushes_and_cold_clones object-log-git-http ""

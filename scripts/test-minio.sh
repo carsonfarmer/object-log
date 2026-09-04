@@ -9,7 +9,7 @@ bucket="object-log-test"
 test_target="${1:-minio}"
 test_filter="${2:-minio_passes_recovery_checkpoint_and_gc_flow}"
 package="${3:-object-log}"
-features="${4:-aws,test-util}"
+features="${4-aws,test-util}"
 container_started=0
 
 cleanup() {
@@ -73,9 +73,14 @@ AWS_SECRET_ACCESS_KEY="${secret_key}" \
 AWS_DEFAULT_REGION="us-east-1" \
 aws --endpoint-url "${endpoint}" s3api create-bucket --bucket "${bucket}" >/dev/null
 
+test_command=(cargo test --package "${package}")
+if [[ -n "${features}" ]]; then
+  test_command+=(--features "${features}")
+fi
+test_command+=(--test "${test_target}" "${test_filter}" -- --ignored --nocapture)
+
 OBJECT_LOG_MINIO_ENDPOINT="${endpoint}" \
 OBJECT_LOG_MINIO_ACCESS_KEY="${access_key}" \
 OBJECT_LOG_MINIO_SECRET_KEY="${secret_key}" \
 OBJECT_LOG_MINIO_BUCKET="${bucket}" \
-cargo test --package "${package}" --features "${features}" \
-  --test "${test_target}" "${test_filter}" -- --ignored --nocapture
+"${test_command[@]}"

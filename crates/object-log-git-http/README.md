@@ -56,5 +56,5 @@ Authentication, TLS, tenant routing, protocol v2, SHA-256 HTTP, and live AWS
 qualification remain deployment or follow-on work. Put this server behind a
 proxy that limits request header bytes. The application cannot prevent Hyper
 from allocating parsed headers before route middleware runs. Local filesystem
-storage does not pass object-log's conditional-update probe. Use local MinIO
+storage does not pass object-log's conditional-update probe. Use local `MinIO`
 for persistent local tests.

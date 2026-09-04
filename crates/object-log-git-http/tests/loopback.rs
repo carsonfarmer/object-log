@@ -1,4 +1,5 @@
 use std::{
+    env,
     error::Error as StdError,
     path::Path,
     process::Command,
@@ -15,9 +16,13 @@ use axum::{
     middleware::{self, Next},
     response::Response,
 };
-use object_log::{Log, LogId, Options, ValidatedBackend};
+use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
 use object_log_git_http::{GitHttpServer, SmartHttp};
-use object_store::{memory::InMemory, path::Path as StorePath};
+use object_store::{
+    aws::{AmazonS3, AmazonS3Builder},
+    memory::InMemory,
+    path::Path as StorePath,
+};
 use tempfile::TempDir;
 use tokio::{net::TcpListener, sync::Barrier, task::JoinHandle};
 
@@ -213,6 +218,58 @@ async fn concurrent_pushes_report_one_durable_winner() -> TestResult {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires OBJECT_LOG_MINIO_* and the pinned local MinIO from scripts/test-minio.sh"]
+async fn minio_host_pushes_and_cold_clones() -> TestResult {
+    let root = TempDir::new()?;
+    let namespace = StorePath::from(format!("git-http-{}", TransactionId::new()));
+    let log_id = LogId::new("repository")?;
+    let backend = ValidatedBackend::new(Arc::new(build_minio()?), namespace.clone()).await?;
+    let log = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let first_scratch = root.path().join("first-scratch");
+    let first_app = GitHttpServer::new(
+        SmartHttp::new(log, &first_scratch),
+        &first_scratch,
+        "2".parse()?,
+    )
+    .router();
+    let (first_url, first_server) = serve(first_app).await?;
+
+    let source = root.path().join("source");
+    git(None, ["init", "--quiet", "-b", "main", path(&source)?])?;
+    write(&source, "minio")?;
+    git(Some(&source), ["add", "file"])?;
+    git(Some(&source), ["commit", "--quiet", "-m", "minio"])?;
+    git(Some(&source), ["remote", "add", "origin", &first_url])?;
+    git(Some(&source), ["push", "--quiet", "-u", "origin", "main"])?;
+    let expected_tip = git_stdout(Some(&source), ["rev-parse", "HEAD"])?;
+    first_server.abort();
+    let _ = first_server.await;
+
+    let backend = ValidatedBackend::new(Arc::new(build_minio()?), namespace).await?;
+    let log = Log::open(backend.scope(&log_id), Options::default()).await?;
+    let second_scratch = root.path().join("second-scratch");
+    let second_app = GitHttpServer::new(
+        SmartHttp::new(log, &second_scratch),
+        &second_scratch,
+        "2".parse()?,
+    )
+    .router();
+    let (second_url, second_server) = serve(second_app).await?;
+    let clone = root.path().join("clone");
+    git(None, ["clone", "--quiet", &second_url, path(&clone)?])?;
+    assert_eq!(std::fs::read_to_string(clone.join("file"))?, "minio");
+    assert_eq!(
+        git_stdout(Some(&clone), ["rev-parse", "HEAD"])?,
+        expected_tip
+    );
+    git(Some(&clone), ["fsck", "--strict"])?;
+    assert!(std::fs::read_dir(first_scratch)?.next().is_none());
+    assert!(std::fs::read_dir(second_scratch)?.next().is_none());
+    second_server.abort();
+    Ok(())
+}
+
 async fn repository_server(
     root: &TempDir,
     namespace: &str,
@@ -335,4 +392,21 @@ fn git_command<const N: usize>(directory: Option<&Path>, args: [&str; N]) -> Com
         command.current_dir(directory);
     }
     command
+}
+
+fn build_minio() -> TestResult<AmazonS3> {
+    Ok(AmazonS3Builder::new()
+        .with_endpoint(required_env("OBJECT_LOG_MINIO_ENDPOINT")?)
+        .with_access_key_id(required_env("OBJECT_LOG_MINIO_ACCESS_KEY")?)
+        .with_secret_access_key(required_env("OBJECT_LOG_MINIO_SECRET_KEY")?)
+        .with_bucket_name(required_env("OBJECT_LOG_MINIO_BUCKET")?)
+        .with_region("us-east-1")
+        .with_allow_http(true)
+        .with_virtual_hosted_style_request(false)
+        .with_disable_bulk_delete(false)
+        .build()?)
+}
+
+fn required_env(name: &'static str) -> TestResult<String> {
+    env::var(name).map_err(|_| format!("{name} is not set").into())
 }
