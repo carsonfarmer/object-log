@@ -36,6 +36,7 @@ pub(crate) struct ExternalBase<'a> {
     pub(crate) data: &'a [u8],
 }
 
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct Normalized {
     pub(crate) bytes: Vec<u8>,
     pub(crate) index: Vec<u8>,
@@ -472,7 +473,7 @@ fn entry_bytes<'a>(range: gix_pack::data::EntryRange, pack: &'a &[u8]) -> Option
     pack.get(start..end)
 }
 
-const fn object_hash(format: ObjectFormat) -> gix_hash::Kind {
+pub(crate) const fn object_hash(format: ObjectFormat) -> gix_hash::Kind {
     match format {
         ObjectFormat::Sha1 => gix_hash::Kind::Sha1,
         ObjectFormat::Sha256 => gix_hash::Kind::Sha256,

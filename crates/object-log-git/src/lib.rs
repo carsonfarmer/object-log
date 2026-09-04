@@ -2,7 +2,15 @@
 
 #![deny(missing_docs, unsafe_code)]
 
-#[cfg(feature = "native-oracle")]
+#[allow(
+    dead_code,
+    reason = "the next Git state tranche consumes this internal module"
+)]
+mod durable;
+#[allow(
+    dead_code,
+    reason = "the durable Git reader uses the pack descriptor without the native oracle"
+)]
 mod format;
 #[cfg(feature = "native-oracle")]
 mod git;
@@ -86,7 +94,6 @@ impl ObjectId {
     }
 
     /// Returns the ID algorithm.
-    #[cfg(feature = "native-oracle")]
     pub(crate) const fn format(self) -> ObjectFormat {
         match self.0 {
             Digest::Sha1(_) => ObjectFormat::Sha1,
