@@ -2,7 +2,7 @@
 
 ## Result
 
-At `9057ae8`, `object-log-git-http` hosts one object-log-backed repository at
+At `6b87403`, `object-log-git-http` hosts one object-log-backed repository at
 `/repo` with Axum. Product code does not run Git or link to C Git. The tests use
 an unchanged Git 2.54.0 client.
 
@@ -102,14 +102,14 @@ The focused gates passed:
 
 ## Line changes
 
-The change from `072e9c1` through `9057ae8` has these physical line changes:
+The change from `072e9c1` through `6b87403` has these physical line changes:
 
 | Category | Added | Removed |
 |---|---:|---:|
-| Product libraries | 668 | 17 |
+| Product libraries | 622 | 17 |
 | Operator executable | 78 | 0 |
-| Tests | 286 | 83 |
-| Manifests, lockfile, Makefile, and test runner | 262 | 7 |
+| Tests | 278 | 84 |
+| Manifests, lockfile, Makefile, and test runner | 261 | 7 |
 | Documentation | 77 | 46 |
 
 These counts use `git diff --numstat`. Product libraries include the HTTP
