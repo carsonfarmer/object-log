@@ -7,10 +7,49 @@ use std::{
 
 use gix::hash::{Kind, ObjectId};
 
+use crate::{Error as RecordError, ObjectFormat, ObjectId as RecordObjectId};
+
 const PACK_HEADER_LEN: usize = 12;
 const MAX_PACK_BYTES: usize = 512 * 1024 * 1024;
 const MAX_OBJECT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_OBJECTS: u32 = 1_000_000;
+
+impl TryFrom<Kind> for ObjectFormat {
+    type Error = RecordError;
+
+    fn try_from(value: Kind) -> Result<Self, Self::Error> {
+        match value {
+            Kind::Sha1 => Ok(Self::Sha1),
+            Kind::Sha256 => Ok(Self::Sha256),
+            _ => Err(RecordError::InvalidObjectId),
+        }
+    }
+}
+
+impl From<ObjectFormat> for Kind {
+    fn from(value: ObjectFormat) -> Self {
+        match value {
+            ObjectFormat::Sha1 => Self::Sha1,
+            ObjectFormat::Sha256 => Self::Sha256,
+        }
+    }
+}
+
+impl TryFrom<ObjectId> for RecordObjectId {
+    type Error = RecordError;
+
+    fn try_from(value: ObjectId) -> Result<Self, Self::Error> {
+        Self::from_bytes(value.kind().try_into()?, value.as_slice())
+    }
+}
+
+impl TryFrom<RecordObjectId> for ObjectId {
+    type Error = RecordError;
+
+    fn try_from(value: RecordObjectId) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_bytes()).map_err(|_| RecordError::InvalidObjectId)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -227,7 +266,12 @@ fn remove_keep(path: Option<&Path>) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error as StdError, ffi::OsStr, process::Command};
+    use std::{
+        error::Error as StdError,
+        ffi::OsStr,
+        io::Write,
+        process::{Command, Stdio},
+    };
 
     use super::*;
 
@@ -239,6 +283,9 @@ mod tests {
             let normalized = normalize_pack(&source, &fixture.pack)?;
             assert!(!normalized.objects.is_empty());
             verify_object_access(&source, &normalized.objects)?;
+            let record_id = RecordObjectId::try_from(normalized.id)?;
+            assert_eq!(ObjectId::try_from(record_id)?, normalized.id);
+            assert_eq!(record_id.format(), ObjectFormat::try_from(hash)?);
 
             let installed = bare(fixture.path().join("installed"), hash)?;
             let result = install_pack(&installed, &normalized.path)?;
@@ -247,6 +294,26 @@ mod tests {
             assert_eq!(list_pack_objects(&installed)?, vec![result]);
             verify_object_access(&installed, &normalized.objects)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn normalizes_a_thin_pack_with_a_repository_base() -> Result<(), Box<dyn StdError>> {
+        let fixture = fixture("sha1")?;
+        let repo = bare(fixture.path().join("target"), Kind::Sha1)?;
+        normalize_pack(&repo, &fixture.pack)?;
+        let thin = thin_pack(&fixture.path().join("work"))?;
+        let header: &[u8; PACK_HEADER_LEN] = thin
+            .get(..PACK_HEADER_LEN)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| "thin pack has no header".to_string())?;
+        let (_, thin_objects) = gix_pack::data::header::decode(header)?;
+        let path = fixture.path().join("thin.pack");
+        fs::write(&path, thin)?;
+
+        let normalized = normalize_pack(&repo, &path)?;
+        assert!(normalized.objects.len() > thin_objects as usize);
+        verify_object_access(&repo, &normalized.objects)?;
         Ok(())
     }
 
@@ -295,10 +362,13 @@ mod tests {
             OsStr::new(format),
             work.as_os_str(),
         ])?;
-        fs::write(work.join("file"), b"one\n")?;
+        let mut contents = vec![b'a'; 64 * 1024];
+        fs::write(work.join("file"), &contents)?;
         git_in(&work, ["add", "file"])?;
         git_in(&work, ["commit", "--quiet", "-m", "one"])?;
-        fs::write(work.join("file"), b"two\n")?;
+        let midpoint = contents.len() / 2;
+        contents[midpoint] = b'b';
+        fs::write(work.join("file"), contents)?;
         git_in(&work, ["commit", "--quiet", "-am", "two"])?;
         git_in(&work, ["repack", "-ad"])?;
         let pack_directory = work.join(".git/objects/pack");
@@ -335,13 +405,33 @@ mod tests {
         command(Some(directory), args.map(OsStr::new))
     }
 
+    fn thin_pack(directory: &Path) -> Result<Vec<u8>, Box<dyn StdError>> {
+        let mut child = configured_git(Some(directory))
+            .args(["pack-objects", "--thin", "--stdout", "--revs"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "git stdin is not available".to_string())?
+            .write_all(b"HEAD\n^HEAD~1\n")?;
+        let output = child.wait_with_output()?;
+        check(&output)?;
+        Ok(output.stdout)
+    }
+
     fn command<const N: usize>(
         directory: Option<&Path>,
         args: [&OsStr; N],
     ) -> Result<(), Box<dyn StdError>> {
+        let output = configured_git(directory).args(args).output()?;
+        check(&output)
+    }
+
+    fn configured_git(directory: Option<&Path>) -> Command {
         let mut command = Command::new("git");
         command
-            .args(args)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "Object Log")
@@ -353,7 +443,10 @@ mod tests {
         if let Some(directory) = directory {
             command.current_dir(directory);
         }
-        let output = command.output()?;
+        command
+    }
+
+    fn check(output: &std::process::Output) -> Result<(), Box<dyn StdError>> {
         if output.status.success() {
             Ok(())
         } else {

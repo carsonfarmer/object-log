@@ -2,7 +2,11 @@
 
 #![deny(missing_docs, unsafe_code)]
 
+#[allow(dead_code, reason = "used by the pending repository adapter")]
 mod format;
+#[allow(dead_code, reason = "used by the pending repository adapter")]
+mod git;
+#[allow(dead_code, reason = "used by the pending repository adapter")]
 mod state;
 
 use std::{collections::BTreeMap, fmt};
