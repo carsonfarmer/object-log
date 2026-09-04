@@ -43,6 +43,11 @@ storage, injected faults, and garbage collection. A separate local acceptance
 test recovers an exact 1,000-record WAL tail. The repository also has
 `Criterion` benchmarks and an opt-in loopback `MinIO` test.
 
+The `object-log-git` crate implements strict durable records, SHA-1 and
+SHA-256 pack normalization and installation, and thin-pack normalization
+against existing repository bases. Pack chunk storage and recovery, repository
+materialization, and transaction orchestration remain active work.
+
 See [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md) for the
 current contracts. The

@@ -2,12 +2,13 @@
 
 Date: 2026-09-03
 
-Revision reviewed: `0c08d43`
+Revision reviewed: `fc71ecc`
 
 ## Decision
 
-Use `gix` and `gix-pack` for the native `object-log-git` storage adapter. Select
-pure-Rust features. Do not run a Git executable or use C FFI.
+Use the `gix` umbrella crate and `gix-pack` for Phase 1 of the native
+`object-log-git` storage adapter. Select pure-Rust features. Do not run a Git
+executable or use C FFI.
 
 `object-log` remains independent of these crates. The Git adapter depends on
 the public object-log API. A later smart HTTP crate depends on the Git adapter.
@@ -59,9 +60,9 @@ and benchmarks. They do not provide the narrow pack-validation and storage
 boundary needed here. Their release history is too small for this project to
 trust that wider surface.
 
-Use focused upstream Gitoxide crates for storage work. Re-evaluate server code
-only when the separate smart HTTP phase starts. Do not make a current server
-crate part of the durable storage boundary.
+Keep the `gix` repository API for storage work. Re-evaluate server code only
+when the separate smart HTTP phase starts. Do not make a current server crate
+part of the durable storage boundary.
 
 ### Git executable
 
@@ -79,14 +80,34 @@ gix = { version = "0.87.1", default-features = false, features = ["sha1", "sha25
 gix-pack = { version = "0.74.2", default-features = false, features = ["streaming-input", "sha1", "sha256"] }
 ```
 
-The native build passed after the disposable lock file selected `tinyvec
-1.10.0`. A fresh resolution selected `tinyvec 1.13.0`, which did not compile
-with the local Rust 1.97.1 toolchain because its `vec!` macro was not in scope.
-The project must pin and review the resolved graph before integration.
+The project lock selects `tinyvec 1.12.0`. A fresh resolution selected
+`tinyvec 1.13.0`, which did not compile with the local Rust 1.97 toolchain
+because its `vec!` macro was not in scope. The project must keep its resolved
+graph pinned and reviewed.
 
 The minimal `gix` plus `gix-pack` WASI check had 106 distinct active package
 versions. A focused `gix-pack`, `gix-hash`, and `gix-validate` check had 62.
 These counts include the disposable root crate.
+
+## Dependency and build footprint
+
+The selected `gix` and `gix-pack` features have 109 normal third-party
+packages on macOS arm64. A lower-bound component set has 86. That set uses
+`gix-config`, `gix-features`, `gix-hash`, `gix-object`, `gix-odb`, `gix-pack`,
+`gix-ref`, and `gix-revision`.
+
+The component set removes 23 packages. It does not replace
+`gix::ThreadSafeRepository::init`, `gix::open`, or `gix::Repository`. The
+adapter would have to own repository creation, configuration, hash selection,
+object and ref store assembly, and revision graph wiring. Phase 1 keeps the
+umbrella crate instead of adding that Git plumbing.
+
+Clean release builds used Rust 1.97.0 on macOS arm64. The umbrella build
+directory used 163.7 MiB. The component build used 124.9 MiB. All release
+rlibs used 85.1 MiB and 62.0 MiB, respectively. Gitoxide-family rlibs used
+27.0 MiB and 14.9 MiB. Empty linked binaries were both 431,312 bytes because
+the linker removed unused code. These numbers measure build footprint. They
+do not measure the final adapter binary.
 
 ## WASI result
 
