@@ -2,11 +2,11 @@ use std::io::{self, Write};
 
 use gix_packetline::{Channel, PacketLineRef, blocking_io::encode, decode};
 
-use crate::{ObjectFormat, ObjectId, RefUpdate, pack::MAX_RECEIVE_PACK_BYTES};
+use crate::pack::{MAX_FETCH_PACK_BYTES, MAX_RECEIVE_PACK_BYTES};
+use crate::{ObjectFormat, ObjectId, RefUpdate};
 
 const MAX_UPLOAD_BYTES: usize = 9 * 1024 * 1024;
 const MAX_RECEIVE_BYTES: usize = 1024 * 1024;
-const MAX_FETCH_PACK_BYTES: usize = 9_437_184;
 const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
 const MAX_COMMANDS: usize = 1_024;
 const MAX_ITEMS: usize = 32_768;

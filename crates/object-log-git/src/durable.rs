@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::{collections::VecDeque, mem::size_of, path::PathBuf};
 
 use bytes::{Bytes, BytesMut};
@@ -8,8 +9,8 @@ use crate::{
     Error, ObjectFormat, ObjectId,
     format::PackDescriptor,
     pack::{
-        INFLATE_BYTES, MAX_DELTA_DEPTH, MAX_INDEX_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS,
-        MAX_PACK_BYTES, Normalized,
+        COMPRESS_BYTES, INFLATE_BYTES, MAX_DELTA_DEPTH, MAX_FETCH_PACK_BYTES, MAX_INDEX_BYTES,
+        MAX_OBJECT_BYTES, MAX_OBJECTS, MAX_PACK_BYTES, Normalized,
         budget::{Operation, Reservation, hold},
         delta_integer, invalid, object_hash, pack_error,
     },
@@ -23,6 +24,7 @@ const MAX_CACHE_BYTES: usize = 8 * CHUNK_BYTES;
 const MAX_TRANSFERS: usize = 8;
 
 type PackIndex = gix_pack::index::File<Bytes>;
+type EntryHeader = gix_pack::data::entry::Header;
 
 pub(crate) async fn stage(
     operation: &Operation,
@@ -65,10 +67,20 @@ pub(crate) async fn stage(
 }
 
 pub(crate) struct Catalog {
+    format: ObjectFormat,
     packs: Box<[Pack]>,
     directory: Vec<Location>,
     operation: Operation,
     _memory: Reservation,
+}
+
+impl Catalog {
+    fn location(&self, id: ObjectId) -> Option<Location> {
+        self.directory
+            .binary_search_by(|location| oid(&self.packs, *location).cmp(id.as_bytes()))
+            .ok()
+            .map(|position| self.directory[position])
+    }
 }
 
 struct Pack {
@@ -137,6 +149,7 @@ pub(crate) async fn load(
     });
     directory.dedup_by(|a, b| oid(&packs, *a) == oid(&packs, *b));
     Ok(Catalog {
+        format,
         packs: packs.into_boxed_slice(),
         directory,
         operation: operation.clone(),
@@ -332,6 +345,30 @@ impl Pack {
             .then_some(start..end)
             .ok_or_else(|| Error::InvalidPack("pack entry range is empty".into()))
     }
+
+    fn base(&self, index: u32, header: EntryHeader) -> Result<Option<u32>, Error> {
+        match header {
+            EntryHeader::OfsDelta { base_distance } => {
+                let base = u64::from(self.offset(index)?)
+                    .checked_sub(base_distance)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .and_then(|offset| {
+                        self.offsets
+                            .binary_search_by_key(&offset, |entry| entry.offset)
+                            .ok()
+                    })
+                    .map(|position| self.offsets[position].index)
+                    .ok_or_else(|| Error::InvalidPack("OFS_DELTA base is missing".into()))?;
+                Ok(Some(base))
+            }
+            EntryHeader::RefDelta { base_id } => {
+                Ok(Some(self.index.lookup(base_id).ok_or_else(|| {
+                    Error::InvalidPack("REF_DELTA base is missing".into())
+                })?))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 pub(crate) struct Object {
@@ -359,14 +396,9 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) async fn find(&mut self, id: ObjectId) -> Result<Option<Object>, Error> {
-        let Ok(position) = self
-            .catalog
-            .directory
-            .binary_search_by(|location| oid(&self.catalog.packs, *location).cmp(id.as_bytes()))
-        else {
+        let Some(location) = self.catalog.location(id) else {
             return Ok(None);
         };
-        let location = self.catalog.directory[position];
         let pack = &self.catalog.packs[usize::from(location.pack)];
         let mut current = location.index;
         let delta_capacity = MAX_DELTA_DEPTH.min(pack.index.num_objects() as usize);
@@ -387,37 +419,18 @@ impl<'a> Reader<'a> {
             let entry = self
                 .entry(location.pack, current, deltas.is_empty())
                 .await?;
-            if entry.header.is_delta() && deltas.len() == MAX_DELTA_DEPTH {
-                return invalid("delta graph is too deep");
-            }
-            match entry.header {
-                gix_pack::data::entry::Header::OfsDelta { base_distance } => {
-                    let offset = u64::from(pack.offset(current)?);
-                    let base = offset
-                        .checked_sub(base_distance)
-                        .and_then(|value| u32::try_from(value).ok())
-                        .ok_or_else(|| Error::InvalidPack("OFS_DELTA base is invalid".into()))?;
-                    current = pack
-                        .offsets
-                        .binary_search_by_key(&base, |entry| entry.offset)
-                        .ok()
-                        .map(|position| pack.offsets[position].index)
-                        .ok_or_else(|| Error::InvalidPack("OFS_DELTA base is missing".into()))?;
-                    deltas.push(entry.data);
+            if let Some(base) = pack.base(current, entry.header)? {
+                if deltas.len() == MAX_DELTA_DEPTH {
+                    return invalid("delta graph is too deep");
                 }
-                gix_pack::data::entry::Header::RefDelta { base_id } => {
-                    current = pack
-                        .index
-                        .lookup(base_id)
-                        .ok_or_else(|| Error::InvalidPack("REF_DELTA base is missing".into()))?;
-                    deltas.push(entry.data);
-                }
-                header => {
-                    let kind = header
-                        .as_kind()
-                        .ok_or_else(|| Error::InvalidPack("pack object kind is invalid".into()))?;
-                    break (kind, entry.data);
-                }
+                current = base;
+                deltas.push(entry.data);
+            } else {
+                let kind = entry
+                    .header
+                    .as_kind()
+                    .ok_or_else(|| Error::InvalidPack("pack object kind is invalid".into()))?;
+                break (kind, entry.data);
             }
         };
         while let Some(delta) = deltas.pop() {
@@ -431,7 +444,129 @@ impl<'a> Reader<'a> {
         Ok(Some(Object { kind, data }))
     }
 
+    pub(crate) async fn fetch_pack(&mut self, ids: &[ObjectId]) -> Result<Bytes, Error> {
+        let format = self.catalog.format;
+        if ids.len() > MAX_OBJECTS as usize || ids.iter().any(|id| id.format() != format) {
+            return invalid("fetch selection is invalid");
+        }
+        let selected_bytes = ids
+            .len()
+            .checked_mul(size_of::<ObjectId>() + size_of::<(Location, ObjectId, u32)>())
+            .ok_or_else(|| Error::InvalidPack("fetch selection size overflowed".into()))?;
+        let _selected_memory = self.catalog.operation.reserve(selected_bytes)?;
+        let mut selected = ids.to_vec();
+        selected.sort_unstable();
+        selected.dedup();
+        let mut entries = Vec::with_capacity(selected.len());
+        for id in &selected {
+            let location = self
+                .catalog
+                .location(*id)
+                .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
+            let pack = &self.catalog.packs[usize::from(location.pack)];
+            entries.push((location, *id, pack.offset(location.index)?));
+        }
+        entries.sort_unstable_by_key(|(location, id, offset)| {
+            let pack = self.catalog.packs[usize::from(location.pack)].id;
+            (pack, *offset, *id)
+        });
+
+        let hash = object_hash(format);
+        let hash_len = hash.len_in_bytes();
+        let output_memory = self.catalog.operation.reserve(MAX_FETCH_PACK_BYTES)?;
+        let mut writer = gix_hash::io::Write::new(
+            PackOutput {
+                bytes: Vec::with_capacity(MAX_FETCH_PACK_BYTES),
+                limit: MAX_FETCH_PACK_BYTES - hash_len,
+                operation: &self.catalog.operation,
+            },
+            hash,
+        );
+        {
+            writer
+                .write_all(&gix_pack::data::header::encode(
+                    gix_pack::data::Version::V2,
+                    u32::try_from(entries.len())
+                        .map_err(|_| Error::InvalidPack("fetch has too many objects".into()))?,
+                ))
+                .map_err(output_error)?;
+            for (location, id, _) in entries {
+                let stored = self.stored_entry(location.pack, location.index).await?;
+                let pack = &self.catalog.packs[usize::from(location.pack)];
+                let base = pack
+                    .base(location.index, stored.header)?
+                    .map(|index| ObjectId::from_bytes(format, pack.oid(index)))
+                    .transpose()?;
+                if base.is_some_and(|base| selected.binary_search(&base).is_err()) {
+                    drop(stored);
+                    let object = self
+                        .find(id)
+                        .await?
+                        .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
+                    let header = match object.kind {
+                        gix_object::Kind::Tree => EntryHeader::Tree,
+                        gix_object::Kind::Blob => EntryHeader::Blob,
+                        gix_object::Kind::Commit => EntryHeader::Commit,
+                        gix_object::Kind::Tag => EntryHeader::Tag,
+                    };
+                    header
+                        .write_to(object.data.len() as u64, &mut writer)
+                        .map_err(output_error)?;
+                    self.catalog.operation.work(object.data.len())?;
+                    let _compress_memory = self.catalog.operation.reserve(COMPRESS_BYTES)?;
+                    let mut compressor = gix_zlib::stream::deflate::Write::new(
+                        &mut writer,
+                        gix_zlib::Compression::DEFAULT,
+                    );
+                    let result = compressor
+                        .write_all(&object.data)
+                        .and_then(|()| compressor.flush());
+                    drop(compressor);
+                    result.map_err(output_error)?;
+                    continue;
+                }
+                let header = base.map_or(stored.header, |base| EntryHeader::RefDelta {
+                    base_id: gix_hash::ObjectId::from_bytes_or_panic(base.as_bytes()),
+                });
+                header
+                    .write_to(stored.size, &mut writer)
+                    .map_err(output_error)?;
+                writer.write_all(&stored.compressed).map_err(output_error)?;
+            }
+        }
+        let gix_hash::io::Write { hash, mut inner } = writer;
+        let digest = hash.try_finalize().map_err(pack_error)?;
+        inner.operation.work(hash_len)?;
+        inner.bytes.extend_from_slice(digest.as_slice());
+        Ok(hold(Bytes::from(inner.bytes), output_memory))
+    }
+
     async fn entry(&mut self, pack: u16, index: u32, hash: bool) -> Result<DecodedEntry, Error> {
+        let entry = self.stored_entry(pack, index).await?;
+        let size = usize::try_from(entry.size)
+            .map_err(|_| Error::InvalidPack("pack entry size exceeds memory".into()))?;
+        self.catalog
+            .operation
+            .work(size * (1 + usize::from(hash && !entry.header.is_delta())))?;
+        let memory = self.catalog.operation.reserve(size)?;
+        let mut data = vec![0; size];
+        let _inflate_memory = self.catalog.operation.reserve(INFLATE_BYTES)?;
+        let (status, consumed, written) = gix_zlib::Inflate::default()
+            .once(&entry.compressed, &mut data)
+            .map_err(pack_error)?;
+        if status != gix_zlib::Status::StreamEnd
+            || consumed != entry.compressed.len()
+            || written != size
+        {
+            return invalid("pack entry zlib stream is not exact");
+        }
+        Ok(DecodedEntry {
+            header: entry.header,
+            data: hold(Bytes::from(data), memory),
+        })
+    }
+
+    async fn stored_entry(&mut self, pack: u16, index: u32) -> Result<StoredEntry, Error> {
         let stored = &self.catalog.packs[usize::from(pack)];
         let range = stored.entry_range(index)?;
         self.catalog
@@ -453,23 +588,10 @@ impl<'a> Reader<'a> {
         if size > MAX_OBJECT_BYTES {
             return invalid("pack entry exceeds object byte limit");
         }
-        self.catalog
-            .operation
-            .work(size * (1 + usize::from(hash && !entry.header.is_delta())))?;
-        let memory = self.catalog.operation.reserve(size)?;
-        let mut data = vec![0; size];
-        let compressed = &bytes[entry.header_size()..];
-        let _inflate_memory = self.catalog.operation.reserve(INFLATE_BYTES)?;
-        let (status, consumed, written) = gix_zlib::Inflate::default()
-            .once(compressed, &mut data)
-            .map_err(pack_error)?;
-        if status != gix_zlib::Status::StreamEnd || consumed != compressed.len() || written != size
-        {
-            return invalid("pack entry zlib stream is not exact");
-        }
-        Ok(DecodedEntry {
+        Ok(StoredEntry {
             header: entry.header,
-            data: hold(Bytes::from(data), memory),
+            size: entry.decompressed_size,
+            compressed: bytes.slice(entry.header_size()..),
         })
     }
 
@@ -539,8 +661,44 @@ impl<'a> Reader<'a> {
 }
 
 struct DecodedEntry {
-    header: gix_pack::data::entry::Header,
+    header: EntryHeader,
     data: Bytes,
+}
+
+struct StoredEntry {
+    header: EntryHeader,
+    size: u64,
+    compressed: Bytes,
+}
+
+struct PackOutput<'a> {
+    bytes: Vec<u8>,
+    limit: usize,
+    operation: &'a Operation,
+}
+
+fn output_error(error: io::Error) -> Error {
+    error.downcast::<Error>().unwrap_or_else(pack_error)
+}
+
+impl Write for PackOutput<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+            return Err(io::Error::other(pack_error(
+                "fetch pack exceeds byte limit",
+            )));
+        }
+        self.operation
+            .work(bytes.len())
+            .and_then(|()| self.operation.work(bytes.len()))
+            .map_err(io::Error::other)?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn apply_delta(op: &Operation, base: &[u8], delta: &[u8], hash: bool) -> Result<Bytes, Error> {
@@ -1288,6 +1446,276 @@ mod tests {
         );
         rehash_index(index, format)?;
         Ok(id)
+    }
+
+    fn inspect_pack(
+        pack: &[u8],
+        format: ObjectFormat,
+    ) -> TestResult<Vec<(gix_pack::data::entry::Header, Vec<u8>)>> {
+        let hash = object_hash(format);
+        let trailer = pack.len() - format.digest_len();
+        let mut hasher = gix_hash::hasher(hash);
+        hasher.update(&pack[..trailer]);
+        assert_eq!(hasher.try_finalize()?.as_slice(), &pack[trailer..]);
+        assert_eq!(&pack[..8], b"PACK\0\0\0\x02");
+        let count = u32::from_be_bytes(pack[8..12].try_into()?);
+        let mut offset = 12;
+        let mut entries = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let entry =
+                gix_pack::data::Entry::from_bytes(&pack[offset..trailer], offset as u64, hash)?;
+            let size = usize::try_from(entry.decompressed_size)?;
+            let mut decoded = vec![0; size];
+            let compressed = &pack[offset + entry.header_size()..trailer];
+            let (status, consumed, written) =
+                gix_zlib::Inflate::default().once(compressed, &mut decoded)?;
+            assert_eq!(status, gix_zlib::Status::StreamEnd);
+            assert_eq!(written, size);
+            entries.push((entry.header, compressed[..consumed].to_vec()));
+            offset += entry.header_size() + consumed;
+        }
+        assert_eq!(offset, trailer);
+        Ok(entries)
+    }
+
+    fn verify_fetch_pack(pack: &[u8], format: ObjectFormat, expected: &[ObjectId]) -> TestResult {
+        let entries = inspect_pack(pack, format)?;
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(entries.len(), expected.len());
+        let directory = tempfile::tempdir()?;
+        let mut init = vec!["init", "--bare", "--quiet"];
+        if format == ObjectFormat::Sha256 {
+            init.push("--object-format=sha256");
+        }
+        git(directory.path(), init, &[])?;
+        git(
+            directory.path(),
+            [
+                "index-pack",
+                "--stdin",
+                "--strict",
+                "--check-self-contained-and-connected",
+            ],
+            pack,
+        )?;
+        for id in expected {
+            let name = format!("{id}^{{object}}");
+            git(directory.path(), ["cat-file", "-e", &name], &[])?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_pack_reuses_full_and_ref_delta_streams_for_both_formats() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for ofs in [false, true] {
+                let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+                let name = format!("fetch-{format:?}-{ofs}");
+                let (log, view) = open(store, &name).await?;
+                let fixture = fixture(format, 10, ofs, false)?;
+                let source = inspect_pack(&fixture.normalized.bytes, format)?;
+                assert!(source.iter().any(|entry| entry.0.is_delta()));
+                let ids = fixture
+                    .objects
+                    .iter()
+                    .map(|item| item.0)
+                    .collect::<Vec<_>>();
+                let entries = indexed_entries(&fixture.normalized, format)?;
+                let delta = entries
+                    .iter()
+                    .find(|entry| entry.1.is_delta())
+                    .ok_or("fixture has no delta")?
+                    .0;
+                let (descriptor, root) =
+                    stage(&test_operation(), &log, &view, fixture.normalized).await?;
+                let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+                let mut reader = Reader::new(&log, &view, &catalog);
+                let output = reader.fetch_pack(&ids).await?;
+                verify_fetch_pack(&output, format, &ids)?;
+                let output_entries = inspect_pack(&output, format)?;
+                assert_eq!(source.len(), output_entries.len());
+                for (source, output) in source.iter().zip(&output_entries) {
+                    assert_eq!(source.1, output.1);
+                    if source.0.is_delta() {
+                        assert!(matches!(
+                            output.0,
+                            gix_pack::data::entry::Header::RefDelta { .. }
+                        ));
+                    }
+                }
+                assert!(!output_entries.iter().any(|entry| matches!(
+                    entry.0,
+                    gix_pack::data::entry::Header::OfsDelta { .. }
+                )));
+
+                let mut reordered = ids.clone();
+                reordered.reverse();
+                reordered.extend_from_slice(&ids);
+                assert_eq!(output, reader.fetch_pack(&reordered).await?);
+                let fallback = reader.fetch_pack(&[delta]).await?;
+                verify_fetch_pack(&fallback, format, &[delta])?;
+                assert!(!inspect_pack(&fallback, format)?[0].0.is_delta());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_output_accepts_the_raw_maximum_and_rejects_the_next_byte() -> TestResult {
+        let operation = test_operation();
+        let hash_len = ObjectFormat::Sha1.digest_len();
+        let mut output = PackOutput {
+            bytes: Vec::with_capacity(MAX_FETCH_PACK_BYTES),
+            limit: MAX_FETCH_PACK_BYTES - hash_len,
+            operation: &operation,
+        };
+        let chunk = vec![0; 64 * 1024];
+        let mut remaining = output.limit;
+        while remaining != 0 {
+            let bytes = remaining.min(chunk.len());
+            output.write_all(&chunk[..bytes])?;
+            remaining -= bytes;
+        }
+        assert_eq!(output.bytes.len() + hash_len, MAX_FETCH_PACK_BYTES);
+        assert!(output.write_all(&[0]).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_pack_rejects_a_missing_immediate_delta_base() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store, "fetch-missing-base").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 10, false, false)?;
+        let delta = indexed_entries(&fixture.normalized, ObjectFormat::Sha1)?
+            .into_iter()
+            .find(|entry| matches!(entry.1, EntryHeader::RefDelta { .. }))
+            .ok_or("fixture has no REF_DELTA")?
+            .0;
+        let mut pack = fixture.normalized.bytes;
+        let mut index = fixture.normalized.index;
+        let file = gix_pack::index::File::from_data(
+            index.as_slice(),
+            PathBuf::new(),
+            object_hash(ObjectFormat::Sha1),
+        )?;
+        let position = file
+            .lookup(gix_hash::ObjectId::try_from(delta.as_bytes())?)
+            .ok_or("delta is absent")?;
+        let range = entry_range(&index, pack.len(), ObjectFormat::Sha1, position)?;
+        let entry = gix_pack::data::Entry::from_bytes(
+            &pack[range],
+            file.pack_offset_at_index(position),
+            object_hash(ObjectFormat::Sha1),
+        )?;
+        let data = usize::try_from(entry.data_offset)?;
+        pack[data - 20..data].fill(0xfe);
+        refresh_entry(&mut pack, &mut index, ObjectFormat::Sha1, position)?;
+        let (descriptor, root) = store_raw(&log, &view, pack, index).await?;
+        let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
+        assert!(
+            Reader::new(&log, &view, &catalog)
+                .fetch_pack(&[delta])
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_pack_preflight_and_work_fail_before_object_gets() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "fetch-preflight").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 1, false, false)?;
+        let id = fixture.objects[0].0;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let operation = test_operation();
+        let catalog = load(
+            &operation,
+            &log,
+            &view,
+            ObjectFormat::Sha1,
+            &[(descriptor, root.reference().clone())],
+        )
+        .await?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        let baseline = operation.live_bytes();
+        store.reset();
+        let missing = ObjectId::from_bytes(ObjectFormat::Sha1, &[0xfe; 20])?;
+        assert!(reader.fetch_pack(&[missing]).await.is_err());
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        assert_eq!(operation.live_bytes(), baseline);
+
+        let range = catalog.packs[0].entry_range(0)?;
+        let entry_work = usize::try_from(range.end - range.start)?;
+        let used = operation.work_bytes();
+        operation.work(crate::pack::budget::WORK_BYTES - used - entry_work - 23)?;
+        store.reset();
+        assert!(matches!(
+            reader.fetch_pack(&[id]).await,
+            Err(Error::InvalidPack(message)) if message == "Git work limit exceeded"
+        ));
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        assert_eq!(operation.live_bytes(), baseline);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetch_output_reservation_lives_with_bytes_and_releases_on_cancel() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "fetch-resources").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 1, false, false)?;
+        let id = fixture.objects[0].0;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let operation = test_operation();
+        let catalog = load(
+            &operation,
+            &log,
+            &view,
+            ObjectFormat::Sha1,
+            &[(descriptor.clone(), root.reference().clone())],
+        )
+        .await?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        drop(reader.chunk(0, 0).await?);
+        let baseline = operation.live_bytes();
+        let output = reader.fetch_pack(&[id]).await?;
+        assert_eq!(operation.live_bytes() - baseline, MAX_FETCH_PACK_BYTES);
+        drop(output);
+        assert_eq!(operation.live_bytes(), baseline);
+        drop(reader);
+        drop(catalog);
+        drop(operation);
+
+        let pool = Pool::new(LIVE_BYTES);
+        let operation = pool.admit()?;
+        let catalog = load(
+            &operation,
+            &log,
+            &view,
+            ObjectFormat::Sha1,
+            &[(descriptor, root.reference().clone())],
+        )
+        .await?;
+        store.reset();
+        let mut pause = store.pause_next_get(FailurePhase::Before);
+        let worker_log = log.clone();
+        let worker_view = view.clone();
+        let task = tokio::spawn(async move {
+            Reader::new(&worker_log, &worker_view, &catalog)
+                .fetch_pack(&[id])
+                .await
+        });
+        assert!(pause.wait_until_entered().await);
+        assert!(operation.live_bytes() >= MAX_FETCH_PACK_BYTES);
+        task.abort();
+        let _ = task.await;
+        assert!(!pause.release());
+        assert_eq!(operation.live_bytes(), 0);
+        drop(operation);
+        assert!(pool.admit().is_ok());
+        Ok(())
     }
 
     #[tokio::test]
