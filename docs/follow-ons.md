@@ -67,18 +67,30 @@ current limitations and follow-on work. The linked issues define separate
 acceptance criteria for SQLite hardening, Spin factors, Git, WASI filesystem,
 verification, performance, and live AWS qualification.
 
-## 1. Minimal serverless Git
+## 1. Git storage API proof
 
-Build `object-log-git` as a separate demonstration crate after SQLite. One log
-owns one Git repository. Immutable Git packs contain objects. One object-log
-commit atomically records a validated ref transaction and its new pack
-references. A checkpoint records the current refs and the packs needed to read
-them. See [`GIT_PLAN.md`](../GIT_PLAN.md).
+`object-log` is the product. It is a small object-storage WAL for higher-level
+storage systems. `object-log-git` is a separate proof of its public API.
 
-The first example uses a disposable bare repository or temporary directory per
-serverless invocation. It keeps transport and authentication outside the
-storage crate. A push conflict returns the current repository view and requires
-the caller to validate the ref preconditions again.
+Phase 1 builds a pure-Rust native storage adapter. It accepts parsed ref
+commands and a pack, validates them, publishes one atomic ref transaction, and
+recovers a standard bare repository. It uses `gix` and `gix-pack`. It does not
+run a Git executable or call a C library. See [`GIT_PLAN.md`](../GIT_PLAN.md)
+and the [library review](evidence/git-library-selection-2026-09-03.md).
+
+Smart HTTP is a later, separate adapter. The core WAL does not depend on Git
+protocol code or Git libraries. The eventual HTTP test still uses an unmodified
+client for clone, fetch, and push. The storage and HTTP evidence must cover
+SHA-1 and SHA-256, collection, MinIO, and the planned benchmarks.
+
+The native adapter can run in Linux serverless functions and containers with
+disposable local storage. Current `gix` pack storage cannot run as a WASI guest
+because it uses unsupported memory maps, and its `wasm` feature removes the
+high-level pack writer. A later WASI adapter can use lower-level streaming pack
+APIs if its added code and trust cost are justified.
+
+Preferred-owner routing and Durable-Object behavior remain deferred. They are
+not the current core goal.
 
 ## 2. WASI filesystem storage
 
