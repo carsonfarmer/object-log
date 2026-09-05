@@ -33,11 +33,81 @@ async fn common_open(log: &Log, format: ObjectFormat) -> Result<Repository, Erro
     Repository::open_with_pool(log, format, &Pool::new(crate::pack::budget::LIVE_BYTES)).await
 }
 
+// Rebuild a fresh Git receiver solely from the shared engine's durable view.
+// This replaces the old cache-based oracle check and still validates every
+// reachable object's integrity and connectivity using the unchanged Git client.
+async fn cold_checked(log: &Log, format: ObjectFormat) -> TestResult<Repository> {
+    let repository = common_open(log, format).await?;
+    let wants: Vec<_> = repository.refs().values().copied().collect();
+    if wants.is_empty() {
+        return Ok(repository);
+    }
+    let pack = repository.fetch_pack(&wants, &[], false).await?;
+    let receiver = tempfile::tempdir()?;
+    command(
+        Some(receiver.path()),
+        &[
+            "init",
+            "--bare",
+            "--quiet",
+            &format!(
+                "--object-format={}",
+                match format {
+                    ObjectFormat::Sha1 => "sha1",
+                    ObjectFormat::Sha256 => "sha256",
+                }
+            ),
+        ],
+    )?;
+    let file = receiver.path().join("received.pack");
+    fs::write(&file, &pack)?;
+    let result = Command::new("git")
+        .current_dir(receiver.path())
+        .args([
+            "index-pack",
+            "--stdin",
+            "--strict",
+            "--check-self-contained-and-connected",
+        ])
+        .stdin(fs::File::open(file)?)
+        .output()?;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for (name, target) in repository.refs() {
+        command(
+            Some(receiver.path()),
+            &[
+                "update-ref",
+                std::str::from_utf8(name)?,
+                &target.to_string(),
+            ],
+        )?;
+    }
+    command(Some(receiver.path()), &["fsck", "--strict", "--no-reflogs"])?;
+    Ok(repository)
+}
+
 fn empty_pack(format: ObjectFormat) -> TestResult<Vec<u8>> {
     let directory = tempfile::tempdir()?;
-    let repo = git::init(directory.path(), format)?;
+    command(
+        Some(directory.path()),
+        &[
+            "init",
+            "--bare",
+            &format!(
+                "--object-format={}",
+                match format {
+                    ObjectFormat::Sha1 => "sha1",
+                    ObjectFormat::Sha256 => "sha256",
+                }
+            ),
+        ],
+    )?;
     let process = Command::new("git")
-        .current_dir(repo.git_dir())
+        .current_dir(directory.path())
         .args(["pack-objects", "--stdout"])
         .stdin(std::process::Stdio::null())
         .output()?;
@@ -110,8 +180,7 @@ async fn common_receive_publish_recovery_ref_only_and_delete() -> TestResult {
             push.publish_receive().await?.0,
             object_log::Resolution::Committed(_)
         ));
-        let recovered =
-            Repository::open_native(&log, fixture.directory.path().join("oracle"), format).await?;
+        let recovered = cold_checked(&log, format).await?;
         assert!(!recovered.refs().contains_key(b"refs/heads/main".as_slice()));
         assert_eq!(recovered.refs().len(), 2);
     }
@@ -504,8 +573,7 @@ async fn common_checkpoint_preserves_live_pack_and_collects_dead_pack() -> TestR
             log.resume_collection(&fenced).await?,
             object_log::CollectionFinish::Complete(..)
         ));
-        let repository =
-            Repository::open_native(&log, fixture.directory.path().join("cold"), format).await?;
+        let repository = cold_checked(&log, format).await?;
         assert_eq!(
             repository.refs().get(b"refs/heads/main".as_slice()),
             Some(&fixture.target)
@@ -696,8 +764,7 @@ async fn common_receive_true_thin_pack_uses_same_view_verified_base() -> TestRes
             push.publish_receive().await?.0,
             object_log::Resolution::Committed(_)
         ));
-        let recovered =
-            Repository::open_native(&log, fixture.directory.path().join("cold"), format).await?;
+        let recovered = cold_checked(&log, format).await?;
         assert_eq!(
             recovered.refs().get(b"refs/heads/main".as_slice()),
             Some(&target)
@@ -765,8 +832,7 @@ async fn common_receive_ref_namespace_applies_deletions_atomically() -> TestResu
             push.publish_receive().await?.0,
             object_log::Resolution::Committed(_)
         ));
-        let recovered =
-            Repository::open_native(&log, fixture.directory.path().join("cold"), format).await?;
+        let recovered = cold_checked(&log, format).await?;
         assert!(!recovered.refs().contains_key(b"refs/heads/x".as_slice()));
         assert_eq!(
             recovered.refs().get(b"refs/heads/x/y".as_slice()),
@@ -780,14 +846,28 @@ async fn common_receive_ref_namespace_applies_deletions_atomically() -> TestResu
 async fn oversized_publication_options_return_a_bounded_error() -> TestResult {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         for max_commit_bytes in [usize::MAX / 4, usize::MAX / 4 + 1] {
-            let backend = ValidatedBackend::new(std::sync::Arc::new(InMemory::new()), StorePath::from("oversized-options")).await?;
-            let log = Log::open(&backend, &LogId::new("oversized")?, Options { max_commit_bytes, ..Options::default() }).await?;
+            let backend = ValidatedBackend::new(
+                std::sync::Arc::new(InMemory::new()),
+                StorePath::from("oversized-options"),
+            )
+            .await?;
+            let log = Log::open(
+                &backend,
+                &LogId::new("oversized")?,
+                Options {
+                    max_commit_bytes,
+                    ..Options::default()
+                },
+            )
+            .await?;
             let repository = common_open(&log, format).await?;
             let fixture = fixture(format, b"bounded options")?;
             let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
             let input = receive_input(format, &[update], &std::fs::read(fixture.pack)?, true);
-            assert!(matches!(repository.prepare_receive(TransactionId::new(), input).await,
-                Err(Error::ReceiveRejected { source, .. }) if matches!(*source, Error::InvalidPack(_))));
+            assert!(
+                matches!(repository.prepare_receive(TransactionId::new(), input).await,
+                Err(Error::ReceiveRejected { source, .. }) if matches!(*source, Error::InvalidPack(_)))
+            );
         }
     }
     Ok(())

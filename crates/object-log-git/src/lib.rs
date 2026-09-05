@@ -4,8 +4,6 @@
 
 mod durable;
 mod format;
-#[cfg(feature = "native-oracle")]
-mod git;
 mod graph;
 mod pack;
 mod receive;
@@ -203,10 +201,6 @@ pub enum Error {
     /// A pack is malformed, corrupt, or outside a configured limit.
     #[error("invalid Git pack: {0}")]
     InvalidPack(String),
-    /// A local repository uses unsupported state or configuration.
-    #[cfg(feature = "native-oracle")]
-    #[error("unsupported Git repository")]
-    UnsupportedRepository,
     /// A ref or object target is invalid.
     #[error("invalid Git reference")]
     InvalidReference,
@@ -219,24 +213,12 @@ pub enum Error {
     /// An object reachable from a proposed ref is invalid.
     #[error("invalid reachable Git object graph: {0}")]
     InvalidObjectGraph(&'static str),
-    /// The local work directory cannot be used as a new disposable cache.
-    #[cfg(feature = "native-oracle")]
-    #[error("Git work directory must not exist or must be empty")]
-    WorkDirectoryNotEmpty,
-    /// A local Git operation failed.
-    #[cfg(feature = "native-oracle")]
-    #[error("Git operation failed: {0}")]
-    Git(String),
     /// Pack transfer or validation failed.
     #[error("Git pack storage failed: {0}")]
     PackStorage(String),
     /// An object-log operation failed.
     #[error(transparent)]
     ObjectLog(#[from] object_log::Error),
-    /// A blocking local Git task stopped before it returned a result.
-    #[cfg(feature = "native-oracle")]
-    #[error("local Git task stopped")]
-    BlockingTask,
 }
 
 impl From<wire::Error> for Error {
@@ -248,24 +230,6 @@ impl From<wire::Error> for Error {
             wire::Error::Io(error) => error
                 .downcast::<Self>()
                 .unwrap_or_else(|error| Self::PackStorage(error.to_string())),
-        }
-    }
-}
-
-#[cfg(feature = "native-oracle")]
-impl From<git::Error> for Error {
-    fn from(error: git::Error) -> Self {
-        match error {
-            git::Error::InvalidPack(message) | git::Error::Pack(message) => {
-                Self::InvalidPack(message)
-            }
-            git::Error::NotBare | git::Error::UnsupportedRepository => Self::UnsupportedRepository,
-            git::Error::InvalidReference => Self::InvalidReference,
-            git::Error::StaleReference => Self::StaleReference,
-            git::Error::NonFastForward => Self::NonFastForward,
-            git::Error::InvalidObjectGraph(message) => Self::InvalidObjectGraph(message),
-            git::Error::Repository(message) => Self::Git(message),
-            git::Error::Io { path, source } => Self::Git(format!("{}: {source}", path.display())),
         }
     }
 }

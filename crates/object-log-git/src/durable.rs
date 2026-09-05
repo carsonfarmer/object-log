@@ -141,38 +141,6 @@ impl Catalog {
             .ok()
             .map(|position| self.directory[position])
     }
-
-    #[cfg(feature = "native-oracle")]
-    pub(crate) async fn pack_bytes(
-        &self,
-        log: &Log,
-        view: &View,
-        id: ObjectId,
-    ) -> Result<Bytes, Error> {
-        let pack = self
-            .packs
-            .iter()
-            .find(|pack| pack.id == id)
-            .ok_or_else(|| Error::InvalidPack("catalog pack is missing".into()))?;
-        let size = pack.bytes as usize;
-        let memory = self.operation.reserve(size)?;
-        let mut bytes = Vec::with_capacity(size);
-        for child in pack.node.children() {
-            let child_size = usize::try_from(child.len())
-                .map_err(|_| Error::InvalidPack("pack chunk exceeds memory".into()))?;
-            self.operation.io(child_size)?;
-            self.operation.work(child_size)?;
-            let chunk = log.read_object(view, child).await?;
-            if chunk.len() != child_size {
-                return invalid("pack chunk byte length does not match");
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        if bytes.len() != size || !bytes.ends_with(id.as_bytes()) {
-            return invalid("pack bytes do not match their descriptor");
-        }
-        Ok(hold(Bytes::from(bytes), memory))
-    }
 }
 
 struct Pack {

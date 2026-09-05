@@ -117,7 +117,7 @@ impl Repository {
                         log: self.log,
                         prepared,
                         recovery_token,
-                        receive: Some(Publication {
+                        receive: Publication {
                             _operation: operation,
                             _memory: vec![
                                 self.state_memory,
@@ -127,7 +127,7 @@ impl Repository {
                                 plan_memory,
                             ],
                             responses,
-                        }),
+                        },
                     });
                 }
                 Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
@@ -240,11 +240,9 @@ impl PreparedPush {
     /// [`Self::recovery_token`] before consuming this value for later recovery.
     ///
     /// # Errors
-    /// Returns an error for a non-wire preparation or invalid durable evidence.
+    /// Returns an error for invalid durable evidence.
     pub async fn publish_receive(self) -> Result<(Resolution, Bytes), Error> {
-        let publication = self
-            .receive
-            .ok_or(Error::InvalidProtocol("not a receive command"))?;
+        let publication = self.receive;
         let resolution = match self.log.commit(self.prepared).await? {
             CommitStatus::Committed(view) => Resolution::Committed(view),
             CommitStatus::Conflict(view) => Resolution::NotCommitted(view),
@@ -348,16 +346,11 @@ impl Repository {
     /// Checkpoints refs and the complete packs needed by their reachable objects.
     ///
     /// Unreachable packs are omitted so object-log collection can reclaim them.
-    /// The native oracle keeps its independently validated retention path.
     ///
     /// # Errors
     /// Returns an error for invalid reachable objects, exhausted limits, or storage
     /// failure. Uncertain publication remains explicit in the checkpoint result.
     pub async fn checkpoint(self) -> Result<object_log::CheckpointStatus, Error> {
-        #[cfg(feature = "native-oracle")]
-        if self.native.is_some() {
-            return self.checkpoint_native().await;
-        }
         let operation = self.operation.clone();
         let log = self.log.clone();
         let format = self.format;
