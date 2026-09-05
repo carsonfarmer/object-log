@@ -11,6 +11,7 @@ mod catalog_migration;
 mod catalog_reuse;
 mod default_branch;
 mod maintenance;
+mod pack_compaction;
 mod receive_command;
 mod uri;
 
@@ -654,6 +655,7 @@ mod tests {
     include!("repository/uri_tests.rs");
     include!("repository/catalog_migration_tests.rs");
     include!("repository/catalog_consumer_tests.rs");
+    include!("repository/pack_compaction_tests.rs");
 
     struct Fixture {
         directory: TempDir,
