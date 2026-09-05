@@ -1,0 +1,2 @@
+    Checking object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/request-guard)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.36s
