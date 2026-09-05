@@ -151,6 +151,13 @@ actual-WASI memory fixtures. See the review's accepted-batch section and raw
 `docs/evidence/git-proof-queue-2026-09-05/` logs. Existing capacity limits and
 #23's actual-WASIp2 latency finding remain unchanged.
 
+Second batch source `0f7abe5` adds ordinary byte-oriented Git ref namespaces
+and selected full-blob verification without decoded-content retention. Combined
+gates pass 332 tests (12 opt-in ignored), native/WASIp2, separate MinIO and six
+actual-WASI fixtures. First-batch hosted Linux run 33943654812 passed. Read
+`docs/spin-maintenance-proposal.md` as a design; the operator implementation is
+still in progress. #29 force policy and #26 target capacity remain open.
+
 Root integrates in exclusive `cf/git-proof-queue`. Next subagents own bounded
 materialization (#34) and general ref namespaces (#29); sidebar tasks own
 incremental blob verification (#26) and maintenance design (#32). They deliver

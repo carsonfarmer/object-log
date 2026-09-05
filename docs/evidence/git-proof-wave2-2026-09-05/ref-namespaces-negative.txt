@@ -1,0 +1,19 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-ref-namespaces/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.76s
+     Running tests/ref_namespaces.rs (target/debug/deps/ref_namespaces-20c6769f9033e181)
+
+running 1 test
+test notes_mirror_and_byte_refs_survive_receive_checkpoint_and_cold_fetch ... FAILED
+
+failures:
+
+---- notes_mirror_and_byte_refs_survive_receive_checkpoint_and_cold_fetch stdout ----
+Error: InvalidProtocol("invalid ref command")
+
+
+failures:
+    notes_mirror_and_byte_refs_survive_receive_checkpoint_and_cold_fetch
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `-p object-log-git --test ref_namespaces`
