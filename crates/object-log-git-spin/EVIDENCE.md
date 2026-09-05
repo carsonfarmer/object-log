@@ -58,3 +58,24 @@ Follow-up transport regressions pass with the same local toolchain:
   before converting the request into WASI HTTP resources.
 - The actual application accepts uppercase `GZIP` and mixed-case `Identity`
   content-encoding tokens on both object formats.
+
+## Later combined qualification
+
+Seven library tests now include exact-limit, overflow, shared-clone, and
+pre-WASI-admission quota cases. One connector budget spans bootstrap probes,
+log open, command I/O, retries, and streamed payloads: 512 outgoing attempts
+and 96 MiB accepted/sent payload. This excludes HTTP headers and remote buffers.
+
+The final component artifact is 4,188,349 bytes, SHA-256
+`fa2dc941e41f9f1775a72712636f45bffa8970bc349dfe2b0242bcf24f97fe1e`.
+Its imports were inspected again and retain the WASI P2 surface above.
+The signed transport and both-hash provider-free HTTP fixtures pass again.
+
+[Actual WASIp2 memory acceptance](../../docs/evidence/git-wasip2-memory-2026-09-04.md)
+proves both hashes with small, 8 MiB, and 384-commit/thin fixtures.
+The [local MinIO run](../../docs/evidence/git-spin-minio-2026-09-04/run.txt)
+passes both-hash full client lifecycle, checkpoint/collection, and fresh-host
+cold clone. Its four macOS fresh-process RSS reports range from 74,563,584 to
+75,104,256 bytes. The compiler cache already existed; these are not empty-cache
+startup measurements. The [Linux evidence](../../docs/evidence/git-spin-linux-2026-09-04.md)
+records hard 128 MiB serving qualification and failed empty-cache startup.

@@ -79,12 +79,12 @@ API:
   and fetch framing plus classic receive-pack framing. A private bounded writer
   creates self-contained SHA-1 and SHA-256 fetch packs. It reuses validated
   compressed entries and materializes an object when reuse would omit its base.
-- [`object-log-git-http`](crates/object-log-git-http) is the current native
-  protocol-v0 reference host for SHA-1. Its tests use an unchanged Git client.
-  Issue #17 moves protocol and storage into one WASI-compatible core while the
-  native host remains the first adapter. The replacement wire module uses
-  protocol v2 for upload-pack discovery and fetch. Push remains standard
-  receive-pack.
+- [`object-log-git-http`](crates/object-log-git-http) is the native adapter for
+  the shared engine. It supports both hashes, protocol-v2 upload, and classic
+  receive-pack. The earlier SHA-1 protocol-v0 oracle remains selectable.
+- [`object-log-git-spin`](crates/object-log-git-spin) adapts WASI HTTP and the
+  established S3 client to the same engine. It needs no filesystem preopens;
+  the generic log remains independent from Spin.
 
 Tasks 1–9 provide the private pack, sparse reader/writer, wire, and budget
 foundations plus one common `Repository::open(&Log, ObjectFormat)` for native
@@ -92,7 +92,8 @@ and `WASIp2`. The repository retains one exact view and exposes its refs without
 local paths. Durable packs use authenticated variable chunk geometry, including
 logs with 8,240-byte object limits. Head transfer, recovery scratch, retained
 state, and catalog allocations are budgeted before allocation. The native oracle
-remains available through `open_native` until replacement client parity passes.
+remains available through `open_native` until client, provider, runtime, performance, and required owner reviews permit
+its deletion.
 
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves
@@ -105,8 +106,12 @@ client, provider, and memory qualification. See the
 [receive evidence](docs/evidence/git-receive-2026-09-04.md).
 The [Task 3 evidence](docs/evidence/git-repository-2026-09-04.md) records the
 recovery fixes, unchanged small-limit tests, independent reviews, and limits.
-One process-wide 88 MiB pool admits one active engine operation under the
-provisional 128 MiB WASI process model. The package manifest declares the
+An 88 MiB engine pool admits one operation per native process or WASI instance.
+Spin deployment forces one live component instance. A fresh Linux serving
+process passes a hard 128 MiB cgroup with a prepared executable cache, but
+empty-cache compilation exceeds that cap. See the
+[Linux qualification](docs/evidence/git-spin-linux-2026-09-04.md) for cache setup
+and the measured lack of spare process-memory margin. The package manifest declares the
 Tokio runtime support used by the native oracle, so standalone all-feature
 checks do not depend on workspace feature unification. The
 [Git proof plan](GIT_PLAN.md) defines the 12 tasks, phase limits, performance
@@ -195,7 +200,11 @@ Run the Git request audit, benchmarks, and pinned `MinIO` lifecycle with:
 ```sh
 make git-performance-acceptance
 make git-bench
+make git-shared-performance-acceptance
 make git-minio-test
+make git-shared-minio-test
+make git-spin-memory-acceptance
+make git-spin-minio-test
 ```
 
 The `MinIO` targets start a pinned container on a loopback port. They create an

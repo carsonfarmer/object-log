@@ -1,0 +1,15 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git)
+   Compiling object-log-git-http v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git-http)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.67s
+     Running tests/loopback.rs (target/debug/deps/loopback-508e591442dac0a7)
+
+running 1 test
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-57887.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-58370.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-58409.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-58891.rss
+test spin_minio_clients_recover_after_collection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 2.99s
+

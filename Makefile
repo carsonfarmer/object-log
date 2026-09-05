@@ -4,7 +4,7 @@ check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo test --workspace --all-features
-	$(MAKE) git-wasi-check
+	$(MAKE) git-wasi-check git-spin-wasi-check
 
 test:
 	cargo test --workspace --all-features
@@ -51,3 +51,14 @@ git-shared-performance-acceptance:
 git-spin-memory-acceptance:
 	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
 	python3 crates/object-log-git-spin/tests/check_memory.py
+
+.PHONY: git-spin-wasi-check git-shared-minio-test git-spin-minio-test
+git-spin-wasi-check:
+	cargo +1.97.1 clippy --locked -p object-log-git-spin --target wasm32-wasip2 -- -D warnings
+
+git-shared-minio-test:
+	./scripts/test-minio.sh loopback shared_minio_clients_recover_after_collection object-log-git-http ""
+
+git-spin-minio-test:
+	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+	./scripts/test-minio.sh loopback spin_minio_clients_recover_after_collection object-log-git-http ""

@@ -1,0 +1,897 @@
+cargo bench --workspace --all-features
+   Compiling libc v0.2.189
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.16.0
+   Compiling regex-syntax v0.8.11
+   Compiling stable_deref_trait v1.2.1
+   Compiling rand_core v0.10.1
+   Compiling typenum v1.20.1
+   Compiling getrandom v0.4.3
+   Compiling thiserror v2.0.20
+   Compiling itoa v1.0.18
+   Compiling bitflags v2.13.1
+   Compiling subtle v2.6.1
+   Compiling parking_lot_core v0.9.12
+   Compiling generic-array v0.14.7
+   Compiling scopeguard v1.2.0
+   Compiling foldhash v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling lock_api v0.4.14
+   Compiling same-file v1.0.6
+   Compiling fastrand v2.5.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling pin-project-lite v0.2.17
+   Compiling walkdir v2.5.0
+   Compiling tinyvec v1.12.0
+   Compiling gix-trace v0.1.21
+   Compiling serde_core v1.0.229
+   Compiling crc32fast v1.5.1
+   Compiling futures-core v0.3.34
+   Compiling bytes v1.12.1
+   Compiling pkg-config v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling hashbrown v0.17.1
+   Compiling byteorder v1.5.0
+   Compiling futures-sink v0.3.34
+   Compiling hybrid-array v0.4.14
+   Compiling futures-channel v0.3.34
+   Compiling unicode-normalization v0.1.25
+   Compiling hash32 v0.3.1
+   Compiling heapless v0.8.0
+   Compiling yoke v0.8.3
+   Compiling futures-io v0.3.34
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling percent-encoding v2.3.2
+   Compiling regex-automata v0.4.18
+   Compiling log v0.4.34
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling futures-util v0.3.34
+   Compiling digest v0.10.7
+   Compiling jobserver v0.1.35
+   Compiling zerovec v0.11.8
+   Compiling tracing-core v0.1.36
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling serde v1.0.229
+   Compiling errno v0.3.14
+   Compiling cc v1.4.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.3
+   Compiling socket2 v0.6.5
+   Compiling cpufeatures v0.2.17
+   Compiling faster-hex v0.10.0
+   Compiling parking_lot v0.12.5
+   Compiling sha1 v0.10.7
+   Compiling digest v0.11.3
+   Compiling prodash v31.0.0
+   Compiling tokio v1.53.1
+   Compiling cpufeatures v0.3.1
+   Compiling http v1.5.0
+   Compiling tracing v0.1.44
+   Compiling cmake v0.1.58
+   Compiling sha2 v0.11.0
+   Compiling sha1-checked v0.10.0
+   Compiling rustix v1.1.4
+   Compiling tinystr v0.8.4
+   Compiling aws-lc-rs v1.18.1
+   Compiling litemap v0.8.3
+   Compiling writeable v0.6.4
+   Compiling http-body v1.1.0
+   Compiling potential_utf v0.1.6
+   Compiling aws-lc-sys v0.45.0
+   Compiling icu_locale_core v2.3.0
+   Compiling zerotrie v0.2.5
+   Compiling utf8_iter v1.0.4
+   Compiling zeroize v1.9.0
+   Compiling fnv v1.0.7
+   Compiling jiff-core v0.1.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling bstr v1.13.1
+   Compiling indexmap v2.14.1
+   Compiling httparse v1.10.1
+   Compiling tower-service v0.3.3
+   Compiling icu_provider v2.3.1
+   Compiling gix-validate v0.11.4
+   Compiling gix-utils v0.3.6
+   Compiling gix-error v0.3.2
+   Compiling gix-path v0.12.6
+   Compiling tempfile v3.27.0
+   Compiling gix-features v0.49.1
+   Compiling jiff v0.2.35
+   Compiling rustls-pki-types v1.15.1
+   Compiling gix-hash v0.26.2
+   Compiling num-traits v0.2.19
+   Compiling form_urlencoded v1.2.2
+   Compiling atomic-waker v1.1.2
+   Compiling untrusted v0.9.0
+   Compiling rustls v0.23.43
+   Compiling try-lock v0.2.5
+   Compiling gix-hashtable v0.16.0
+   Compiling want v0.3.1
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling sync_wrapper v1.0.2
+   Compiling zmij v1.0.23
+   Compiling tower-layer v0.3.3
+   Compiling httpdate v1.0.3
+   Compiling serde_json v1.0.151
+   Compiling either v1.18.0
+   Compiling http-body-util v0.1.5
+   Compiling tokio-util v0.7.19
+   Compiling memmap2 v0.9.11
+   Compiling base64 v0.22.1
+   Compiling ipnet v2.12.1
+   Compiling tower v0.5.3
+   Compiling gix-fs v0.22.1
+   Compiling idna_adapter v1.2.2
+   Compiling security-framework-sys v2.17.0
+   Compiling idna v1.1.0
+   Compiling h2 v0.4.19
+   Compiling core-foundation v0.10.1
+   Compiling cfg_aliases v0.2.2
+   Compiling gix-tempfile v24.0.0
+   Compiling url v2.5.8
+   Compiling nix v0.31.3
+   Compiling security-framework v3.7.0
+   Compiling iana-time-zone v0.1.65
+   Compiling futures-executor v0.3.34
+   Compiling nonempty v0.12.0
+   Compiling ryu v1.0.23
+   Compiling gix-date v0.16.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling futures v0.3.34
+   Compiling tower-http v0.6.11
+   Compiling chrono v0.4.45
+   Compiling gix-actor v0.42.0
+   Compiling gix-object v0.64.1
+   Compiling blake3 v1.8.7
+   Compiling chacha20 v0.10.2
+   Compiling spin v0.10.1
+   Compiling crc-fast v1.10.0
+   Compiling rand v0.10.2
+   Compiling itertools v0.15.0
+   Compiling gix-chunk v0.8.0
+   Compiling quick-xml v0.41.0
+   Compiling md-5 v0.11.0
+   Compiling arrayvec v0.7.8
+   Compiling humantime v2.4.0
+   Compiling constant_time_eq v0.4.2
+   Compiling minicbor v2.3.0
+   Compiling gix-commitgraph v0.39.0
+   Compiling hyper v1.11.1
+   Compiling gix-lock v24.0.0
+   Compiling uuid v1.26.0
+   Compiling hex v0.4.3
+   Compiling gix-revwalk v0.35.0
+   Compiling crossbeam-utils v0.8.22
+   Compiling gix-quote v0.8.0
+   Compiling gix-sec v0.14.2
+   Compiling rustversion v1.0.23
+   Compiling crossbeam-epoch v0.9.20
+   Compiling zerocopy v0.8.56
+   Compiling gix-traverse v0.61.0
+   Compiling hyper-util v0.1.20
+   Compiling gix-ref v0.67.1
+   Compiling hashbrown v0.16.1
+   Compiling zerocopy-derive v0.8.56
+   Compiling zlib-rs v0.6.7
+   Compiling crossbeam-deque v0.8.7
+   Compiling clru v0.6.3
+   Compiling gix-command v0.10.1
+   Compiling gix-diff v0.67.1
+   Compiling gix-url v0.38.0
+   Compiling gix-packetline v0.22.2
+   Compiling rayon-core v1.13.0
+   Compiling arc-swap v1.9.2
+   Compiling gix-transport v0.59.2
+   Compiling gix-shallow v0.13.0
+   Compiling gix-glob v0.27.1
+   Compiling gix-config-value v0.19.1
+   Compiling gix-bitmap v0.4.0
+   Compiling filetime v0.2.29
+   Compiling gix-macros v0.1.6
+   Compiling plotters-backend v0.3.7
+   Compiling unicode-bom v2.0.3
+   Compiling clap_lex v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling ciborium-io v0.2.2
+   Compiling gix-protocol v0.65.1
+   Compiling gix-config v0.60.0
+   Compiling plotters-svg v0.3.7
+   Compiling gix-index v0.55.0
+   Compiling clap_builder v4.6.6
+   Compiling gix-zlib v0.1.0
+   Compiling gix-pack v0.74.2
+   Compiling gix-discover v0.55.0
+   Compiling gix-revision v0.49.1
+   Compiling itertools v0.13.0
+   Compiling gix-refspec v0.45.1
+   Compiling cast v0.3.0
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.9.1
+   Compiling gix-odb v0.84.0
+   Compiling criterion-plot v0.6.0
+   Compiling half v2.7.1
+   Compiling clap v4.6.6
+   Compiling rayon v1.12.0
+   Compiling plotters v0.3.7
+   Compiling tinytemplate v1.2.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling regex v1.13.1
+   Compiling vcpkg v0.2.15
+   Compiling gix v0.87.1
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling libsqlite3-sys v0.38.2
+   Compiling flate2 v1.1.10
+   Compiling wit-bindgen-rt v0.24.0
+   Compiling smartstring v1.0.1
+   Compiling lazy_static v1.5.0
+   Compiling compression-core v0.4.33
+   Compiling mime v0.3.17
+   Compiling static_assertions v1.1.0
+   Compiling axum-core v0.5.6
+   Compiling compression-codecs v0.4.39
+   Compiling sharded-slab v0.1.7
+   Compiling matchers v0.2.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling criterion v0.7.0
+   Compiling tracing-log v0.2.0
+   Compiling hashlink v0.12.1
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling fallible-iterator v0.3.0
+   Compiling matchit v0.8.4
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling wit-bindgen v0.51.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling wasi v0.13.1+wasi-0.2.0
+   Compiling async-compression v0.4.44
+   Compiling axum v0.8.9
+   Compiling smartcow v0.2.1
+   Compiling anyhow v1.0.104
+   Compiling foldhash v0.1.5
+   Compiling spin-sdk v5.2.0
+   Compiling spin-executor v5.2.0
+   Compiling hashbrown v0.15.5
+   Compiling routefinder v0.5.4
+   Compiling semver v1.0.28
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling wasmparser v0.244.0
+   Compiling rustls-webpki v0.103.15
+   Compiling rusqlite v0.40.2
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git)
+   Compiling object-log-sqlite v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-sqlite)
+   Compiling object-log-git-http v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git-http)
+   Compiling object-log-kv v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-kv)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git-spin)
+    Finished `bench` profile [optimized] target(s) in 48.29s
+     Running unittests src/lib.rs (target/release/deps/object_log-0336dcb16ef45e2b)
+
+running 58 tests
+test format::tests::changed_envelope_is_corrupt ... ignored
+test format::tests::checkpoint_encoder_preserves_format_and_snapshot ... ignored
+test format::tests::collection_plan_enforces_count_sum_and_encoded_byte_limits ... ignored
+test format::tests::collection_plan_rejects_malformed_physical_keys ... ignored
+test format::tests::collection_plan_rejects_non_positive_or_non_canonical_sets ... ignored
+test format::tests::collection_plan_round_trip_preserves_exact_physical_keys ... ignored
+test format::tests::commit_round_trip_preserves_opaque_bytes ... ignored
+test format::tests::empty_head_encoding_is_stable ... ignored
+test format::tests::future_format_version_fails_closed ... ignored
+test format::tests::head_enforces_its_durable_bounds_and_sequence_evidence ... ignored
+test format::tests::head_rejects_checkpoint_sequence_overflow ... ignored
+test format::tests::head_rejects_duplicate_and_unsorted_retention_ids ... ignored
+test format::tests::head_rejects_duplicate_transaction_across_base_and_tail ... ignored
+test format::tests::head_rejects_outcomes_without_a_checkpoint ... ignored
+test format::tests::head_rejects_sequence_gap ... ignored
+test format::tests::head_round_trip_preserves_collection_state_and_enforces_exclusion ... ignored
+test format::tests::head_round_trip_preserves_order_and_base ... ignored
+test format::tests::node_rejects_impossible_child_count_before_reserving ... ignored
+test format::tests::recovery_token_cannot_change_the_durable_options ... ignored
+test format::tests::recovery_token_excludes_staging_proof ... ignored
+test format::tests::recovery_token_round_trip_preserves_the_exact_candidate ... ignored
+test format::tests::reference_node_accepts_exact_payload_and_child_limits ... ignored
+test format::tests::reference_node_encoder_bounds_the_maximum_git_root ... ignored
+test format::tests::reference_node_encoder_matches_derive_at_cbor_boundaries ... ignored
+test format::tests::reference_node_rejects_child_count_before_child_decode ... ignored
+test format::tests::reference_node_rejects_invalid_child_fields ... ignored
+test format::tests::reference_node_rejects_noncanonical_shapes ... ignored
+test format::tests::reference_node_rejects_truncation_digest_and_value_type ... ignored
+test format::tests::reference_node_round_trip_is_stable_and_keeps_payload_backing ... ignored
+test format::tests::trailing_bytes_are_rejected ... ignored
+test format::tests::unknown_field_is_not_canonical ... ignored
+test log::tests::active_plan_fences_an_exact_checkpoint_retry ... ignored
+test log::tests::active_plan_fences_the_new_commit_physical_key ... ignored
+test log::tests::active_plan_rejects_existing_ref_with_conflicting_length ... ignored
+test log::tests::checkpoint_allocation_skips_a_planned_physical_key ... ignored
+test log::tests::commit_ref_len_matches_the_encoded_commit_and_read_reference ... ignored
+test log::tests::fresh_commit_rejects_a_collision_but_exact_recovery_can_reuse_it ... ignored
+test log::tests::fresh_staging_does_not_accept_a_collision_after_an_ambiguous_error ... ignored
+test log::tests::fresh_staging_reallocates_a_colliding_physical_id ... ignored
+test log::tests::old_incarnation_candidate_cannot_delete_current_data ... ignored
+test log::tests::oversized_live_reference_fails_before_collection_io ... ignored
+test log::tests::recovery_applies_durable_inline_limits ... ignored
+test log::tests::recovery_rejects_a_commit_from_another_log ... ignored
+test log::tests::recovery_rejects_a_commit_from_the_wrong_parent ... ignored
+test log::tests::resume_rejects_a_different_current_plan_before_delete ... ignored
+test sim::tests::delete_pause_after_stops_after_visible_delete ... ignored
+test sim::tests::delete_pause_at_second_occurrence_skips_first_request ... ignored
+test sim::tests::delete_pause_before_preserves_visibility_until_release ... ignored
+test sim::tests::put_pause_after_stops_after_visibility ... ignored
+test sim::tests::put_pause_at_second_occurrence_skips_first_request ... ignored
+test sim::tests::put_pause_before_blocks_visibility_and_releases_once ... ignored
+test store::tests::delete_batch_accepts_exact_limit ... ignored
+test store::tests::delete_batch_drains_partial_failures_before_retry ... ignored
+test store::tests::delete_batch_rejects_excess_before_io ... ignored
+test store::tests::immutable_delete_is_repeatable_in_memory_and_filesystem ... ignored
+test store::tests::new_immutable_keys_get_distinct_physical_ids ... ignored
+test store::tests::scoped_listing_classifies_only_canonical_immutable_paths ... ignored
+test store::tests::scoped_listing_does_not_cross_log_segments ... ignored
+
+test result: ok. 0 passed; 0 failed; 58 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/protocol.rs (target/release/deps/protocol-55ea534f5206a05f)
+Gnuplot not found, using plotters backend
+Benchmarking memory/append_batch/1
+Benchmarking memory/append_batch/1: Warming up for 1.0000 s
+Benchmarking memory/append_batch/1: Collecting 10 samples in estimated 2.0004 s (124k iterations)
+Benchmarking memory/append_batch/1: Analyzing
+memory/append_batch/1   time:   [5.6630 µs 5.8747 µs 6.4958 µs]
+                        thrpt:  [153.94 Kelem/s 170.22 Kelem/s 176.58 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking memory/append_batch/4
+Benchmarking memory/append_batch/4: Warming up for 1.0000 s
+Benchmarking memory/append_batch/4: Collecting 10 samples in estimated 2.0002 s (126k iterations)
+Benchmarking memory/append_batch/4: Analyzing
+memory/append_batch/4   time:   [5.6945 µs 5.7491 µs 5.8571 µs]
+                        thrpt:  [682.93 Kelem/s 695.77 Kelem/s 702.43 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking memory/append_batch/16
+Benchmarking memory/append_batch/16: Warming up for 1.0000 s
+Benchmarking memory/append_batch/16: Collecting 10 samples in estimated 2.0001 s (121k iterations)
+Benchmarking memory/append_batch/16: Analyzing
+memory/append_batch/16  time:   [6.2928 µs 6.3448 µs 6.3922 µs]
+                        thrpt:  [2.5030 Melem/s 2.5218 Melem/s 2.5426 Melem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking memory/append_batch/64
+Benchmarking memory/append_batch/64: Warming up for 1.0000 s
+Benchmarking memory/append_batch/64: Collecting 10 samples in estimated 2.0007 s (104k iterations)
+Benchmarking memory/append_batch/64: Analyzing
+memory/append_batch/64  time:   [9.2531 µs 9.4209 µs 9.5089 µs]
+                        thrpt:  [6.7305 Melem/s 6.7934 Melem/s 6.9166 Melem/s]
+Benchmarking memory/append_batch/256
+Benchmarking memory/append_batch/256: Warming up for 1.0000 s
+Benchmarking memory/append_batch/256: Collecting 10 samples in estimated 2.0005 s (80k iterations)
+Benchmarking memory/append_batch/256: Analyzing
+memory/append_batch/256 time:   [13.911 µs 13.945 µs 13.984 µs]
+                        thrpt:  [18.307 Melem/s 18.358 Melem/s 18.402 Melem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking memory/append_inline_bytes/256
+Benchmarking memory/append_inline_bytes/256: Warming up for 1.0000 s
+Benchmarking memory/append_inline_bytes/256: Collecting 10 samples in estimated 2.0007 s (120k iterations)
+Benchmarking memory/append_inline_bytes/256: Analyzing
+memory/append_inline_bytes/256
+                        time:   [6.0000 µs 6.0412 µs 6.1059 µs]
+                        thrpt:  [163.78 Kelem/s 165.53 Kelem/s 166.67 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking memory/append_inline_bytes/4096
+Benchmarking memory/append_inline_bytes/4096: Warming up for 1.0000 s
+Benchmarking memory/append_inline_bytes/4096: Collecting 10 samples in estimated 2.0005 s (99k iterations)
+Benchmarking memory/append_inline_bytes/4096: Analyzing
+memory/append_inline_bytes/4096
+                        time:   [9.6118 µs 9.6180 µs 9.6250 µs]
+                        thrpt:  [103.90 Kelem/s 103.97 Kelem/s 104.04 Kelem/s]
+
+Benchmarking memory/append_staged_bytes/65536
+Benchmarking memory/append_staged_bytes/65536: Warming up for 1.0000 s
+Benchmarking memory/append_staged_bytes/65536: Collecting 10 samples in estimated 2.0007 s (42k iterations)
+Benchmarking memory/append_staged_bytes/65536: Analyzing
+memory/append_staged_bytes/65536
+                        time:   [36.419 µs 36.442 µs 36.469 µs]
+                        thrpt:  [1.6736 GiB/s 1.6748 GiB/s 1.6759 GiB/s]
+Benchmarking memory/append_staged_bytes/1048576
+Benchmarking memory/append_staged_bytes/1048576: Warming up for 1.0000 s
+Benchmarking memory/append_staged_bytes/1048576: Collecting 10 samples in estimated 2.0099 s (4125 iterations)
+Benchmarking memory/append_staged_bytes/1048576: Analyzing
+memory/append_staged_bytes/1048576
+                        time:   [466.35 µs 467.05 µs 468.01 µs]
+                        thrpt:  [2.0866 GiB/s 2.0909 GiB/s 2.0941 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+
+Benchmarking memory/recover_tail/0
+Benchmarking memory/recover_tail/0: Warming up for 1.0000 s
+Benchmarking memory/recover_tail/0: Collecting 10 samples in estimated 2.0001 s (1.1M iterations)
+Benchmarking memory/recover_tail/0: Analyzing
+memory/recover_tail/0   time:   [1.7959 µs 1.7968 µs 1.7974 µs]
+                        thrpt:  [0.0000  elem/s 0.0000  elem/s 0.0000  elem/s]
+Benchmarking memory/recover_tail/16
+Benchmarking memory/recover_tail/16: Warming up for 1.0000 s
+Benchmarking memory/recover_tail/16: Collecting 10 samples in estimated 2.0011 s (45k iterations)
+Benchmarking memory/recover_tail/16: Analyzing
+memory/recover_tail/16  time:   [43.106 µs 43.181 µs 43.234 µs]
+                        thrpt:  [370.08 Kelem/s 370.53 Kelem/s 371.18 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking memory/recover_tail/64
+Benchmarking memory/recover_tail/64: Warming up for 1.0000 s
+Benchmarking memory/recover_tail/64: Collecting 10 samples in estimated 2.0018 s (12k iterations)
+Benchmarking memory/recover_tail/64: Analyzing
+memory/recover_tail/64  time:   [164.04 µs 164.38 µs 164.74 µs]
+                        thrpt:  [388.48 Kelem/s 389.34 Kelem/s 390.16 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking memory/recover_tail/256
+Benchmarking memory/recover_tail/256: Warming up for 1.0000 s
+Benchmarking memory/recover_tail/256: Collecting 10 samples in estimated 2.0115 s (2970 iterations)
+Benchmarking memory/recover_tail/256: Analyzing
+memory/recover_tail/256 time:   [659.61 µs 660.21 µs 661.41 µs]
+                        thrpt:  [387.05 Kelem/s 387.76 Kelem/s 388.11 Kelem/s]
+Found 3 outliers among 10 measurements (30.00%)
+  1 (10.00%) low severe
+  2 (20.00%) high severe
+Benchmarking memory/recover_tail/1024
+Benchmarking memory/recover_tail/1024: Warming up for 1.0000 s
+Benchmarking memory/recover_tail/1024: Collecting 10 samples in estimated 2.0798 s (770 iterations)
+Benchmarking memory/recover_tail/1024: Analyzing
+memory/recover_tail/1024
+                        time:   [2.6644 ms 2.6689 ms 2.6784 ms]
+                        thrpt:  [382.32 Kelem/s 383.68 Kelem/s 384.32 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
+Benchmarking memory/writer_contention/1
+Benchmarking memory/writer_contention/1: Warming up for 1.0000 s
+Benchmarking memory/writer_contention/1: Collecting 10 samples in estimated 2.0004 s (129k iterations)
+Benchmarking memory/writer_contention/1: Analyzing
+memory/writer_contention/1
+                        time:   [3.5525 µs 3.5646 µs 3.5734 µs]
+                        thrpt:  [279.85 Kelem/s 280.54 Kelem/s 281.49 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking memory/writer_contention/2
+Benchmarking memory/writer_contention/2: Warming up for 1.0000 s
+Benchmarking memory/writer_contention/2: Collecting 10 samples in estimated 2.0005 s (87k iterations)
+Benchmarking memory/writer_contention/2: Analyzing
+memory/writer_contention/2
+                        time:   [9.0442 µs 9.0684 µs 9.1051 µs]
+                        thrpt:  [219.66 Kelem/s 220.55 Kelem/s 221.14 Kelem/s]
+Benchmarking memory/writer_contention/8
+Benchmarking memory/writer_contention/8: Warming up for 1.0000 s
+Benchmarking memory/writer_contention/8: Collecting 10 samples in estimated 2.0022 s (30k iterations)
+Benchmarking memory/writer_contention/8: Analyzing
+memory/writer_contention/8
+                        time:   [41.181 µs 41.288 µs 41.590 µs]
+                        thrpt:  [192.35 Kelem/s 193.76 Kelem/s 194.26 Kelem/s]
+Found 3 outliers among 10 measurements (30.00%)
+  1 (10.00%) low mild
+  2 (20.00%) high severe
+Benchmarking memory/writer_contention/32
+Benchmarking memory/writer_contention/32: Warming up for 1.0000 s
+Benchmarking memory/writer_contention/32: Collecting 10 samples in estimated 2.0123 s (8250 iterations)
+Benchmarking memory/writer_contention/32: Analyzing
+memory/writer_contention/32
+                        time:   [174.02 µs 174.57 µs 175.28 µs]
+                        thrpt:  [182.56 Kelem/s 183.30 Kelem/s 183.88 Kelem/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+
+Benchmarking memory/gc/start/flat_live_1k
+Benchmarking memory/gc/start/flat_live_1k: Warming up for 1.0000 s
+Benchmarking memory/gc/start/flat_live_1k: Collecting 10 samples in estimated 2.2195 s (550 iterations)
+Benchmarking memory/gc/start/flat_live_1k: Analyzing
+memory/gc/start/flat_live_1k
+                        time:   [1.9674 ms 1.9723 ms 1.9747 ms]
+                        thrpt:  [506.41 Kelem/s 507.01 Kelem/s 508.27 Kelem/s]
+Benchmarking memory/gc/start/deep_live_1k
+Benchmarking memory/gc/start/deep_live_1k: Warming up for 1.0000 s
+Benchmarking memory/gc/start/deep_live_1k: Collecting 10 samples in estimated 2.0555 s (440 iterations)
+Benchmarking memory/gc/start/deep_live_1k: Analyzing
+memory/gc/start/deep_live_1k
+                        time:   [2.3982 ms 2.4129 ms 2.4429 ms]
+                        thrpt:  [409.36 Kelem/s 414.44 Kelem/s 416.98 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking memory/gc/start/half_live_wide_10k
+Benchmarking memory/gc/start/half_live_wide_10k: Warming up for 1.0000 s
+Benchmarking memory/gc/start/half_live_wide_10k: Collecting 10 samples in estimated 3.7088 s (110 iterations)
+Benchmarking memory/gc/start/half_live_wide_10k: Analyzing
+memory/gc/start/half_live_wide_10k
+                        time:   [13.369 ms 13.407 ms 13.440 ms]
+                        thrpt:  [744.05 Kelem/s 745.87 Kelem/s 747.98 Kelem/s]
+Benchmarking memory/gc/start/dead_100k
+Benchmarking memory/gc/start/dead_100k: Warming up for 1.0000 s
+
+Warning: Unable to complete 10 samples in 2.0s. You may wish to increase target time to 3.0s.
+Benchmarking memory/gc/start/dead_100k: Collecting 10 samples in estimated 3.0162 s (10 iterations)
+Benchmarking memory/gc/start/dead_100k: Analyzing
+memory/gc/start/dead_100k
+                        time:   [82.290 ms 82.627 ms 83.032 ms]
+                        thrpt:  [1.2044 Melem/s 1.2103 Melem/s 1.2152 Melem/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking memory/gc/fence_lookup/planned_ref_100k
+Benchmarking memory/gc/fence_lookup/planned_ref_100k: Warming up for 1.0000 s
+Benchmarking memory/gc/fence_lookup/planned_ref_100k: Collecting 10 samples in estimated 3.2222 s (110 iterations)
+Benchmarking memory/gc/fence_lookup/planned_ref_100k: Analyzing
+memory/gc/fence_lookup/planned_ref_100k
+                        time:   [29.219 ms 29.263 ms 29.291 ms]
+                        thrpt:  [3.4141 Melem/s 3.4173 Melem/s 3.4224 Melem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking memory/gc/resume/clean_1k
+Benchmarking memory/gc/resume/clean_1k: Warming up for 1.0000 s
+Benchmarking memory/gc/resume/clean_1k: Collecting 10 samples in estimated 2.1465 s (605 iterations)
+Benchmarking memory/gc/resume/clean_1k: Analyzing
+memory/gc/resume/clean_1k
+                        time:   [929.70 µs 932.39 µs 933.81 µs]
+                        thrpt:  [1.0709 Melem/s 1.0725 Melem/s 1.0756 Melem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking memory/gc/resume/partial_1001
+Benchmarking memory/gc/resume/partial_1001: Warming up for 1.0000 s
+Benchmarking memory/gc/resume/partial_1001: Collecting 10 samples in estimated 2.1929 s (495 iterations)
+Benchmarking memory/gc/resume/partial_1001: Analyzing
+memory/gc/resume/partial_1001
+                        time:   [865.18 µs 866.91 µs 868.91 µs]
+                        thrpt:  [1.1520 Melem/s 1.1547 Melem/s 1.1570 Melem/s]
+
+     Running unittests src/lib.rs (target/release/deps/object_log_git-2bd768f08540e12b)
+
+running 121 tests
+test durable::tests::cache_evicts_at_eight_mib_while_slices_keep_their_reservation ... ignored
+test durable::tests::cache_metadata_is_reserved_before_the_first_chunk_read ... ignored
+test durable::tests::catalog_preflight_rejects_derived_limit_without_gets ... ignored
+test durable::tests::catalog_reservation_releases_on_drop_and_cancel ... ignored
+test durable::tests::chunk_boundaries_are_exact_and_verified_chunks_are_cached ... ignored
+test durable::tests::collection_keeps_published_pack_tree_and_removes_unpublished_tree ... ignored
+test durable::tests::duplicate_ids_choose_the_lowest_pack_id_for_every_root_order ... ignored
+test durable::tests::empty_object_has_one_exact_zlib_stream ... ignored
+test durable::tests::entries_reject_crc_zlib_trailing_bytes_and_wrong_oid ... ignored
+test durable::tests::fetch_output_accepts_the_raw_maximum_and_rejects_the_next_byte ... ignored
+test durable::tests::fetch_output_reservation_lives_with_bytes_and_releases_on_cancel ... ignored
+test durable::tests::fetch_pack_preflight_and_work_fail_before_object_gets ... ignored
+test durable::tests::fetch_pack_rejects_a_missing_immediate_delta_base ... ignored
+test durable::tests::fetch_pack_reuses_full_and_ref_delta_streams_for_both_formats ... ignored
+test durable::tests::fetch_pack_writes_empty_sha1_and_sha256_packs ... ignored
+test durable::tests::indexes_reject_corrupt_checksums_fans_ids_and_offsets ... ignored
+test durable::tests::inflate_memory_and_hash_work_fail_before_cached_decode ... ignored
+test durable::tests::malformed_variable_geometry_is_rejected_before_blob_reads ... ignored
+test durable::tests::multi_level_ofs_and_ref_delta_chains_round_trip_with_limits ... ignored
+test durable::tests::nodes_reject_wrong_child_kind_lengths_and_descriptor_bytes ... ignored
+test durable::tests::sha1_and_sha256_stage_load_and_sparse_find_match_git ... ignored
+test durable::tests::stage_reserves_exact_maximum_before_writes_and_through_root_put ... ignored
+test durable::tests::variable_chunks_authenticate_geometry_and_keep_reads_sparse ... ignored
+test format::tests::duplicate_and_unordered_items_are_rejected ... ignored
+test format::tests::records_have_one_strict_encoding ... ignored
+test git::local::tests::creates_opens_and_materializes_both_formats ... ignored
+test git::local::tests::enforces_ref_and_branch_policy ... ignored
+test git::local::tests::rejects_missing_and_corrupt_reachable_objects ... ignored
+test git::tests::normalizes_a_thin_pack_with_a_repository_base ... ignored
+test git::tests::normalizes_installs_and_reads_sha1_and_sha256 ... ignored
+test git::tests::rejects_corruption_and_excess_object_count ... ignored
+test graph::tests::both_hashes_visit_merge_parents_nested_tags_and_skip_blob_bodies_and_gitlinks ... ignored
+test graph::tests::deep_history_uses_a_deduplicated_iterative_queue ... ignored
+test graph::tests::malformed_and_truncated_objects_fail_instead_of_hiding_iterator_errors ... ignored
+test graph::tests::missing_objects_and_conflicting_declared_or_actual_kinds_fail ... ignored
+test graph::tests::object_limit_rejects_before_reads_and_work_stays_cumulative ... ignored
+test graph::tests::tag_to_a_tree_leaf_defers_blob_content_verification ... ignored
+test graph::tests::wide_repeated_edges_keep_one_leaf_and_reserve_before_allocation ... ignored
+test pack::budget::tests::admission_reservations_and_slices_release_on_last_drop ... ignored
+test pack::budget::tests::cancellation_releases_admission_and_reserved_memory ... ignored
+test pack::budget::tests::counters_accept_exact_limits_and_reject_the_next_unit ... ignored
+test pack::budget::tests::reservation_growth_and_shrink_have_exact_bounds ... ignored
+test pack::budget::tests::state_phase_is_shared_and_failed_growth_rolls_back ... ignored
+test pack::tests::accepts_empty_sha1_and_sha256_packs ... ignored
+test pack::tests::delta_integer_rejects_target_width_overflow_and_truncation ... ignored
+test pack::tests::enforces_the_git_generator_delta_depth_limit ... ignored
+test pack::tests::normalized_storage_can_exceed_the_network_input_limit ... ignored
+test pack::tests::normalizes_a_ref_delta_before_its_in_pack_base ... ignored
+test pack::tests::normalizes_base_ofs_and_in_pack_ref_objects ... ignored
+test pack::tests::normalizes_sha256_objects ... ignored
+test pack::tests::rejects_bad_external_base_evidence ... ignored
+test pack::tests::rejects_corrupt_or_ambiguous_pack_structure ... ignored
+test pack::tests::rejects_each_resource_limit_before_returning_a_pack ... ignored
+test pack::tests::resolves_a_thin_ref_delta_from_a_supplied_base ... ignored
+test pack::tests::thin_pack_work_has_an_exact_operation_boundary ... ignored
+test receive::tests::cancellation_releases_helper_and_reader_reservations ... ignored
+test receive::tests::gix_missing_id_can_be_an_unresolved_internal_chain_base ... ignored
+test receive::tests::internal_ref_chain_needs_no_store_lookup ... ignored
+test receive::tests::missing_base_and_exhausted_budgets_do_not_read_storage ... ignored
+test receive::tests::mixed_chains_prune_redundant_durable_candidates ... ignored
+test receive::tests::original_duplicates_and_corrupt_packs_are_not_repaired ... ignored
+test receive::tests::resolves_true_thin_base_and_releases_retained_memory ... ignored
+test receive::tests::round_budget_is_checked_before_an_available_base_get ... ignored
+test receive::tests::unavailable_root_does_not_refetch_a_supplied_intermediate ... ignored
+test repository::tests::checkpoint_preserves_conflict_and_pending_outcomes ... ignored
+test repository::tests::checkpoint_reuses_materialized_pack_proofs_without_graph_reads ... ignored
+test repository::tests::common_checkpoint_preserves_live_pack_and_collects_dead_pack ... ignored
+test repository::tests::common_open_accepts_384_transaction_history ... ignored
+test repository::tests::common_receive_active_collection_charges_plan_before_staging ... ignored
+test repository::tests::common_receive_checks_every_leaf_and_rejects_missing_objects ... ignored
+test repository::tests::common_receive_conflict_and_lost_response_keep_exact_candidate ... ignored
+test repository::tests::common_receive_expired_view_retry_keeps_cumulative_operation ... ignored
+test repository::tests::common_receive_fast_forward_branch_kind_and_tag_updates ... ignored
+test repository::tests::common_receive_pending_never_reports_success ... ignored
+test repository::tests::common_receive_publish_recovery_ref_only_and_delete ... ignored
+test repository::tests::common_receive_ref_namespace_applies_deletions_atomically ... ignored
+test repository::tests::common_receive_rejects_stale_atomic_duplicate_and_corrupt_pack ... ignored
+test repository::tests::common_receive_true_thin_pack_uses_same_view_verified_base ... ignored
+test repository::tests::common_repository_preflights_state_and_releases_cancelled_load ... ignored
+test repository::tests::common_repository_retains_one_authenticated_exact_view ... ignored
+test repository::tests::decode_admission_covers_dense_malformed_ref_vectors ... ignored
+test repository::tests::delete_only_stages_no_pack_and_two_writers_conflict ... ignored
+test repository::tests::head_transfer_is_charged_before_read_and_after_retry ... ignored
+test repository::tests::large_cold_recovery_installs_the_complete_final_write ... ignored
+test repository::tests::lost_response_resumes_without_restaging_the_pack ... ignored
+test repository::tests::materialization_rejects_before_tail_reads_without_resetting_budget ... ignored
+test repository::tests::native_stored_read_accepts_exact_limit_and_rejects_next_byte ... ignored
+test repository::tests::oversized_publication_options_return_a_bounded_error ... ignored
+test repository::tests::publishes_and_cold_recovers_both_object_formats ... ignored
+test repository::tests::refuses_nonempty_work_directory_without_deleting_it ... ignored
+test repository::tests::rejects_loose_objects_that_are_not_in_a_durable_pack ... ignored
+test repository::tests::selected_fetch_matches_git_and_includes_complete_tag_chains ... ignored
+test repository::tests::selected_fetch_rejects_wrong_tree_and_tag_leaf_kinds ... ignored
+test repository::tests::stateless_fetch_accepts_an_old_reachable_tip ... ignored
+test repository::tests::upload_expired_view_reopens_once_with_the_original_budget ... ignored
+test repository::tests::upload_limits_fail_before_io_and_response_retains_its_memory ... ignored
+test repository::tests::upload_ls_refs_peels_full_filtered_tag_chains ... ignored
+test repository::tests::upload_ls_refs_rejects_incorrect_final_tag_kind ... ignored
+test repository::tests::upload_v2_discovers_refs_negotiates_and_frames_both_hashes ... ignored
+test state::tests::checkpoint_round_trips_empty_pack_set ... ignored
+test state::tests::pack_descriptors_stay_aligned_with_roots ... ignored
+test state::tests::transaction_is_sorted_and_applied_atomically ... ignored
+test tests::public_values_reject_invalid_inputs ... ignored
+test wire::tests::accepts_optional_line_feeds_and_empty_prefixes ... ignored
+test wire::tests::enforces_output_count_limits_without_partial_output ... ignored
+test wire::tests::enforces_packet_and_reason_limits_before_output ... ignored
+test wire::tests::enforces_receive_control_command_and_pack_limits ... ignored
+test wire::tests::enforces_upload_count_and_byte_limits ... ignored
+test wire::tests::parses_fetch_flags_and_deduplicates_negotiation_ids ... ignored
+test wire::tests::parses_git_254_ls_refs_fixture_without_copying_prefixes ... ignored
+test wire::tests::parses_git_254_receive_fixture_and_borrows_pack ... ignored
+test wire::tests::receive_defaults_sha1_accepts_line_feeds_and_enforces_pack_shape ... ignored
+test wire::tests::rejects_invalid_receive_capabilities_commands_and_pack ... ignored
+test wire::tests::rejects_invalid_upload_framing_and_arguments ... ignored
+test wire::tests::upload_advertisement_matches_protocol_v2 ... ignored
+test wire::tests::validates_complete_advertisements_before_output ... ignored
+test wire::tests::writes_classic_receive_advertisements ... ignored
+test wire::tests::writes_exact_ls_refs_fixture ... ignored
+test wire::tests::writes_exact_receive_statuses ... ignored
+test wire::tests::writes_fetch_sections_and_maximum_sideband_chunks ... ignored
+test wire::tests::writes_sha256_ids_and_rejects_mixed_formats_before_output ... ignored
+
+test result: ok. 0 passed; 0 failed; 121 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/git.rs (target/release/deps/git-cbbf0b2d6b37a969)
+Gnuplot not found, using plotters backend
+Benchmarking git/publication/pack/small
+Benchmarking git/publication/pack/small: Warming up for 1.0000 s
+Benchmarking git/publication/pack/small: Collecting 10 samples in estimated 8.0710 s (1870 iterations)
+Benchmarking git/publication/pack/small: Analyzing
+git/publication/pack/small
+                        time:   [978.23 µs 989.96 µs 999.08 µs]
+                        thrpt:  [4.1151 MiB/s 4.1530 MiB/s 4.2028 MiB/s]
+Benchmarking git/publication/pack/chunked_8_mib
+Benchmarking git/publication/pack/chunked_8_mib: Warming up for 1.0000 s
+Benchmarking git/publication/pack/chunked_8_mib: Collecting 10 samples in estimated 11.084 s (110 iterations)
+Benchmarking git/publication/pack/chunked_8_mib: Analyzing
+git/publication/pack/chunked_8_mib
+                        time:   [93.824 ms 95.144 ms 96.595 ms]
+                        thrpt:  [82.848 MiB/s 84.111 MiB/s 85.294 MiB/s]
+
+Benchmarking git/checkpoint/pack/small
+Benchmarking git/checkpoint/pack/small: Warming up for 1.0000 s
+Benchmarking git/checkpoint/pack/small: Collecting 10 samples in estimated 8.2084 s (935 iterations)
+Benchmarking git/checkpoint/pack/small: Analyzing
+git/checkpoint/pack/small
+                        time:   [14.559 µs 14.951 µs 15.598 µs]
+                        thrpt:  [263.58 MiB/s 274.98 MiB/s 282.38 MiB/s]
+Benchmarking git/checkpoint/pack/chunked_8_mib
+Benchmarking git/checkpoint/pack/chunked_8_mib: Warming up for 1.0000 s
+
+Warning: Unable to complete 10 samples in 8.0s. You may wish to increase target time to 8.3s or enable flat sampling.
+Benchmarking git/checkpoint/pack/chunked_8_mib: Collecting 10 samples in estimated 8.2981 s (55 iterations)
+Benchmarking git/checkpoint/pack/chunked_8_mib: Analyzing
+git/checkpoint/pack/chunked_8_mib
+                        time:   [44.199 µs 51.034 µs 57.222 µs]
+                        thrpt:  [136.57 GiB/s 153.13 GiB/s 176.82 GiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+
+Benchmarking git/cold_recovery/pack/small
+Benchmarking git/cold_recovery/pack/small: Warming up for 1.0000 s
+Benchmarking git/cold_recovery/pack/small: Collecting 10 samples in estimated 8.1050 s (1210 iterations)
+Benchmarking git/cold_recovery/pack/small: Analyzing
+git/cold_recovery/pack/small
+                        time:   [3.5002 ms 3.6325 ms 3.9082 ms]
+                        thrpt:  [1.0520 MiB/s 1.1318 MiB/s 1.1746 MiB/s]
+Benchmarking git/cold_recovery/pack/chunked_8_mib
+Benchmarking git/cold_recovery/pack/chunked_8_mib: Warming up for 1.0000 s
+Benchmarking git/cold_recovery/pack/chunked_8_mib: Collecting 10 samples in estimated 9.4272 s (165 iterations)
+Benchmarking git/cold_recovery/pack/chunked_8_mib: Analyzing
+git/cold_recovery/pack/chunked_8_mib
+                        time:   [49.228 ms 50.100 ms 52.244 ms]
+                        thrpt:  [153.18 MiB/s 159.73 MiB/s 162.56 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
+     Running unittests src/lib.rs (target/release/deps/object_log_git_http-164794a572620bcf)
+
+running 10 tests
+test server::tests::response_reader_owns_its_concurrency_permit ... ignored
+test server::tests::routes_apply_git_metadata_and_client_error_statuses ... ignored
+test server::tests::streamed_request_and_protocol_limits_are_enforced ... ignored
+test shared::tests::decoded_body_has_an_exact_bound ... ignored
+test shared::tests::protocol_header_requires_one_exact_version ... ignored
+test tests::fragmented_pack_header_is_accepted ... ignored
+test tests::negotiation_round_returns_only_nak ... ignored
+test tests::receive_requires_capabilities_and_writes_no_false_success ... ignored
+test tests::service_metadata_is_exact ... ignored
+test tests::upload_distinguishes_negotiation_from_done ... ignored
+
+test result: ok. 0 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/release/deps/object_log_git_http-090de0d12118ad7b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/object_log_git_spin-8e6e918211d73cd4)
+
+running 7 tests
+test tests::compressed_input_is_bounded_after_expansion ... ignored
+test tests::concatenated_gzip_members_are_preserved ... ignored
+test tests::input_limit_is_checked_before_append ... ignored
+test transport::tests::connector_clones_share_bootstrap_and_command_quota ... ignored
+test transport::tests::exhausted_calls_fail_before_entering_wasi_http ... ignored
+test transport::tests::overall_deadline_cannot_be_silently_ignored ... ignored
+test transport::tests::quota_accepts_exact_limits_and_rejects_overflow_without_wrapping ... ignored
+
+test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/object_log_kv-3785b03bb0d88490)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/object_log_sqlite-0342934a387875dc)
+
+running 6 tests
+test format::tests::decoder_rejects_invalid_record_classes ... ignored
+test format::tests::snapshot_and_wal_have_stable_canonical_bytes ... ignored
+test tests::complete_wal_validation_rejects_corruption ... ignored
+test tests::journal_pointer_reads_only_the_committed_wal_prefix ... ignored
+test tests::reset_ignores_an_old_physical_suffix_and_changes_salts ... ignored
+test wal::tests::header_checksum_word_order_follows_the_magic ... ignored
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/sqlite.rs (target/release/deps/sqlite-8db75be7dff69713)
+Gnuplot not found, using plotters backend
+Benchmarking sqlite/transaction/small/direct
+Benchmarking sqlite/transaction/small/direct: Warming up for 1.0000 s
+Benchmarking sqlite/transaction/small/direct: Collecting 10 samples in estimated 2.0063 s (16k iterations)
+Benchmarking sqlite/transaction/small/direct: Analyzing
+sqlite/transaction/small/direct
+                        time:   [50.824 µs 64.194 µs 74.426 µs]
+                        thrpt:  [839.76 KiB/s 973.62 KiB/s 1.2009 MiB/s]
+Benchmarking sqlite/transaction/small/adapter
+Benchmarking sqlite/transaction/small/adapter: Warming up for 1.0000 s
+Benchmarking sqlite/transaction/small/adapter: Collecting 10 samples in estimated 2.0090 s (2860 iterations)
+Benchmarking sqlite/transaction/small/adapter: Analyzing
+sqlite/transaction/small/adapter
+                        time:   [63.220 µs 84.739 µs 147.20 µs]
+                        thrpt:  [424.60 KiB/s 737.56 KiB/s 988.62 KiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+
+Benchmarking sqlite/transaction/1_mib/direct
+Benchmarking sqlite/transaction/1_mib/direct: Warming up for 1.0000 s
+Benchmarking sqlite/transaction/1_mib/direct: Collecting 10 samples in estimated 2.1692 s (440 iterations)
+Benchmarking sqlite/transaction/1_mib/direct: Analyzing
+sqlite/transaction/1_mib/direct
+                        time:   [4.0037 ms 4.0218 ms 4.0342 ms]
+                        thrpt:  [247.88 MiB/s 248.65 MiB/s 249.77 MiB/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking sqlite/transaction/1_mib/adapter
+Benchmarking sqlite/transaction/1_mib/adapter: Warming up for 1.0000 s
+Benchmarking sqlite/transaction/1_mib/adapter: Collecting 10 samples in estimated 2.0096 s (220 iterations)
+Benchmarking sqlite/transaction/1_mib/adapter: Analyzing
+sqlite/transaction/1_mib/adapter
+                        time:   [4.0176 ms 4.2111 ms 4.5365 ms]
+                        thrpt:  [220.43 MiB/s 237.47 MiB/s 248.90 MiB/s]
+
+Benchmarking sqlite/transaction/1_mib_chunked/adapter
+Benchmarking sqlite/transaction/1_mib_chunked/adapter: Warming up for 1.0000 s
+Benchmarking sqlite/transaction/1_mib_chunked/adapter: Collecting 10 samples in estimated 2.8478 s (165 iterations)
+Benchmarking sqlite/transaction/1_mib_chunked/adapter: Analyzing
+sqlite/transaction/1_mib_chunked/adapter
+                        time:   [5.2251 ms 5.4692 ms 6.0058 ms]
+                        thrpt:  [166.51 MiB/s 182.84 MiB/s 191.38 MiB/s]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+
+Benchmarking sqlite/read/adapter/unchanged_refresh
+Benchmarking sqlite/read/adapter/unchanged_refresh: Warming up for 1.0000 s
+Benchmarking sqlite/read/adapter/unchanged_refresh: Collecting 10 samples in estimated 2.0000 s (1.6M iterations)
+Benchmarking sqlite/read/adapter/unchanged_refresh: Analyzing
+sqlite/read/adapter/unchanged_refresh
+                        time:   [1.3030 µs 1.3401 µs 1.3558 µs]
+
+Benchmarking sqlite/conflict/adapter/publish_and_rebuild
+Benchmarking sqlite/conflict/adapter/publish_and_rebuild: Warming up for 1.0000 s
+Benchmarking sqlite/conflict/adapter/publish_and_rebuild: Collecting 10 samples in estimated 2.1365 s (770 iterations)
+Benchmarking sqlite/conflict/adapter/publish_and_rebuild: Analyzing
+sqlite/conflict/adapter/publish_and_rebuild
+                        time:   [409.86 µs 427.34 µs 461.33 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
+Benchmarking sqlite/cold_recovery/tail/10
+Benchmarking sqlite/cold_recovery/tail/10: Warming up for 1.0000 s
+Benchmarking sqlite/cold_recovery/tail/10: Collecting 10 samples in estimated 2.0350 s (2640 iterations)
+Benchmarking sqlite/cold_recovery/tail/10: Analyzing
+sqlite/cold_recovery/tail/10
+                        time:   [449.21 µs 469.40 µs 495.51 µs]
+                        thrpt:  [20.181 Kelem/s 21.304 Kelem/s 22.261 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking sqlite/cold_recovery/tail/1000
+Benchmarking sqlite/cold_recovery/tail/1000: Warming up for 1.0000 s
+Benchmarking sqlite/cold_recovery/tail/1000: Collecting 10 samples in estimated 2.0311 s (110 iterations)
+Benchmarking sqlite/cold_recovery/tail/1000: Analyzing
+sqlite/cold_recovery/tail/1000
+                        time:   [13.457 ms 13.897 ms 14.497 ms]
+                        thrpt:  [68.978 Kelem/s 71.956 Kelem/s 74.309 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking sqlite/checkpoint/database/1_mib
+Benchmarking sqlite/checkpoint/database/1_mib: Warming up for 1.0000 s
+Benchmarking sqlite/checkpoint/database/1_mib: Collecting 10 samples in estimated 2.1956 s (275 iterations)
+Benchmarking sqlite/checkpoint/database/1_mib: Analyzing
+sqlite/checkpoint/database/1_mib
+                        time:   [1.9406 ms 1.9705 ms 2.0034 ms]
+                        thrpt:  [499.15 MiB/s 507.48 MiB/s 515.30 MiB/s]
+Benchmarking sqlite/checkpoint/database/100_mib
+Benchmarking sqlite/checkpoint/database/100_mib: Warming up for 1.0000 s
+
+Warning: Unable to complete 10 samples in 2.0s. You may wish to increase target time to 8.9s.
+Benchmarking sqlite/checkpoint/database/100_mib: Collecting 10 samples in estimated 8.8805 s (10 iterations)
+Benchmarking sqlite/checkpoint/database/100_mib: Analyzing
+sqlite/checkpoint/database/100_mib
+                        time:   [193.85 ms 207.90 ms 223.71 ms]
+                        thrpt:  [447.02 MiB/s 481.01 MiB/s 515.85 MiB/s]
+

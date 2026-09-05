@@ -1,145 +1,104 @@
 # object-log handoff
 
-Updated: 2026-09-04 (Tasks 8 and 9 accepted)
+Updated: 2026-09-04, final adapter qualification.
 
-## Start here
+## Intent
 
-Read these files in order:
+The standalone, byte-oriented object-storage log is the product. Complete,
+usable examples prove its correctness and ease of integration. Git is a real
+use case from which to improve generic capabilities; keep Git rules in the Git
+crate. Cursor's “Git at any scale” is the design inspiration. The core remains
+independent from Spin, while the same library runs in a Spin WASIp2 adapter.
 
-1. `AGENTS.md`
-2. `GIT_PLAN.md`
-3. `docs/evidence/git-fetch-pack-2026-09-04.md`
-4. This file
+Read `AGENTS.md`, `GIT_PLAN.md`, and the evidence linked below. Source-size
+thresholds are architecture review signals; required behavior is preserved.
 
-Task 3 was integrated at `ae65d80`. Its preserved local
-worktree is:
+## Accepted main and active work
+
+Main is pushed through `b4b05f3` (Tasks 1–9). Hosted Linux CI run
+33938325701 passed. Task 3's authenticated variable geometry preserves all
+three original small-object-limit GC tests. Its original worktree and branch
+remain preserved. Later accepted work adds command-local catalogs, bounded
+iterative traversal, exact have-aware selection, protocol-v2 upload commands,
+thin receive normalization, atomic ref publication, and shared checkpointing.
+
+The combined adapter work is in:
 
 ```text
-/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-repository-task3
+/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared
+cf/git-native-shared
 ```
 
-## Goal
+Native and Spin adapters use the same common repository for both hashes.
+Classic receive supports default Git's flush-only HTTP probe before chunked
+large pushes. Both adapters preserve exact recovery tokens on uncertain
+publication, including invalid resolution evidence after a hidden successful
+head write. The native path finishes admitted publication after disconnect
+and drains its task tracker on shutdown.
 
-Build a small, fast object-storage WAL for higher-level storage systems. Keep
-the core byte-oriented and independent from Spin. The KV, SQLite, and Git
-crates prove the public API.
+## Current evidence
 
-Owner clarification: the examples must be complete and usable, and must prove
-ease of integration as well as correctness. Git is a real use case from which
-to improve the standalone log API. Classify complexity as domain behavior,
-a missing generic capability, or unnecessary integration machinery, and fix
-the appropriate layer. Cursor's "Git at any scale" is the design inspiration.
+- Combined workspace gate: 359 passed, 12 opt-in ignored; formatting, strict
+  native Clippy, and locked WASIp2 check passed. Separate core and Spin WASIp2
+  strict checks and release component builds pass.
+- Unchanged native clients pass both hashes, v2 traces, 384-commit negotiation,
+  default 8 MiB push/clone, rejection, checkpoint, GC, and cold recovery.
+- Seven native fault tests cover cancellation, real TCP disconnect, pending and
+  expired tokens, corrupt resolution evidence, admission, and body/header limits.
+- Actual WASIp2 memory-store lifecycle passes both hashes for 4 KiB, 8 MiB,
+  and 384-commit plus thin update fixtures, with exact OIDs and strict Git checks.
+- Native/shared/Spin local MinIO lifecycles pass. The final Spin run includes
+  collection followed by a fresh host and strict cold clone, with unpooled
+  outbound HTTP. No live AWS run is claimed.
+- Preserved extended SQLite recovery, staged request accounting, native Git
+  request audit, workspace Criterion, and large memory/MinIO GC gates pass.
+- Independent Rust correctness, simplification, architecture, quota, and
+  adversarial reviews completed; findings were repaired. Final WASIp2 paired
+  performance evidence and prose review are being completed before integration.
 
-The Git proof must keep its full target:
+Evidence:
 
-- Git protocol-v2 discovery, clone, and have-aware fetch;
-- classic receive-pack push;
-- SHA-1 and SHA-256;
-- a WASI-compatible core and a later Spin adapter;
-- memory, filesystem, and local MinIO acceptance;
-- recovery, collection, limits, benchmarks, and unchanged Git client tests.
+- `docs/evidence/git-receive-2026-09-04.md`
+- `docs/evidence/git-adapter-regression-2026-09-04.md`
+- `docs/evidence/git-shared-performance-2026-09-04.md`
+- `docs/evidence/git-wasip2-memory-2026-09-04.md`
+- `docs/evidence/git-spin-linux-2026-09-04.md`
+- `docs/evidence/git-final-architecture-2026-09-04.md`
 
-Do not remove a required feature to meet a source-size estimate. The 5,000-line
-core target and 2,000-line proof target are architecture review signals. Report
-and justify material overage. Correct behavior and measured performance have
-priority.
+## Spin deployment constraint
 
-## Accepted foundations
+A fresh Linux Spin process using a prepared executable cache passes the
+both-hash workload inside a hard 128 MiB cgroup with swap disabled. Both runs
+reach the cap and trigger reclaim; no spare process-memory margin is established.
+Empty-cache compilation is OOM-killed under 128 MiB. Prepare the exact component's
+cache on the deployment platform outside the serving cgroup using
+`crates/object-log-git-spin/prewarm_cache.py`, then serve with `run.sh --cache`.
+Cache setup peaked at roughly 228–231 MB in the recorded runs.
 
-Task 2 is accepted at `b322985`. Its private fetch-pack writer supports both
-hash formats, validated compressed-entry reuse, and full-object fallback when
-a delta base is absent from the selected set. It passed Git 2.54 strict pack
-validation, native checks, and locked WASIp2 checks. The native oracle remains
-until replacement client and storage parity is proven.
+The compiled-code cache contains no repository authority. Losing it requires
+recompilation; repository recovery still needs only the object-log head and
+immutable store objects. `run.sh` forces one pooled component instance and
+disables outbound connection pooling. Earlier pooled transport runs had an
+intermittent WASI protocol error; its cause is not proven. Successful unpooled
+runs and the prior failure are both recorded.
 
-## Task 3 acceptance
+## Preserved boundaries and follow-ons
 
-Task 3 now passes all local gates after authenticated variable chunk geometry
-and repository allocation/accounting repairs. The focused fixes are `1eabf9c`
-(geometry) and `c578b22` (bounds). The current branch also contains the latest
-main documentation. See `docs/evidence/git-repository-2026-09-04.md`.
+- The head remains the only mutable durable authority; local state is disposable.
+- Sparse range reads remain. Catalog, graph, pack, transfer, and retry accounting
+  stay bounded; all engine counters accumulate across one expired-view retry.
+- Spin's handler-wide connector budget also includes backend probes and log open:
+  512 outgoing attempts and 96 MiB accepted/sent payload. Headers and bytes
+  already buffered by the remote transport are outside that payload ledger.
+- The native oracle remains selectable. Its deletion is deferred until runtime
+  and performance qualification and any required owner review are complete.
+- Each live pack requires a catalog-root read. Issue #19 tracks compaction;
+  the current proof does not establish arbitrary repository scale.
+- Generic local filesystem storage lacks conditional compare-and-swap. Its
+  rejection tests and native disposable-filesystem oracle tests remain.
 
-- 303 workspace tests passed, 9 opt-in tests ignored.
-- All 3 Git GC tests preserve their original 8,240-byte/16 KiB object limits.
-- Strict native Clippy and locked WASIp2 check/Clippy passed.
-- Independent Rust correctness and simplification reviews completed; findings
-  were fixed, including pre-allocation rejection of impossible core node counts.
+Git replacement: https://github.com/carsonfarmer/object-log/issues/17
 
-## Task 4 acceptance
+Compaction: https://github.com/carsonfarmer/object-log/issues/19
 
-Task 4 adds command-local catalogs and bounded iterative graph traversal.
-Seven focused graph tests and the full gate pass (311 passed, 9 ignored).
-Independent correctness/simplification review approved after fixing tag-blob
-reads and nonadjacent duplicate tree names. See
-`docs/evidence/git-graph-2026-09-04.md`.
-
-Hosted Linux CI run 33935170712 passed at `f210cc7`, including the native
-loopback that previously failed. The flush fix remains a source-proven repair;
-we did not reproduce the earlier hosted failure locally.
-
-## Tasks 5 and 6 acceptance
-
-Exact want-minus-have selection and complete include-tag chains now produce
-both-hash packs checked in fresh receivers containing only accepted-have
-history. Selected leaves verify their declared type; unrelated leaves remain
-unread. Independent correctness review approved after those repairs. The full
-gate passes (313 passed, 9 opt-in tests ignored), including native strict Clippy
-and locked WASIp2 check/Clippy. See `docs/evidence/git-selection-2026-09-04.md`.
-
-## Task 7 acceptance
-
-Protocol-v2 discovery, ls-refs, ACK-only negotiation, and done-fetch use the
-common repository. Responses retain memory reservations through transmission;
-one expired-view retry shares counters with open. Matching tag refs are fully
-peeled with actual-kind checks. Independent review found and repaired the final
-target-kind gap. The full workspace gate passes (318 passed, 9 ignored), with
-strict native and WASIp2 checks. See `docs/evidence/git-upload-2026-09-04.md`.
-
-## Tasks 8 and 9 acceptance
-
-Thin-base resolution, complete ref validation, atomic preparation/publication,
-and shared checkpointing pass the full workspace gate (339 passed, 9 ignored)
-and strict WASIp2 Clippy. Independent correctness and simplification findings
-were repaired, including collection-plan accounting and overflow-safe
-publication bounds. See `docs/evidence/git-receive-2026-09-04.md`.
-
-## Next actions
-
-Tasks 10–12 are assembled for integration in `.object-log-worktrees/git-native-shared`.
-The common receive/checkpoint path and native adapter are passing focused real
-Git client tests for both hashes. Full gates, fault tests, performance evidence,
-and replacement MinIO acceptance are running before integration. Thin helper
-and receive branches remain preserved. Spin adapter work is isolated in
-`.object-log-worktrees/git-spin-adapter`.
-
-The owner reaffirmed Spin serverless compatibility as a design constraint.
-A separate `cf/spin-transport-probe` worktree is testing Spin SDK 5.2 with the
-established object_store S3 implementation and a WASI HTTP connector. This is
-a probe, not an accepted adapter. Keep native-only dependencies out of the
-common libraries and verify actual component imports as well as compilation.
-
-## Decisions and risks
-
-- The object-log head remains the only mutable durable authority.
-- Immutable objects use deterministic content IDs and random physical IDs for
-  safe deletion.
-- Keep the sparse range-read design. Do not replace it with whole-pack loading
-  only to reduce source lines.
-- Keep all operation counters cumulative across one expired-view retry.
-- Buffer and validate a response before returning bytes.
-- Each live Git pack adds one catalog-root GET. Issue #19 tracks compaction.
-  This does not block a small trial, but it blocks a scale claim.
-- `sley-protocol` 0.5.2 compiles for Rust 1.97 and WASIp2 and could reduce wire
-  code. It is not adopted. Reconsider it only after the current path works and
-  a measured simplification review shows a clear net benefit.
-- `gitserver-core` is filesystem-bound and does not compile for the accepted
-  WASIp2 path. Do not use it.
-
-## Tracking
-
-- Git replacement: https://github.com/carsonfarmer/object-log/issues/17
-- Git pack compaction: https://github.com/carsonfarmer/object-log/issues/19
-- Live AWS qualification: https://github.com/carsonfarmer/object-log/issues/10
-- Roadmap and limitations: https://github.com/carsonfarmer/object-log/issues/11
-
-No live AWS test has run. Local MinIO qualification remains a later gate.
+Live AWS: https://github.com/carsonfarmer/object-log/issues/10

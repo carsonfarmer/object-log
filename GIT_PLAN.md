@@ -21,6 +21,12 @@ The core `object-log` crate remains independent from Git.
 
 ## Current state
 
+Tasks 1–9 are accepted on main at `b4b05f3`. The shared native and Spin adapters
+are implemented and undergoing final provider, runtime, performance, and
+independent review gates. The native oracle remains available. The historical
+foundation counts below describe their stated revision, not current size.
+
+
 Revision `b322985c616d948e7365739e3286baeaeb460acc` completes tasks 1 and 2 with
 four private, host-neutral foundations:
 
@@ -45,9 +51,9 @@ task-2 writer. The modules support SHA-1 and SHA-256. The native crate and the
 no-default-feature WASIp2 target pass standalone checks. The manifest declares
 the Tokio runtime support used by the native oracle.
 
-Task 3 connects durable state through the common `Repository`. Graph selection
-and wire command integration remain before a real Git v2 client trial. Task 4 makes catalogs command-local and supplies bounded iterative graph
-traversal. Exact selection and protocol integration remain.
+Tasks 3–9 connect durable state, command-local catalogs, graph traversal, exact
+selection, upload commands, and receive preparation/publication through the
+common `Repository`.
 
 The native proof remains the client and storage oracle. It uses a disposable
 bare repository and high-level `gix` APIs. It supports atomic ref transactions,
@@ -94,7 +100,10 @@ pre-release API correction.
 
 Do not add public `Engine`, `Service`, `Outcome`, `Catalog`, or `Reader` types.
 Packet parsing, graph traversal, pack creation, budgets, and object-log state
-remain private. Receive-pack and its publication surface remain later tasks.
+remain private. `prepare_receive` returns a `PreparedPush`; its
+`publish_receive` returns resolution and bounded wire bytes. Retain its opaque
+recovery token before publishing. `View::collection_plan_bytes` supplies generic
+authenticated size metadata for publication accounting.
 
 The native HTTP and Spin adapters must call the same `Repository` path. The
 adapters can enforce smaller transport limits, but they cannot weaken the
@@ -126,8 +135,9 @@ for its complete behavior.
 
 ## Memory and operation budgets
 
-The process admits one active Git engine operation. All repositories share one
-88 MiB live allocation pool. All requests in the process share this limit.
+The native process admits one active Git engine operation through an 88 MiB
+shared live allocation pool. In WASI that static pool belongs to one component
+instance; the qualified Spin launcher forces one live instance.
 
 | Process memory | Budget |
 | --- | ---: |
@@ -308,8 +318,11 @@ native deletion. Record noisy results as inconclusive.
 
 After the Spin component exists, measure a fresh process with
 `--max-instance-memory 134217728` and `/usr/bin/time -l`. A peak at or below
-120 MiB is a provisional target, not a hard gate. A later Linux test must
-enforce a 128 MiB cgroup and prove that the host survives the workload.
+120 MiB is a provisional target, not a hard gate. The [Linux qualification](docs/evidence/git-spin-linux-2026-09-04.md) now proves
+that fresh processes with a prepared executable cache survive the both-hash
+workload inside a 128 MiB no-swap cgroup. They reach the cap, so no spare margin
+is established. Empty-cache compilation fails at that limit; the documented
+deployment prepares the exact component cache outside the serving cgroup.
 
 No tighter call-count or serial-depth performance gate exists yet. Measurement
 code must add zero product lines; keep it in test and support code. A failed
@@ -328,11 +341,18 @@ Count product and test lines separately from revision `2ee2174`.
 | Tests | Add 1,600–2,400 | Report separately |
 
 At revision `b322985`, the private replacement foundation has 2,189 raw product
-lines. The combined Git and HTTP implementation has 4,970 raw product lines.
+lines. The combined Git and HTTP implementation has 5,101 raw product lines under
+consistent top-level test-module counting; the earlier 4,970 count accidentally
+truncated production code at an inline test-only helper.
 Task 2 stayed within its separate source-size gate. The native deletion target
 remains 2,165 product lines. After that deletion, the expected Git, HTTP, and
 Spin total is 3,480–4,125 product lines. Require architecture review if it
 exceeds 4,150.
+
+The [final architecture review](docs/evidence/git-final-architecture-2026-09-04.md)
+records 7,490 adjusted product Rust lines at `0ed9b52`, before the final small
+cleanup and qualification fixes. Required Git rules and bounded WASI transport
+explain most growth; it does not justify moving domain rules into object-log.
 
 Treat source-size thresholds, including the historical stop gates above, as
 architecture review signals. Report material overage and explain its cause

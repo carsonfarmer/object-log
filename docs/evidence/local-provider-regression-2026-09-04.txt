@@ -1,0 +1,118 @@
+./scripts/test-minio.sh
+   Compiling indexmap v2.14.1
+   Compiling criterion v0.7.0
+   Compiling h2 v0.4.19
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.20s
+     Running tests/minio.rs (target/debug/deps/minio-838a3f23f9357726)
+
+running 1 test
+test minio_passes_recovery_checkpoint_and_gc_flow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.23s
+
+./scripts/test-minio.sh minio minio_sqlite_recovers_before_and_after_collection object-log-sqlite aws
+   Compiling object-log-sqlite v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-sqlite)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.84s
+     Running tests/minio.rs (target/debug/deps/minio-e04b1893216e6f7a)
+
+running 1 test
+test minio_sqlite_recovers_before_and_after_collection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+./scripts/test-minio.sh minio minio_git_push_checkpoint_collection_and_cold_recovery object-log-git aws
+   Compiling gix-utils v0.3.6
+   Compiling h2 v0.4.19
+   Compiling tower-http v0.6.11
+   Compiling gix-features v0.49.1
+   Compiling gix-quote v0.8.0
+   Compiling gix-url v0.38.0
+   Compiling gix-command v0.10.1
+   Compiling gix-hash v0.26.2
+   Compiling gix-fs v0.22.1
+   Compiling gix-glob v0.27.1
+   Compiling gix-transport v0.59.2
+   Compiling gix-tempfile v24.0.0
+   Compiling gix-hashtable v0.16.0
+   Compiling gix-commitgraph v0.39.0
+   Compiling gix-refspec v0.45.1
+   Compiling gix-object v0.64.1
+   Compiling gix-lock v24.0.0
+   Compiling gix-shallow v0.13.0
+   Compiling gix-revwalk v0.35.0
+   Compiling gix-ref v0.67.1
+   Compiling gix-diff v0.67.1
+   Compiling gix-traverse v0.61.0
+   Compiling gix-revision v0.49.1
+   Compiling gix-pack v0.74.2
+   Compiling gix-index v0.55.0
+   Compiling gix-config v0.60.0
+   Compiling gix-discover v0.55.0
+   Compiling gix-protocol v0.65.1
+   Compiling hyper v1.11.1
+   Compiling gix-odb v0.84.0
+   Compiling hyper-util v0.1.20
+   Compiling gix v0.87.1
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.36s
+     Running tests/minio.rs (target/debug/deps/minio-fd8a8c2fabc738c0)
+
+running 1 test
+test minio_git_push_checkpoint_collection_and_cold_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.39s
+
+./scripts/test-minio.sh loopback minio_host_pushes_and_cold_clones object-log-git-http ""
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git)
+   Compiling object-log-git-http v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared/crates/object-log-git-http)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.95s
+     Running tests/loopback.rs (target/debug/deps/loopback-508e591442dac0a7)
+
+running 1 test
+test minio_host_pushes_and_cold_clones ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.28s
+
+cargo test --features test-util --test gc_acceptance memory_gc_removes_100k_objects -- --ignored --nocapture
+   Compiling smallvec v1.16.0
+   Compiling tokio v1.53.1
+   Compiling icu_normalizer v2.3.0
+   Compiling parking_lot_core v0.9.12
+   Compiling parking_lot v0.12.5
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling object_store v0.14.1
+   Compiling criterion v0.7.0
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.47s
+     Running tests/gc_acceptance.rs (target/debug/deps/gc_acceptance-451afc820afadfe7)
+
+running 1 test
+memory GC start and resume: 1.845613792s
+test memory_gc_removes_100k_objects ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.81s
+
+./scripts/test-minio.sh gc_acceptance minio_gc_removes_10001_objects
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.67s
+     Running tests/gc_acceptance.rs (target/debug/deps/gc_acceptance-f9d25c162d8cdc03)
+
+running 1 test
+MinIO GC start and resume: 1.544803791s
+test minio_gc_removes_10001_objects ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 9.02s
+

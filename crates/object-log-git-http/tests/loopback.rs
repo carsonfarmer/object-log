@@ -505,8 +505,13 @@ async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, R
     let rss = artifact.with_extension("rss");
     let run = Path::new(env!("CARGO_MANIFEST_DIR")).join("../object-log-git-spin/run.sh");
     let mut process = Command::new("/usr/bin/time");
+    let time_report = if cfg!(target_os = "macos") {
+        "-l"
+    } else {
+        "-v"
+    };
     process
-        .args(["-l", "-o"])
+        .args([time_report, "-o"])
         .arg(&rss)
         .arg(run)
         .args(["--listen", &address]);
