@@ -77,8 +77,14 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         .with_allow_http(true)
         .with_virtual_hosted_style_request(false)
         .build()?;
-    let backend = ValidatedBackend::new(Arc::new(store), StorePath::from(prefix)).await?;
+    let faults = object_log::sim::FaultStore::new(store);
+    let backend = ValidatedBackend::new(Arc::new(faults.clone()), StorePath::from(prefix)).await?;
     let id = LogId::new("repository")?;
+    assert!(
+        !operator(&config_path, &["collect", "--resume-only"])?
+            .status
+            .success()
+    );
     let missing = operator(&config_path, &["status"])?;
     assert!(!missing.status.success());
     assert!(
@@ -280,9 +286,65 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         reader.stop()?;
     }
     default_branch_lifecycle(&config_path, root.path(), &source, &log, &new).await?;
+    collection_lifecycle(&config_path, root.path(), &source, &log, &faults, &new).await?;
     println!(
-        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master and unborn default passed"
+        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master, unborn default, interrupted collection and cold push passed"
     );
+    Ok(())
+}
+
+// The test library installs the plan; the operator can only resume it. Each
+// serving process has been drained and its group/listener checked by Host::stop.
+async fn collection_lifecycle(
+    config: &Path,
+    root: &Path,
+    source: &Path,
+    log: &Log,
+    faults: &object_log::sim::FaultStore,
+    tip: &[u8],
+) -> TestResult {
+    assert_eq!(
+        decode(&operator(config, &["collect", "--resume-only"])?)?["outcome"],
+        "no_active_plan"
+    );
+    let view = log.load().await?;
+    log.put_object(&view, Bytes::from_static(b"unpublished collection fixture"))
+        .await?;
+    let object_log::CollectionStart::Installed(fenced, _) = log.start_collection(&view).await?
+    else {
+        return Err("fixture plan not installed".into());
+    };
+    faults.reset();
+    let mut pause = faults.pause_next_delete(object_log::sim::FailurePhase::After);
+    let mut interrupted = Box::pin(log.resume_collection(&fenced));
+    assert!(
+        tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut interrupted => false }
+    );
+    drop(interrupted);
+    assert!(!pause.release());
+    // Fresh executable, no local plan or receipt, after a real provider delete.
+    let report = operator(config, &["collect", "--resume-only"])?;
+    assert!(report.status.success());
+    assert_eq!(decode(&report)?["outcome"], "collected");
+    assert!(log.load().await?.collection_plan_bytes().is_none());
+    assert_eq!(
+        decode(&operator(config, &["collect", "--resume-only"])?)?["outcome"],
+        "no_active_plan"
+    );
+    let (mut reader, url) = serve(config, root).await?;
+    let clone = root.join("clone-after-collection");
+    git(None, &["clone", "-q", &url, text(&clone)?])?;
+    assert_eq!(git(Some(&clone), &["rev-parse", "HEAD"])?, tip);
+    git(Some(&clone), &["fsck", "--strict"])?;
+    assert_eq!(fs::read_to_string(clone.join("file"))?, "two");
+    git(
+        Some(source),
+        &["push", "-q", &url, "HEAD:refs/tags/after-collection"],
+    )?;
+    git(Some(&clone), &["fetch", "-q", "--tags"])?;
+    assert_eq!(git(Some(&clone), &["rev-parse", "after-collection"])?, tip);
+    git(Some(&clone), &["fsck", "--strict"])?;
+    reader.stop()?;
     Ok(())
 }
 

@@ -892,3 +892,216 @@ async fn default_branch_concurrent_head_change_reports_conflict_without_receipt(
     }
     Ok(())
 }
+
+#[test]
+fn collection_requires_resume_only_and_rejects_planning_flags() -> TestResult {
+    assert!(matches!(
+        parse(arguments(
+            Path::new("unused"),
+            &["collect", "--resume-only"]
+        ))?
+        .action,
+        Action::CollectResume
+    ));
+    for args in [
+        vec!["collect"],
+        vec!["collect", "--start"],
+        vec!["collect", "--resume-only", "--force"],
+    ] {
+        assert!(parse(arguments(Path::new("unused"), &args)).is_err());
+    }
+    Ok(())
+}
+
+async fn collection_fixture(name: &str) -> TestResult<(Log, FaultStore, ValidatedBackend)> {
+    let (log, faults, backend) = fixture(name, Options::default()).await?;
+    let view = log.load().await?;
+    for value in ["unreachable-one", "unreachable-two", "unreachable-three"] {
+        log.put_object(&view, Bytes::from_static(value.as_bytes()))
+            .await?;
+    }
+    assert!(matches!(
+        log.start_collection(&view).await?,
+        object_log::CollectionStart::Installed(..)
+    ));
+    faults.reset();
+    Ok((log, faults, backend))
+}
+
+#[tokio::test]
+async fn collection_without_plan_never_scans_or_plans() -> TestResult {
+    let (log, faults, _) = fixture("no-plan", Options::default()).await?;
+    let view = log.load().await?;
+    log.put_object(&view, Bytes::from_static(b"orphan preserved"))
+        .await?;
+    faults.reset();
+    let report = execute(&log, &Action::CollectResume).await;
+    assert_eq!(json(&report)?["outcome"], "no_active_plan");
+    assert_eq!(report.exit(), 0);
+    for operation in [Operation::Put, Operation::Delete, Operation::List] {
+        assert_eq!(faults.metrics().operation(operation).requests, 0);
+    }
+    assert!(log.refresh(&view).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_partial_deletion_and_lost_clear_reply_recover_without_receipts() -> TestResult {
+    for (operation, phase) in [
+        (Operation::Delete, FailurePhase::After),
+        (Operation::Put, FailurePhase::Before),
+        (Operation::Put, FailurePhase::After),
+    ] {
+        let (log, faults, backend) = collection_fixture("collect-pending").await?;
+        faults.fail_next(operation, phase);
+        let report = execute(&log, &Action::CollectResume).await;
+        assert_eq!(report.exit(), 4);
+        let value = json(&report)?;
+        assert_eq!(value["outcome"], "pending");
+        assert!(value.get("generation").is_none());
+        assert_eq!(value["collection"]["candidate_count"], 3);
+        assert_eq!(value["collection"]["delete_attempts"], 3);
+        drop(log);
+        let reopened = Log::open_existing(
+            &backend,
+            &LogId::new("collect-pending")?,
+            Options::default(),
+        )
+        .await?;
+        let report = execute(&reopened, &Action::CollectResume).await;
+        assert_eq!(report.exit(), 0);
+        assert!(reopened.load().await?.collection_plan_bytes().is_none());
+        assert_eq!(
+            json(&execute(&reopened, &Action::CollectResume).await)?["outcome"],
+            "no_active_plan"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_cancel_after_delete_remains_pending_and_resumes() -> TestResult {
+    let (log, faults, backend) = collection_fixture("collect-cancel").await?;
+    let mut pause = faults.pause_next_delete(FailurePhase::After);
+    let work = bounded(
+        "collect",
+        Duration::from_millis(40),
+        execute(&log, &Action::CollectResume),
+    );
+    tokio::pin!(work);
+    assert!(
+        tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+    );
+    let report = work.await;
+    assert_eq!(json(&report)?["outcome"], "pending");
+    assert!(report.collection.is_none());
+    assert!(!pause.release());
+    let reopened =
+        Log::open_existing(&backend, &LogId::new("collect-cancel")?, Options::default()).await?;
+    assert_eq!(execute(&reopened, &Action::CollectResume).await.exit(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_never_switches_to_a_competing_plan() -> TestResult {
+    let (log, faults, _) = collection_fixture("collect-race").await?;
+    let mut pause = faults.pause_get_at(2, FailurePhase::Before);
+    let work = execute(&log, &Action::CollectResume);
+    tokio::pin!(work);
+    assert!(
+        tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+    );
+    let old = log.load().await?;
+    assert!(matches!(
+        log.resume_collection(&old).await?,
+        object_log::CollectionFinish::Complete(..)
+    ));
+    let fresh = log.load().await?;
+    log.put_object(&fresh, Bytes::from_static(b"new plan orphan"))
+        .await?;
+    assert!(matches!(
+        log.start_collection(&fresh).await?,
+        object_log::CollectionStart::Installed(..)
+    ));
+    let replacement = log.load().await?;
+    assert!(pause.release());
+    let report = work.await;
+    assert_eq!(report.exit(), 3);
+    assert_eq!(json(&report)?["outcome"], "conflict");
+    assert_eq!(json(&report)?["collection"]["delete_attempts"], 0);
+    assert!(log.refresh(&replacement).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_corrupt_plan_rejects_before_any_delete() -> TestResult {
+    use futures::TryStreamExt as _;
+    use object_store::{ObjectStore as _, ObjectStoreExt as _};
+    let (log, faults, _) = collection_fixture("collect-corrupt").await?;
+    let plan = faults
+        .list(None)
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .find(|entry| entry.location.as_ref().contains("/collection-plans/"))
+        .ok_or("plan missing")?;
+    faults
+        .put(
+            &plan.location,
+            Bytes::from(vec![0; usize::try_from(plan.size)?]).into(),
+        )
+        .await?;
+    let before = log.load().await?;
+    faults.reset();
+    let report = execute(&log, &Action::CollectResume).await;
+    assert_eq!(json(&report)?["outcome"], "invalid_evidence");
+    assert_eq!(report.exit(), 5);
+    assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+    assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+    assert!(log.refresh(&before).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_install_lost_reply_recovers_only_the_installed_plan() -> TestResult {
+    for phase in [FailurePhase::Before, FailurePhase::After] {
+        let (log, faults, backend) = fixture("collect-install", Options::default()).await?;
+        let before = log.load().await?;
+        log.put_object(&before, Bytes::from_static(b"orphan"))
+            .await?;
+        faults.reset();
+        faults.schedule(object_log::sim::Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase,
+        });
+        assert!(matches!(
+            log.start_collection(&before).await?,
+            object_log::CollectionStart::Pending
+        ));
+        drop(log);
+        let reopened = Log::open_existing(
+            &backend,
+            &LogId::new("collect-install")?,
+            Options::default(),
+        )
+        .await?;
+        let installed = reopened.load().await?.collection_plan_bytes().is_some();
+        faults.reset();
+        let report = execute(&reopened, &Action::CollectResume).await;
+        assert_eq!(report.exit(), 0);
+        assert_eq!(
+            json(&report)?["outcome"],
+            if installed {
+                "collected"
+            } else {
+                "no_active_plan"
+            }
+        );
+        assert_eq!(faults.metrics().operation(Operation::List).requests, 0);
+        if !installed {
+            assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+        }
+    }
+    Ok(())
+}

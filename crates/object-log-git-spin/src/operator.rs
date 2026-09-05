@@ -22,7 +22,7 @@ const CONFIG_BYTES: usize = 16 * 1024;
 const TOKEN_BYTES: usize = 1024 * 1024;
 const OUTPUT_BYTES: usize = 2048;
 const DEADLINE: Duration = Duration::from_mins(1);
-const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | set-default-branch --expected REF --target REF --recovery-file FILE";
+const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | collect --resume-only | set-default-branch --expected REF --target REF --recovery-file FILE";
 
 #[derive(Clone, Copy, Debug)]
 struct Failure(&'static str, u8);
@@ -54,6 +54,15 @@ pub(super) struct Report {
     usage: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_token: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collection: Option<CollectionCounters>,
+}
+
+#[derive(Serialize)]
+struct CollectionCounters {
+    candidate_count: usize,
+    candidate_bytes: u64,
+    delete_attempts: usize,
 }
 
 impl Report {
@@ -69,6 +78,7 @@ impl Report {
             collection_active: None,
             usage: None,
             recovery_token: None,
+            collection: None,
         }
     }
 
@@ -84,6 +94,15 @@ impl Report {
             .map(object_log::CheckpointRef::through_sequence);
         self.collection_epoch = Some(view.collection_epoch());
         self.collection_active = Some(view.collection_plan_bytes().is_some());
+        self
+    }
+
+    fn collection(mut self, counters: object_log::CollectionReport) -> Self {
+        self.collection = Some(CollectionCounters {
+            candidate_count: counters.candidate_count(),
+            candidate_bytes: counters.candidate_bytes(),
+            delete_attempts: counters.delete_attempts(),
+        });
         self
     }
 
@@ -299,6 +318,7 @@ enum Action {
     Status,
     Resume(Vec<u8>),
     Checkpoint,
+    CollectResume,
     SetDefault {
         expected: Vec<u8>,
         target: Vec<u8>,
@@ -311,6 +331,7 @@ impl Action {
             Self::Status => "status",
             Self::Resume(_) => "resume-commit",
             Self::Checkpoint => "checkpoint",
+            Self::CollectResume => "collect",
             Self::SetDefault { .. } => "set-default-branch",
         }
     }
@@ -326,6 +347,14 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
                 .value_parser(clap::value_parser!(PathBuf)),
         )
         .subcommand(Command::new("status"))
+        .subcommand(
+            Command::new("collect").arg(
+                Arg::new("resume-only")
+                    .long("resume-only")
+                    .action(clap::ArgAction::SetTrue)
+                    .required(true),
+            ),
+        )
         .subcommand(
             Command::new("set-default-branch")
                 .arg(
@@ -378,6 +407,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
     let action = match parsed.subcommand() {
         Some(("status", _)) => Action::Status,
         Some(("checkpoint", _)) => Action::Checkpoint,
+        Some(("collect", _)) => Action::CollectResume,
         Some(("set-default-branch", command)) => {
             let name = |key| {
                 command
@@ -421,8 +451,36 @@ fn classify(error: &object_log::Error) -> Failure {
     }
 }
 
+async fn collect_resume(log: &Log) -> Report {
+    let view = match log.load().await {
+        Ok(view) => view,
+        Err(error) => return Report::failed("collect", classify(&error)),
+    };
+    if view.collection_plan_bytes().is_none() {
+        return Report::new("collect", "no_active_plan", 0).observed(&view);
+    }
+    match log.resume_collection(&view).await {
+        Ok(object_log::CollectionFinish::Complete(view, counters)) => {
+            Report::new("collect", "collected", 0)
+                .observed(&view)
+                .collection(counters)
+        }
+        Ok(object_log::CollectionFinish::Conflict(view, counters)) => {
+            Report::new("collect", "conflict", 3)
+                .observed(&view)
+                .collection(counters)
+        }
+        Ok(object_log::CollectionFinish::Pending(counters)) => {
+            Report::new("collect", "pending", 4).collection(counters)
+        }
+        Err(object_log::Error::Store(_)) => Report::new("collect", "pending", 4),
+        Err(error) => Report::failed("collect", classify(&error)),
+    }
+}
+
 async fn execute(log: &Log, action: &Action, format: ObjectFormat) -> Report {
     match action {
+        Action::CollectResume => collect_resume(log).await,
         Action::SetDefault {
             expected,
             target,
@@ -543,7 +601,7 @@ async fn bounded(
                 operation,
                 if matches!(
                     operation,
-                    "resume-commit" | "checkpoint" | "set-default-branch"
+                    "resume-commit" | "checkpoint" | "set-default-branch" | "collect"
                 ) {
                     "pending"
                 } else {

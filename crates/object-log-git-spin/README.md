@@ -102,11 +102,11 @@ normal Git response framing. Each invocation validates the backend and
 opens the log, so measurements must include that fixed provider work.
 
 The one-shot operator command below supports head status, exact commit-token
-resumption, explicit default-branch updates and metadata checkpoints that retain
-every pack. Collection still
-requires shared-library calls, as demonstrated in [`tests/minio.rs`](tests/minio.rs)
-while Spin is stopped. Issue #32 remains open for collection commands, retention
-cleanup and broader memory and sustained-service qualification.
+resumption, explicit default-branch updates, metadata checkpoints that retain
+every pack, and resumption of installed collection plans. Fresh plan creation
+and retention management still require shared-library calls while Spin is
+stopped. Issue #32 remains open for those commands and sustained-service
+qualification.
 
 ## Local operator command
 
@@ -118,6 +118,7 @@ chmod 600 /deployment/repository.toml
 target/release/object-log-git-maintain --config /deployment/repository.toml status
 target/release/object-log-git-maintain --config /deployment/repository.toml resume-commit --token-file /private/push.token
 target/release/object-log-git-maintain --config /deployment/repository.toml checkpoint --retain-packs
+target/release/object-log-git-maintain --config /deployment/repository.toml collect --resume-only
 target/release/object-log-git-maintain --config /deployment/repository.toml set-default-branch --expected refs/heads/main --target refs/heads/trunk --recovery-file /private/default-branch.token
 ```
 
@@ -172,6 +173,39 @@ fresh head. This converges maintenance state but cannot establish the exact
 historical outcome of the earlier attempt: this command does not persist an
 exact checkpoint token or run unbounded resolution after the helper returns.
 
+`collect --resume-only` reloads the existing head and resumes only its installed,
+authenticated positive deletion plan. It never scans the namespace, starts a
+plan, checkpoints, releases retentions or deletes arbitrary keys. No token or
+local plan is required. A plan must already have been installed through the
+shared library; fresh collection planning is not exposed by this command.
+
+Stop ingress and drain all serving and maintenance processes before collection.
+Resolve known pending Git tokens before advancing checkpoint or GC; reconcile
+the current checkpoint objective before installing a plan. An earlier
+checkpoint's unknown exact outcome does not block cleanup forever once that
+objective is confirmed. A conservative retain-packs checkpoint does not make
+unreachable packs collectible; pack compaction remains separate work.
+
+`no_active_plan` means the loaded head had no active plan. It does not classify
+an earlier attempt, prove prior plan-file cleanup, or prove that no garbage remains. `collected` means the core
+confirmed completion; `conflict` leaves a competing plan untouched. `pending`
+can follow partial deletion or a lost fence-clear reply. Stop, reload and repeat
+`collect --resume-only`; the core safely repeats the installed positive set.
+Never reconstruct a lost plan locally or infer rollback from an error. Resource
+or integrity errors may also follow earlier deletion; preserve the head fence
+and investigate rather than manually clearing it.
+
+The optional `collection` JSON object reports `candidate_count`,
+`candidate_bytes` and `delete_attempts` for this invocation only. Attempts are
+submitted candidates, not confirmed newly deleted objects or lifetime totals.
+Missing objects count as successful deletion attempts; candidate bytes are not
+confirmed reclaimed bytes. A deadline or error without core counters omits them,
+which means unknown rather than zero. Once no plan remains,
+restart Spin and verify clone/fetch before reopening normal ingress. Scheduling
+uses offline maintenance windows with backoff on conflict and alerts on repeated
+pending or blocked outcomes; this command does not establish sustained service
+capacity or provide an online scheduler.
+
 `set-default-branch` publishes an explicit symbolic HEAD update through the same
 WAL CAS. Stop and drain serving processes first. Both names must be full branch
 refs; the target may be unborn. Existing ref OIDs and packs are preserved. Legacy
@@ -203,7 +237,7 @@ outcome together with the exit status:
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, or requested help. `not_committed` means resolution completed, not a successful push. |
+| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, `collected`, `no_active_plan`, or requested help. `not_committed` means resolution completed, not a successful push. |
 | 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unavailable recovery output, unsupported platform or incompatible durable options. |
 | 3 | `conflict`, `stale_default`, or shared-engine `busy`; inspect the fresh state before another update. |
 | 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |
