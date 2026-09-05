@@ -819,6 +819,38 @@ impl Log {
         })
     }
 
+    /// Reads an authenticated node and derives publication proofs for its children.
+    ///
+    /// The parent must carry a proof from this log handle (or its clone) and
+    /// the supplied collection epoch. Only the parent is read and verified;
+    /// its existing graph proof permits reuse of unchanged child subtrees.
+    /// The returned payload and ordered children come from that verified node.
+    ///
+    /// Separately opened handles must obtain a fresh parent proof through
+    /// materialization or [`Self::stage_objects`]. This operation does not
+    /// refresh the view or grant a retention lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for foreign views or proofs, epoch mismatches, non-node
+    /// parents, invalid storage, or configured limits. A missing parent has the
+    /// same expiry or corruption classification as [`Self::read_node`].
+    pub async fn read_staged_node(
+        &self,
+        view: &View,
+        node: &StagedObject,
+    ) -> Result<(Bytes, Vec<StagedObject>), Error> {
+        self.validate_view(view)?;
+        self.validate_staged_object(view, node)?;
+        let node = self.read_node(view, node.reference()).await?;
+        let children = node
+            .children
+            .into_iter()
+            .map(|child| self.staged_object(view, child))
+            .collect();
+        Ok((node.payload, children))
+    }
+
     async fn read_immutable_for_view(
         &self,
         view: &View,
@@ -1515,10 +1547,15 @@ impl Log {
         if objects.len() > self.options.max_object_refs {
             return Err(Error::LimitExceeded("object references"));
         }
-        if objects.iter().any(|object| {
-            !Arc::ptr_eq(&object.domain, &self.staging_domain)
-                || object.collection_epoch != view.collection_epoch()
-        }) {
+        objects
+            .iter()
+            .try_for_each(|object| self.validate_staged_object(view, object))
+    }
+
+    fn validate_staged_object(&self, view: &View, object: &StagedObject) -> Result<(), Error> {
+        if !Arc::ptr_eq(&object.domain, &self.staging_domain)
+            || object.collection_epoch != view.collection_epoch()
+        {
             return Err(Error::InvalidStagedObject);
         }
         Ok(())
@@ -2998,6 +3035,308 @@ mod tests {
             cold.read_object(&view, object.reference()).await?,
             Bytes::from_static(b"durable bytes")
         );
+        Ok(())
+    }
+
+    async fn staged_read_log(
+        id: &str,
+        options: Options,
+    ) -> Result<(Log, FaultStore, ValidatedBackend), Error> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("staged-node-tests"))
+                .await?;
+        let log = Log::open(&backend, &LogId::new(id)?, options).await?;
+        Ok((log, faults, backend))
+    }
+
+    async fn publish_root(log: &Log, view: &View, root: StagedObject) -> Result<View, Error> {
+        let prepared = log.prepare(
+            view,
+            TransactionId::new(),
+            Bytes::from_static(&[1]),
+            Bytes::new(),
+            vec![root],
+        )?;
+        match log.commit(prepared).await? {
+            CommitStatus::Committed(view) => Ok(view),
+            _ => Err(Error::InvalidFormat("test root did not publish".into())),
+        }
+    }
+
+    #[tokio::test]
+    async fn staged_node_reads_only_parent_independent_of_subtree_size()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for count in [1, 64] {
+            let (log, faults, _) = staged_read_log("parent-only", Options::default()).await?;
+            let view = log.load().await?;
+            let mut leaves = Vec::new();
+            for _ in 0..count {
+                leaves.push(log.put_object(&view, Bytes::from_static(b"leaf")).await?);
+            }
+            let branch = log
+                .put_node(&view, Bytes::from_static(b"branch"), leaves)
+                .await?;
+            let root = log
+                .put_node(&view, Bytes::from_static(b"root"), vec![branch.clone()])
+                .await?;
+            faults.reset();
+            let (payload, children) = log.clone().read_staged_node(&view, &root).await?;
+            assert_eq!(payload, Bytes::from_static(b"root"));
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].reference(), branch.reference());
+            assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+            assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+            log.prepare(
+                &view,
+                TransactionId::new(),
+                Bytes::new(),
+                Bytes::new(),
+                children,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_node_rejects_foreign_proofs_and_non_nodes_before_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, backend) = staged_read_log("provenance", Options::default()).await?;
+        let view = log.load().await?;
+        let root = log.put_node(&view, Bytes::new(), Vec::new()).await?;
+        let blob = log.put_object(&view, Bytes::new()).await?;
+        let reopened =
+            Log::open_existing(&backend, &LogId::new("provenance")?, Options::default()).await?;
+        let foreign = Log::open(&backend, &LogId::new("other")?, Options::default())
+            .await?
+            .load()
+            .await?;
+        faults.reset();
+        assert!(matches!(
+            reopened.read_staged_node(&view, &root).await,
+            Err(Error::InvalidStagedObject)
+        ));
+        assert!(matches!(
+            log.read_staged_node(&foreign, &root).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        assert!(matches!(
+            log.read_staged_node(&view, &blob).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        assert_eq!(faults.metrics().total_requests(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_node_allows_empty_nodes_with_zero_reference_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let options = Options {
+            max_object_refs: 0,
+            ..Options::default()
+        };
+        let (log, faults, _) = staged_read_log("empty", options).await?;
+        let view = log.load().await?;
+        let root = log
+            .put_node(&view, Bytes::from_static(b"empty"), Vec::new())
+            .await?;
+        faults.reset();
+        let (payload, children) = log.read_staged_node(&view, &root).await?;
+        assert_eq!(payload, Bytes::from_static(b"empty"));
+        assert!(children.is_empty());
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_node_missing_and_corrupt_parent_never_grants_children()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for failure in ["missing", "corrupt", "expired"] {
+            let (log, faults, _) = staged_read_log(failure, Options::default()).await?;
+            let view = log.load().await?;
+            let blob = log.put_object(&view, Bytes::from_static(b"child")).await?;
+            let root = log
+                .put_node(&view, Bytes::from_static(b"parent"), vec![blob])
+                .await?;
+            if failure == "corrupt" {
+                let key = log.object_key(root.reference());
+                let stored = log
+                    .store
+                    .read(key, log.options.max_object_bytes)
+                    .await?
+                    .ok_or("parent is missing")?;
+                let mut bytes = stored.bytes.to_vec();
+                bytes[0] ^= 1;
+                log.store
+                    .update(key, Bytes::from(bytes), stored.version)
+                    .await?;
+            } else if failure == "missing" {
+                log.store
+                    .delete_immutable_batch(
+                        [log.object_immutable_key(root.reference())].into_iter(),
+                    )
+                    .await?;
+            } else {
+                let CollectionStart::Installed(fenced, _) = log.start_collection(&view).await?
+                else {
+                    return Err("collection did not start".into());
+                };
+                assert!(matches!(
+                    log.resume_collection(&fenced).await?,
+                    CollectionFinish::Complete(..)
+                ));
+            }
+            faults.reset();
+            let result = log.read_staged_node(&view, &root).await;
+            if failure == "expired" {
+                assert!(matches!(result, Err(Error::ViewExpired)));
+            } else {
+                assert!(matches!(result, Err(Error::CorruptObject)));
+            }
+            assert_eq!(
+                faults.metrics().operation(Operation::Get).requests,
+                if failure == "corrupt" { 1 } else { 2 }
+            );
+            assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_node_epoch_fence_accepts_only_fresh_live_parent_proofs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, _) = staged_read_log("fenced", Options::default()).await?;
+        let view = log.load().await?;
+        let blob = log.put_object(&view, Bytes::from_static(b"live")).await?;
+        let root = log
+            .put_node(&view, Bytes::from_static(b"root"), vec![blob])
+            .await?;
+        let view = publish_root(&log, &view, root.clone()).await?;
+        log.put_object(&view, Bytes::from_static(b"orphan")).await?;
+        let CollectionStart::Installed(fenced, _) = log.start_collection(&view).await? else {
+            return Err("collection did not start".into());
+        };
+        faults.reset();
+        assert!(matches!(
+            log.read_staged_node(&fenced, &root).await,
+            Err(Error::InvalidStagedObject)
+        ));
+        assert_eq!(faults.metrics().total_requests(), 0);
+        let state = crate::materialize(&log, fenced, &FoldProbe::default()).await?;
+        faults.reset();
+        let (_, children) = log
+            .read_staged_node(state.view(), &state.state().objects[0])
+            .await?;
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        let replacement = log
+            .put_node(state.view(), Bytes::from_static(b"replacement"), children)
+            .await?;
+        let published = publish_root(&log, state.view(), replacement).await?;
+        assert!(matches!(
+            log.resume_collection(&published).await?,
+            CollectionFinish::Complete(..)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_node_cow_reuses_siblings_through_cold_resolution_and_collection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, backend) = staged_read_log("cow", Options::default()).await?;
+        let view = log.load().await?;
+        let left_blob = log
+            .put_object(&view, Bytes::from_static(b"old-left"))
+            .await?;
+        let left = log
+            .put_node(&view, Bytes::new(), vec![left_blob.clone()])
+            .await?;
+        let right_blob = log.put_object(&view, Bytes::from_static(b"right")).await?;
+        let right = log.put_node(&view, Bytes::new(), vec![right_blob]).await?;
+        let root = log
+            .put_node(
+                &view,
+                Bytes::from_static(b"root"),
+                vec![left.clone(), right.clone()],
+            )
+            .await?;
+        let view = publish_root(&log, &view, root.clone()).await?;
+        let (_, mut children) = log.read_staged_node(&view, &root).await?;
+        let new_blob = log
+            .put_object(&view, Bytes::from_static(b"new-left"))
+            .await?;
+        children[0] = log.put_node(&view, Bytes::new(), vec![new_blob]).await?;
+        let replacement = log
+            .put_node(&view, Bytes::from_static(b"replacement"), children)
+            .await?;
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(&[1]),
+            Bytes::new(),
+            vec![replacement],
+        )?;
+        let token = prepared.recovery_token()?;
+        faults.reset();
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::After,
+        });
+        assert!(matches!(
+            log.commit(prepared).await?,
+            CommitStatus::Pending(_)
+        ));
+        let cold = Log::open_existing(&backend, &LogId::new("cow")?, Options::default()).await?;
+        assert!(matches!(
+            cold.resume(&token).await?,
+            Resolution::Committed(_)
+        ));
+        let state = crate::materialize(&cold, cold.load().await?, &FoldProbe::default()).await?;
+        let current_root = state
+            .state()
+            .objects
+            .last()
+            .ok_or("root is missing")?
+            .clone();
+        let through = state.view().tail().last().ok_or("tail is missing")?;
+        let CheckpointStatus::Published(view) = cold
+            .publish_checkpoint(
+                state.view(),
+                through,
+                Bytes::from_static(&[2]),
+                vec![current_root],
+            )
+            .await?
+        else {
+            return Err("checkpoint did not publish".into());
+        };
+        let CollectionStart::Installed(fenced, _) = cold.start_collection(&view).await? else {
+            return Err("collection did not start".into());
+        };
+        let CollectionFinish::Complete(view, report) = cold.resume_collection(&fenced).await?
+        else {
+            return Err("collection did not finish".into());
+        };
+        assert!(report.delete_attempts >= 3);
+        let state = crate::materialize(&cold, view, &FoldProbe::default()).await?;
+        let (_, children) = cold
+            .read_staged_node(state.view(), &state.state().objects[0])
+            .await?;
+        assert_eq!(children[1].reference(), right.reference());
+        let (_, right_children) = cold.read_staged_node(state.view(), &children[1]).await?;
+        assert_eq!(
+            cold.read_object(state.view(), right_children[0].reference())
+                .await?,
+            Bytes::from_static(b"right")
+        );
+        for dead in [root.reference(), left.reference(), left_blob.reference()] {
+            assert!(
+                cold.store
+                    .read(cold.object_key(dead), cold.options.max_object_bytes)
+                    .await?
+                    .is_none()
+            );
+        }
         Ok(())
     }
 
