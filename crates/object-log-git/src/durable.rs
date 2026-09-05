@@ -469,6 +469,46 @@ impl<'a> Reader<'a> {
         self.catalog.location(id).is_some()
     }
 
+    // Verify selected content without retaining decoded full blobs. Delta and
+    // structural objects keep the existing bounded materialization path.
+    pub(crate) async fn verify(&mut self, id: ObjectId) -> Result<Option<gix_object::Kind>, Error> {
+        let Some(location) = self.catalog.location(id) else {
+            return Ok(None);
+        };
+        let pack = &self.catalog.packs[usize::from(location.pack)];
+        let range = pack.entry_range(location.index);
+        self.catalog
+            .operation
+            .work((range.end - range.start) as usize)?;
+        let entry = self.entry_header(location).await?;
+        if entry.header != EntryHeader::Blob {
+            return Ok(self.find(id).await?.map(|object| object.kind));
+        }
+        let size = usize::try_from(entry.decompressed_size).map_err(pack_error)?;
+        // Include one byte of expansion probing to reject undersized headers.
+        self.catalog.operation.work((size + 1) * 2)?;
+        let _memory = self
+            .catalog
+            .operation
+            .reserve(INFLATE_BYTES + VERIFY_WINDOW_BYTES)?;
+        let mut decoder = BlobVerifier::new(id.format(), entry.decompressed_size);
+        self.copy_compressed_entry(location, &entry, &mut decoder)
+            .await?;
+        decoder.finish(id)?;
+        Ok(Some(gix_object::Kind::Blob))
+    }
+
+    async fn entry_header(&mut self, location: Location) -> Result<PackEntry, Error> {
+        let pack = &self.catalog.packs[usize::from(location.pack)];
+        let range = pack.entry_range(location.index);
+        // A canonical u64 size takes at most ten bytes, followed by at
+        // most a SHA-256 base ID. Never gather the compressed entry.
+        let prefix = self
+            .read_range(location.pack, range.start..range.end.min(range.start + 42))
+            .await?;
+        parse_entry(&prefix, u64::from(range.start), pack.id.format())
+    }
+
     pub(crate) async fn find(&mut self, id: ObjectId) -> Result<Option<Object>, Error> {
         let Some(location) = self.catalog.location(id) else {
             return Ok(None);
@@ -568,13 +608,7 @@ impl<'a> Reader<'a> {
             self.catalog
                 .operation
                 .work((range.end - range.start) as usize)?;
-            // A canonical u64 size takes at most ten bytes, followed by at
-            // most a SHA-256 base ID. Never gather the compressed entry.
-            let prefix = self
-                .read_range(location.pack, range.start..range.end.min(range.start + 42))
-                .await?;
-            let entry = parse_entry(&prefix, u64::from(range.start), format)?;
-            drop(prefix);
+            let entry = self.entry_header(location).await?;
             let pack = &self.catalog.packs[usize::from(location.pack)];
             let base = pack
                 .base(&entry)?
@@ -786,6 +820,103 @@ impl<'a> Reader<'a> {
         self.cache_bytes += bytes;
         self.cache.push_back(((pack, index), value.clone()));
         Ok(value)
+    }
+}
+
+const VERIFY_WINDOW_BYTES: usize = 32 * 1024;
+
+struct BlobVerifier {
+    inflate: gix_zlib::Decompress,
+    hash: gix_hash::Hasher,
+    output: Vec<u8>,
+    size: u64,
+    ended: bool,
+}
+
+impl BlobVerifier {
+    fn new(format: ObjectFormat, size: u64) -> Self {
+        let mut hash = gix_hash::hasher(object_hash(format));
+        hash.update(&gix_object::encode::loose_header(
+            gix_object::Kind::Blob,
+            size,
+        ));
+        Self {
+            inflate: gix_zlib::Decompress::new(),
+            hash,
+            output: vec![0; VERIFY_WINDOW_BYTES],
+            size,
+            ended: false,
+        }
+    }
+
+    fn consume(&mut self, mut bytes: &[u8]) -> Result<(), Error> {
+        loop {
+            if self.ended {
+                return if bytes.is_empty() {
+                    Ok(())
+                } else {
+                    invalid("pack entry zlib stream is not exact")
+                };
+            }
+            let remaining =
+                usize::try_from(self.size - self.inflate.total_out()).map_err(pack_error)?;
+            let capacity = (remaining + 1).min(self.output.len());
+            let before_in = self.inflate.total_in();
+            let before_out = self.inflate.total_out();
+            let status = self
+                .inflate
+                .decompress(
+                    bytes,
+                    &mut self.output[..capacity],
+                    gix_zlib::FlushDecompress::None,
+                )
+                .map_err(pack_error)?;
+            let consumed =
+                usize::try_from(self.inflate.total_in() - before_in).map_err(pack_error)?;
+            let written =
+                usize::try_from(self.inflate.total_out() - before_out).map_err(pack_error)?;
+            if written > remaining {
+                return invalid("pack entry exceeds its declared size");
+            }
+            self.hash.update(&self.output[..written]);
+            bytes = &bytes[consumed..];
+            self.ended = status == gix_zlib::Status::StreamEnd;
+            if self.ended {
+                continue;
+            }
+            if consumed == 0 && written == 0 {
+                return if bytes.is_empty() {
+                    Ok(())
+                } else {
+                    invalid("pack entry zlib stream made no progress")
+                };
+            }
+            // Drain a full output window even if this chunk's input is spent.
+            if bytes.is_empty() && written < capacity {
+                return Ok(());
+            }
+        }
+    }
+
+    fn finish(self, id: ObjectId) -> Result<(), Error> {
+        if !self.ended || self.inflate.total_out() != self.size {
+            return invalid("pack entry zlib stream is not exact");
+        }
+        if self.hash.try_finalize().map_err(pack_error)?.as_slice() != id.as_bytes() {
+            return invalid("decoded object ID does not match");
+        }
+        Ok(())
+    }
+}
+
+impl Write for BlobVerifier {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.consume(bytes).map_err(io::Error::other)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1604,6 +1735,7 @@ mod tests {
         let (descriptor, root) = store_raw(log, view, pack, index).await?;
         let catalog = load_one(log, view, ObjectFormat::Sha1, descriptor, &root).await?;
         assert!(Reader::new(log, view, &catalog).find(id).await.is_err());
+        assert!(Reader::new(log, view, &catalog).verify(id).await.is_err());
         Ok(())
     }
 
@@ -1817,11 +1949,183 @@ mod tests {
                 reordered.reverse();
                 reordered.extend_from_slice(&ids);
                 assert_eq!(output, reader.fetch_pack(&reordered).await?);
+                assert_eq!(reader.verify(delta).await?, Some(gix_object::Kind::Blob));
                 let fallback = reader.fetch_pack(&[delta]).await?;
                 verify_fetch_pack(&fallback, format, &[delta])?;
                 assert!(!inspect_pack(&fallback, format)?[0].0.is_delta());
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verifies_full_blobs_with_fixed_memory_and_installed_git_ids() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for uncompressed in [false, true] {
+                let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+                let (log, view) = open(store.clone(), "verify-blob").await?;
+                let fixture = pack_fixture(
+                    format,
+                    vec![vec![b'x'; 2 * CHUNK_BYTES]],
+                    false,
+                    uncompressed,
+                )?;
+                let id = fixture.objects[0].0;
+                let (descriptor, root) =
+                    stage(&test_operation(), &log, &view, fixture.normalized).await?;
+                let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+                let mut reader = Reader::new(&log, &view, &catalog);
+                // Cache compressed chunks before isolating decoder allocation.
+                let range = catalog.packs[0].entry_range(0);
+                reader.visit_range(0, range, |_| Ok(())).await?;
+                let allowance = INFLATE_BYTES + VERIFY_WINDOW_BYTES;
+                let pressure = catalog
+                    .operation
+                    .reserve(LIVE_BYTES - catalog.operation.live_bytes() - allowance)?;
+                store.reset();
+                let baseline = catalog.operation.live_bytes();
+                assert_eq!(reader.verify(id).await?, Some(gix_object::Kind::Blob));
+                assert_eq!(catalog.operation.live_bytes(), baseline);
+                assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+                assert!(reader.find(id).await.is_err());
+                drop(pressure);
+                assert_eq!(
+                    reader.find(id).await?.ok_or("missing blob")?.data.len(),
+                    2 * CHUNK_BYTES
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_blob_verification_checks_zlib_boundaries_size_and_oid() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for size in [
+                0,
+                1,
+                VERIFY_WINDOW_BYTES - 1,
+                VERIFY_WINDOW_BYTES,
+                VERIFY_WINDOW_BYTES + 1,
+            ] {
+                let data = vec![b'x'; size];
+                let hash =
+                    gix_object::compute_hash(object_hash(format), gix_object::Kind::Blob, &data)?;
+                let id = ObjectId::from_bytes(format, hash.as_slice())?;
+                let mut compressed = Vec::new();
+                let mut writer = gix_zlib::stream::deflate::Write::new(
+                    &mut compressed,
+                    gix_zlib::Compression::DEFAULT,
+                );
+                writer.write_all(&data)?;
+                writer.flush()?;
+                drop(writer);
+                for width in [1, 7, compressed.len()] {
+                    let mut verifier = BlobVerifier::new(format, size as u64);
+                    for chunk in compressed.chunks(width) {
+                        verifier.consume(chunk)?;
+                    }
+                    verifier.finish(id)?;
+                }
+                let mut verifier = BlobVerifier::new(format, size as u64);
+                verifier.consume(&compressed)?;
+                assert!(verifier.consume(&[0]).is_err());
+                let mut verifier = BlobVerifier::new(format, size as u64);
+                let mut trailing = compressed.clone();
+                trailing.push(0);
+                assert!(verifier.consume(&trailing).is_err());
+                let mut verifier = BlobVerifier::new(format, size as u64);
+                verifier.consume(&compressed[..compressed.len() - 1])?;
+                assert!(verifier.finish(id).is_err());
+                let mut verifier = BlobVerifier::new(format, size as u64 + 1);
+                verifier.consume(&compressed)?;
+                assert!(verifier.finish(id).is_err());
+                if size > 0 {
+                    let mut verifier = BlobVerifier::new(format, size as u64 - 1);
+                    assert!(verifier.consume(&compressed).is_err());
+                }
+                let wrong = ObjectId::from_bytes(format, &vec![0x42; format.digest_len()])?;
+                let mut verifier = BlobVerifier::new(format, size as u64);
+                verifier.consume(&compressed)?;
+                assert!(verifier.finish(wrong).is_err());
+                let mut verifier = BlobVerifier::new(format, size as u64);
+                let mut corrupt = compressed;
+                let last = corrupt.len() - 1;
+                corrupt[last] ^= 1;
+                assert!(verifier.consume(&corrupt).is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_blob_verification_releases_decoder_and_admission() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "verify-cancel").await?;
+        let fixture = fixture(ObjectFormat::Sha256, 1, false, true)?;
+        let id = fixture.objects[0].0;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let pool = Pool::new(LIVE_BYTES);
+        let operation = pool.admit()?;
+        let catalog = load(
+            &operation,
+            &log,
+            &view,
+            ObjectFormat::Sha256,
+            &[(descriptor, root.reference().clone())],
+        )
+        .await?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        drop(reader.chunk(0, 0).await?);
+        let baseline = operation.live_bytes();
+        let mut pause = store.pause_next_get(FailurePhase::Before);
+        let mut pending = Box::pin(reader.verify(id));
+        tokio::select! {
+            result = &mut pending => { result?; return Err("verification completed before pause".into()); },
+            entered = pause.wait_until_entered() => assert!(entered),
+        }
+        assert!(operation.live_bytes() >= baseline + INFLATE_BYTES + VERIFY_WINDOW_BYTES);
+        drop(pending);
+        assert_eq!(operation.live_bytes(), baseline);
+        assert!(!pause.release());
+        drop(reader);
+        drop(catalog);
+        assert_eq!(operation.live_bytes(), 0);
+        drop(operation);
+        assert!(pool.admit().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_verification_checks_work_and_memory_before_cached_decode() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "verify-budget").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 1, false, false)?;
+        let id = fixture.objects[0].0;
+        let size = fixture.objects[0].1.len();
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        drop(reader.chunk(0, 0).await?);
+        let baseline = catalog.operation.live_bytes();
+        let pressure = catalog
+            .operation
+            .reserve(LIVE_BYTES - baseline - INFLATE_BYTES - VERIFY_WINDOW_BYTES + 1)?;
+        store.reset();
+        assert!(matches!(reader.verify(id).await,
+            Err(Error::InvalidPack(message)) if message == "Git live-memory limit exceeded"));
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        drop(pressure);
+        let range = catalog.packs[0].entry_range(0);
+        let required = (range.end - range.start) as usize + (size + 1) * 2;
+        let used = catalog.operation.work_bytes();
+        catalog
+            .operation
+            .work(crate::pack::budget::WORK_BYTES - used - required + 1)?;
+        assert!(matches!(reader.verify(id).await,
+            Err(Error::InvalidPack(message)) if message == "Git work limit exceeded"));
+        assert_eq!(catalog.operation.live_bytes(), baseline);
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
         Ok(())
     }
 
@@ -1933,6 +2237,8 @@ mod tests {
             let baseline = catalog.operation.live_bytes();
             let mut reader = Reader::new(&log, &view, &catalog);
             assert!(matches!(reader.fetch_pack(&[id]).await,
+                Err(Error::InvalidPack(message)) if message == "pack entry CRC does not match"));
+            assert!(matches!(reader.verify(id).await,
                 Err(Error::InvalidPack(message)) if message == "pack entry CRC does not match"));
             drop(reader);
             assert_eq!(catalog.operation.live_bytes(), baseline);

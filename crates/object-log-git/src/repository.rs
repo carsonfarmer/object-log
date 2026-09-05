@@ -164,8 +164,8 @@ impl Repository {
         for id in &selected.ids {
             let node = &graph.nodes[graph.location(*id).ok_or(Error::InvalidReference)? as usize];
             if !node.verified {
-                let object = reader.find(*id).await?.ok_or(Error::InvalidReference)?;
-                if Some(object.kind) != node.kind {
+                let kind = reader.verify(*id).await?.ok_or(Error::InvalidReference)?;
+                if Some(kind) != node.kind {
                     return crate::pack::invalid("selected graph object has the wrong kind");
                 }
             }

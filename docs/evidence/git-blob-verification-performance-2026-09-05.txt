@@ -1,0 +1,10 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/419f/object-log/crates/object-log-git)
+    Finished `release` profile [optimized] target(s) in 4.00s
+     Running tests/shared_performance.rs (target/release/deps/shared_performance-b19ca7257e9bfa1f)
+
+running 1 test
+test shared_git_performance_acceptance has been running for over 60 seconds
+test shared_git_performance_acceptance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 121.18s
+
