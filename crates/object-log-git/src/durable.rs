@@ -122,6 +122,72 @@ impl Catalog {
     }
 }
 
+/// One authenticated selected index, tied to the caller's exact read context.
+/// Loading and enumerating it never reads pack blob chunks or unrelated roots.
+#[allow(dead_code, reason = "pending coordinated catalog migration caller")]
+pub(crate) struct SelectedIndex<'a> {
+    pack: Pack,
+    operation: &'a Operation,
+    _log: &'a Log,
+    _view: &'a View,
+    _memory: Reservation,
+}
+
+#[allow(dead_code, reason = "pending coordinated catalog migration caller")]
+impl<'a> SelectedIndex<'a> {
+    pub(crate) async fn load(
+        operation: &'a Operation,
+        log: &'a Log,
+        view: &'a View,
+        descriptor: &PackDescriptor,
+        root: &StagedObject,
+    ) -> Result<Self, Error> {
+        let format = descriptor.id.format();
+        let roots = [(descriptor.clone(), root.reference().clone())];
+        let memory = operation.reserve_state(catalog_bytes(format, &roots)?)?;
+        let bytes = usize::try_from(root.reference().len()).map_err(pack_error)?;
+        let entries = (bytes / (format.digest_len() + 8)).min(MAX_OBJECTS as usize);
+        operation.work(
+            bytes + entries * (entries.max(1).ilog2() as usize + 1) * size_of::<OffsetEntry>(),
+        )?;
+        operation.io(bytes)?;
+        let pack = load_pack(log, view, format, descriptor, root.reference()).await?;
+        Ok(Self {
+            pack,
+            operation,
+            _log: log,
+            _view: view,
+            _memory: memory,
+        })
+    }
+
+    pub(crate) fn num_objects(&self) -> u32 {
+        self.pack.index.num_objects()
+    }
+
+    pub(crate) fn object_id_at(&self, position: u32) -> Result<ObjectId, Error> {
+        self.operation.work(self.pack.id.format().digest_len())?;
+        if position >= self.num_objects() {
+            return invalid("catalog index position is out of range");
+        }
+        ObjectId::from_bytes(
+            self.pack.id.format(),
+            self.pack.index.oid_at_index(position).as_bytes(),
+        )
+    }
+
+    pub(crate) fn entries(&self) -> impl Iterator<Item = Result<(ObjectId, u32), Error>> + '_ {
+        (0..self.num_objects()).map(|position| self.object_id_at(position).map(|id| (id, position)))
+    }
+
+    pub(crate) fn verify_position(&self, id: ObjectId, position: u32) -> Result<(), Error> {
+        if self.object_id_at(position)? != id {
+            return invalid("catalog OID does not match selected index position");
+        }
+        Ok(())
+    }
+}
+
 struct Pack {
     id: ObjectId,
     bytes: u32,
@@ -2022,6 +2088,79 @@ mod tests {
                 verify_fetch_pack(&fallback, format, &[delta])?;
                 assert!(!inspect_pack(&fallback, format)?[0].0.is_delta());
             }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_index_is_sparse_authenticated_and_checks_catalog_positions() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+            let (log, view) = open(store.clone(), "selected-index").await?;
+            let fixture = fixture(format, 3, true, false)?;
+            let expected = fixture
+                .objects
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let (descriptor, root) =
+                stage(&test_operation(), &log, &view, fixture.normalized).await?;
+            let operation = test_operation();
+            store.reset();
+            let selected = SelectedIndex::load(&operation, &log, &view, &descriptor, &root).await?;
+            let entries = selected.entries().collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected
+            );
+            for (id, position) in &entries {
+                selected.verify_position(*id, *position)?;
+            }
+            assert!(
+                selected
+                    .verify_position(entries[0].0, selected.num_objects())
+                    .is_err()
+            );
+            assert!(selected.verify_position(entries[0].0, u32::MAX).is_err());
+            assert!(
+                selected
+                    .verify_position(entries[0].0, entries[1].1)
+                    .is_err()
+            );
+            let other = if format == ObjectFormat::Sha1 {
+                ObjectFormat::Sha256
+            } else {
+                ObjectFormat::Sha1
+            };
+            let foreign = ObjectId::from_bytes(other, &vec![0x42; other.digest_len()])?;
+            assert!(selected.verify_position(foreign, 0).is_err());
+            assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 1);
+            assert_eq!(store.metrics().downloaded_bytes(), root.reference().len());
+            operation.work(crate::pack::budget::WORK_BYTES - operation.work_bytes())?;
+            assert!(selected.object_id_at(0).is_err());
+            drop(selected);
+            assert_eq!(operation.live_bytes(), 0);
+            let operation = test_operation();
+            let pressure = operation.reserve_state(crate::pack::budget::STATE_BYTES)?;
+            store.reset();
+            assert!(
+                SelectedIndex::load(&operation, &log, &view, &descriptor, &root)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+            drop(pressure);
+            let mut wrong = descriptor.clone();
+            wrong.id = ObjectId::from_bytes(format, &vec![0x42; format.digest_len()])?;
+            assert!(
+                SelectedIndex::load(&operation, &log, &view, &wrong, &root)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(operation.live_bytes(), 0);
         }
         Ok(())
     }
