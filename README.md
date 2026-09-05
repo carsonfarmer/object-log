@@ -103,8 +103,11 @@ It clears a qualifying WAL tail while retaining every pack. The command also
 resumes an installed collection with `collect --resume-only` and migrates the
 legacy pack catalog with `migrate-catalog --recovery-file`. Migration publishes
 an authenticated lookup tree through the same conditional WAL head; cold object
-reads load only the indexes for selected packs. Migration remains
-bounded and explicit; live-pack compaction is separate work.
+reads load only the indexes for selected packs. After migration,
+`compact-packs --recovery-file` repacks reachable objects into bounded output
+packs and publishes one replacement catalog. Follow with checkpointing and
+collection to reclaim the old packs. Compaction preserves refs and symbolic
+`HEAD`; its full live-graph traversal remains subject to operation limits.
 The same command can explicitly change the persisted default branch with
 `set-default-branch`, an expected old target, and a private recovery-file path.
 Unborn targets are supported; cloning follows the persisted symbolic `HEAD`.
