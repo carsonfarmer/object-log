@@ -775,3 +775,20 @@ async fn common_receive_ref_namespace_applies_deletions_atomically() -> TestResu
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn oversized_publication_options_return_a_bounded_error() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        for max_commit_bytes in [usize::MAX / 4, usize::MAX / 4 + 1] {
+            let backend = ValidatedBackend::new(std::sync::Arc::new(InMemory::new()), StorePath::from("oversized-options")).await?;
+            let log = Log::open(&backend, &LogId::new("oversized")?, Options { max_commit_bytes, ..Options::default() }).await?;
+            let repository = common_open(&log, format).await?;
+            let fixture = fixture(format, b"bounded options")?;
+            let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
+            let input = receive_input(format, &[update], &std::fs::read(fixture.pack)?, true);
+            assert!(matches!(repository.prepare_receive(TransactionId::new(), input).await,
+                Err(Error::ReceiveRejected { source, .. }) if matches!(*source, Error::InvalidPack(_))));
+        }
+    }
+    Ok(())
+}
