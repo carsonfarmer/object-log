@@ -2,7 +2,7 @@
 //!
 //! Maintenance uses the same repository library outside the stopped Spin host;
 //! all Git discovery, push, fetch, and cold clone traffic goes through Spin.
-#![cfg(not(target_arch = "wasm32"))]
+#![cfg(all(unix, not(target_arch = "wasm32")))]
 
 use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
 use object_log_git::ObjectFormat;
@@ -10,12 +10,25 @@ use object_store::{
     aws::{AmazonS3, AmazonS3Builder},
     path::Path as StorePath,
 };
+use std::os::unix::process::CommandExt;
 use std::{env, error::Error as StdError, path::Path, process::Command, sync::Arc, time::Duration};
 use tempfile::TempDir;
 
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[path = "support/spin_process.rs"]
+mod spin_process;
+
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
+
+#[tokio::test]
+#[ignore = "requires Spin 4, a release component and fixture variables, but no provider"]
+async fn spin_host_process_group_shutdown_closes_listener() -> TestResult {
+    let (_, mut host) = serve_spin(ObjectFormat::Sha1, "shutdown-only").await?;
+    host.stop()?;
+    host.stop()?;
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires local MinIO, Spin 4, and a release WASIp2 component build"]
@@ -64,7 +77,7 @@ async fn force_policy_lifecycle(format: ObjectFormat) -> TestResult {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("non-fast-forward"));
     assert!(git_stdout(None, ["ls-remote", &url, "refs/heads/main"])?.starts_with(after.trim()));
-    server.stop();
+    server.stop()?;
 
     let (url, mut writer) = serve_spin_with_policy(format, &namespace, false, true).await?;
     git(Some(&source), ["push", "--quiet", &lease, &url, "main"])?;
@@ -92,7 +105,7 @@ async fn force_policy_lifecycle(format: ObjectFormat) -> TestResult {
             "refs/archive/saved",
         ],
     )?;
-    writer.stop();
+    writer.stop()?;
     let observed = log.load().await?;
     let (url, mut reader) = serve_spin_with_policy(format, &namespace, true, true).await?;
     let cold = root.path().join("cold");
@@ -122,7 +135,7 @@ async fn force_policy_lifecycle(format: ObjectFormat) -> TestResult {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("403"));
     assert!(log.refresh(&observed).await?.is_none());
-    reader.stop();
+    reader.stop()?;
     Ok(())
 }
 
@@ -239,7 +252,7 @@ async fn client_lifecycle(format: ObjectFormat) -> TestResult {
         .status
         .success()
     );
-    server.stop();
+    server.stop()?;
     {
         let before = log.load().await?;
         let (url, mut reader) = serve_spin_with_policy(format, &namespace, true, false).await?;
@@ -256,7 +269,7 @@ async fn client_lifecycle(format: ObjectFormat) -> TestResult {
         assert!(String::from_utf8_lossy(&rejected.stderr).contains("403"));
         assert!(git_stdout(None, ["ls-remote", &url, "refs/heads/blocked"])?.is_empty());
         assert!(log.refresh(&before).await?.is_none());
-        reader.stop();
+        reader.stop()?;
     }
     {
         let repository = object_log_git::Repository::open(&log, format).await?;
@@ -277,7 +290,7 @@ async fn client_lifecycle(format: ObjectFormat) -> TestResult {
         git(None, ["clone", "--quiet", &url, path(&cold)?])?;
         git(Some(&cold), ["fsck", "--strict"])?;
         assert_eq!(std::fs::read_to_string(cold.join("file"))?, "winner");
-        cold_server.stop();
+        cold_server.stop()?;
     }
     Ok(())
 }
@@ -336,7 +349,7 @@ async fn spin_minio_default_git_large_push_probes_then_streams_both_hashes() -> 
         git(None, ["clone", "--quiet", &url, path(&clone)?])?;
         git(Some(&clone), ["fsck", "--strict"])?;
         assert_eq!(std::fs::read(clone.join("large"))?, content);
-        server.stop();
+        server.stop()?;
     }
     Ok(())
 }
@@ -436,27 +449,28 @@ async fn large_fetch(format: ObjectFormat) -> TestResult {
     {
         assert!(trace.contains("acknowledgments"), "{trace}");
     }
-    server.stop();
+    server.stop()?;
     Ok(())
 }
 
-struct RunningHost(Option<(std::process::Child, String)>);
+struct RunningHost(Option<std::process::Child>, String, std::path::PathBuf);
 
 impl RunningHost {
-    fn stop(&mut self) {
-        if let Some((mut child, pid)) = self.0.take() {
-            if pid.is_empty() {
-                let _ = child.kill();
-            } else {
-                let _ = Command::new("kill").args(["-TERM", &pid]).status();
+    fn stop(&mut self) -> TestResult {
+        if let Some(child) = &mut self.0 {
+            // SIGINT lets /usr/bin/time finish its RSS report while reaping Spin.
+            spin_process::stop(child, &self.1, "-INT")?;
+            if std::fs::metadata(&self.2)?.len() == 0 {
+                return Err("Spin timer did not write its RSS report".into());
             }
-            let _ = child.wait();
+            self.0 = None;
         }
+        Ok(())
     }
 }
 impl Drop for RunningHost {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 
@@ -489,6 +503,7 @@ async fn serve_spin_with_policy(
         "-v"
     };
     process
+        .process_group(0)
         .args([time_report, "-o"])
         .arg(&rss)
         .arg(run)
@@ -514,22 +529,16 @@ async fn serve_spin_with_policy(
         &format!("allow_non_fast_forward={allow_non_fast_forward}"),
     ]);
     let child = process.stdout(log.try_clone()?).stderr(log).spawn()?;
-    let mut host = RunningHost(Some((child, String::new())));
+    let mut host = RunningHost(Some(child), address.clone(), rss.clone());
     for _ in 0..100 {
-        if let Some((child, pid)) = &mut host.0 {
-            if let Some(status) = child.try_wait()? {
-                return Err(format!(
-                    "Spin exited {status}: {}",
-                    std::fs::read_to_string(artifact.with_extension("log"))?
-                )
-                .into());
-            }
-            if pid.is_empty() {
-                let found = Command::new("pgrep")
-                    .args(["-P", &child.id().to_string()])
-                    .output()?;
-                String::from_utf8(found.stdout)?.trim().clone_into(pid);
-            }
+        if let Some(child) = &mut host.0
+            && let Some(status) = child.try_wait()?
+        {
+            return Err(format!(
+                "Spin exited {status}: {}",
+                std::fs::read_to_string(artifact.with_extension("log"))?
+            )
+            .into());
         }
         if std::net::TcpStream::connect(&address).is_ok() {
             println!("Spin {format} RSS report: {}", rss.display());

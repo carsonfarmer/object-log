@@ -1,0 +1,8 @@
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s
+     Running tests/operator_minio.rs (target/debug/deps/operator_minio-cd157fa405323e75)
+
+running 1 test
+test operator_spin_process_group_shutdown_closes_listener ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.28s

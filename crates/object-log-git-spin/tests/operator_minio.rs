@@ -11,14 +11,29 @@ use std::{
     fmt::Write as _,
     fs,
     io::Write,
-    os::unix::fs::OpenOptionsExt,
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::Path,
     process::{Child, Command, Output},
     sync::Arc,
     time::Duration,
 };
 
+#[path = "support/spin_process.rs"]
+mod spin_process;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+#[tokio::test]
+#[ignore = "requires Spin 4 and a release WASIp2 component, but no provider"]
+async fn operator_spin_process_group_shutdown_closes_listener() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let config = root.path().join("shutdown.toml");
+    private_file(&config, b"endpoint = \"http://127.0.0.1:9\"\nbucket = \"test\"\naccess_key = \"test\"\nsecret_key = \"test\"\n")?;
+    let (mut host, _) = serve(&config, root.path()).await?;
+    host.stop()?;
+    host.stop()?;
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires local MinIO, Spin 4 and a release WASIp2 component"]
@@ -376,12 +391,12 @@ fn git(directory: Option<&Path>, args: &[&str]) -> TestResult<Vec<u8>> {
     Ok(output.stdout)
 }
 
-struct Host(Option<Child>);
+struct Host(Option<Child>, String);
 impl Host {
     fn stop(&mut self) -> TestResult {
-        if let Some(mut child) = self.0.take() {
-            child.kill()?;
-            child.wait()?;
+        if let Some(child) = &mut self.0 {
+            spin_process::stop(child, &self.1, "-TERM")?;
+            self.0 = None;
         }
         Ok(())
     }
@@ -398,21 +413,25 @@ async fn serve(config: &Path, state: &Path) -> TestResult<(Host, String)> {
         .port();
     let address = format!("127.0.0.1:{port}");
     let log = fs::File::create(state.join(format!("spin-{port}.log")))?;
-    let mut host = Host(Some(
-        Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("run.sh"))
-            .args([
-                "--listen",
-                &address,
-                "--variable",
-                &format!("@{}", config.display()),
-            ])
-            .arg("--state-dir")
-            .arg(state)
-            .args(["--follow", "git"])
-            .stdout(log.try_clone()?)
-            .stderr(log)
-            .spawn()?,
-    ));
+    let mut host = Host(
+        Some(
+            Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("run.sh"))
+                .process_group(0)
+                .args([
+                    "--listen",
+                    &address,
+                    "--variable",
+                    &format!("@{}", config.display()),
+                ])
+                .arg("--state-dir")
+                .arg(state)
+                .args(["--follow", "git"])
+                .stdout(log.try_clone()?)
+                .stderr(log)
+                .spawn()?,
+        ),
+        address.clone(),
+    );
     for _ in 0..100 {
         if let Some(child) = &mut host.0
             && child.try_wait()?.is_some()
