@@ -539,6 +539,12 @@ async fn recover_pack(
         .write_all(&bytes)
         .await
         .map_err(|error| Error::PackStorage(error.to_string()))?;
+    // Tokio write_all can return while its final blocking write is pending.
+    // The independent Git reader must only open a complete recovery file.
+    output
+        .flush()
+        .await
+        .map_err(|error| Error::PackStorage(error.to_string()))?;
     drop(output);
     let install_path = work_dir.to_owned();
     let input = path.clone();
@@ -961,6 +967,42 @@ mod tests {
                 recovered.refs().get(&b"refs/tags/after-checkpoint"[..]),
                 Some(&fixture.target)
             );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn large_cold_recovery_installs_the_complete_final_write() -> TestResult {
+        // Exceed Tokio File's default 2 MiB buffer with incompressible bytes so
+        // both full writes and the final partial write reach the recovery file.
+        let mut state = 1_u64;
+        let contents: Vec<u8> = (0..2 * 1024 * 1024 + 4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let fixture = fixture(format, &contents)?;
+            assert!(fs::metadata(&fixture.pack)?.len() > 2 * 1024 * 1024);
+            let (log, _, _) = test_log("large-native-recovery").await?;
+            publish_durable_pack(&log, &fixture, format).await?;
+            for attempt in 0..4 {
+                let cache = fixture.directory.path().join(format!("cold-{attempt}"));
+                let recovered = Repository::open_native(&log, &cache, format).await?;
+                assert_eq!(
+                    recovered.refs().get(&b"refs/heads/main"[..]),
+                    Some(&fixture.target)
+                );
+                command(Some(&cache), &["fsck", "--strict"])?;
+                assert_eq!(
+                    command_output(Some(&cache), &["show", "refs/heads/main:file"])?.stdout,
+                    contents
+                );
+                assert!(!cache.join("object-log-recovery.pack").exists());
+            }
         }
         Ok(())
     }
