@@ -23,6 +23,17 @@ use std::{
 const HTTP_CALLS: usize = 512;
 const HTTP_BYTES: usize = 96 * 1024 * 1024;
 
+#[derive(Debug)]
+pub(crate) struct QuotaExceeded;
+
+impl std::fmt::Display for QuotaExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Git HTTP storage quota exceeded")
+    }
+}
+
+impl std::error::Error for QuotaExceeded {}
+
 // One budget per incoming Git handler, including bootstrap and engine retries.
 #[derive(Debug, Default)]
 struct Budget {
@@ -36,7 +47,7 @@ impl Budget {
                 current.checked_add(amount).filter(|&next| next <= limit)
             })
             .map(|_| ())
-            .map_err(|_| http_error(std::io::Error::other("Git HTTP storage quota exceeded")))
+            .map_err(|_| http_error(QuotaExceeded))
     }
     fn call(&self) -> Result<(), HttpError> {
         Self::charge(&self.calls, 1, HTTP_CALLS)
@@ -273,6 +284,35 @@ impl CryptoProvider for Crypto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_marker_survives_storage_and_git_error_wrappers() -> Result<(), HttpError> {
+        let wrap = |source: HttpError| {
+            anyhow::Error::new(object_log_git::Error::ObjectLog(object_log::Error::Store(
+                object_store::Error::Generic {
+                    store: "test",
+                    source: Box::new(source),
+                },
+            )))
+        };
+        let budget = Budget::default();
+        let denied = budget
+            .transfer(HTTP_BYTES + 1)
+            .err()
+            .ok_or_else(|| http_error(std::io::Error::other("quota unexpectedly admitted")))?;
+        assert!(
+            wrap(denied)
+                .chain()
+                .any(<dyn std::error::Error + 'static>::is::<QuotaExceeded>)
+        );
+        let ordinary = http_error(std::io::Error::other("Git HTTP storage quota exceeded"));
+        assert!(
+            !wrap(ordinary)
+                .chain()
+                .any(<dyn std::error::Error + 'static>::is::<QuotaExceeded>)
+        );
+        Ok(())
+    }
 
     #[test]
     fn quota_accepts_exact_limits_and_rejects_overflow_without_wrapping() -> Result<(), HttpError> {

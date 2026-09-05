@@ -334,11 +334,19 @@ mod entry {
             Ok(reply) => reply,
             Err(error) => {
                 eprintln!("Git request failed");
+                let transport_limit = error
+                    .chain()
+                    .any(<dyn std::error::Error + 'static>::is::<super::transport::QuotaExceeded>);
                 match error.downcast::<Error>() {
                     Ok(Error::Busy) => Reply(
                         503,
                         "text/plain",
                         Bytes::from_static(b"Git operation busy\n"),
+                    ),
+                    Ok(Error::ObjectLog(object_log::Error::RequestDenied)) => Reply(
+                        503,
+                        "text/plain",
+                        Bytes::from_static(b"Git operation limit reached\n"),
                     ),
                     Ok(
                         Error::InvalidProtocol(_) | Error::InvalidReference | Error::InvalidPack(_),
@@ -350,6 +358,11 @@ mod entry {
                     Ok(Error::ReceiveRejected { response, .. }) => {
                         Reply(200, RECEIVE_RESULT, response)
                     }
+                    _ if transport_limit => Reply(
+                        503,
+                        "text/plain",
+                        Bytes::from_static(b"Git operation limit reached\n"),
+                    ),
                     _ => Reply(
                         500,
                         "text/plain",

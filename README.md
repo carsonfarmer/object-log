@@ -101,6 +101,10 @@ existing-WAL status, exact commit-token recovery, and conservative metadata
 checkpointing with `checkpoint --retain-packs` under a bounded metadata profile.
 It clears a qualifying WAL tail while retaining every pack; pack compaction,
 catalog limits, and collection remain separate.
+The same command can explicitly change the persisted default branch with
+`set-default-branch`, an expected old target, and a private recovery-file path.
+Unborn targets are supported; cloning follows the persisted symbolic `HEAD`.
+Pending publication still requires its exact recovery evidence.
 
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves
@@ -128,6 +132,11 @@ change that measurement. See the
 The [Task 3 evidence](docs/evidence/git-repository-2026-09-04.md) records the
 recovery fixes, unchanged small-limit tests, independent reviews, and limits.
 An 88 MiB engine pool admits one operation per native process or WASI instance.
+Git attaches an operation-local request guard to the log and retains it across
+retries. Existing caller guards run first; denied admission never removes caller
+policy. These counters cover logical storage-client calls and bounded payloads,
+while Spin separately bounds HTTP traffic including bootstrap. They are not
+whole-process memory measurements. Admission exhaustion returns HTTP 503.
 Spin deployment forces one live component instance. A fresh Linux serving
 process passes a hard 128 MiB cgroup with a prepared executable cache, but
 empty-cache compilation exceeds that cap. See the
