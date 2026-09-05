@@ -425,7 +425,11 @@ mod tests {
                 futures::stream::iter([Ok(bytes)]),
             )
             .await?;
-            let (descriptor, root) = input.scan(format).await?.normalize(&mut NoBases).await?;
+            let (descriptor, root) = input
+                .scan(format)
+                .await?
+                .normalize(&mut pack::ingest::NoBases)
+                .await?;
             drop(input);
             drop(stage);
             let operation = Pool::new(16 * 1024 * 1024).admit()?;
@@ -462,17 +466,6 @@ mod tests {
             assert!(graph.nodes.iter().all(|node| node.verified));
         }
         Ok(())
-    }
-
-    struct NoBases;
-    impl pack::ingest::BaseProvider for NoBases {
-        async fn provide<'a>(
-            &mut self,
-            _: &pack::ingest::Input<'a>,
-            _: ObjectId,
-        ) -> Result<Option<pack::ingest::Decoded<'a>>, Error> {
-            Ok(None)
-        }
     }
 
     #[tokio::test]

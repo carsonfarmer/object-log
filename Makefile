@@ -56,6 +56,11 @@ git-spin-wasi-check:
 git-spin-minio-test:
 	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
 	./scripts/test-minio.sh minio spin_minio object-log-git-spin ""
+.PHONY: git-spin-capacity-test
+git-spin-capacity-test:
+	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+	./scripts/test-minio.sh minio spin_capacity_ object-log-git-spin ""
+
 .PHONY: git-spin-performance-acceptance
 git-spin-performance-acceptance:
 	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release

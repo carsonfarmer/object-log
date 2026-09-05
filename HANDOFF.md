@@ -25,9 +25,13 @@ Check hosted CI after each push. Verification belongs in tests and commits.
   repeated push/checkpoint/GC cycles and cold Git recovery are tested. Extend
   this beyond the tested 1,100 file-changing pushes and 35 maintenance/cold-clone
   cycles per hash; compaction still traverses the live graph.
-- Bounded streaming receive and fetch are implemented, including read-only
-  selected-delta replay. Qualify at least 50 MiB files and 1 GiB pushes plus
-  usable fetch/clone; current capacity limits remain unchanged.
+- Streaming receive supports 1 GiB blobs and 1,040 MiB incoming packs. Both-hash
+  Spin/MinIO tests cover large-file push, clone/fetch and maintenance, plus cold
+  clone combining three independent 720 MiB pushes into one pack over 2,080 MiB.
+- The real object-log history fixture now passes push, cold clone, incremental
+  update, migration, compaction/checkpoint/GC and final cold verification. Private
+  encoded-chunk sharing and verified small-delta reuse reduce repeated reads
+  and decoding without raising operation quotas or changing the core API.
 - Continue the GitHub queue, especially #19, #21, #23, #25 and #26.
 
 Use exclusive implementation worktrees; root alone integrates main. Keep useful

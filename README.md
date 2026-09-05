@@ -117,12 +117,17 @@ Pending publication still requires its exact recovery evidence.
 Spin receive consumes bounded frames and stages replayable input before
 publication. Small decoded scratch objects use charged request memory, and
 larger objects use immutable storage. Interrupted input cannot publish refs;
-reopening an expired view retains the same operation counters. The current
-file and pack limits remain unchanged. Fetch streams bounded frames from an
+reopening an expired view retains the same operation counters. Streaming receive
+allows 1 GiB blobs and 1,040 MiB incoming packs; commits, trees, and tags retain
+an 8 MiB limit. Fetch spans stored packs within cumulative work and transfer
+limits. Buffered convenience APIs retain their smaller limits. Fetch streams bounded frames from an
 authenticated view with backpressure; late failures abort the response without
 a final pack digest. Selected deltas are decoded through bounded read-only
 windows. The sustained provider test exercises 1,100 file-changing pushes per
 hash, with 35 compaction/checkpoint/collection cycles and cold clone checks.
+New Spin repositories use a versioned Git storage profile with 2,080 child
+references per object. Repositories using the original default profile keep their durable
+options and smaller pack geometry; opening them does not migrate those options.
 
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves

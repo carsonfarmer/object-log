@@ -23,7 +23,12 @@ The core `object-log` crate remains independent from Git.
 
 The full [review and execution queue](docs/reviews/git-proof-2026-09-05.md)
 records ordinary-workflow gaps and core API lessons. Issue #26 sets minimum
-capacity at 50 MiB files and 1 GiB pushes. Use ordinary Spin defaults for runtime
+capacity at 50 MiB files and 1 GiB pushes. Streaming receive and fetch now meet
+that minimum in both-hash Spin/MinIO lifecycles. Aggregate clone also combines
+three separate 720 MiB pushes into a pack over 2,080 MiB. The real object-log
+history fixture covers incremental updates and compaction/checkpoint/GC with
+cold recovery; graph and operation budgets still define a finite scale envelope.
+Use ordinary Spin defaults for runtime
 behavior; no host memory cap, pooling override, or one-instance wrapper is required.
 
 Tasks 1–9 were accepted at `b4b05f3`. Tasks 10–12 now pass unchanged-client,

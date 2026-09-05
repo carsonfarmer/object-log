@@ -81,8 +81,9 @@ storage read-only mode. It does not cancel a push already running, change S3
 permissions, or prevent separate processes with storage access from publishing.
 
 The adapter validates request headers before backend access and acquires a
-repository operation before reading a command body. Both transmitted and
-gzip-expanded bodies are limited to 10 MiB. Receive decodes bounded frames into
+repository operation before reading a command body. Upload-pack command bodies
+are limited to 10 MiB; receive bodies allow 1,040 MiB of pack data plus 1 MiB of
+controls. Both transmitted and gzip-expanded sizes are bounded. Receive decodes frames into
 replayable input; small decoded scratch objects use charged request memory and
 larger objects use immutable storage. Upload-pack command bodies still use
 bounded collection. Response bytes retain their engine owner
@@ -296,12 +297,13 @@ complete immutable dependency graphs and active collection plans; it does not
 use the serving Git operation budgets. Resource measurements should use normal
 runtime settings; there is no imposed Spin host-memory acceptance cap.
 
-Checkpointing uses the shared maintenance profile: 8,192 charged calls, 88 MiB
-live pool, 24 MiB retained state, 96 MiB transfer and 256 MiB work, with one
-cumulative expired-view retry. Those reservations bound shared-engine work,
+Checkpointing uses the shared maintenance profile: the serving call allowance
+plus 8,192 metadata calls, an 88 MiB live pool and 24 MiB retained state. Transfer
+and work allowances scale with the streaming pack limit; one expired-view retry
+shares all counters. Those reservations bound shared-engine work,
 not the whole process; backend setup/probes precede helper admission. Oversized
-metadata can still reject. See the [shared helper evidence](../../docs/evidence/git-metadata-maintenance-2026-09-05.md)
-for accounting and limits. Collection and HTTP authorization are implemented.
+metadata can still reject. See the [engine budget](../object-log-git/src/budget.rs)
+for current allowances. Collection and HTTP authorization are implemented.
 Externally owned retentions block collection until their owner releases them;
 the CLI does not create or automatically clear retentions.
 
@@ -369,3 +371,17 @@ python3 crates/object-log-git-spin/tests/check_uri.py
 Build the release WASIp2 component first. The check accepts the same loopback
 `OBJECT_LOG_MINIO_*` settings as `check_partial.py`, or starts its own pinned
 MinIO container when those settings are absent.
+
+Run the opt-in large-file lifecycle against local MinIO with ordinary Spin:
+
+```sh
+make git-spin-capacity-test
+OBJECT_LOG_GIT_CAPACITY_BYTES=1073741824 make git-spin-capacity-test
+```
+
+The large-file case defaults to 50 MiB. Both hashes exercise push, clone, fetch,
+large-blob tags, compaction, checkpoint, GC, and cold recovery. The 50 MiB case
+also edits and pushes the file incrementally. The suite also tests interrupted
+uploads and a cold clone combining three independently pushed 720 MiB blobs
+into a pack larger than 2,080 MiB. Fixtures use temporary storage and need
+several GiB of free disk space.
