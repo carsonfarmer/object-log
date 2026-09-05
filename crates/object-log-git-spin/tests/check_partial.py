@@ -233,7 +233,17 @@ def main():
                         git(refetch, "fetch", "--quiet", "--refetch", "--filter=blob:limit=16384")
                         assert not missing(refetch)
                         git(refetch, "fsck", "--strict")
-                        print(name + ": promisor omissions, thresholds, lazy show/checkout, cold checkpoint/GC, shallow/deepen/unshallow incremental fetch, filter refetch and unavailable-remote recovery passed", flush=True)
+                        push_client = root / "push-client"
+                        git(root, "clone", "--quiet", '--filter=blob:none', url, str(push_client))
+                        assert missing(push_client), "historical blobs should remain promised"
+                        (push_client / "contribution").write_text("ordinary contribution")
+                        git(push_client, "add", "contribution")
+                        git(push_client, "commit", "--quiet", "-m", "contribute after clone")
+                        git(push_client, "push", "--quiet")
+                        git(source, "fetch", "--quiet", url, "refs/heads/main")
+                        assert git(source, "show", "FETCH_HEAD:contribution") == "ordinary contribution"
+                        git(source, "fsck", "--strict")
+                        print(name + ": promisor omissions, thresholds, lazy show/checkout, cold checkpoint/GC, shallow/deepen/unshallow incremental fetch, filter refetch unavailable-remote recovery and commit/push passed", flush=True)
                     finally:
                         stop(host, port)
     except Exception:

@@ -1322,3 +1322,64 @@ async fn guarded_receive_matches_client_attempts_through_publication_and_recover
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn shallow_push_requires_complete_server_history() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let base = fixture(format, b"base")?;
+        let source = base.directory.path().join("source");
+        fs::write(source.join("file"), b"contribution")?;
+        command(Some(&source), &["commit", "--quiet", "-am", "contribute"])?;
+        let tip = ObjectId::parse(
+            format,
+            output(Some(&source), &["rev-parse", "HEAD"])?.trim(),
+        )?;
+        let selection = base.directory.path().join("selection");
+        fs::write(&selection, format!("{tip}\n^{}\n", base.target))?;
+        let packed = Command::new("git")
+            .current_dir(&source)
+            .args(["pack-objects", "--revs", "--stdout"])
+            .stdin(fs::File::open(selection)?)
+            .output()?;
+        assert!(packed.status.success());
+        let input = receive_input(
+            format,
+            &[RefUpdate::new("refs/heads/contribution", None, Some(tip))?],
+            &packed.stdout,
+            true,
+        );
+        let declaration = format!("shallow {}", base.target);
+        let mut shallow = format!("{:04x}{declaration}", declaration.len() + 4).into_bytes();
+        shallow.extend_from_slice(&input);
+        let shallow = Bytes::from(shallow);
+        let (log, _, _) = test_log("shallow-push-closure").await?;
+        for policy in [
+            crate::ReceivePolicy::FastForwardOnly,
+            crate::ReceivePolicy::AllowNonFastForward,
+        ] {
+            assert!(matches!(
+                common_open(&log, format)
+                    .await?
+                    .prepare_receive_with_policy(TransactionId::new(), shallow.clone(), policy)
+                    .await,
+                Err(Error::ReceiveRejected { .. })
+            ));
+        }
+        assert!(log.load().await?.tail().is_empty());
+        publish_durable_pack(&log, &base, format).await?;
+        let prepared = common_open(&log, format)
+            .await?
+            .prepare_receive(TransactionId::new(), shallow)
+            .await?;
+        assert!(matches!(
+            prepared.publish_receive().await?.0,
+            object_log::Resolution::Committed(_)
+        ));
+        let recovered = cold_checked(&log, format).await?;
+        assert_eq!(
+            recovered.refs().get(b"refs/heads/contribution".as_slice()),
+            Some(&tip)
+        );
+    }
+    Ok(())
+}

@@ -216,7 +216,17 @@ try:
                     head_cut = root / "head-cut"
                     git(root, "clone", "--quiet", "--branch", "side", "--shallow-exclude=HEAD", url, str(head_cut))
                     verify(head_cut, 1)
-                    print(name + ": depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge strict client acceptance passed", flush=True)
+                    push_client = root / "push-client"
+                    git(root, "clone", "--quiet", '--depth=1', url, str(push_client))
+                    assert git(push_client, "rev-parse", "--is-shallow-repository") == "true"
+                    (push_client / "contribution").write_text("ordinary contribution")
+                    git(push_client, "add", "contribution")
+                    git(push_client, "commit", "--quiet", "-m", "contribute after clone")
+                    git(push_client, "push", "--quiet")
+                    git(source, "fetch", "--quiet", url, "refs/heads/main")
+                    assert git(source, "show", "FETCH_HEAD:contribution") == "ordinary contribution"
+                    git(source, "fsck", "--strict")
+                    print(name + ": depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge commit/push strict client acceptance passed", flush=True)
                 finally:
                     stop(host, port)
 except Exception:

@@ -559,6 +559,7 @@ pub(crate) fn parse_receive_controls(
     let mut packets = input;
     let mut updates = Vec::new();
     let mut capabilities = 0_u8;
+    let mut shallow_count = 0;
     while let Some(line) = data_until(&mut packets, PacketLineRef::Flush)? {
         within(
             input.len() - packets.len(),
@@ -567,6 +568,16 @@ pub(crate) fn parse_receive_controls(
         )?;
         within(updates.len() + 1, MAX_COMMANDS, "ref commands")?;
         let line = text(line);
+        if let Some(id) = line.strip_prefix(b"shallow ") {
+            if !updates.is_empty() || parse_optional_id(id, format)?.is_none() {
+                return Err(Error::Protocol("invalid shallow declaration"));
+            }
+            shallow_count += 1;
+            within(shallow_count, MAX_ITEMS, "shallow declarations")?;
+            // Sender history metadata grants no missing-object exemption. The
+            // receiver still verifies every object and parent in the new refs.
+            continue;
+        }
         let command = if updates.is_empty() {
             let nul = line
                 .iter()
@@ -1414,6 +1425,61 @@ mod tests {
             assert_eq!(rest, b"not yet a complete pack");
             protocol(parse_receive(&input, format));
             protocol(parse_receive_controls(b"0000", format));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn receive_shallow_declarations_are_bounded_leading_metadata() -> TestResult {
+        for (format, id, pack, caps) in [
+            (
+                ObjectFormat::Sha1,
+                SHA1_A,
+                EMPTY_SHA1_PACK,
+                "object-format=sha1",
+            ),
+            (
+                ObjectFormat::Sha256,
+                SHA256_A,
+                EMPTY_SHA256_PACK,
+                "object-format=sha256",
+            ),
+        ] {
+            let command = receive_one(
+                format,
+                &"0".repeat(id.len()),
+                id,
+                caps.as_bytes(),
+                pack,
+                false,
+            )?;
+            let mut prefix = Vec::new();
+            encode_line(format!("shallow {id}").as_bytes(), true, &mut prefix)?;
+            let mut input = prefix.clone();
+            input.extend_from_slice(&command);
+            let result = parse_receive(&input, format)?;
+            assert_eq!(result.updates.len(), 1);
+            assert_eq!(result.pack, pack);
+            for value in [
+                "bad".to_owned(),
+                "0".repeat(id.len()),
+                format!("{id} extra"),
+            ] {
+                let mut input = Vec::new();
+                encode_line(format!("shallow {value}").as_bytes(), false, &mut input)?;
+                input.extend_from_slice(&command);
+                protocol(parse_receive(&input, format));
+            }
+            let split = command.len() - pack.len() - 4;
+            let mut late = command[..split].to_vec();
+            late.extend_from_slice(&prefix);
+            late.extend_from_slice(&command[split..]);
+            protocol(parse_receive(&late, format));
+            let mut excessive = prefix.repeat(MAX_ITEMS + 1);
+            excessive.extend_from_slice(&command);
+            assert!(parse_receive(&excessive, format).is_err());
+            prefix.extend_from_slice(b"0000");
+            protocol(parse_receive(&prefix, format));
         }
         Ok(())
     }
