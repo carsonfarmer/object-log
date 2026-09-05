@@ -1,9 +1,13 @@
 """Opt-in unchanged Git shallow clients against a fresh local Spin/MinIO pair.
 
 Run after the release WASIp2 build. Uses only loopback endpoints and destroys
-its MinIO container on exit. Host compilation is outside the serving budget.
+its owned MinIO container on exit. Alternatively set OBJECT_LOG_MINIO_ENDPOINT,
+BUCKET, ACCESS_KEY and SECRET_KEY (all with OBJECT_LOG_MINIO_ prefix) for an
+existing loopback service/bucket, which is never deleted. Host compilation is
+outside the serving budget.
 """
 import json
+import ipaddress
 import errno
 import signal
 import os
@@ -13,6 +17,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -81,13 +86,44 @@ def verify(path, count):
     git(path, "fsck", "--strict", "--no-reflogs")
 
 
+def external_minio():
+    endpoint = os.environ.get("OBJECT_LOG_MINIO_ENDPOINT")
+    if endpoint is None:
+        return None
+    parsed = urllib.parse.urlsplit(endpoint)
+    hostname = parsed.hostname or ""
+    loopback = hostname == "localhost"
+    if not loopback:
+        try:
+            loopback = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+    if (not loopback or parsed.scheme not in ("http", "https")
+            or parsed.username or parsed.password or parsed.path not in ("", "/")
+            or parsed.query or parsed.fragment):
+        raise ValueError("external MinIO endpoint must be a loopback HTTP(S) origin")
+    values = [os.environ.get("OBJECT_LOG_MINIO_" + key)
+              for key in ("BUCKET", "ACCESS_KEY", "SECRET_KEY")]
+    if not all(values):
+        raise ValueError("external MinIO requires BUCKET, ACCESS_KEY and SECRET_KEY")
+    return endpoint.rstrip("/"), *values
+
+
+external = external_minio()
+owned_container = external is None
 try:
-    run(["docker", "run", "--detach", "--rm", "--name", CONTAINER,
-         "--publish", "127.0.0.1::9000", "--env", "MINIO_ROOT_USER=objectlog",
-         "--env", "MINIO_ROOT_PASSWORD=objectlog-local-test-secret", IMAGE, "server", "/data"])
-    endpoint = "http://" + run(["docker", "port", CONTAINER, "9000/tcp"])
-    ready(endpoint + "/minio/health/ready")
-    run(["aws", "--endpoint-url", endpoint, "s3api", "create-bucket", "--bucket", "object-log-test"])
+    if external:
+        endpoint, bucket, access_key, secret_key = external
+        ENV.update(AWS_ACCESS_KEY_ID=access_key, AWS_SECRET_ACCESS_KEY=secret_key)
+        ready(endpoint + "/minio/health/ready")
+    else:
+        bucket, access_key, secret_key = "object-log-test", "objectlog", "objectlog-local-test-secret"
+        run(["docker", "run", "--detach", "--rm", "--name", CONTAINER,
+             "--publish", "127.0.0.1::9000", "--env", "MINIO_ROOT_USER=" + access_key,
+             "--env", "MINIO_ROOT_PASSWORD=" + secret_key, IMAGE, "server", "/data"])
+        endpoint = "http://" + run(["docker", "port", CONTAINER, "9000/tcp"])
+        ready(endpoint + "/minio/health/ready")
+        run(["aws", "--endpoint-url", endpoint, "s3api", "create-bucket", "--bucket", bucket])
     for name in ["sha1", "sha256"]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -95,8 +131,8 @@ try:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
             url = f"http://127.0.0.1:{port}/repo"
-            variables = dict(endpoint=endpoint, bucket="object-log-test", access_key="objectlog",
-                             secret_key="objectlog-local-test-secret", prefix="shallow-" + name,
+            variables = dict(endpoint=endpoint, bucket=bucket, access_key=access_key,
+                             secret_key=secret_key, prefix="shallow-" + name + "-" + uuid.uuid4().hex,
                              object_format=name, auth_mode="disabled")
             config = root / "config.toml"
             config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
@@ -181,4 +217,5 @@ except Exception:
         print(path.read_text())
     raise
 finally:
-    subprocess.run(["docker", "rm", "--force", CONTAINER], capture_output=True, check=False, timeout=20)
+    if owned_container:
+        subprocess.run(["docker", "rm", "--force", CONTAINER], capture_output=True, check=False, timeout=20)
