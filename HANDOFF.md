@@ -19,8 +19,8 @@ and isolated native MinIO. Hosted CI is checked after each push.
 
 ## Next implementation
 
-- Integrate reviewed packfile URI candidate 4708fc1 (depends on transport c54ec3a,
-  already included). Preserve persisted HEAD and request guards at merge seams.
+- Authenticated packfile URIs are implemented, including range resume and cold
+  recovery. Preserve this path while adding catalog and streaming consumers.
 - Integrate the actual catalog Reader/publication consumers after the final
   replica-content checkpoint check. Capacity and catalog workers own this work.
 - Finish bounded streaming receive AND fetch/clone for the capacity target:

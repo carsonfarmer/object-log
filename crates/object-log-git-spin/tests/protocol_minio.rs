@@ -24,3 +24,9 @@ fn shallow_minio_clients() -> Result<(), Box<dyn std::error::Error>> {
 fn partial_minio_clients() -> Result<(), Box<dyn std::error::Error>> {
     run("check_partial.py")
 }
+
+#[test]
+#[ignore = "requires local MinIO, Spin 4, AWS CLI, Python and release WASIp2 component"]
+fn uri_minio_clients() -> Result<(), Box<dyn std::error::Error>> {
+    run("check_uri.py")
+}

@@ -78,3 +78,8 @@ git-spin-partial-test:
 git-spin-auth-minio-test:
 	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
 	./scripts/test-minio.sh auth_minio auth_minio object-log-git-spin ""
+
+.PHONY: git-spin-uri-test
+git-spin-uri-test:
+	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+	./scripts/test-minio.sh protocol_minio uri_minio object-log-git-spin ""
