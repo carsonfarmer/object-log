@@ -72,7 +72,7 @@ impl Graph {
             let id = graph.nodes[index].id;
             // Direct refs have no declared kind. Verify them without collecting
             // their bodies: a blob has no graph edges, however large it is.
-            if graph.nodes[index].kind.is_none() {
+            if graph.nodes[index].kind.is_none() || graph.nodes[index].kind == Some(Kind::Blob) {
                 let kind = reader.verify(id).await?.ok_or(Error::InvalidReference)?;
                 graph.expect_kind(index, kind)?;
                 if kind == Kind::Blob {
@@ -404,7 +404,9 @@ mod tests {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let blob = (Kind::Blob, vec![42; 50 * 1024 * 1024]);
             let blob_id = id(format, &blob)?;
-            let bytes = bytes::Bytes::from(pack(format, &[blob])?);
+            let annotated = tag(blob_id, "blob", "large");
+            let tag_id = id(format, &annotated)?;
+            let bytes = bytes::Bytes::from(pack(format, &[blob, annotated])?);
             let backend =
                 ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("large-blob-root"))
                     .await?;
@@ -446,6 +448,18 @@ mod tests {
             assert_eq!(graph.nodes[0].kind, Some(Kind::Blob));
             assert!(graph.nodes[0].verified);
             assert!(graph.edges.is_empty());
+            drop(graph);
+            // Processing the tag first sets the direct root's declared kind
+            // before that root reaches the queue; it must still avoid find().
+            let graph = Graph::load(
+                &operation,
+                &mut Reader::new(&log, &view, &catalog),
+                &[tag_id, blob_id],
+            )
+            .await?;
+            assert_eq!(graph.nodes.len(), 2);
+            assert_eq!(graph.edges.len(), 1);
+            assert!(graph.nodes.iter().all(|node| node.verified));
         }
         Ok(())
     }
