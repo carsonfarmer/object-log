@@ -118,7 +118,11 @@ Spin receive consumes bounded frames and stages replayable input before
 publication. Small decoded scratch objects use charged request memory, and
 larger objects use immutable storage. Interrupted input cannot publish refs;
 reopening an expired view retains the same operation counters. The current
-file and pack limits remain unchanged while streamed fetch is being completed.
+file and pack limits remain unchanged. Fetch streams bounded frames from an
+authenticated view with backpressure; late failures abort the response without
+a final pack digest. Selected deltas are decoded through bounded read-only
+windows. The sustained provider test exercises 1,100 file-changing pushes per
+hash, with 35 compaction/checkpoint/collection cycles and cold clone checks.
 
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves
@@ -271,14 +275,12 @@ qualify live AWS or remote object-store performance.
 
 The bounded Git proof is implemented; the broader scale and deployment goal
 remains open. Follow-on acceptance covers [pack compaction and useful scale](https://github.com/carsonfarmer/object-log/issues/19),
-[Spin startup, memory headroom and concurrency](https://github.com/carsonfarmer/object-log/issues/21),
-[pooled outbound HTTP failures](https://github.com/carsonfarmer/object-log/issues/22),
+[ordinary Spin reliability](https://github.com/carsonfarmer/object-log/issues/21),
 [large-push performance](https://github.com/carsonfarmer/object-log/issues/23),
-[partial/filtered clones and packfile URIs](https://github.com/carsonfarmer/object-log/issues/24),
+[50 MiB files and 1 GiB pushes](https://github.com/carsonfarmer/object-log/issues/26),
 and [simpler integration](https://github.com/carsonfarmer/object-log/issues/25).
 
 The [Git proof review and execution queue](docs/reviews/git-proof-2026-09-05.md)
 tracks the remaining work toward an ordinary, usable service and the generic
-WAL improvements justified by building it. Physical storage retries can exceed
-current Git staging charges; [issue #36](https://github.com/carsonfarmer/object-log/issues/36)
-tracks that accounting gap separately from cumulative expired-view retries.
+WAL improvements justified by building it. Shared-engine calls, transfer and work
+remain cumulative across expired-view retries.

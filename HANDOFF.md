@@ -23,11 +23,12 @@ Check hosted CI after each push. Verification belongs in tests and commits.
   recovery. Preserve this path while adding catalog and streaming consumers.
 - Live-pack compaction and its operator command preserve refs and symbolic HEAD;
   repeated push/checkpoint/GC cycles and cold Git recovery are tested. Extend
-  this to larger sustained workloads; compaction still traverses the live graph.
-- Bounded streaming receive is implemented with shared input reads and charged
-  small-object scratch. Finish streamed fetch/clone, then qualify at least
-  50 MiB files and 1 GiB pushes; current capacity limits remain unchanged.
-- Continue the GitHub queue, especially #19, #23, #25, #26 and #32.
+  this beyond the tested 1,100 file-changing pushes and 35 maintenance/cold-clone
+  cycles per hash; compaction still traverses the live graph.
+- Bounded streaming receive and fetch are implemented, including read-only
+  selected-delta replay. Qualify at least 50 MiB files and 1 GiB pushes plus
+  usable fetch/clone; current capacity limits remain unchanged.
+- Continue the GitHub queue, especially #19, #21, #23, #25 and #26.
 
 Use exclusive implementation worktrees; root alone integrates main. Keep useful
 regression tests, sparse authenticated reads, cumulative retry counters, recovery,

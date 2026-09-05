@@ -216,8 +216,10 @@ confirmed reclaimed bytes. A deadline or error without core counters omits them,
 which means unknown rather than zero. Once no plan remains,
 restart Spin and verify clone/fetch before reopening normal ingress. Scheduling
 uses offline maintenance windows with backoff on conflict and alerts on repeated
-pending or blocked outcomes; this command does not establish sustained service
-capacity or provide an online scheduler.
+pending or blocked outcomes. The provider test performs maintenance every 32
+file-changing pushes through 1,100 pushes per hash, checking a cold clone after
+each cycle. This cadence is a tested small-file workload, not an online scheduler
+or a capacity guarantee for every repository.
 
 `set-default-branch` publishes an explicit symbolic HEAD update through the same
 WAL CAS. Stop and drain serving processes first. Both names must be full branch
@@ -280,10 +282,13 @@ outcome together with the exit status:
 | 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |
 | 5 | Invalid/corrupt evidence, a missing head, resource limit, unsupported backend, collection fence, expired view or runtime setup failure. `invalid_git_state_or_limit` covers Git validation and budget failures. No raw error chain is printed. |
 
-Native S3 retries are disabled, connect timeout is five seconds, request timeout
-is thirty seconds, and the asynchronous backend operation has a sixty-second
-deadline. Deadline expiry during a mutation is pending: cancellation
-cannot prove publication failed. A new resume command may retry the same token.
+S3 SDK retries are disabled. Our transport adds at most one extra HTTP client
+execution for selected pre-response failures of bodyless GET/HEAD requests; it
+does not retry mutations. The native HTTP client retains its own safe protocol
+retries, so this is not a two-transmission bound.
+Connect timeout is five seconds, request timeout is thirty seconds, and the
+asynchronous backend operation has a sixty-second deadline. Deadline expiry
+during a mutation is pending: cancellation cannot prove publication failed. A new resume command may retry the same token.
 Input file reads precede the asynchronous deadline.
 
 Input caps do not establish decoded-memory limits. Core resumption may verify
@@ -296,8 +301,9 @@ live pool, 24 MiB retained state, 96 MiB transfer and 256 MiB work, with one
 cumulative expired-view retry. Those reservations bound shared-engine work,
 not the whole process; backend setup/probes precede helper admission. Oversized
 metadata can still reject. See the [shared helper evidence](../../docs/evidence/git-metadata-maintenance-2026-09-05.md)
-for accounting and limits. GC, retention administration and HTTP authorization
-remain separate work under #32/#35.
+for accounting and limits. Collection and HTTP authorization are implemented.
+Externally owned retentions block collection until their owner releases them;
+the CLI does not create or automatically clear retentions.
 
 A local signed HTTP fixture tests the transport independently of a provider:
 
