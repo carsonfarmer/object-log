@@ -27,7 +27,15 @@ prefix = "object-log-git"
 log_id = "repository"
 object_format = "sha1"
 read_only = "false"
+auth_mode = "basic"
+auth_read_token = ""
+auth_write_token = ""
 ```
+
+Before serving, set at least one HTTP token to 64 hexadecimal characters from
+32 random bytes; the two tokens must differ when both are present. Empty roles
+are disabled, and the empty defaults above fail closed. See [private Git
+authentication](AUTH.md) for credential helpers, HTTPS, and rotation.
 
 All values are strings. `endpoint`, `bucket`, `access_key`, and `secret_key`
 are required; the other values above are defaults. Use `sha256` for a SHA-256
@@ -56,13 +64,15 @@ Push the first `main` branch from a matching-format local repository with
 `git push http://127.0.0.1:3000/repo main`, then clone with
 `git -c protocol.version=2 clone http://127.0.0.1:3000/repo`.
 
-Client HTTP access has no authentication: every reachable client can read and,
-by default, push. Keep this recipe on a trusted local network boundary. Public
-hosting requires a separately reviewed authentication and transport security
-design. No public deployment is provided here.
+Client HTTP access uses Basic authentication with username `git`. A read token
+allows clone/fetch; a write token also allows push. Configure a credential helper
+before the commands above. Use HTTPS with a trusted loopback backend for private
+deployments as described in [AUTH.md](AUTH.md). For local unauthenticated fixtures
+only, explicitly set `auth_mode = "disabled"` and leave both tokens empty.
+No public deployment is provided here.
 
 For a repository that should accept only Git reads, set `read_only = "true"`
-and restart every serving process. Both receive discovery and receive POSTs
+and restart every serving process. Authenticated receive discovery and receive POSTs
 (including Git's authentication probe) return HTTP 403 before storage access or
 body collection. Clone and fetch remain available. Only the exact strings
 `true` and `false` are accepted; a misspelling fails requests with HTTP 500.

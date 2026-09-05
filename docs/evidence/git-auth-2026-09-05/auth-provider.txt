@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/auth_minio.rs (target/debug/deps/auth_minio-5a2e2e63e91ee0d1)
+
+running 2 tests
+sha1: credential-helper push/clone/fetch, cold recovery, rotation, 403 policy, exact head preservation passed
+sha256: credential-helper push/clone/fetch, cold recovery, rotation, 403 policy, exact head preservation passed
+test auth_minio_credential_helper_lifecycle ... ok
+sha1: invalid config and auth rejected before backend/body; challenge and routes verified
+sha256: invalid config and auth rejected before backend/body; challenge and routes verified
+test auth_minio_preflight_without_backend_or_body ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.18s
+

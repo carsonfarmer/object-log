@@ -13,6 +13,9 @@ region = { default = "us-east-1" }
 prefix = { default = "object-log-git" }
 log_id = { default = "repository" }
 object_format = { default = "sha1" }
+auth_mode = { default = "basic" }
+auth_read_token = { default = "", secret = true }
+auth_write_token = { default = "", secret = true }
 read_only = { default = "false" }
 allow_non_fast_forward = { default = "false" }
 
@@ -33,6 +36,9 @@ region = "{{ region }}"
 prefix = "{{ prefix }}"
 log_id = "{{ log_id }}"
 object_format = "{{ object_format }}"
+auth_mode = "{{ auth_mode }}"
+auth_read_token = "{{ auth_read_token }}"
+auth_write_token = "{{ auth_write_token }}"
 read_only = "{{ read_only }}"
 allow_non_fast_forward = "{{ allow_non_fast_forward }}"
 

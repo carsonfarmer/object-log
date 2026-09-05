@@ -7,6 +7,7 @@
     )
 )]
 
+mod auth;
 mod transport;
 
 use std::{io::Read, sync::Arc, time::Duration};
@@ -26,7 +27,7 @@ const RECEIVE_RESULT: &str = "application/x-git-receive-pack-result";
 
 struct Reply(u16, &'static str, Bytes);
 
-async fn repository() -> anyhow::Result<Repository> {
+async fn repository(format: ObjectFormat) -> anyhow::Result<Repository> {
     let variable = spin_sdk::variables::get;
     let endpoint = variable("endpoint")?;
     let store = AmazonS3Builder::new()
@@ -59,7 +60,6 @@ async fn repository() -> anyhow::Result<Repository> {
         Options::default(),
     )
     .await?;
-    let format = object_format()?;
     Ok(Repository::open(&log, format).await?)
 }
 
@@ -124,6 +124,25 @@ fn validate_headers(
     Ok(encoding)
 }
 
+fn http_policy() -> anyhow::Result<(auth::AuthConfig, bool, ReceivePolicy, ObjectFormat)> {
+    // Validate the entire HTTP policy before credentials, storage, or body access.
+    let variable = spin_sdk::variables::get;
+    let config = auth::AuthConfig::parse(
+        &variable("auth_mode")?,
+        &variable("auth_read_token")?,
+        &variable("auth_write_token")?,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let read_only = variable("read_only")?.parse::<bool>()?;
+    let policy = if variable("allow_non_fast_forward")?.parse::<bool>()? {
+        ReceivePolicy::AllowNonFastForward
+    } else {
+        ReceivePolicy::FastForwardOnly
+    };
+    let format = object_format()?;
+    Ok((config, read_only, policy, format))
+}
+
 async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
     let path = request.path_with_query().unwrap_or_default();
     let upload = path == "/repo/git-upload-pack";
@@ -135,19 +154,24 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
     if !(get && (upload_advert || receive_advert) || post && (upload || receive)) {
         return Ok(Reply(404, "text/plain", Bytes::from_static(b"not found\n")));
     }
-    let read_only = spin_sdk::variables::get("read_only")?.parse::<bool>()?;
-    if read_only && (receive || receive_advert) {
-        return Ok(Reply(
-            403,
-            "text/plain",
-            Bytes::from_static(b"repository is read-only\n"),
-        ));
+    let (config, read_only, policy, format) = http_policy()?;
+    let authorization = request.headers().get("authorization");
+    if let Err(denied) = config.authorize(
+        authorization.iter().map(Vec::as_slice),
+        receive || receive_advert,
+        read_only,
+    ) {
+        return Ok(match denied {
+            auth::Denied::Unauthorized => Reply(
+                401,
+                "text/plain",
+                Bytes::from_static(b"authentication required\n"),
+            ),
+            auth::Denied::Forbidden => {
+                Reply(403, "text/plain", Bytes::from_static(b"access forbidden\n"))
+            }
+        });
     }
-    let policy = if spin_sdk::variables::get("allow_non_fast_forward")?.parse::<bool>()? {
-        ReceivePolicy::AllowNonFastForward
-    } else {
-        ReceivePolicy::FastForwardOnly
-    };
     let Ok(encoding) = validate_headers(&request, upload, upload_advert, post) else {
         return Ok(Reply(
             400,
@@ -159,12 +183,12 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
         return Ok(Reply(
             200,
             "application/x-git-upload-pack-advertisement",
-            Repository::upload_advertisement(object_format()?),
+            Repository::upload_advertisement(format),
         ));
     }
     // Opening holds engine admission before host body collection. The bounded
     // host buffer lives in the runtime allowance until the command charges it.
-    let repository = repository().await?;
+    let repository = repository(format).await?;
     if receive_advert {
         return Ok(Reply(
             200,
@@ -273,6 +297,12 @@ async fn respond(
         ),
         ("cache-control".into(), b"no-cache".to_vec()),
     ])?;
+    if status == 401 {
+        fields.set(
+            "www-authenticate",
+            &[b"Basic realm=\"object-log Git\"".to_vec()],
+        )?;
+    }
     let response = OutgoingResponse::new(fields);
     response
         .set_status_code(status)
@@ -303,7 +333,7 @@ mod entry {
         let reply = match dispatch(request).await {
             Ok(reply) => reply,
             Err(error) => {
-                eprintln!("Git request failed: {error:#}");
+                eprintln!("Git request failed");
                 match error.downcast::<Error>() {
                     Ok(Error::Busy) => Reply(
                         503,
@@ -328,8 +358,8 @@ mod entry {
                 }
             }
         };
-        if let Err(error) = respond(out, reply).await {
-            eprintln!("Git response failed: {error:#}");
+        if respond(out, reply).await.is_err() {
+            eprintln!("Git response failed");
         }
     }
 }

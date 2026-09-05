@@ -20,6 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "=0.22.1"
 bytes = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures = "0.3"
@@ -34,6 +35,7 @@ object_store = { version = "=0.14.1", default-features = false, features = ["aws
 sha2 = "0.10"
 spin-sdk = { version = "=5.2.0", default-features = false }
 spin-executor = "=5.2.0"
+subtle = "=2.6.1"
 wasi = "=0.13.1"
 
 [lints.rust]

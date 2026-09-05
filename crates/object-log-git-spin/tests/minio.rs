@@ -520,6 +520,8 @@ async fn serve_spin_with_policy(
     }
     process.args([
         "--variable",
+        "auth_mode=disabled",
+        "--variable",
         &format!("prefix={prefix}"),
         "--variable",
         &format!("object_format={format}"),

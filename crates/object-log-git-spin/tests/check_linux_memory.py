@@ -55,7 +55,7 @@ def main():
     def start(label, memory, object_format, prefix):
         evidence = output / label
         evidence.mkdir()
-        variables = {"endpoint": "http://minio:9000", "bucket": "object-log-test", "region": "us-east-1", "access_key": "objectlog", "secret_key": "objectlog-local-test-secret", "prefix": prefix, "log_id": "repository", "object_format": object_format}
+        variables = {"endpoint": "http://minio:9000", "bucket": "object-log-test", "region": "us-east-1", "access_key": "objectlog", "secret_key": "objectlog-local-test-secret", "prefix": prefix, "log_id": "repository", "object_format": object_format, "auth_mode": "disabled"}
         (evidence / "variables.json").write_text(json.dumps(variables))
         name = token + "-" + label
         # Keep a small shell alive after Spin exits so OOM counters can be captured.

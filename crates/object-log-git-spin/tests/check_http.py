@@ -39,6 +39,7 @@ for object_format, (read_only, allow_rewrite) in itertools.product(["sha1", "sha
             "access_key": "fixture-access",
             "secret_key": "fixture-secret",
             "object_format": object_format,
+            "auth_mode": "disabled",
         }
         if read_only is not None:
             variables["read_only"] = read_only
@@ -63,23 +64,19 @@ for object_format, (read_only, allow_rewrite) in itertools.product(["sha1", "sha
             else:
                 raise RuntimeError("Spin failed to start")
             if read_only is not None or allow_rewrite == "invalid":
-                expected = 403 if read_only == "true" else 500
-                expected_body = b"repository is read-only\n" if read_only == "true" else b"Git request failed\n"
+                expected = 403 if read_only == "true" and allow_rewrite != "invalid" else 500
+                expected_body = b"access forbidden\n" if expected == 403 else b"Git request failed\n"
                 result = request("/repo/info/refs?service=git-receive-pack")
                 assert result[:2] == (expected, expected_body), result
                 for headers in [{}, {"Content-Type": "application/x-git-receive-pack-request"}]:
                     for command_body in [b"0000", b"invalid push"]:
                         status, body, _ = request("/repo/git-receive-pack", headers, command_body)
                         assert (status, body) == (expected, expected_body), (status, body)
-                if read_only != "true" and (read_only == "invalid" or allow_rewrite == "invalid"):
+                if read_only == "invalid" or allow_rewrite == "invalid":
                     result = request("/repo/info/refs?service=git-upload-pack", {"Git-Protocol": "version=2"})
                     assert result[:2] == (500, expected_body), result
                     print(object_format + ": invalid boolean policy fails closed")
                     continue
-            if read_only == "true" and allow_rewrite == "invalid":
-                assert request("/repo/info/refs?service=git-upload-pack", {"Git-Protocol": "version=2"})[0] == 500
-                print(object_format + ": read-only rejection precedes invalid rewrite policy")
-                continue
             status, body, headers = request("/repo/info/refs?service=git-upload-pack", {"Git-Protocol": "version=2"})
             assert status == 200 and body.startswith(b"000eversion 2\n") and body.endswith(b"0000"), (status, body)
             assert ("object-format=" + object_format).encode() in body
