@@ -1,0 +1,42 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.25s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7b162a3d36c9d4b3)
+
+running 3 tests
+test pack::tests::scan_inflation_retains_only_delta_size_prefix ... ok
+test pack::tests::scan_inflation_checks_exact_sizes_and_adjacent_streams ... ok
+test pack::tests::pack_scan_uses_fixed_decode_memory_for_both_hashes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 116 filtered out; finished in 0.39s
+
+     Running tests/gc.rs (target/debug/deps/gc-ccb207d95a13fa9a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/minio.rs (target/debug/deps/minio-48f44135997a3b97)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/performance_acceptance.rs (target/debug/deps/performance_acceptance-d8a226191fbfd0be)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/ref_namespaces.rs (target/debug/deps/ref_namespaces-20c6769f9033e181)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/shared_performance.rs (target/debug/deps/shared_performance-7e9fccb356afb900)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

@@ -168,3 +168,21 @@ the concrete contents. The prior upstream report was withdrawn and its original
 revision removed. Do not restore upstream links or cross-references. Local #22
 remains an investigation. Keep later SQLite, production KV and the owner's
 G-trees-based verifiable KV work out of the present Git tranche.
+
+## Latest accepted queue batch
+
+Source `24c6ede` adds bounded materialization/checkpoint validation, existing-only
+open, exact node preflight (removing Git's copied CBOR formula), fixed-window
+receive scanning and opt-in Spin rewritten-history policy. Combined gates:
+348 passed, 13 opt-in ignored; native/WASIp2, separately run Git/Spin MinIO,
+request accounting and six actual-WASI fixtures pass. #31 and #29 are complete
+within their issue scope. #34 stays open for Git retained-state/decoder accounting
+and long-tail qualification; #26 capacity is unchanged. See the review's third
+batch and `docs/evidence/git-proof-wave3-2026-09-05/`.
+
+Next ownership: WAL worker owns child-proof/read-bound core APIs; Git worker
+owns shared metadata-maintenance/accounting; capacity sidebar owns durable/pack
+streaming; operator sidebar owns native maintenance command; protocol sidebar
+owns wire/graph/selection shallow support and has temporarily yielded
+repository.rs to maintenance. Catalog worker builds the private tree foundation.
+Only root integrates. No upstream communications are authorized.

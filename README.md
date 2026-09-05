@@ -33,6 +33,8 @@ The durable model has:
 `Log::open` takes a `ValidatedBackend` and a `LogId`; the internal scoped store
 is not part of the public API. `load` returns one cheap-clone `View` for reads
 and conditional work. `refresh` returns `None` when that view is still current.
+Adapters can use `open_existing` when a missing log must not be initialized,
+and `node_size` to check exact reference-node fit before storing its children.
 Adapters can call `preflight` before expensive local work. Its successful path
 does no I/O and makes no allocation. They can then call `prepare` with the final
 operation and staged objects.
@@ -98,8 +100,11 @@ command-local catalogs, so ref discovery avoids index loads. Known blob leaves
 are deferred until selected content needs verification. Exact want/have
 selection, protocol-v2 upload commands, and classic receive preparation and
 publication now use that same repository. Thin inputs become self-contained
-packs; ref updates validate connectivity and fast-forward rules before one
-publication. Spin passes unchanged-client and local-provider qualification.
+packs; ref updates validate connectivity and exact old IDs before one atomic
+publication. Fast-forward-only is the default; Spin operators can explicitly
+allow rewritten history with `allow_non_fast_forward`. Ordinary Git-valid
+ref namespaces include notes and mirrored refs. Spin passes unchanged-client
+and local-provider qualification.
 The [Spin performance record](docs/evidence/git-spin-performance-2026-09-04.md)
 retains one latency review finding; removing the old implementation does not
 change that measurement. See the

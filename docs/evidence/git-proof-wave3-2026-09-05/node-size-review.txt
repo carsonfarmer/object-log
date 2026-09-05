@@ -1,0 +1,64 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.87s
+     Running unittests src/lib.rs (target/debug/deps/object_log-83f665d879e2691f)
+
+running 12 tests
+test format::tests::node_preflight_checks_size_overflow_and_stops_at_the_reference_limit ... ok
+test format::tests::node_rejects_impossible_child_count_before_reserving ... ok
+test format::tests::reference_node_rejects_child_count_before_child_decode ... ok
+test format::tests::reference_node_rejects_truncation_digest_and_value_type ... ok
+test format::tests::reference_node_rejects_invalid_child_fields ... ok
+test format::tests::reference_node_rejects_noncanonical_shapes ... ok
+test format::tests::reference_node_round_trip_is_stable_and_keeps_payload_backing ... ok
+test log::tests::node_size_preflights_without_io_and_matches_stored_nodes ... ok
+test format::tests::reference_node_accepts_exact_payload_and_child_limits ... ok
+test format::tests::reference_node_encoder_bounds_the_maximum_git_root ... ok
+test format::tests::node_preflight_matches_large_child_lengths_and_envelope_boundaries ... ok
+test format::tests::reference_node_encoder_matches_derive_at_cbor_boundaries ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 58 filtered out; finished in 0.30s
+
+     Running tests/checkpoint.rs (target/debug/deps/checkpoint-98d153dee9ac9030)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+     Running tests/gc.rs (target/debug/deps/gc-2b6cb24003fa68c5)
+
+running 1 test
+test corrupt_live_node_fails_before_collection_io ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+     Running tests/gc_acceptance.rs (target/debug/deps/gc_acceptance-f9d25c162d8cdc03)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/minio.rs (target/debug/deps/minio-838a3f23f9357726)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/model.rs (target/debug/deps/model-6ec71a8a7ab2faa7)
+
+running 1 test
+test staged_blob_and_node_publish_without_dependency_reads ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/protocol.rs (target/debug/deps/protocol-9f42c344907a451d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/store_conformance.rs (target/debug/deps/store_conformance-1d69507953cb3f92)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
