@@ -358,7 +358,10 @@ impl Log {
     /// Clones this log with operation-local request admission.
     ///
     /// Preserves identity and staged proofs; all resulting clones and nested
-    /// operations share the guard. Replaces any prior guard on this clone only.
+    /// operations share the guard. Existing guards run first, in attachment order;
+    /// a refusal stops admission before later guards or the client are invoked.
+    /// Earlier admissions are not refunded when a later guard refuses. This
+    /// changes only the new clone and never removes a caller's existing policy.
     /// Keep the same guarded handle across an operation's retries. Admission is
     /// optional caller policy, not part of the durable log contract. Backend
     /// validation and opening performed before attachment are not charged.

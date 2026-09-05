@@ -48,7 +48,9 @@ pub struct RequestDenied;
 /// Operation-local request admission, shared by all clones of a guarded log.
 ///
 /// Implementations must synchronize concurrent admissions atomically. Accepted
-/// charges are cumulative: cancellation and failures do not refund them. This
+/// charges are cumulative: later guards may refuse the request, and cancellation
+/// or failures do not refund admission. Charges can exceed submitted client calls.
+/// This
 /// synchronous callback must not block or call back into the log. It bounds core
 /// client invocations, not retries or pagination hidden inside the backend.
 pub trait RequestGuard: std::fmt::Debug + Send + Sync {
@@ -57,6 +59,19 @@ pub trait RequestGuard: std::fmt::Debug + Send + Sync {
     /// # Errors
     /// Return `RequestDenied` to prevent this invocation entirely.
     fn before_request(&self, request: Request) -> Result<(), RequestDenied>;
+}
+
+#[derive(Debug)]
+struct Guards {
+    previous: Arc<dyn RequestGuard>,
+    next: Arc<dyn RequestGuard>,
+}
+
+impl RequestGuard for Guards {
+    fn before_request(&self, request: Request) -> Result<(), RequestDenied> {
+        self.previous.before_request(request)?;
+        self.next.before_request(request)
+    }
 }
 
 /// One backend behavior required by the publication protocol.
@@ -289,6 +304,13 @@ impl ScopedStore {
     }
 
     pub(crate) fn with_request_guard(&self, guard: Arc<dyn RequestGuard>) -> Self {
+        let guard = match &self.guard {
+            Some(previous) => Arc::new(Guards {
+                previous: previous.clone(),
+                next: guard,
+            }),
+            None => guard,
+        };
         Self {
             guard: Some(guard),
             ..self.clone()

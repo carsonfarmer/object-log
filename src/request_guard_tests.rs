@@ -442,3 +442,41 @@ async fn request_guard_collection_denial_does_not_count_unsubmitted_deletes() ->
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn request_guard_composition_preserves_policy_and_prior_admissions() -> GuardResult {
+    let (log, faults, _) = guarded_fixture("guard-composition").await?;
+    let caller = Guard::new(0);
+    let operation = Guard::new(10);
+    let guarded = log
+        .with_request_guard(caller.clone())
+        .with_request_guard(operation.clone());
+    assert!(matches!(guarded.load().await, Err(Error::RequestDenied)));
+    assert!(operation.requests().is_empty());
+    assert_eq!(faults.metrics().total_requests(), 0);
+
+    let caller = Guard::new(10);
+    let operation = Guard::new(1);
+    let caller_log = log.with_request_guard(caller.clone());
+    let guarded = caller_log.with_request_guard(operation.clone());
+    guarded.load().await?;
+    assert!(matches!(
+        guarded.clone().load().await,
+        Err(Error::RequestDenied)
+    ));
+    assert_eq!(
+        caller.requests().len(),
+        2,
+        "later refusal never refunds prior admission"
+    );
+    assert_eq!(operation.requests().len(), 1);
+    assert_eq!(faults.metrics().total_requests(), 1);
+    caller_log.load().await?;
+    assert_eq!(
+        caller.requests().len(),
+        3,
+        "attachment did not mutate original handle"
+    );
+    assert_eq!(operation.requests().len(), 1);
+    Ok(())
+}
