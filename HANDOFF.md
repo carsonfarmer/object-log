@@ -1,6 +1,6 @@
 # object-log handoff
 
-Updated: 2026-09-04, combined Git acceptance.
+Updated: 2026-09-04, previous native Git removal.
 
 ## Intent
 
@@ -13,30 +13,48 @@ independent from Spin, while the same library runs in a Spin WASIp2 adapter.
 Read `AGENTS.md`, `GIT_PLAN.md`, and the evidence linked below. Source-size
 thresholds are architecture review signals; required behavior is preserved.
 
-## Accepted main and active work
+## Current implementation
 
-Tasks 1–9 were pushed through `b4b05f3`; hosted Linux CI run
-33938325701 passed. The combined adapter acceptance is the current tranche. Task 3's authenticated variable geometry preserves all
-three original small-object-limit GC tests. Its original worktree and branch
-remain preserved. Later accepted work adds command-local catalogs, bounded
-iterative traversal, exact have-aware selection, protocol-v2 upload commands,
-thin receive normalization, atomic ref publication, and shared checkpointing.
+The complete shared proof was accepted at `c3273b0`; hosted Linux CI
+33939435517 passed. The owner subsequently requested removal of the previous
+native Git implementation. That implementation, its `native-oracle` feature,
+filesystem repository API, and protocol-v0 host path are removed.
 
-The combined adapter integration worktree is:
+Both the previous native engine and the entire `object-log-git-http` crate are
+removed. Spin is the HTTP host. Installed Git remains the independent test and
+benchmark reference. Useful client tests run against real Spin/MinIO; uncertain
+publication, corrupt evidence, and expired token tests run in the portable Git
+library. The removed native host's TaskTracker/disconnect/shutdown behavior is
+not a Spin guarantee: Spin awaits publication inline.
 
-```text
-/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared
-cf/git-native-shared
-```
+Removal work uses exclusive `cf/remove-native-git`, source `4a99384` plus root
+workspace/docs changes. Do not interpret historical evidence as claiming that
+deleted APIs still exist.
 
-Native and Spin adapters use the same common repository for both hashes.
-Classic receive supports default Git's flush-only HTTP probe before chunked
-large pushes. Both adapters preserve exact recovery tokens on uncertain
-publication, including invalid resolution evidence after a hidden successful
-head write. The native path finishes admitted publication after disconnect
-and drains its task tracker on shutdown.
+## Removal verification
 
-## Current evidence
+The final combined removal gate passes 322 tests, with 12 opt-in tests ignored
+in that ordinary run. Formatting, strict native linting, default-feature core
+WASIp2 checking, and strict Spin WASIp2 linting pass. Actual Spin/provider tests
+are run separately; the final removal evidence records their exact results.
+Independent correctness and simplification/deletion reviews cover the changes.
+
+Current adjusted product Rust is 4,885 lines: Git 4,293 and Spin 592. A
+consistent raw preamble count falls from 7,526 to 4,955; see the evidence for
+test-helper and historical blank-line accounting. The lockfile drops 54 packages without version bumps. Generic object-log
+source is unchanged. See `docs/evidence/git-native-removal-2026-09-04.md`.
+
+## Owner's clarified follow-on scope
+
+The first bounded functional proof is implemented; the broader project is not
+complete until the generic WAL approach demonstrates useful Git scale.
+Prioritize compaction/scale (#19), Spin memory/startup/concurrency (#21), pooled
+HTTP investigation (#22), SHA-1 large-push performance (#23), shallow/partial/
+filtered clones and packfile URIs (#24), and simplification (#25). All have
+explicit GitHub acceptance criteria. Keep the core generic and independent of
+Spin; implement Git semantics in the Git crate. See `docs/follow-ons.md`.
+
+## Qualification before removal
 
 - Combined workspace gate: 359 passed, 12 opt-in ignored; formatting, strict
   native Clippy, and locked WASIp2 check passed. Separate core and Spin WASIp2
@@ -55,7 +73,7 @@ and drains its task tracker on shutdown.
 - Independent Rust correctness, simplification, architecture, quota, and
   adversarial reviews completed; findings were repaired. Final WASIp2 paired
   performance and prose reviews are complete. All functional/resource gates pass;
-  one latency result requires owner review before native-oracle deletion.
+  one latency result remains recorded for performance review.
 
 Evidence:
 
@@ -94,17 +112,23 @@ runs and the prior failure are both recorded.
 - Spin's handler-wide connector budget also includes backend probes and log open:
   512 outgoing attempts and 96 MiB accepted/sent payload. Headers and bytes
   already buffered by the remote transport are outside that payload ledger.
-- The native oracle remains selectable. Its deletion is deferred for owner
-  performance review: actual WASIp2 SHA-1 8 MiB push is 1.655× p50 and 1.634× p95
-  against the same-run Git baseline after 30 pairs. No feature was cut to improve
-  those numbers.
+- The owner authorized old-engine removal independently of the performance
+  finding: actual WASIp2 SHA-1 8 MiB push was 1.655× p50 and 1.634× p95 against
+  installed Git after 30 pairs. That benchmark remains; deletion does not
+  claim a speed improvement.
 - Each live pack requires a catalog-root read. Issue #19 tracks compaction;
   the current proof does not establish arbitrary repository scale.
 - Generic local filesystem storage lacks conditional compare-and-swap. Its
-  rejection tests and native disposable-filesystem oracle tests remain.
+  rejection tests remain. Git-client fixtures still exercise filesystem receivers,
+  while the product engine requires no local Git repository.
 
 Git replacement: https://github.com/carsonfarmer/object-log/issues/17
 
 Compaction: https://github.com/carsonfarmer/object-log/issues/19
 
 Live AWS: https://github.com/carsonfarmer/object-log/issues/10
+
+The pooled HTTP error is now reproduced with a standalone Spin SDK component
+without object-log, object_store or the custom bridge. Pooled GETs fail with
+IncompleteMessage; two unpooled runs pass 1,000 invocations each. Exact fault
+ownership remains unproven. See `docs/evidence/spin-pooling-2026-09-05.md` and #22.

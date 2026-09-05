@@ -80,65 +80,53 @@ verification, performance, and live AWS qualification.
 
 ## 1. Git storage API proof
 
-`object-log` is the product. It is a small, generic, object-storage-backed WAL
-for higher-level storage systems. `object-log-git` is a separate proof of its
-public API.
+The shared engine now supports both hashes, protocol-v2 discovery and
+have-aware fetch, classic receive-pack, thin packs, atomic publication,
+checkpoint/collection, and cold recovery. Native and actual Spin WASIp2
+qualification passed with unchanged Git clients and local MinIO. The core
+log remains generic and independent from Git and Spin.
 
-The native storage proof is implemented. It accepts parsed ref commands and an
-optional pack path. It validates refs, pack bytes, reachable objects, and pack
-provenance. It then prepares and publishes one atomic ref transaction. Cold
-open rebuilds a standard bare repository from object storage. The proof uses
-`gix` and `gix-pack`. It does not run a Git executable or call a C library. See
-[`GIT_PLAN.md`](../GIT_PLAN.md) and the
-[library review](evidence/git-library-selection-2026-09-03.md).
+The previous filesystem-backed native Git engine and entire native HTTP host
+are removed. Useful client tests run against actual Spin, and portable tests
+cover uncertain publication and recovery. Installed Git remains the independent
+correctness/performance reference. The
+shared library exposes one `Repository::open(&Log, ObjectFormat)` and
+byte-oriented upload/receive commands, with command-local indexes and sparse
+range reads. No scratch Git repository is required.
 
-Checkpoint selection and collection acceptance are implemented. A checkpoint
-retains each pack that contains a live object. The acceptance test removes more
-than 100 dead physical objects, preserves the live pack, cold-recovers the
-repository, and passes strict Git validation. The request audit, benchmarks,
-pinned `MinIO` lifecycle, and local evidence are complete.
+An 88 MiB pool admits one engine operation per native process or WASI instance.
+Spin serving at a configured 128 MiB process limit requires one live instance
+and an executable cache prepared outside that limit. Empty-cache compilation
+fails there, and serving has no proven spare memory margin. The SHA-1 8 MiB
+WASIp2 push remains approximately 1.65 times its native Git timing baseline;
+removing old product code does not resolve that observation.
 
-Smart HTTP is a separate proof crate. The core WAL does not depend on Git
-protocol code or Git libraries. The current protocol v0 Axum host is a native
-test reference. Its loopback tests use an unchanged client for clone, fetch,
-push, branch and tag changes, and non-fast-forward rejection.
+The bounded functional proof is complete, but the broader Git proof remains
+open until it demonstrates useful scale and straightforward integration:
 
-Issue [#17](https://github.com/carsonfarmer/object-log/issues/17) replaces the
-native-only Git core. At revision `b322985`, the private pack, durable-reader
-and writer, wire, and operation-budget foundations are accepted. They contain
-2,189 product lines and compile for `wasm32-wasip2` without default features.
-The crate also passes a standalone native all-feature check because its
-manifest declares the Tokio runtime support used by the native oracle.
+- [#19: compaction and scale](https://github.com/carsonfarmer/object-log/issues/19):
+  bound catalog work as live packs accumulate, preserve atomic replacement and
+  GC safety, and measure sustained Spin/MinIO workloads before and after.
+- [#21: memory and admission](https://github.com/carsonfarmer/object-log/issues/21):
+  separate cold compilation from serving, establish headroom, and measure
+  concurrency instead of assuming the single-instance qualification generalizes.
+- [#22: pooled HTTP failure](https://github.com/carsonfarmer/object-log/issues/22):
+  isolate the intermittent protocol error and pursue an upstream issue/fix if
+  a minimal reproducer establishes responsibility.
+- [#23: large-push performance](https://github.com/carsonfarmer/object-log/issues/23):
+  profile the SHA-1 8 MiB WASIp2 receive finding before choosing an optimization.
+- [#24: clone extensions](https://github.com/carsonfarmer/object-log/issues/24):
+  shallow/deepen/unshallow, partial and filtered clones, and packfile URIs with
+  unchanged clients, both hashes, cold recovery and GC. Do not advertise them
+  before implementation and provider acceptance. Larger object/pack/history
+  support needs measured range-backed processing, not merely larger constants.
+- [#25: simplification](https://github.com/carsonfarmer/object-log/issues/25):
+  remove avoidable machinery and identify missing generic capabilities without
+  moving Git policy into the core or reducing required behavior.
 
-Task 3 replaces the native-only signatures with one common public `Repository`
-for native and WASIp2. It opens with `Repository::open(&Log, ObjectFormat)` and
-exposes refs through `refs(&self)`. The shared API has no work directory or path
-output. It owns the exact `View`, refs, authenticated pack roots and sizes,
-`Operation`, and retained-state reservation. Each later object-reading command
-creates one private `Catalog` and `Reader`. This keeps pack-index loads out of
-`ls-refs` and avoids a self-reference. This is a pre-release API correction.
-Receive-pack remains later.
-Protocol-v2 fetch accepts reachable wants and subtracts valid client haves.
-Fetch pack creation first reuses safe compressed entries, then materializes
-objects when reuse cannot produce a self-contained pack. Classic receive-pack
-returns the current conflict, pending-result, lost-response, and per-ref
-statuses.
-
-One process-wide 88 MiB pool admits one active engine operation under a
-provisional 128 MiB WASI process model. Each operation has cumulative call,
-transfer, work, thin-resolution, and retry limits. Local memory acceptance must
-pass before MinIO. The generic `object_store::LocalFileSystem` backend lacks
-conditional compare-and-swap and is rejected. A filesystem case needs an
-adapter that supplies that operation. The native oracle remains until unchanged
-Git clients and the storage lifecycle reach parity. See the current
-[`GIT_PLAN.md`](../GIT_PLAN.md) for the exact tasks, limits, performance gates,
-and source-size stop gates. The replacement path has not run a real Git
-protocol-v2 client trial because the private modules are not connected through
-`Repository`.
-
-Each live pack currently adds one catalog-root GET when a repository opens.
-Compaction must bound the live-pack count before any scale claim. This limit
-does not block a small local trial.
+See [GIT_PLAN.md](../GIT_PLAN.md) and the dated evidence for exact scopes,
+limits, and qualification conditions. The filesystem provider's missing
+conditional compare-and-swap remains separately tested. Live AWS is #10.
 
 ## 2. WASI filesystem storage
 

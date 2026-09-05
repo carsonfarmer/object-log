@@ -13,9 +13,9 @@ do not move Git rules into the generic log or cut behavior to reduce size.
 discovery, clone, incremental fetch, atomic push, and cold recovery. Object
 storage is the durable authority. Local files and memory are cache data.
 
-The first integrated host can remain native. The protocol, pack, object lookup,
-and publication path must compile for `wasm32-wasip2`. A later Spin component
-must adapt HTTP and object storage without a second Git engine.
+Spin is the Git HTTP host. The protocol, pack, object lookup, and publication
+path compile for `wasm32-wasip2`; the component adapts HTTP and object storage
+without a second Git engine. The earlier native host is removed.
 
 The core `object-log` crate remains independent from Git.
 
@@ -23,12 +23,14 @@ The core `object-log` crate remains independent from Git.
 
 Tasks 1–9 were accepted at `b4b05f3`. Tasks 10–12 now pass unchanged-client,
 local-provider, functional, and resource qualification for the shared native
-and Spin adapters. Independent reviews are recorded. Native-oracle deletion
-remains deferred: the actual WASIp2 SHA-1 8 MiB push measured 1.655× p50 and
-1.634× p95 against native Git after 30 pairs, requiring owner performance
-review. See the [Spin measurements](docs/evidence/git-spin-performance-2026-09-04.md). The historical
-foundation counts below describe their stated revision, not current size.
-
+and Spin adapters. Independent reviews are recorded. The owner subsequently
+authorized removal of the previous native implementation. That implementation
+and the entire native HTTP crate are removed. Useful client coverage runs
+through actual Spin; publication/recovery faults run in the portable library.
+Installed Git remains the
+benchmark reference. The measured WASIp2 SHA-1 8 MiB push performance finding
+is unchanged; see the [Spin measurements](docs/evidence/git-spin-performance-2026-09-04.md).
+The historical foundation counts below describe their stated revision, not current size.
 
 Revision `b322985c616d948e7365739e3286baeaeb460acc` completes tasks 1 and 2 with
 four private, host-neutral foundations:
@@ -51,22 +53,27 @@ task-1 acceptance and the no-go decision at that revision. The
 behavior and local checks. The
 [fetch-pack record](docs/evidence/git-fetch-pack-2026-09-04.md) covers the
 task-2 writer. The modules support SHA-1 and SHA-256. The native crate and the
-no-default-feature WASIp2 target pass standalone checks. The manifest declares
-the Tokio runtime support used by the native oracle.
+no-default-feature WASIp2 target pass standalone checks. The historical manifest included the native reference runtime; that dependency
+has since been removed.
 
 Tasks 3–9 connect durable state, command-local catalogs, graph traversal, exact
 selection, upload commands, and receive preparation/publication through the
 common `Repository`.
 
-The native proof remains the client and storage oracle. It uses a disposable
-bare repository and high-level `gix` APIs. It supports atomic ref transactions,
-cold recovery, checkpoints, collection, and protocol-v0 smart HTTP. Its fetch
-path sends all reachable objects because it ignores the client's `have` set.
-The [baseline](docs/evidence/git-wasi-baseline-2026-09-04.md) records its size,
-protocol trace, storage requests, and local latency.
+The earlier native proof used disposable bare repositories and high-level
+`gix` APIs. Its fetch ignored client haves. The [historical baseline](docs/evidence/git-wasi-baseline-2026-09-04.md)
+remains evidence of that implementation; its product code is now removed.
 
-Do not delete the native oracle until the replacement passes the same client
-and storage cases.
+The earlier native HTTP host and its detached-task/shutdown machinery are
+removed. Spin awaits publication inline; it does not promise the deleted host's
+finish-after-disconnect behavior. An interrupted standard Git push has the usual
+lost-reply ambiguity. Custom protocols can use exact-candidate recovery tokens.
+
+The first bounded functional proof is complete, but the broader project is not.
+The owner requires compaction and a useful scale demonstration (#19), operational
+memory/admission qualification (#21), pooled transport investigation (#22),
+performance review (#23), shallow/partial/filtered clones and packfile URIs (#24),
+and simplification (#25). See `docs/follow-ons.md` for links and acceptance scope.
 
 ## Storage and consistency contract
 
@@ -108,9 +115,8 @@ remain private. `prepare_receive` returns a `PreparedPush`; its
 recovery token before publishing. `View::collection_plan_bytes` supplies generic
 authenticated size metadata for publication accounting.
 
-The native HTTP and Spin adapters must call the same `Repository` path. The
-adapters can enforce smaller transport limits, but they cannot weaken the
-engine limits.
+The Spin adapter calls the common `Repository` path. It can enforce smaller
+transport limits, but cannot weaken the engine limits.
 
 ## Git protocol policy
 
@@ -235,13 +241,14 @@ the response.
 9. Complete: prepare and publish the ordered receive ref transaction. Preserve current
    conflict, pending-result, lost-response, and per-ref status behavior.
 10. Complete: change the native Axum host into a thin adapter and run unchanged-client
-    parity against the native oracle. Keep the oracle available for comparison.
+    parity against the earlier reference. Both native implementations have now
+    been removed; useful tests migrated to the shared library and actual Spin.
 11. Complete with documented runtime conditions: add the thin Spin WASIp2 adapter. Record imports and peak process memory,
     then run all memory-store acceptance and performance cases.
 12. Client/provider qualification complete: run the same accepted cases against
-    local MinIO. Native deletion is deferred for owner performance review. Delete the native oracle
-    only after client and storage parity, all hard gates, and required owner
-    reviews pass. Finish with Rust, adversarial, prose, and deletion reviews.
+    local MinIO. The owner authorized deletion of the previous native engine after
+    qualification; useful tests and installed-Git comparisons remain. Rust,
+    adversarial, prose, and deletion reviews remain part of acceptance.
 
 Tasks are sequential because each task supplies the contract or evidence for
 the next task. Local memory cases must pass before MinIO. The generic
@@ -317,8 +324,9 @@ The hard local gates are:
 
 Ten samples do not define a hard latency gate. With ten samples, p95 is the
 maximum observation. If candidate p50 or p95 exceeds 1.25 times an equivalent
-Git oracle, run 30 paired samples and require owner performance review before
-native deletion. Record noisy results as inconclusive.
+Git baseline, run 30 paired samples and record the performance finding for
+owner review. The owner subsequently authorized old-engine removal independently
+of that finding; installed-Git comparisons remain. Record noisy results as inconclusive.
 
 After the Spin component exists, measure a fresh process with
 `--max-instance-memory 134217728` and `/usr/bin/time -l`. A peak at or below
@@ -330,7 +338,7 @@ deployment prepares the exact component cache outside the serving cgroup.
 
 No tighter call-count or serial-depth performance gate exists yet. Measurement
 code must add zero product lines; keep it in test and support code. A failed
-hard gate blocks native-oracle deletion.
+hard gate blocks accepting a behavior-changing replacement.
 
 ## Source-size review thresholds
 
@@ -348,10 +356,11 @@ At revision `b322985`, the private replacement foundation has 2,189 raw product
 lines. The combined Git and HTTP implementation has 5,101 raw product lines under
 consistent top-level test-module counting; the earlier 4,970 count accidentally
 truncated production code at an inline test-only helper.
-Task 2 stayed within its separate source-size gate. The native deletion target
-remains 2,165 product lines. After that deletion, the expected Git, HTTP, and
-Spin total is 3,480–4,125 product lines. Require architecture review if it
-exceeds 4,150.
+Task 2 stayed within its separate source-size gate. The historical native-deletion estimate
+was 2,165 product lines, with an expected remaining total of 3,480–4,125 and
+a review threshold of 4,150. Actual removal leaves 4,885 adjusted production
+lines (Git 4,293, Spin 592); the architecture review signal
+remains exceeded. See the [removal record](docs/evidence/git-native-removal-2026-09-04.md).
 
 The [final architecture review](docs/evidence/git-final-architecture-2026-09-04.md)
 records 7,490 adjusted product Rust lines at `0ed9b52`, before the final small
@@ -391,4 +400,5 @@ remain acceptance requirements.
 
 GitHub issue [#17](https://github.com/carsonfarmer/object-log/issues/17) tracks
 this work. Issue [#14](https://github.com/carsonfarmer/object-log/issues/14)
-tracks native-host hardening that remains useful after the shared path exists.
+records the superseded native-host work. Spin runtime and protocol follow-ons
+are tracked in #21–#25 and compaction in #19.

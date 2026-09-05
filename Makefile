@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-wasi-check git-performance-acceptance git-minio-test git-http-minio-test
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-wasi-check git-performance-acceptance git-minio-test
 
 check:
 	cargo fmt --all --check
@@ -32,16 +32,13 @@ git-bench:
 	cargo bench -p object-log-git --bench git
 
 git-wasi-check:
-	cargo +1.97.1 check --locked -p object-log-git --lib --target wasm32-wasip2 --no-default-features
+	cargo +1.97.1 check --locked -p object-log-git --lib --target wasm32-wasip2
 
 git-performance-acceptance:
 	cargo test -p object-log-git --test performance_acceptance git_request_and_byte_accounting -- --ignored --exact --nocapture
 
 git-minio-test:
 	./scripts/test-minio.sh minio minio_git_push_checkpoint_collection_and_cold_recovery object-log-git aws
-
-git-http-minio-test:
-	./scripts/test-minio.sh loopback minio_host_pushes_and_cold_clones object-log-git-http ""
 
 .PHONY: git-shared-performance-acceptance
 git-shared-performance-acceptance:
@@ -52,16 +49,13 @@ git-spin-memory-acceptance:
 	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
 	python3 crates/object-log-git-spin/tests/check_memory.py
 
-.PHONY: git-spin-wasi-check git-shared-minio-test git-spin-minio-test
+.PHONY: git-spin-wasi-check git-spin-minio-test
 git-spin-wasi-check:
 	cargo +1.97.1 clippy --locked -p object-log-git-spin --target wasm32-wasip2 -- -D warnings
 
-git-shared-minio-test:
-	./scripts/test-minio.sh loopback shared_minio_clients_recover_after_collection object-log-git-http ""
-
 git-spin-minio-test:
 	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh loopback spin_minio_clients_recover_after_collection object-log-git-http ""
+	./scripts/test-minio.sh minio spin_minio object-log-git-spin ""
 .PHONY: git-spin-performance-acceptance
 git-spin-performance-acceptance:
 	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release

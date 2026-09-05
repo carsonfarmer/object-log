@@ -9,7 +9,6 @@ license = "Apache-2.0"
 [workspace]
 members = [
     "crates/object-log-git",
-    "crates/object-log-git-http",
     "crates/object-log-git-spin",
     "crates/object-log-kv",
     "crates/object-log-sqlite",
