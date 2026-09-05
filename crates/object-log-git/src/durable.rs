@@ -449,6 +449,25 @@ impl<'a> Reader<'a> {
         self.catalog.location(id).is_some()
     }
 
+    /// Size for filtering only: full blobs use authenticated, canonical pack
+    /// metadata without checking the decoded size or object ID. Selected content
+    /// must still pass `verify`. Deltas and structural objects use `find`, so a
+    /// delta reports its decoded result size, never its instruction-stream size.
+    #[allow(dead_code, reason = "pending coordinated partial-clone caller")]
+    pub(crate) async fn object_size(&mut self, id: ObjectId) -> Result<Option<usize>, Error> {
+        let Some(location) = self.catalog.location(id) else {
+            return Ok(None);
+        };
+        self.catalog.operation.work(42)?;
+        let entry = self.entry_header(location).await?;
+        if entry.header == EntryHeader::Blob {
+            return Ok(Some(
+                usize::try_from(entry.decompressed_size).map_err(pack_error)?,
+            ));
+        }
+        Ok(self.find(id).await?.map(|object| object.data.len()))
+    }
+
     // Verify selected content without retaining decoded full blobs. Delta and
     // structural objects keep the existing bounded materialization path.
     pub(crate) async fn verify(&mut self, id: ObjectId) -> Result<Option<gix_object::Kind>, Error> {
@@ -1958,6 +1977,80 @@ mod tests {
                 verify_fetch_pack(&fallback, format, &[delta])?;
                 assert!(!inspect_pack(&fallback, format)?[0].0.is_delta());
             }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn object_size_uses_blob_metadata_and_decoded_delta_results() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for ofs in [false, true] {
+                let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+                let (log, view) = open(store, "object-size").await?;
+                let fixture = fixture(format, 10, ofs, false)?;
+                assert!(
+                    indexed_entries(&fixture.normalized, format)?
+                        .iter()
+                        .any(|entry| entry.1.is_delta())
+                );
+                let (descriptor, root) =
+                    stage(&test_operation(), &log, &view, fixture.normalized).await?;
+                let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+                let mut reader = Reader::new(&log, &view, &catalog);
+                for (id, data) in fixture.objects {
+                    assert_eq!(reader.object_size(id).await?, Some(data.len()));
+                }
+                let missing = ObjectId::from_bytes(format, &vec![0x42; format.digest_len()])?;
+                assert_eq!(reader.object_size(missing).await?, None);
+            }
+            for size in [0, 15, 16, 127, 128, 2 * CHUNK_BYTES] {
+                let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+                let (log, view) = open(store.clone(), "blob-size").await?;
+                let fixture = pack_fixture(format, vec![vec![b'x'; size]], false, false)?;
+                let id = fixture.objects[0].0;
+                let (descriptor, root) =
+                    stage(&test_operation(), &log, &view, fixture.normalized).await?;
+                let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+                let mut reader = Reader::new(&log, &view, &catalog);
+                reader
+                    .entry_header(catalog.location(id).ok_or("missing location")?)
+                    .await?;
+                // Only the bounded prefix allocation fits; no inflater or object fits.
+                let pressure = catalog
+                    .operation
+                    .reserve(LIVE_BYTES - catalog.operation.live_bytes() - 42)?;
+                store.reset();
+                assert_eq!(reader.object_size(id).await?, Some(size));
+                assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+                assert!(reader.verify(id).await.is_err());
+                drop(pressure);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn object_size_is_filter_metadata_not_content_verification() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+            let (log, view) = open(store, "wrong-size").await?;
+            let mut fixture = pack_fixture(format, vec![vec![b'x'; 128]], false, false)?;
+            let id = fixture.objects[0].0;
+            // Re-authenticate a canonical but false declared size (129 vs 128).
+            fixture.normalized.bytes[12] ^= 1;
+            fixture.normalized.id = refresh_entry(
+                &mut fixture.normalized.bytes,
+                &mut fixture.normalized.index,
+                format,
+                0,
+            )?;
+            let (descriptor, root) =
+                stage(&test_operation(), &log, &view, fixture.normalized).await?;
+            let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+            let mut reader = Reader::new(&log, &view, &catalog);
+            assert_eq!(reader.object_size(id).await?, Some(129));
+            assert!(reader.verify(id).await.is_err());
+            assert!(reader.find(id).await.is_err());
         }
         Ok(())
     }
