@@ -30,7 +30,8 @@ def request(path, headers=None, data=None):
             time.sleep(GAP)
 
 
-for object_format, read_only in itertools.product(["sha1", "sha256"], [None, "true", "invalid"]):
+policies = [(None, None), (None, "true"), (None, "invalid"), ("true", "true"), ("true", "invalid"), ("invalid", None)]
+for object_format, (read_only, allow_rewrite) in itertools.product(["sha1", "sha256"], policies):
     with tempfile.TemporaryDirectory() as directory, (ROOT / "tests/http-runtime.log").open("w") as log:
         variables = {
             "endpoint": "http://127.0.0.1:19173",
@@ -41,6 +42,8 @@ for object_format, read_only in itertools.product(["sha1", "sha256"], [None, "tr
         }
         if read_only is not None:
             variables["read_only"] = read_only
+        if allow_rewrite is not None:
+            variables["allow_non_fast_forward"] = allow_rewrite
         config = pathlib.Path(directory) / "repository.toml"
         config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
         command = [
@@ -59,7 +62,7 @@ for object_format, read_only in itertools.product(["sha1", "sha256"], [None, "tr
                     time.sleep(.1)
             else:
                 raise RuntimeError("Spin failed to start")
-            if read_only is not None:
+            if read_only is not None or allow_rewrite == "invalid":
                 expected = 403 if read_only == "true" else 500
                 expected_body = b"repository is read-only\n" if read_only == "true" else b"Git request failed\n"
                 result = request("/repo/info/refs?service=git-receive-pack")
@@ -68,11 +71,15 @@ for object_format, read_only in itertools.product(["sha1", "sha256"], [None, "tr
                     for command_body in [b"0000", b"invalid push"]:
                         status, body, _ = request("/repo/git-receive-pack", headers, command_body)
                         assert (status, body) == (expected, expected_body), (status, body)
-                if read_only == "invalid":
+                if read_only != "true" and (read_only == "invalid" or allow_rewrite == "invalid"):
                     result = request("/repo/info/refs?service=git-upload-pack", {"Git-Protocol": "version=2"})
                     assert result[:2] == (500, expected_body), result
-                    print(object_format + ": invalid read_only fails closed")
+                    print(object_format + ": invalid boolean policy fails closed")
                     continue
+            if read_only == "true" and allow_rewrite == "invalid":
+                assert request("/repo/info/refs?service=git-upload-pack", {"Git-Protocol": "version=2"})[0] == 500
+                print(object_format + ": read-only rejection precedes invalid rewrite policy")
+                continue
             status, body, headers = request("/repo/info/refs?service=git-upload-pack", {"Git-Protocol": "version=2"})
             assert status == 200 and body.startswith(b"000eversion 2\n") and body.endswith(b"0000"), (status, body)
             assert ("object-format=" + object_format).encode() in body
@@ -83,7 +90,7 @@ for object_format, read_only in itertools.product(["sha1", "sha256"], [None, "tr
             assert request("/repo/info/refs?service=git-upload-pack")[0] == 400
             assert request("/repo/git-upload-pack", {"Git-Protocol": "version=2", "Content-Type": "text/plain"}, b"0000")[0] == 400
             assert request("/repo/unknown")[0] == 404
-            print(f"{object_format} read_only={read_only or 'default'}: actual component discovery and HTTP rejection passed without a provider")
+            print(f"{object_format} read_only={read_only or 'default'} allow_non_fast_forward={allow_rewrite or 'default'}: actual component discovery and HTTP rejection passed without a provider")
         finally:
             process.terminate()
             process.wait(timeout=10)

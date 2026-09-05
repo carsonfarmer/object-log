@@ -1,0 +1,13 @@
+HTTP fixture: isolated policy checks with a 50 ms inter-request gap
+sha1 read_only=default allow_non_fast_forward=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=default allow_non_fast_forward=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid boolean policy fails closed
+sha1 read_only=true allow_non_fast_forward=true: actual component discovery and HTTP rejection passed without a provider
+sha1: read-only rejection precedes invalid rewrite policy
+sha1: invalid boolean policy fails closed
+sha256 read_only=default allow_non_fast_forward=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=default allow_non_fast_forward=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid boolean policy fails closed
+sha256 read_only=true allow_non_fast_forward=true: actual component discovery and HTTP rejection passed without a provider
+sha256: read-only rejection precedes invalid rewrite policy
+sha256: invalid boolean policy fails closed

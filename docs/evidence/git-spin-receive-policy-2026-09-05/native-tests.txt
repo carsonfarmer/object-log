@@ -1,0 +1,15 @@
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-receive-policy/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.20s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git_spin-01bd7e6ec8aae479)
+
+running 7 tests
+test tests::concatenated_gzip_members_are_preserved ... ok
+test tests::input_limit_is_checked_before_append ... ok
+test transport::tests::exhausted_calls_fail_before_entering_wasi_http ... ok
+test transport::tests::overall_deadline_cannot_be_silently_ignored ... ok
+test transport::tests::quota_accepts_exact_limits_and_rejects_overflow_without_wrapping ... ok
+test transport::tests::connector_clones_share_bootstrap_and_command_quota ... ok
+test tests::compressed_input_is_bounded_after_expansion ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+

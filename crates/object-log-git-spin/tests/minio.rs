@@ -19,6 +19,115 @@ type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires local MinIO, Spin 4, and a release WASIp2 component build"]
+async fn spin_minio_force_with_lease_and_notes_obey_host_policy() -> TestResult {
+    let _serial = TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        force_policy_lifecycle(format).await?;
+    }
+    Ok(())
+}
+
+async fn force_policy_lifecycle(format: ObjectFormat) -> TestResult {
+    let root = TempDir::new()?;
+    let namespace = format!("git-spin-policy-{}", TransactionId::new());
+    let backend =
+        ValidatedBackend::new(Arc::new(build_minio()?), StorePath::from(namespace.clone())).await?;
+    let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
+    let (url, mut server) = serve_spin(format, &namespace).await?;
+    let source = root.path().join("source");
+    let format_option = match format {
+        ObjectFormat::Sha1 => "--object-format=sha1",
+        ObjectFormat::Sha256 => "--object-format=sha256",
+    };
+    git(
+        None,
+        [
+            "init",
+            "--quiet",
+            "-b",
+            "main",
+            format_option,
+            path(&source)?,
+        ],
+    )?;
+    write(&source, "before")?;
+    git(Some(&source), ["add", "file"])?;
+    git(Some(&source), ["commit", "--quiet", "-m", "before"])?;
+    let before = git_stdout(Some(&source), ["rev-parse", "HEAD"])?;
+    write(&source, "after")?;
+    git(Some(&source), ["commit", "--quiet", "-am", "after"])?;
+    let after = git_stdout(Some(&source), ["rev-parse", "HEAD"])?;
+    git(Some(&source), ["push", "--quiet", &url, "main"])?;
+    git(Some(&source), ["reset", "--quiet", "--hard", before.trim()])?;
+    let lease = format!("--force-with-lease=refs/heads/main:{}", after.trim());
+    let rejected = git_output(Some(&source), ["push", "--quiet", &lease, &url, "main"])?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("non-fast-forward"));
+    assert!(git_stdout(None, ["ls-remote", &url, "refs/heads/main"])?.starts_with(after.trim()));
+    server.stop();
+
+    let (url, mut writer) = serve_spin_with_policy(format, &namespace, false, true).await?;
+    git(Some(&source), ["push", "--quiet", &lease, &url, "main"])?;
+    assert!(git_stdout(None, ["ls-remote", &url, "refs/heads/main"])?.starts_with(before.trim()));
+    git(Some(&source), ["reset", "--quiet", "--hard", after.trim()])?;
+    let rejected = git_output(Some(&source), ["push", "--quiet", &lease, &url, "main"])?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("stale info"));
+    assert!(git_stdout(None, ["ls-remote", &url, "refs/heads/main"])?.starts_with(before.trim()));
+    git(
+        Some(&source),
+        ["notes", "add", "-m", "durable HTTP note", before.trim()],
+    )?;
+    git(
+        Some(&source),
+        ["update-ref", "refs/archive/saved", before.trim()],
+    )?;
+    git(
+        Some(&source),
+        [
+            "push",
+            "--quiet",
+            &url,
+            "refs/notes/commits",
+            "refs/archive/saved",
+        ],
+    )?;
+    writer.stop();
+    let observed = log.load().await?;
+    let (url, mut reader) = serve_spin_with_policy(format, &namespace, true, true).await?;
+    let cold = root.path().join("cold");
+    git(None, ["clone", "--quiet", &url, path(&cold)?])?;
+    assert_eq!(std::fs::read_to_string(cold.join("file"))?, "before");
+    assert_eq!(git_stdout(Some(&cold), ["rev-parse", "HEAD"])?, before);
+    git(
+        Some(&cold),
+        [
+            "fetch",
+            "--quiet",
+            "origin",
+            "refs/notes/commits:refs/notes/commits",
+            "refs/archive/saved:refs/archive/saved",
+        ],
+    )?;
+    assert_eq!(
+        git_stdout(Some(&cold), ["notes", "show"])?.trim(),
+        "durable HTTP note"
+    );
+    git(Some(&cold), ["fsck", "--strict"])?;
+    let current_lease = format!("--force-with-lease=refs/heads/main:{}", before.trim());
+    let rejected = git_output(
+        Some(&source),
+        ["push", "--quiet", &current_lease, &url, "main"],
+    )?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("403"));
+    assert!(log.refresh(&observed).await?.is_none());
+    reader.stop();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local MinIO, Spin 4, and a release WASIp2 component build"]
 async fn spin_minio_clients_recover_after_collection() -> TestResult {
     let _serial = TEST_LOCK.lock().await;
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
@@ -133,7 +242,7 @@ async fn client_lifecycle(format: ObjectFormat) -> TestResult {
     server.stop();
     {
         let before = log.load().await?;
-        let (url, mut reader) = serve_spin_with_policy(format, &namespace, true).await?;
+        let (url, mut reader) = serve_spin_with_policy(format, &namespace, true, false).await?;
         let read_only_clone = root.path().join("read-only");
         git(None, ["clone", "--quiet", &url, path(&read_only_clone)?])?;
         git(Some(&read_only_clone), ["fetch", "--quiet"])?;
@@ -352,13 +461,14 @@ impl Drop for RunningHost {
 }
 
 async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, RunningHost)> {
-    serve_spin_with_policy(format, prefix, false).await
+    serve_spin_with_policy(format, prefix, false, false).await
 }
 
 async fn serve_spin_with_policy(
     format: ObjectFormat,
     prefix: &str,
     read_only: bool,
+    allow_non_fast_forward: bool,
 ) -> TestResult<(String, RunningHost)> {
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
@@ -400,6 +510,8 @@ async fn serve_spin_with_policy(
         &format!("object_format={format}"),
         "--variable",
         &format!("read_only={read_only}"),
+        "--variable",
+        &format!("allow_non_fast_forward={allow_non_fast_forward}"),
     ]);
     let child = process.stdout(log.try_clone()?).stderr(log).spawn()?;
     let mut host = RunningHost(Some((child, String::new())));

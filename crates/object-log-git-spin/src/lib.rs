@@ -14,7 +14,7 @@ use std::{io::Read, sync::Arc, time::Duration};
 use bytes::Bytes;
 use futures::StreamExt;
 use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
-use object_log_git::{Error, ObjectFormat, Repository};
+use object_log_git::{Error, ObjectFormat, ReceivePolicy, Repository};
 use object_store::{RetryConfig, aws::AmazonS3Builder, client::ClientOptions, path::Path};
 use spin_sdk::http::{
     Fields, IncomingRequest, Method, OutgoingBody, OutgoingResponse, ResponseOutparam,
@@ -143,6 +143,11 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
             Bytes::from_static(b"repository is read-only\n"),
         ));
     }
+    let policy = if spin_sdk::variables::get("allow_non_fast_forward")?.parse::<bool>()? {
+        ReceivePolicy::AllowNonFastForward
+    } else {
+        ReceivePolicy::FastForwardOnly
+    };
     let Ok(encoding) = validate_headers(&request, upload, upload_advert, post) else {
         return Ok(Reply(
             400,
@@ -192,7 +197,10 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
     if body.as_ref() == b"0000" {
         return Ok(Reply(200, RECEIVE_RESULT, Bytes::new()));
     }
-    match repository.prepare_receive(TransactionId::new(), body).await {
+    match repository
+        .prepare_receive_with_policy(TransactionId::new(), body, policy)
+        .await
+    {
         Ok(prepared) => {
             let token = prepared.recovery_token().clone();
             match prepared.publish_receive().await {
