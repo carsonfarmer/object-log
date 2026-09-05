@@ -122,6 +122,20 @@ impl fmt::Display for ObjectId {
     }
 }
 
+/// Server policy for updates to existing branch refs.
+///
+/// Git clients do not transmit a force flag. A caller allowing rewritten
+/// history must authorize that policy independently of the wire request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReceivePolicy {
+    /// Require every updated branch to descend from its current commit.
+    #[default]
+    FastForwardOnly,
+    /// Allow rewritten branch history while retaining exact old-ID checks,
+    /// object validation, and atomic conditional publication.
+    AllowNonFastForward,
+}
+
 /// One atomic ref update.
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
 #[cbor(array)]

@@ -6,7 +6,7 @@ use object_log::{CommitStatus, Resolution, TransactionId};
 
 use super::{PreparedPush, Repository, pack_roots, wire_response};
 use crate::{
-    Error, ObjectId, RefUpdate, durable,
+    Error, ObjectId, ReceivePolicy, RefUpdate, durable,
     graph::Graph,
     pack::budget::{Operation, Reservation, hold},
     state::Machine,
@@ -52,6 +52,9 @@ impl Repository {
 
     /// Validates and stages a classic receive-pack command for atomic publication.
     ///
+    /// Existing branches require fast-forward updates. Use
+    /// [`Self::prepare_receive_with_policy`] to explicitly allow rewritten history.
+    ///
     /// The caller must open the repository before collecting a bounded request
     /// body. The complete input may contain at most 1 MiB of commands and 9 MiB
     /// of pack data. Failed validation can leave collectible immutable staging.
@@ -60,9 +63,29 @@ impl Repository {
     /// Malformed controls return a protocol error. Valid commands rejected before
     /// publication return [`Error::ReceiveRejected`] with their report-status bytes.
     pub async fn prepare_receive(
+        self,
+        transaction_id: TransactionId,
+        input: Bytes,
+    ) -> Result<PreparedPush, Error> {
+        self.prepare_receive_with_policy(transaction_id, input, ReceivePolicy::default())
+            .await
+    }
+
+    /// Validates and stages receive-pack with an explicit server branch policy.
+    ///
+    /// Allowing non-fast-forward updates does not bypass old-ID comparison,
+    /// connectivity, branch object-kind checks, or atomic publication. The policy
+    /// applies to this request, including its one possible expired-view retry.
+    /// Admission and input limits match [`Self::prepare_receive`].
+    ///
+    /// # Errors
+    /// Returns the same malformed-input and rejected-command errors as
+    /// [`Self::prepare_receive`].
+    pub async fn prepare_receive_with_policy(
         mut self,
         transaction_id: TransactionId,
         input: Bytes,
+        policy: ReceivePolicy,
     ) -> Result<PreparedPush, Error> {
         if input.len() > wire::MAX_RECEIVE_BYTES + crate::pack::MAX_RECEIVE_PACK_BYTES {
             return Err(Error::InvalidProtocol("receive input bytes"));
@@ -75,7 +98,10 @@ impl Repository {
         operation.work(input.len())?;
         let request = wire::parse_receive(&input, self.format)?;
         loop {
-            match self.prepare_receive_attempt(transaction_id, &request).await {
+            match self
+                .prepare_receive_attempt(transaction_id, &request, policy)
+                .await
+            {
                 Ok((prepared, prepared_memory)) => {
                     let responses = [
                         response(&operation, &request, ReceiveStatus::Success)?,
@@ -159,6 +185,7 @@ impl Repository {
         &self,
         transaction_id: TransactionId,
         request: &ReceiveRequest<'_>,
+        policy: ReceivePolicy,
     ) -> Result<(object_log::PreparedCommit, Reservation), Error> {
         self.log.preflight(&self.view, transaction_id)?;
         for update in &request.updates {
@@ -219,7 +246,7 @@ impl Repository {
                     }
                 }
             }
-            validate_branches(&self.operation, &graph, &request.updates)?;
+            validate_branches(&self.operation, &graph, &request.updates, policy)?;
         }
         let memory = self.operation.reserve(publication_bytes(
             self.log.options(),
@@ -285,6 +312,7 @@ fn validate_branches(
     operation: &Operation,
     graph: &Graph,
     updates: &[RefUpdate],
+    policy: ReceivePolicy,
 ) -> Result<(), Error> {
     let _memory = operation.reserve_state(graph.nodes.len() * (1 + std::mem::size_of::<u32>()))?;
     let mut visited = vec![false; graph.nodes.len()];
@@ -303,6 +331,9 @@ fn validate_branches(
         let Some(expected) = update.expected else {
             continue;
         };
+        if policy == ReceivePolicy::AllowNonFastForward {
+            continue;
+        }
         operation.work(graph.nodes.len())?;
         visited.fill(false);
         queue.clear();

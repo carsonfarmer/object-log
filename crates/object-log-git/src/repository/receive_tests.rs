@@ -502,6 +502,128 @@ async fn common_receive_fast_forward_branch_kind_and_tag_updates() -> TestResult
 }
 
 #[tokio::test]
+async fn common_receive_allow_rewrite_keeps_leases_cas_and_atomic_branch_validation() -> TestResult
+{
+    use crate::ReceivePolicy::AllowNonFastForward;
+
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let fixture = fixture(format, b"before rewrite")?;
+        let (log, _, _) = test_log("common-receive-rewrite").await?;
+        publish_durable_pack(&log, &fixture, format).await?;
+        let source = fixture.directory.path().join("source");
+        fs::write(source.join("file"), b"after")?;
+        command(Some(&source), &["commit", "--quiet", "-am", "after"])?;
+        let new = ObjectId::parse(
+            format,
+            output(Some(&source), &["rev-parse", "HEAD"])?.trim(),
+        )?;
+        let pack = command_output(Some(&source), &["pack-objects", "--all", "--stdout"])?.stdout;
+        let input = receive_input(
+            format,
+            &[RefUpdate::new(
+                "refs/heads/main",
+                Some(fixture.target),
+                Some(new),
+            )?],
+            &pack,
+            true,
+        );
+        assert!(matches!(
+            common_open(&log, format)
+                .await?
+                .prepare_receive(TransactionId::new(), input)
+                .await?
+                .publish_receive()
+                .await?
+                .0,
+            object_log::Resolution::Committed(_)
+        ));
+        let rewind = receive_input(
+            format,
+            &[RefUpdate::new(
+                "refs/heads/main",
+                Some(new),
+                Some(fixture.target),
+            )?],
+            &empty_pack(format)?,
+            true,
+        );
+        let first = common_open(&log, format)
+            .await?
+            .prepare_receive_with_policy(TransactionId::new(), rewind.clone(), AllowNonFastForward)
+            .await?;
+        let second = common_open(&log, format)
+            .await?
+            .prepare_receive_with_policy(TransactionId::new(), rewind.clone(), AllowNonFastForward)
+            .await?;
+        let (resolution, response) = first.publish_receive().await?;
+        assert!(matches!(resolution, object_log::Resolution::Committed(_)));
+        assert!(String::from_utf8_lossy(&response).contains("ok refs/heads/main"));
+        drop(response);
+        let (resolution, response) = second.publish_receive().await?;
+        assert!(matches!(
+            resolution,
+            object_log::Resolution::NotCommitted(_)
+        ));
+        assert!(
+            String::from_utf8_lossy(&response).contains("ng refs/heads/main atomic ref conflict")
+        );
+        drop(response);
+        assert!(
+            matches!(common_open(&log, format).await?.prepare_receive_with_policy(TransactionId::new(), rewind, AllowNonFastForward).await, Err(Error::ReceiveRejected { source, .. }) if matches!(*source, Error::StaleReference))
+        );
+        let blob = ObjectId::parse(
+            format,
+            output(Some(&source), &["rev-parse", "HEAD:file"])?.trim(),
+        )?;
+        assert_atomic_rewrite_rejected(&log, format, fixture.target, blob).await?;
+        let recovered = cold_checked(&log, format).await?;
+        assert_eq!(recovered.refs().len(), 1);
+        assert_eq!(
+            recovered.refs().get(b"refs/heads/main".as_slice()),
+            Some(&fixture.target)
+        );
+    }
+    Ok(())
+}
+
+async fn assert_atomic_rewrite_rejected(
+    log: &Log,
+    format: ObjectFormat,
+    target: ObjectId,
+    blob: ObjectId,
+) -> TestResult {
+    use crate::ReceivePolicy::AllowNonFastForward;
+    let input = receive_input(
+        format,
+        &[
+            RefUpdate::new("refs/tags/atomic", None, Some(target))?,
+            RefUpdate::new("refs/heads/main", Some(target), Some(blob))?,
+        ],
+        &empty_pack(format)?,
+        true,
+    );
+    let Error::ReceiveRejected { response, source } = common_open(log, format)
+        .await?
+        .prepare_receive_with_policy(TransactionId::new(), input, AllowNonFastForward)
+        .await
+        .err()
+        .ok_or("invalid atomic rewrite accepted")?
+    else {
+        return Err("expected receive rejection".into());
+    };
+    assert!(matches!(*source, Error::InvalidReference));
+    assert_eq!(
+        String::from_utf8_lossy(&response)
+            .matches("ng refs/")
+            .count(),
+        2
+    );
+    drop(response);
+    Ok(())
+}
+
+#[tokio::test]
 async fn common_receive_checks_every_leaf_and_rejects_missing_objects() -> TestResult {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let fixture = fixture(format, b"leaf")?;
@@ -565,13 +687,18 @@ async fn common_receive_checks_every_leaf_and_rejects_missing_objects() -> TestR
             &packed.stdout,
             true,
         );
-        assert!(matches!(
-            common_open(&log, format)
-                .await?
-                .prepare_receive(TransactionId::new(), input)
-                .await,
-            Err(Error::ReceiveRejected { .. })
-        ));
+        for policy in [
+            crate::ReceivePolicy::FastForwardOnly,
+            crate::ReceivePolicy::AllowNonFastForward,
+        ] {
+            assert!(matches!(
+                common_open(&log, format)
+                    .await?
+                    .prepare_receive_with_policy(TransactionId::new(), input.clone(), policy)
+                    .await,
+                Err(Error::ReceiveRejected { .. })
+            ));
+        }
         assert!(log.load().await?.tail().is_empty());
         let input = receive_input(
             format,
@@ -583,13 +710,18 @@ async fn common_receive_checks_every_leaf_and_rejects_missing_objects() -> TestR
             &empty_pack(format)?,
             true,
         );
-        assert!(matches!(
-            common_open(&log, format)
-                .await?
-                .prepare_receive(TransactionId::new(), input)
-                .await,
-            Err(Error::ReceiveRejected { .. })
-        ));
+        for policy in [
+            crate::ReceivePolicy::FastForwardOnly,
+            crate::ReceivePolicy::AllowNonFastForward,
+        ] {
+            assert!(matches!(
+                common_open(&log, format)
+                    .await?
+                    .prepare_receive_with_policy(TransactionId::new(), input.clone(), policy)
+                    .await,
+                Err(Error::ReceiveRejected { .. })
+            ));
+        }
         assert!(log.load().await?.tail().is_empty());
     }
     Ok(())
@@ -660,6 +792,16 @@ async fn common_checkpoint_preserves_live_pack_and_collects_dead_pack() -> TestR
 
 #[tokio::test]
 async fn common_receive_expired_view_retry_keeps_cumulative_operation() -> TestResult {
+    for policy in [
+        crate::ReceivePolicy::FastForwardOnly,
+        crate::ReceivePolicy::AllowNonFastForward,
+    ] {
+        receive_expired_view(policy).await?;
+    }
+    Ok(())
+}
+
+async fn receive_expired_view(policy: crate::ReceivePolicy) -> TestResult {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let dead = fixture(format, b"old collectible")?;
         let fixture = fixture(format, b"retained")?;
@@ -710,17 +852,34 @@ async fn common_receive_expired_view_retry_keeps_cumulative_operation() -> TestR
             object_log::CollectionFinish::Complete(..)
         ));
         let before = operation.calls();
-        let input = receive_input(
-            format,
-            &[RefUpdate::new(
-                "refs/tags/after-gc",
-                None,
-                Some(fixture.target),
-            )?],
-            &empty_pack(format)?,
-            true,
-        );
-        let push = old.prepare_receive(TransactionId::new(), input).await?;
+        let input = if policy == crate::ReceivePolicy::AllowNonFastForward {
+            // Rewritten history uses a previously collected pack; retry must
+            // preserve permission as well as the cumulative operation budget.
+            receive_input(
+                format,
+                &[RefUpdate::new(
+                    "refs/heads/main",
+                    Some(fixture.target),
+                    Some(dead.target),
+                )?],
+                &fs::read(&dead.pack)?,
+                true,
+            )
+        } else {
+            receive_input(
+                format,
+                &[RefUpdate::new(
+                    "refs/tags/after-gc",
+                    None,
+                    Some(fixture.target),
+                )?],
+                &empty_pack(format)?,
+                true,
+            )
+        };
+        let push = old
+            .prepare_receive_with_policy(TransactionId::new(), input, policy)
+            .await?;
         assert!(
             operation.calls() > before + 6,
             "stale read and reopen stay charged"
