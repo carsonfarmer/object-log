@@ -1,5 +1,6 @@
-//! Private authenticated catalog foundation; not yet used by repository state.
+//! Authenticated OID catalog rooted in the replayed Git state.
 
+#[cfg(test)]
 use bytes::Bytes;
 use minicbor::{Decoder, Encode};
 use object_log::{Log, ObjectKind, StagedObject, View};
@@ -93,6 +94,7 @@ impl CatalogTree {
         self.root.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) async fn lookup(
         &self,
         log: &Log,

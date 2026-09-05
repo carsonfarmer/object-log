@@ -1,7 +1,13 @@
 //! A bounded decoded-node cache tied to one log view and admitted operation.
 
-use super::*;
+use super::{CatalogTree, Loaded, PackLocation, check_bounds, invalid, read_memory, read_reserved};
+use crate::{
+    Error, ObjectId,
+    format::PackDescriptor,
+    pack::budget::{Operation, Reservation},
+};
 use object_log::{Digest, ObjectRef};
+use object_log::{Log, StagedObject, View};
 
 const MAX_NODES: usize = 256;
 const RETAINED_BYTES: usize = 2 * 1024 * 1024;
