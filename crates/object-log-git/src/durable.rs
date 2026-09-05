@@ -277,6 +277,7 @@ fn selected_index_bytes(descriptor: &PackDescriptor, root: &StagedObject) -> Res
 }
 
 struct Pack {
+    root: ObjectRef,
     id: ObjectId,
     bytes: u32,
     chunk_bytes: usize,
@@ -409,6 +410,7 @@ async fn load_pack(
     }
     let (index, offsets) = validate_index(node.payload(), format, descriptor)?;
     Ok(Pack {
+        root: root.clone(),
         id: descriptor.id,
         bytes: u32::try_from(bytes)
             .map_err(|_| Error::InvalidPack("pack length exceeds u32".into()))?,
@@ -580,6 +582,7 @@ pub(crate) struct Object {
 }
 
 pub(crate) struct Reader<'a> {
+    certificate: Option<&'a crate::pack::ingest::ScanCertificate<'a>>,
     log: &'a Log,
     view: &'a View,
     catalog: &'a Catalog,
@@ -594,10 +597,20 @@ impl<'a> Reader<'a> {
             log,
             view,
             catalog,
+            certificate: None,
             tree_cache: None,
             selected_packs: None,
             cache: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn with_scan_certificate(
+        mut self,
+        certificate: Option<&'a crate::pack::ingest::ScanCertificate<'a>>,
+    ) -> Self {
+        self.certificate = certificate
+            .filter(|proof| proof.matches_context(&self.catalog.operation, self.log, self.view));
+        self
     }
 
     pub(crate) async fn contains(&mut self, id: ObjectId) -> Result<bool, Error> {
@@ -672,6 +685,19 @@ impl<'a> Reader<'a> {
             return Ok(None);
         };
         let pack = self.pack(location.pack);
+        if self.certificate.is_some_and(|proof| {
+            proof.verifies_blob(
+                &pack.root,
+                &PackDescriptor {
+                    id: pack.id,
+                    bytes: u64::from(pack.bytes),
+                },
+                location.index,
+                id,
+            )
+        }) {
+            return Ok(Some(gix_object::Kind::Blob));
+        }
         let range = pack.entry_range(location.index);
         self.catalog
             .operation

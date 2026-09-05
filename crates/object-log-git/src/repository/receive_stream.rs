@@ -78,24 +78,32 @@ impl Repository {
         loop {
             let result = async {
                 self.validate_receive_controls(transaction_id, &request)?;
-                let staged = if let Some(replay) = &mut replay {
+                let (staged, certificate) = if let Some(replay) = &mut replay {
                     let input = replay.bind(&operation, &self.log, &self.view).await?;
                     let scanned = input.scan(self.format).await?;
                     if scanned.is_empty() {
-                        None
+                        (None, None)
                     } else {
                         let catalog = self.catalog().await?;
                         let mut bases = StoredBases {
                             repository: &self,
                             catalog: &catalog,
                         };
-                        Some(scanned.normalize(&mut bases).await?)
+                        let (staged, certificate) =
+                            scanned.normalize_for_receive(&mut bases).await?;
+                        (Some(staged), certificate)
                     }
                 } else {
-                    None
+                    (None, None)
                 };
-                self.prepare_staged_receive(transaction_id, &request, staged, policy)
-                    .await
+                self.prepare_staged_receive(
+                    transaction_id,
+                    &request,
+                    staged,
+                    policy,
+                    certificate.as_ref(),
+                )
+                .await
             }
             .await;
             match result {

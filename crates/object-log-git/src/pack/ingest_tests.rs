@@ -573,3 +573,236 @@ async fn inline_scratch_spans_tiny_storage_geometry_without_puts() -> TestResult
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn scan_certificate_requires_exact_selected_root_and_context() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let dir = fixture(format, 128, false)?;
+        let (store, base_log, view) = open().await?;
+        let operation = Pool::new(4 * FRAME_BYTES).admit()?;
+        let log = base_log.with_request_guard(Arc::new(operation.clone()));
+        let input = Input::receive(
+            &operation,
+            &log,
+            &view,
+            frames(&dir.path().join("input.pack"), 4096)?,
+        )
+        .await?;
+        let scanned = input.scan(format).await?;
+        let id = scanned.entries[0].id.ok_or("missing scanned ID")?;
+        let ((descriptor, root), certificate) = scanned.normalize_for_receive(&mut NoBases).await?;
+        let certificate = certificate.ok_or("full pack was not certified")?;
+        assert!(certificate.matches_context(&operation, &log, &view));
+        assert!(!certificate.matches_context(&Pool::new(4 * FRAME_BYTES).admit()?, &log, &view));
+        assert!(!certificate.matches_context(&operation, &log.clone(), &view));
+        let other_view = log.load().await?;
+        assert!(!certificate.matches_context(&operation, &log, &other_view));
+        assert!(certificate.verifies_blob(root.reference(), &descriptor, 0, id));
+        assert!(!certificate.verifies_blob(root.reference(), &descriptor, 1, id));
+        assert!(!certificate.verifies_blob(root.reference(), &descriptor, 0, descriptor.id));
+        let mut wrong_descriptor = descriptor.clone();
+        wrong_descriptor.bytes += 1;
+        assert!(!certificate.verifies_blob(root.reference(), &wrong_descriptor, 0, id));
+        // Identical logical root and pack ID, independently staged physical replica.
+        let node = log.read_node(&view, root.reference()).await?;
+        let replica = log
+            .put_node(&view, node.payload().clone(), input.chunks.clone())
+            .await?;
+        assert_ne!(root.reference(), replica.reference());
+        assert!(!certificate.verifies_blob(replica.reference(), &descriptor, 0, id));
+        for (selected, certified) in [(&root, true), (&replica, false)] {
+            let catalog = crate::durable::load(
+                &operation,
+                &log,
+                &view,
+                format,
+                &[(descriptor.clone(), selected.reference().clone())],
+            )
+            .await?;
+            let mut reader = crate::durable::Reader::new(&log, &view, &catalog)
+                .with_scan_certificate(Some(&certificate));
+            store.reset();
+            assert_eq!(reader.verify(id).await?, Some(gix_object::Kind::Blob));
+            assert_eq!(
+                store.metrics().operation(StoreOperation::Get).requests == 0,
+                certified
+            );
+        }
+        // An already indexed physical replica wins when the same pack arrives again.
+        let tree = crate::catalog_tree::CatalogTree::empty(format)
+            .insert_pack(
+                &log,
+                &view,
+                &operation,
+                descriptor.clone(),
+                replica,
+                &[(id, 0)],
+            )
+            .await?
+            .insert_pack(
+                &log,
+                &view,
+                &operation,
+                descriptor.clone(),
+                root.clone(),
+                &[(id, 0)],
+            )
+            .await?;
+        let catalog = crate::durable::Catalog::from_tree(&operation, format, tree.root().cloned())?;
+        {
+            let mut reader = crate::durable::Reader::new(&log, &view, &catalog)
+                .with_scan_certificate(Some(&certificate));
+            assert!(reader.contains(id).await?);
+            store.reset();
+            assert_eq!(reader.verify(id).await?, Some(gix_object::Kind::Blob));
+            assert!(store.metrics().operation(StoreOperation::Get).requests > 0);
+        }
+        drop(catalog);
+        drop(certificate);
+        drop(input);
+        assert_eq!(operation.live_bytes(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_deltas_do_not_receive_scan_certificates() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let dir = fixture(format, 4096, true)?;
+        let (_, base_log, view) = open().await?;
+        let operation = Pool::new(4 * FRAME_BYTES).admit()?;
+        let log = base_log.with_request_guard(Arc::new(operation.clone()));
+        let input = Input::receive(
+            &operation,
+            &log,
+            &view,
+            frames(&dir.path().join("input.pack"), 4096)?,
+        )
+        .await?;
+        let scanned = input.scan(format).await?;
+        assert!(
+            scanned
+                .entries
+                .iter()
+                .any(|entry| entry.header.header.is_delta())
+        );
+        let (_, certificate) = scanned.normalize_for_receive(&mut NoBases).await?;
+        assert!(certificate.is_none());
+        drop(input);
+        assert_eq!(operation.live_bytes(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn scan_certificate_preserves_actual_structural_kind() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let dir = fixture(format, 128, false)?;
+        let mut pack = fs::read(dir.path().join("input.pack"))?;
+        // The scanner hashes the actual tree header; the opaque body is deliberately
+        // not a valid tree. A certificate must never turn this into a verified blob.
+        pack[12] = (pack[12] & !0x70) | 0x20;
+        seal(&mut pack, format)?;
+        let (store, base_log, view) = open().await?;
+        let operation = Pool::new(4 * FRAME_BYTES).admit()?;
+        let log = base_log.with_request_guard(Arc::new(operation.clone()));
+        let input = Input::receive(
+            &operation,
+            &log,
+            &view,
+            stream::iter([Ok(Bytes::from(pack))]),
+        )
+        .await?;
+        let scanned = input.scan(format).await?;
+        let id = scanned.entries[0].id.ok_or("missing ID")?;
+        let ((descriptor, root), certificate) = scanned.normalize_for_receive(&mut NoBases).await?;
+        let certificate = certificate.ok_or("missing full-entry certificate")?;
+        assert!(!certificate.verifies_blob(root.reference(), &descriptor, 0, id));
+        let catalog = crate::durable::load(
+            &operation,
+            &log,
+            &view,
+            format,
+            &[(descriptor, root.reference().clone())],
+        )
+        .await?;
+        {
+            let mut reader = crate::durable::Reader::new(&log, &view, &catalog)
+                .with_scan_certificate(Some(&certificate));
+            store.reset();
+            assert_eq!(reader.verify(id).await?, Some(gix_object::Kind::Tree));
+            assert!(store.metrics().operation(StoreOperation::Get).requests > 0);
+        }
+        drop(catalog);
+        drop(certificate);
+        drop(input);
+        assert_eq!(operation.live_bytes(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn scan_certificate_is_recreated_after_completed_input_view_expires() -> TestResult {
+    let format = ObjectFormat::Sha1;
+    let dir = fixture(format, 128, false)?;
+    let (_, base_log, view) = open().await?;
+    let operation = Pool::new(4 * FRAME_BYTES).admit()?;
+    let log = base_log.with_request_guard(Arc::new(operation.clone()));
+    let input = Input::receive(
+        &operation,
+        &log,
+        &view,
+        frames(&dir.path().join("input.pack"), 4096)?,
+    )
+    .await?;
+    let ((descriptor, root), certificate) = input
+        .scan(format)
+        .await?
+        .normalize_for_receive(&mut NoBases)
+        .await?;
+    let certificate = certificate.ok_or("missing initial certificate")?;
+    let mut replay = input.into_replay();
+    let dead = log
+        .put_object(&view, Bytes::from_static(b"collectible"))
+        .await?;
+    // Keep the input reachable while collection invalidates the scan's view.
+    let prepared = log.prepare(
+        &view,
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![root.clone()],
+    )?;
+    let CommitStatus::Committed(current) = log.commit(prepared).await? else {
+        return Err("not committed".into());
+    };
+    let CollectionStart::Installed(fenced, _) = log.start_collection(&current).await? else {
+        return Err("no fence".into());
+    };
+    let CollectionFinish::Complete(current, _) = log.resume_collection(&fenced).await? else {
+        return Err("collection incomplete".into());
+    };
+    assert!(matches!(
+        log.read_object(&view, dead.reference()).await,
+        Err(object_log::Error::ViewExpired)
+    ));
+    assert!(!certificate.matches_context(&operation, &log, &current));
+    drop(certificate);
+    let input = replay.bind(&operation, &log, &current).await?;
+    let ((new_descriptor, new_root), new_certificate) = input
+        .scan(format)
+        .await?
+        .normalize_for_receive(&mut NoBases)
+        .await?;
+    assert_eq!(descriptor, new_descriptor);
+    assert_ne!(root.reference(), new_root.reference());
+    assert!(
+        new_certificate
+            .ok_or("missing fresh certificate")?
+            .matches_context(&operation, &log, &current)
+    );
+    drop(input);
+    drop(replay);
+    assert_eq!(operation.live_bytes(), 0);
+    Ok(())
+}

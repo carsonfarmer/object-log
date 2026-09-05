@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use bytes::Bytes;
-use object_log::StagedObject;
+use object_log::{Log, ObjectRef, StagedObject, View};
 
 use super::{Cursor, Input};
 use crate::{
@@ -237,9 +237,18 @@ pub(super) async fn read_header(
     invalid("pack entry header is too long")
 }
 
-impl Scanned<'_, '_> {
+impl<'log> Scanned<'_, 'log> {
     /// Only full-object packs can finish until bounded delta resolution exists.
-    pub(super) async fn finish(mut self) -> Result<(PackDescriptor, StagedObject), Error> {
+    pub(super) async fn finish(self) -> Result<(PackDescriptor, StagedObject), Error> {
+        let (staged, _) = self.finish_inner(false).await?;
+        Ok(staged)
+    }
+
+    pub(super) async fn finish_certified(self) -> Result<CertifiedPack<'log>, Error> {
+        self.finish_inner(true).await
+    }
+
+    async fn finish_inner(mut self, certify: bool) -> Result<CertifiedPack<'log>, Error> {
         let input = self.input;
         if self.entries.iter().any(|entry| entry.id.is_none()) {
             return invalid("input requires delta resolution before publication");
@@ -260,13 +269,43 @@ impl Scanned<'_, '_> {
             .log
             .put_node(input.view, index, input.chunks.clone())
             .await?;
-        Ok((
-            PackDescriptor {
-                id: self.id,
-                bytes: self.bytes,
-            },
-            root,
-        ))
+        let descriptor = PackDescriptor {
+            id: self.id,
+            bytes: self.bytes,
+        };
+        let certificate = if certify {
+            let memory = input
+                .operation
+                .reserve(self.entries.len() * size_of::<(ObjectId, gix_object::Kind)>())?;
+            input
+                .operation
+                .work(self.entries.len() * size_of::<Entry>())?;
+            let mut entries = Vec::with_capacity(self.entries.len());
+            for entry in &self.entries {
+                entries.push((
+                    entry
+                        .id
+                        .ok_or_else(|| pack_error("uncertified object ID"))?,
+                    entry
+                        .header
+                        .header
+                        .as_kind()
+                        .ok_or_else(|| pack_error("cannot certify delta entry"))?,
+                ));
+            }
+            Some(ScanCertificate {
+                log: input.log,
+                view: input.view,
+                operation: input.operation.clone(),
+                root: root.reference().clone(),
+                descriptor: descriptor.clone(),
+                entries,
+                _memory: memory,
+            })
+        } else {
+            None
+        };
+        Ok(((descriptor, root), certificate))
     }
 
     fn index(&mut self, input: &Input<'_>) -> Result<Bytes, Error> {
@@ -326,5 +365,44 @@ impl Scanned<'_, '_> {
         hash.update(&bytes);
         bytes.extend_from_slice(hash.try_finalize().map_err(pack_error)?.as_slice());
         Ok(hold(bytes.into(), memory))
+    }
+}
+
+/// A move-only proof from a complete full-entry scan and its authenticated index.
+/// It lives only inside the receive attempt; replay never retains it.
+pub(crate) struct ScanCertificate<'a> {
+    log: &'a Log,
+    view: &'a View,
+    operation: crate::pack::budget::Operation,
+    root: ObjectRef,
+    descriptor: PackDescriptor,
+    entries: Vec<(ObjectId, gix_object::Kind)>,
+    _memory: Reservation,
+}
+
+pub(super) type CertifiedPack<'a> = ((PackDescriptor, StagedObject), Option<ScanCertificate<'a>>);
+
+impl ScanCertificate<'_> {
+    pub(crate) fn matches_context(
+        &self,
+        operation: &crate::pack::budget::Operation,
+        log: &Log,
+        view: &View,
+    ) -> bool {
+        self.operation.same_as(operation)
+            && std::ptr::eq(self.log, log)
+            && std::ptr::eq(self.view, view)
+    }
+
+    pub(crate) fn verifies_blob(
+        &self,
+        root: &ObjectRef,
+        descriptor: &PackDescriptor,
+        position: u32,
+        id: ObjectId,
+    ) -> bool {
+        self.root == *root
+            && self.descriptor == *descriptor
+            && self.entries.get(position as usize) == Some(&(id, gix_object::Kind::Blob))
     }
 }

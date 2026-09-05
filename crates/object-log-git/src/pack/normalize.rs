@@ -191,3 +191,20 @@ impl Scanned<'_, '_> {
         .await
     }
 }
+
+impl<'log> Scanned<'_, 'log> {
+    pub(crate) async fn normalize_for_receive(
+        self,
+        provider: &mut impl BaseProvider,
+    ) -> Result<super::scan::CertifiedPack<'log>, Error> {
+        if self
+            .entries
+            .iter()
+            .all(|entry| !entry.header.header.is_delta())
+        {
+            self.finish_certified().await
+        } else {
+            Ok((self.normalize(provider).await?, None))
+        }
+    }
+}

@@ -232,7 +232,7 @@ impl Repository {
                 })
             }
         };
-        self.prepare_staged_receive(transaction_id, request, staged, policy)
+        self.prepare_staged_receive(transaction_id, request, staged, policy, None)
             .await
     }
 
@@ -242,6 +242,7 @@ impl Repository {
         request: &ReceiveControls,
         staged: Option<(crate::format::PackDescriptor, object_log::StagedObject)>,
         policy: ReceivePolicy,
+        certificate: Option<&crate::pack::ingest::ScanCertificate<'_>>,
     ) -> Result<(object_log::PreparedCommit, Reservation), Error> {
         self.validate_receive_controls(transaction_id, request)?;
         let mut objects = Vec::new();
@@ -280,7 +281,8 @@ impl Repository {
             } else {
                 durable::load(&self.operation, &self.log, &self.view, self.format, &roots).await?
             };
-            let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
+            let mut reader = durable::Reader::new(&self.log, &self.view, &catalog)
+                .with_scan_certificate(certificate);
             let _roots_memory = self
                 .operation
                 .reserve_state(request.updates.len() * std::mem::size_of::<ObjectId>())?;

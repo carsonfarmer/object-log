@@ -30,7 +30,7 @@ mod scratch;
 #[path = "stored.rs"]
 mod stored;
 pub(crate) use resolve::{BaseProvider, NoBases};
-pub(crate) use scan::{Entry as IndexedEntry, Scanned};
+pub(crate) use scan::{Entry as IndexedEntry, ScanCertificate, Scanned};
 pub(crate) use scratch::Decoded;
 
 pub(super) const FRAME_BYTES: usize = 1024 * 1024;
