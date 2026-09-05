@@ -81,6 +81,44 @@ pub(crate) struct Normalized {
     pub(crate) id: ObjectId,
     pub(crate) _memory: [budget::Reservation; 2],
 }
+pub(crate) enum NormalizeError {
+    MissingBase {
+        id: ObjectId,
+        candidates: Vec<ObjectId>,
+        _memory: Memory,
+        message: String,
+    },
+    DuplicateObject(ObjectId),
+    Invalid(Error),
+}
+
+impl From<Error> for NormalizeError {
+    fn from(error: Error) -> Self {
+        Self::Invalid(error)
+    }
+}
+
+impl NormalizeError {
+    fn into_error(self) -> Error {
+        match self {
+            Self::MissingBase { message, .. } => Error::InvalidPack(message),
+            Self::DuplicateObject(_) => {
+                Error::InvalidPack("pack contains duplicate object IDs".into())
+            }
+            Self::Invalid(error) => error,
+        }
+    }
+}
+
+pub(crate) fn normalize_attempt(
+    operation: &budget::Operation,
+    format: ObjectFormat,
+    input: &[u8],
+    external_bases: &[ExternalBase<'_>],
+) -> Result<Normalized, NormalizeError> {
+    normalize_attempt_with(operation, format, input, external_bases, DEFAULT_LIMITS)
+}
+
 pub(crate) fn normalize(
     operation: &budget::Operation,
     format: ObjectFormat,
@@ -113,8 +151,19 @@ fn normalize_with(
     external_bases: &[ExternalBase<'_>],
     limits: Limits,
 ) -> Result<Normalized, Error> {
+    normalize_attempt_with(operation, format, input, external_bases, limits)
+        .map_err(NormalizeError::into_error)
+}
+
+fn normalize_attempt_with(
+    operation: &budget::Operation,
+    format: ObjectFormat,
+    input: &[u8],
+    external_bases: &[ExternalBase<'_>],
+    limits: Limits,
+) -> Result<Normalized, NormalizeError> {
     if input.len() > limits.input_bytes {
-        return invalid("input exceeds byte limit");
+        return Err(Error::InvalidPack("input exceeds byte limit".into()).into());
     }
     let hash = object_hash(format);
     let (entries, mut stats, mut scan_memory) = scan(operation, input, hash, limits)?;
@@ -480,7 +529,7 @@ fn index(
     entries: Vec<InputEntry>,
     limits: Limits,
     stats: &Stats,
-) -> Result<(ObjectId, Vec<u8>, budget::Reservation), Error> {
+) -> Result<(ObjectId, Vec<u8>, budget::Reservation), NormalizeError> {
     let object_count = entries.len();
     let graph_item_bytes = size_of::<(u64, gix_pack::data::entry::Header)>()
         + size_of::<Option<usize>>()
@@ -497,7 +546,7 @@ fn index(
         .and_then(|bytes| bytes.checked_add(hash.len_in_bytes() * 2))
         .ok_or_else(|| Error::InvalidPack("pack index size overflowed".into()))?;
     if index_bytes > limits.index_bytes {
-        return invalid("pack index exceeds byte limit");
+        return Err(Error::InvalidPack("pack index exceeds byte limit".into()).into());
     }
     operation.work(total([
         stats.normalized,
@@ -535,19 +584,57 @@ fn index(
         Some(limits.object_bytes),
         Version::V2,
     )
-    .map_err(pack_error)?;
+    .map_err(|error| {
+        index_error(operation, format, &relationships, error)
+            .unwrap_or_else(NormalizeError::Invalid)
+    })?;
     let file = gix_pack::index::File::from_data(index.as_slice(), PathBuf::new(), hash)
         .map_err(pack_error)?;
     let mut previous = None;
     for entry in file.iter() {
         if previous == Some(entry.oid) {
-            return invalid("pack contains duplicate object IDs");
+            return Err(NormalizeError::DuplicateObject(ObjectId::from_bytes(
+                format,
+                entry.oid.as_slice(),
+            )?));
         }
         previous = Some(entry.oid);
     }
     validate_delta_depth(&relationships, &file)?;
     let id = ObjectId::from_bytes(format, outcome.data_hash.as_slice())?;
     Ok((id, index, index_memory))
+}
+
+fn index_error(
+    operation: &budget::Operation,
+    format: ObjectFormat,
+    relationships: &[(u64, gix_pack::data::entry::Header)],
+    error: gix_pack::index::write::Error,
+) -> Result<NormalizeError, Error> {
+    let gix_pack::index::write::Error::TreeTraversal(
+        gix_pack::cache::delta::traverse::Error::UnresolvedRefDelta { base_id },
+    ) = &error
+    else {
+        return Ok(NormalizeError::Invalid(pack_error(error)));
+    };
+    let id = ObjectId::from_bytes(format, base_id.as_slice())?;
+    let bytes = relationships.len() * size_of::<ObjectId>();
+    let memory = operation.reserve(bytes)?;
+    operation.work(bytes)?;
+    let mut candidates = Vec::with_capacity(relationships.len());
+    for (_, header) in relationships {
+        if let gix_pack::data::entry::Header::RefDelta { base_id } = header {
+            candidates.push(ObjectId::from_bytes(format, base_id.as_slice())?);
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    Ok(NormalizeError::MissingBase {
+        id,
+        candidates,
+        _memory: memory,
+        message: error.to_string(),
+    })
 }
 
 fn validate_delta_depth(
