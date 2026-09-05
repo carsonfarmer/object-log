@@ -2,9 +2,15 @@
 
 use std::error::Error as StdError;
 
+use futures::TryStreamExt;
+
 use crate::{Error, Log, ObjectRef, StagedObject, View};
 
 /// Applies opaque log data to one application state type.
+///
+/// Callbacks may run before a later storage or state error is discovered.
+/// Failed materialization drops its partial state; it does not roll back any
+/// external effects performed by callbacks.
 pub trait Materializer {
     /// The reconstructed application state.
     type State;
@@ -108,11 +114,15 @@ where
         }
         None => materializer.empty(),
     };
-    for record in log.read_tail(&view).await? {
-        let objects = record_proofs(log, &view, record.objects());
-        materializer
-            .apply(&mut state, record.operation(), &objects)
-            .map_err(MaterializeError::State)?;
+    {
+        let records = log.tail_records(&view)?;
+        futures::pin_mut!(records);
+        while let Some(record) = records.try_next().await? {
+            let objects = record_proofs(log, &view, record.objects());
+            materializer
+                .apply(&mut state, record.operation(), &objects)
+                .map_err(MaterializeError::State)?;
+        }
     }
     Ok(Materialized { view, state })
 }

@@ -1043,30 +1043,45 @@ impl Log {
     /// Returns expiry for missing commits in an older unretained view. A
     /// missing commit in the current epoch is corruption.
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
-        self.validate_view(view)?;
-        let mut reads = stream::iter(view.tail().iter().cloned())
-            .map(|reference| self.read_commit_optional(reference))
-            .buffered(MAX_CONCURRENT_READS);
-        let mut records = Vec::with_capacity(view.tail().len());
-        while let Some(record) = reads.try_next().await? {
-            let Some(record) = record else {
-                return Err(self.missing_read_error(view).await?);
-            };
-            records.push(record);
-        }
+        self.tail_records(view)?
+            .try_fold(
+                Vec::with_capacity(view.tail().len()),
+                |mut records, record| async move {
+                    records.push(record);
+                    Ok(records)
+                },
+            )
+            .await
+    }
 
+    // Keep ordered decoding bounded independently of the tail length. Both
+    // callers consume the stream to completion before returning durable state.
+    pub(crate) fn tail_records<'a>(
+        &'a self,
+        view: &'a View,
+    ) -> Result<impl futures::Stream<Item = Result<CommitRecord, Error>> + 'a, Error> {
+        self.validate_view(view)?;
         let mut expected_tip = view
             .checkpoint()
             .map(|checkpoint| checkpoint.through_commit);
-        for record in &records {
-            if record.expected_tip != expected_tip {
-                return Err(Error::InvalidFormat(
-                    "the commit tail has a broken parent chain".to_owned(),
-                ));
-            }
-            expected_tip = Some(record.reference.digest);
-        }
-        Ok(records)
+        Ok(stream::iter(view.tail().iter().cloned())
+            .map(move |reference| async move {
+                match self.read_commit_optional(reference).await? {
+                    Some(record) => Ok(record),
+                    None => Err(self.missing_read_error(view).await?),
+                }
+            })
+            .buffered(MAX_CONCURRENT_READS)
+            .map(move |record| {
+                let record = record?;
+                if record.expected_tip != expected_tip {
+                    return Err(Error::InvalidFormat(
+                        "the commit tail has a broken parent chain".to_owned(),
+                    ));
+                }
+                expected_tip = Some(record.reference.digest);
+                Ok(record)
+            }))
     }
 
     /// Publishes an opaque base that covers one exact prefix of `view`.
@@ -2777,6 +2792,276 @@ mod tests {
         assert_eq!(faults.metrics().operation(Operation::List).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct FoldProbe {
+        applied: std::cell::Cell<usize>,
+        dropped: std::rc::Rc<std::cell::Cell<bool>>,
+        reads: Option<FaultStore>,
+        maximum_ahead: std::cell::Cell<usize>,
+    }
+
+    struct FoldState {
+        total: usize,
+        objects: Vec<StagedObject>,
+        dropped: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl Drop for FoldState {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+
+    impl crate::Materializer for FoldProbe {
+        type State = FoldState;
+        type Error = std::io::Error;
+
+        fn empty(&self) -> FoldState {
+            FoldState {
+                total: 0,
+                objects: Vec::new(),
+                dropped: self.dropped.clone(),
+            }
+        }
+
+        fn restore(
+            &self,
+            snapshot: &[u8],
+            objects: &[StagedObject],
+        ) -> Result<FoldState, Self::Error> {
+            let mut state = self.empty();
+            state.total = usize::from(snapshot[0]);
+            state.objects = objects.to_vec();
+            Ok(state)
+        }
+
+        fn apply(
+            &self,
+            state: &mut FoldState,
+            operation: &[u8],
+            objects: &[StagedObject],
+        ) -> Result<(), Self::Error> {
+            if let Some(reads) = &self.reads {
+                let completed = usize::try_from(reads.metrics().operation(Operation::Get).requests)
+                    .map_err(std::io::Error::other)?;
+                self.maximum_ahead
+                    .set(self.maximum_ahead.get().max(completed - self.applied.get()));
+            }
+            if operation[0] == 255 {
+                return Err(std::io::Error::other("rejected operation"));
+            }
+            state.total += usize::from(operation[0]);
+            state.objects.extend_from_slice(objects);
+            self.applied.set(self.applied.get() + 1);
+            Ok(())
+        }
+    }
+
+    async fn fold_append(log: &Log, view: &View, operation: Bytes) -> Result<View, Error> {
+        let prepared = log.prepare(
+            view,
+            TransactionId::new(),
+            operation,
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        match log.commit(prepared).await? {
+            CommitStatus::Committed(view) => Ok(view),
+            _ => Err(Error::InvalidFormat("test append did not publish".into())),
+        }
+    }
+
+    #[tokio::test]
+    async fn materialization_bounds_completed_records_ahead_of_application()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("bounded-fold")).await?;
+        let log = Log::open(&backend, &LogId::new("tail")?, Options::default()).await?;
+        let mut view = log.load().await?;
+        let count = MAX_CONCURRENT_READS * 3;
+        for _ in 0..count {
+            view = fold_append(&log, &view, Bytes::from(vec![1; 32 * 1024])).await?;
+        }
+        faults.reset();
+        let probe = FoldProbe {
+            reads: Some(faults.clone()),
+            ..FoldProbe::default()
+        };
+        let state = crate::materialize(&log, view, &probe).await?;
+        assert_eq!(state.state().total, count);
+        assert_eq!(probe.applied.get(), count);
+        // The store completes each GET before its record can be decoded. The
+        // completed-but-unapplied count therefore bounds retained records.
+        assert!(
+            probe.maximum_ahead.get() <= MAX_CONCURRENT_READS,
+            "{} records completed ahead of application",
+            probe.maximum_ahead.get(),
+        );
+        assert_eq!(
+            faults.metrics().operation(Operation::Get).requests,
+            u64::try_from(count)?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialization_drops_partial_state_on_late_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for failure in ["body", "parent", "domain"] {
+            let log = test_log(failure, Options::default()).await?;
+            let mut view = log.load().await?;
+            for position in 0..3 {
+                let byte = if failure == "domain" && position == 2 {
+                    255
+                } else {
+                    1
+                };
+                view = fold_append(&log, &view, Bytes::from(vec![byte])).await?;
+            }
+            let last = view.tail()[2].clone();
+            if failure == "body" {
+                let key = log.commit_key(&last);
+                let stored = log
+                    .store
+                    .read(key, log.options.max_commit_bytes)
+                    .await?
+                    .ok_or("missing test commit")?;
+                let mut bytes = stored.bytes.to_vec();
+                bytes[0] ^= 1;
+                log.store
+                    .update(key, Bytes::from(bytes), stored.version)
+                    .await?;
+            } else if failure == "parent" {
+                let stored = log.read_commit(&last).await?;
+                let bytes = format::encode_commit(&format::Commit {
+                    log_id: log.store.log_id().clone(),
+                    incarnation: log.incarnation,
+                    transaction_id: last.transaction_id,
+                    expected_tip: None,
+                    operation: stored.operation,
+                    result: stored.result,
+                    objects: stored.objects,
+                })?;
+                let mut replacement = last;
+                replacement.digest = Digest::of(&bytes);
+                replacement.len = u64::try_from(bytes.len())?;
+                log.store
+                    .create(log.commit_key(&replacement), bytes)
+                    .await?;
+                let mut head = view.head().clone();
+                head.tail[2] = replacement;
+                log.store
+                    .update(
+                        StoreKey::Head,
+                        format::encode_head(&head)?,
+                        view.storage_version().clone(),
+                    )
+                    .await?;
+                view = log.load().await?;
+            }
+            let probe = FoldProbe::default();
+            let result = crate::materialize(&log, view.clone(), &probe).await;
+            match failure {
+                "body" => assert!(matches!(
+                    result,
+                    Err(crate::MaterializeError::Log(Error::CorruptObject))
+                )),
+                "parent" => {
+                    assert!(matches!(
+                        result,
+                        Err(crate::MaterializeError::Log(Error::InvalidFormat(_)))
+                    ));
+                    assert!(matches!(
+                        log.read_tail(&view).await,
+                        Err(Error::InvalidFormat(_))
+                    ));
+                }
+                _ => assert!(matches!(result, Err(crate::MaterializeError::State(_)))),
+            }
+            assert_eq!(probe.applied.get(), 2);
+            assert!(probe.dropped.get(), "partial state escaped after {failure}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialization_restores_checkpoint_and_republishes_tail_proofs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("fold-checkpoint", Options::default()).await?;
+        let view = fold_append(&log, &log.load().await?, Bytes::from_static(&[1])).await?;
+        let object = log
+            .put_object(&view, Bytes::from_static(b"checkpoint object"))
+            .await?;
+        let CheckpointStatus::Published(view) = log
+            .publish_checkpoint(
+                &view,
+                &view.tail()[0],
+                Bytes::from_static(&[1]),
+                vec![object],
+            )
+            .await?
+        else {
+            return Err("checkpoint did not publish".into());
+        };
+        let object = log
+            .put_object(&view, Bytes::from_static(b"tail object"))
+            .await?;
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(&[2]),
+            Bytes::new(),
+            vec![object],
+        )?;
+        let CommitStatus::Committed(view) = log.commit(prepared).await? else {
+            return Err("tail did not publish".into());
+        };
+        let probe = FoldProbe::default();
+        let state = crate::materialize(&log, view.clone(), &probe).await?;
+        assert_eq!(state.state().total, 3);
+        assert_eq!(probe.applied.get(), 1);
+        assert_eq!(state.state().objects.len(), 2);
+        assert!(matches!(
+            log.publish_checkpoint(
+                state.view(),
+                &view.tail()[0],
+                Bytes::from_static(&[3]),
+                state.state().objects.clone(),
+            )
+            .await?,
+            CheckpointStatus::Published(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialization_returns_expiry_after_history_collection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("fold-expiry", Options::default()).await?;
+        let old = fold_append(&log, &log.load().await?, Bytes::from_static(&[1])).await?;
+        let CheckpointStatus::Published(view) = log
+            .publish_checkpoint(&old, &old.tail()[0], Bytes::from_static(&[1]), Vec::new())
+            .await?
+        else {
+            return Err("checkpoint did not publish".into());
+        };
+        let CollectionStart::Installed(view, _) = log.start_collection(&view).await? else {
+            return Err("collection did not start".into());
+        };
+        assert!(matches!(
+            log.resume_collection(&view).await?,
+            CollectionFinish::Complete(..)
+        ));
+        let probe = FoldProbe::default();
+        assert!(matches!(
+            crate::materialize(&log, old, &probe).await,
+            Err(crate::MaterializeError::Log(Error::ViewExpired))
+        ));
+        assert!(probe.dropped.get());
         Ok(())
     }
 
