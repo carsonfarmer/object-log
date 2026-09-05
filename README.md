@@ -100,8 +100,9 @@ reference. Spin is the Git HTTP host. The optional local
 existing-WAL status, exact commit-token recovery, and conservative metadata
 checkpointing with `checkpoint --retain-packs` under a bounded metadata profile.
 It clears a qualifying WAL tail while retaining every pack. The command also
-resumes an installed collection with `collect --resume-only` and migrates the
-legacy pack catalog with `migrate-catalog --recovery-file`. Migration publishes
+starts or resumes collection with `collect`; `collect --resume-only` restricts
+it to an already installed plan. Existing retentions block fresh planning.
+It migrates the legacy pack catalog with `migrate-catalog --recovery-file`. Migration publishes
 an authenticated lookup tree through the same conditional WAL head; cold object
 reads load only the indexes for selected packs. After migration,
 `compact-packs --recovery-file` repacks reachable objects into bounded output

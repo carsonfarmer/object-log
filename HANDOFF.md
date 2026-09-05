@@ -8,7 +8,7 @@ head as the only mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 
 The Git proof now supports explicit authenticated catalog migration, sparse
 selected-pack lookup, persisted default branches, cumulative request guards,
-bounded head/collection decoding, and installed-collection resumption. Native
+bounded head/collection decoding, and fresh or resumed operator collection. Native
 operator and WASI transports share one safe-read retry policy; native reqwest
 retains its existing protocol-level retry behavior. Writes retain pending-result
 semantics. The native Git engine and HTTP host are removed; installed Git remains
