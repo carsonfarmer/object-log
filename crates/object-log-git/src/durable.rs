@@ -17,8 +17,9 @@ use crate::{
 };
 
 const CHUNK_BYTES: usize = 1024 * 1024;
-// Canonical CBOR adds 1,045 bytes for the envelope and 16 chunk references.
-const MAX_PACK_ROOT_BYTES: usize = MAX_INDEX_BYTES + 1_045;
+const MAX_CHUNKS: usize = u16::MAX as usize + 1;
+// A child reference uses at most 62 CBOR bytes for a <= 1 MiB blob.
+const MAX_PACK_ROOT_BYTES: usize = MAX_INDEX_BYTES + 64 + 62 * MAX_CHUNKS;
 const MAX_CATALOG_BYTES: usize = 24 * CHUNK_BYTES;
 const MAX_CACHE_BYTES: usize = 8 * CHUNK_BYTES;
 const MAX_TRANSFERS: usize = 8;
@@ -33,20 +34,33 @@ pub(crate) async fn stage(
     view: &View,
     normalized: Normalized,
 ) -> Result<(PackDescriptor, StagedObject), Error> {
+    if normalized.bytes.len() > MAX_PACK_BYTES || normalized.index.len() > MAX_INDEX_BYTES {
+        return invalid("staged pack or index exceeds byte limit");
+    }
     let bytes = Bytes::from(normalized.bytes);
-    let count = bytes.len().div_ceil(CHUNK_BYTES);
-    if count > log.options().max_object_refs {
+    let width = CHUNK_BYTES.min(log.options().max_object_bytes);
+    if width == 0 || bytes.is_empty() {
+        return invalid("pack chunk width is zero");
+    }
+    let count = bytes.len().div_ceil(width);
+    if count > log.options().max_object_refs.min(MAX_CHUNKS) {
         return invalid("pack needs too many chunks");
     }
     let staging_bytes = count
         .checked_mul(size_of::<StagedObject>() + size_of::<ObjectRef>())
         .ok_or_else(|| Error::InvalidPack("Git staging size overflowed".into()))?;
     let _staging_memory = operation.reserve(staging_bytes)?;
-    let _root_memory = operation.reserve(MAX_PACK_ROOT_BYTES)?;
-    operation.work(MAX_PACK_ROOT_BYTES)?;
-    operation.io(MAX_PACK_ROOT_BYTES)?;
+    let root_bytes = root_bytes(normalized.index.len(), bytes.len(), width);
+    if root_bytes > log.options().max_object_bytes {
+        return Err(Error::ObjectLog(object_log::Error::LimitExceeded(
+            "object bytes",
+        )));
+    }
+    let _root_memory = operation.reserve(root_bytes)?;
+    operation.work(root_bytes)?;
+    operation.io(root_bytes)?;
     let children = stream::iter((0..count).map(|index| {
-        let chunk = bytes.slice(index * CHUNK_BYTES..bytes.len().min((index + 1) * CHUNK_BYTES));
+        let chunk = bytes.slice(index * width..bytes.len().min((index + 1) * width));
         async move {
             operation.io(chunk.len())?;
             Ok::<_, Error>(log.put_object(view, chunk).await?)
@@ -65,6 +79,24 @@ pub(crate) async fn stage(
         },
         root,
     ))
+}
+
+// The object-log node envelope and children use canonical CBOR. Reserve the
+// exact encoded size before any PUT, including the authenticated references.
+fn root_bytes(index: usize, bytes: usize, width: usize) -> usize {
+    fn head(value: usize) -> usize {
+        match value {
+            0..=23 => 1,
+            24..=255 => 2,
+            256..=65_535 => 3,
+            _ => 5,
+        }
+    }
+    let count = bytes.div_ceil(width);
+    let last = bytes - (count - 1) * width;
+    let inner =
+        5 + head(index) + index + head(count) + (count - 1) * (57 + head(width)) + 57 + head(last);
+    37 + head(inner) + inner
 }
 
 pub(crate) struct Catalog {
@@ -119,6 +151,7 @@ impl Catalog {
 struct Pack {
     id: ObjectId,
     bytes: u32,
+    chunk_bytes: usize,
     index: PackIndex,
     offsets: Box<[OffsetEntry]>,
     node: ReferenceNode,
@@ -206,7 +239,7 @@ fn catalog_bytes(
             let entries =
                 ((root.saturating_sub(index_fixed)) / index_entry).min(MAX_OBJECTS as usize);
             let dynamic = root
-                + MAX_PACK_BYTES.div_ceil(CHUNK_BYTES) * size_of::<ObjectRef>()
+                + (root / 58) * size_of::<ObjectRef>()
                 + entries * (size_of::<OffsetEntry>() + size_of::<Location>());
             total
                 .checked_add(dynamic)
@@ -227,14 +260,20 @@ async fn load_pack(
         .map_err(|_| Error::InvalidPack("pack length exceeds memory".into()))?;
     let node = log.read_node(view, root).await?;
     let chunks = node.children();
-    if chunks.len() != bytes.div_ceil(CHUNK_BYTES) {
+    let width = chunks.first().map_or(0, ObjectRef::len);
+    if width == 0 || width > CHUNK_BYTES as u64 || chunks.len() > MAX_CHUNKS {
+        return invalid("pack chunk geometry is invalid");
+    }
+    let width = usize::try_from(width)
+        .map_err(|_| Error::InvalidPack("pack chunk exceeds memory".into()))?;
+    if chunks.len() != bytes.div_ceil(width) {
         return invalid("pack chunk count does not match");
     }
     for (index, child) in chunks.iter().enumerate() {
         let expected = if index + 1 == chunks.len() {
-            bytes - index * CHUNK_BYTES
+            bytes - index * width
         } else {
-            CHUNK_BYTES
+            width
         };
         if child.kind() != ObjectKind::Blob || child.len() != expected as u64 {
             return invalid("pack chunk is invalid");
@@ -245,6 +284,7 @@ async fn load_pack(
         id: descriptor.id,
         bytes: u32::try_from(bytes)
             .map_err(|_| Error::InvalidPack("pack length exceeds u32".into()))?,
+        chunk_bytes: width,
         index,
         offsets,
         node,
@@ -415,6 +455,7 @@ pub(crate) struct Reader<'a> {
     catalog: &'a Catalog,
     cache: VecDeque<((u16, u16), Bytes)>,
     cache_bytes: usize,
+    cache_memory: Option<Reservation>,
 }
 
 impl<'a> Reader<'a> {
@@ -425,6 +466,7 @@ impl<'a> Reader<'a> {
             catalog,
             cache: VecDeque::new(),
             cache_bytes: 0,
+            cache_memory: None,
         }
     }
 
@@ -622,14 +664,15 @@ impl<'a> Reader<'a> {
     }
 
     async fn read_range(&mut self, pack: u16, range: std::ops::Range<u32>) -> Result<Bytes, Error> {
-        let first = range.start as usize / CHUNK_BYTES;
-        let last = (range.end as usize - 1) / CHUNK_BYTES;
+        let width = self.catalog.packs[usize::from(pack)].chunk_bytes;
+        let first = range.start as usize / width;
+        let last = (range.end as usize - 1) / width;
         if first == last {
             let chunk = self.chunk(pack, first).await?;
-            let end = range.end as usize % CHUNK_BYTES;
-            return Ok(chunk.slice(
-                range.start as usize % CHUNK_BYTES..if end == 0 { chunk.len() } else { end },
-            ));
+            let end = range.end as usize % width;
+            return Ok(
+                chunk.slice(range.start as usize % width..if end == 0 { chunk.len() } else { end })
+            );
         }
         let length = (range.end - range.start) as usize;
         let memory = self.catalog.operation.reserve(length)?;
@@ -637,12 +680,12 @@ impl<'a> Reader<'a> {
         for chunk_index in first..=last {
             let chunk = self.chunk(pack, chunk_index).await?;
             let start = if chunk_index == first {
-                range.start as usize % CHUNK_BYTES
+                range.start as usize % width
             } else {
                 0
             };
             let end = if chunk_index == last {
-                let end = range.end as usize % CHUNK_BYTES;
+                let end = range.end as usize % width;
                 if end == 0 { chunk.len() } else { end }
             } else {
                 chunk.len()
@@ -657,6 +700,17 @@ impl<'a> Reader<'a> {
             .map_err(|_| Error::InvalidPack("pack chunk index exceeds u16".into()))?;
         if let Some((_, bytes)) = self.cache.iter().find(|(key, _)| *key == (pack, index)) {
             return Ok(bytes.clone());
+        }
+        if self.cache_memory.is_none() {
+            // Every inserted entry costs one cumulative I/O call. Reserving the
+            // call limit bounds metadata even with very small stored chunks.
+            let capacity = crate::pack::budget::CALLS;
+            self.cache_memory = Some(
+                self.catalog
+                    .operation
+                    .reserve(capacity * size_of::<((u16, u16), Bytes)>())?,
+            );
+            self.cache = VecDeque::with_capacity(capacity);
         }
         let object = self.catalog.packs[usize::from(pack)]
             .node
@@ -1065,12 +1119,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn variable_chunks_authenticate_geometry_and_keep_reads_sparse() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for width in [8_240, 16 * 1024, CHUNK_BYTES] {
+                let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+                let backend =
+                    ValidatedBackend::new(Arc::new(store.clone()), StorePath::from("variable"))
+                        .await?;
+                let log = Log::open(
+                    &backend,
+                    &LogId::new("chunks")?,
+                    Options {
+                        max_object_bytes: width,
+                        ..Options::default()
+                    },
+                )
+                .await?;
+                let view = log.load().await?;
+                let fixture = pack_fixture(format, vec![vec![b'x'; width * 2 + 100]], false, true)?;
+                let expected = fixture.normalized.bytes.clone();
+                let (descriptor, root) =
+                    stage(&test_operation(), &log, &view, fixture.normalized).await?;
+                assert_eq!(
+                    root.reference().len(),
+                    root_bytes(
+                        1_032 + 2 * format.digest_len() + format.digest_len() + 8,
+                        expected.len(),
+                        width
+                    ) as u64
+                );
+                let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+                assert_eq!(catalog.packs[0].chunk_bytes, width);
+                let mut reader = Reader::new(&log, &view, &catalog);
+                store.reset();
+                let boundary = u32::try_from(width)?;
+                assert_eq!(
+                    &reader.read_range(0, boundary - 1..boundary + 1).await?[..],
+                    &expected[(width - 1)..=width]
+                );
+                let gets = store.metrics().operation(StoreOperation::Get);
+                assert_eq!(gets.requests, 2);
+                assert_eq!(gets.downloaded_bytes, 2 * width as u64);
+                assert!(gets.downloaded_bytes < expected.len() as u64);
+                assert_eq!(
+                    &reader.read_range(0, 0..boundary).await?[..],
+                    &expected[..width]
+                );
+                assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 2);
+                let end = u32::try_from(expected.len())?;
+                assert_eq!(
+                    &reader.read_range(0, end - 1..end).await?[..],
+                    &expected[expected.len() - 1..]
+                );
+                let (id, data) = &fixture.objects[0];
+                assert_eq!(
+                    &reader.find(*id).await?.ok_or("missing object")?.data[..],
+                    data
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_metadata_is_reserved_before_the_first_chunk_read() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "cache-metadata").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 1, false, false)?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
+        let metadata = crate::pack::budget::CALLS * size_of::<((u16, u16), Bytes)>();
+        let mut reader = Reader::new(&log, &view, &catalog);
+        let pressure = catalog
+            .operation
+            .reserve(LIVE_BYTES - catalog.operation.live_bytes() - metadata + 1)?;
+        store.reset();
+        assert!(reader.read_range(0, 0..1).await.is_err());
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        assert_eq!(reader.cache.capacity(), 0);
+        drop(pressure);
+        let before = catalog.operation.live_bytes();
+        drop(reader.read_range(0, 0..1).await?);
+        assert_eq!(
+            catalog.operation.live_bytes() - before,
+            metadata + reader.cache_bytes
+        );
+        drop(reader);
+        assert_eq!(catalog.operation.live_bytes(), before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_variable_geometry_is_rejected_before_blob_reads() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "geometry").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 1, false, false)?;
+        let size = fixture.normalized.bytes.len();
+        for lengths in [
+            vec![],
+            vec![0],
+            vec![CHUNK_BYTES + 1],
+            vec![1, size - 1],
+            vec![size, 1],
+            vec![size - 1],
+            vec![size / 3, size / 3 - 1, size - 2 * (size / 3) + 1],
+        ] {
+            let mut children = Vec::new();
+            for length in lengths {
+                children.push(log.put_object(&view, Bytes::from(vec![0; length])).await?);
+            }
+            let root = log
+                .put_node(
+                    &view,
+                    Bytes::from(fixture.normalized.index.clone()),
+                    children,
+                )
+                .await?;
+            let descriptor = PackDescriptor {
+                id: fixture.normalized.id,
+                bytes: size as u64,
+            };
+            store.reset();
+            assert_load_fails(&log, &view, ObjectFormat::Sha1, descriptor, root).await?;
+            assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stage_reserves_exact_maximum_before_writes_and_through_root_put() -> TestResult {
         let store = FaultStore::from_arc(Arc::new(InMemory::new()));
         let (log, view) = open(store.clone(), "stage-memory").await?;
         let vectors = MAX_PACK_BYTES.div_ceil(CHUNK_BYTES)
             * (size_of::<StagedObject>() + size_of::<ObjectRef>());
-        let required = MAX_PACK_BYTES + MAX_INDEX_BYTES + MAX_PACK_ROOT_BYTES + vectors;
+        let required = MAX_PACK_BYTES
+            + MAX_INDEX_BYTES
+            + root_bytes(MAX_INDEX_BYTES, MAX_PACK_BYTES, CHUNK_BYTES)
+            + vectors;
         let pool = Pool::new(required);
         let operation = pool.admit()?;
         let normalized = maximal_normalized(&operation)?;
@@ -1087,7 +1272,10 @@ mod tests {
         assert_eq!(operation.live_bytes(), required);
         assert!(pause.release());
         let (_, root) = task.await??;
-        assert_eq!(root.reference().len(), MAX_PACK_ROOT_BYTES as u64);
+        assert_eq!(
+            root.reference().len(),
+            root_bytes(MAX_INDEX_BYTES, MAX_PACK_BYTES, CHUNK_BYTES) as u64
+        );
         assert_eq!(operation.live_bytes(), 0);
 
         let operation = Pool::new(required - 1).admit()?;
@@ -1912,11 +2100,11 @@ mod tests {
         let oversized = log
             .put_node(
                 &view,
-                Bytes::from(vec![0; MAX_INDEX_BYTES + 1]),
+                Bytes::from(vec![0; MAX_PACK_ROOT_BYTES + 1]),
                 vec![child; MAX_PACK_BYTES / CHUNK_BYTES],
             )
             .await?;
-        assert_eq!(oversized.reference().len(), MAX_PACK_ROOT_BYTES as u64 + 1);
+        assert!(oversized.reference().len() > MAX_PACK_ROOT_BYTES as u64);
         store.reset();
         assert_load_fails(
             &log,
@@ -1939,8 +2127,8 @@ mod tests {
             .await?;
         assert_load_fails(&log, &view, ObjectFormat::Sha1, descriptor.clone(), root).await?;
 
-        let first = log.put_object(&view, pack.slice(..CHUNK_BYTES - 1)).await?;
-        let second = log.put_object(&view, pack.slice(CHUNK_BYTES - 1..)).await?;
+        let first = log.put_object(&view, pack.slice(..1)).await?;
+        let second = log.put_object(&view, pack.slice(1..)).await?;
         let root = log
             .put_node(
                 &view,

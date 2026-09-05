@@ -2,7 +2,6 @@ mod support;
 
 use std::{
     collections::BTreeSet,
-    fs,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -71,7 +70,8 @@ async fn cold_open_retries_from_an_empty_cache_after_its_view_expires() -> TestR
         }
     };
     assert!(entered);
-    assert!(fs::metadata(cache.join("object-log-recovery.pack"))?.len() > 0);
+    // Recovery validates the bounded pack before creating its temporary file.
+    assert!(!cache.join("object-log-recovery.pack").exists());
 
     let writer = repository(&log, directory.path(), "writer").await?;
     let prepared = writer
