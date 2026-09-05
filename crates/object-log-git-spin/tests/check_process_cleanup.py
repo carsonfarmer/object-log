@@ -22,31 +22,40 @@ for name in sys.argv[1:] or ["check_shallow.py"]:
     scope = dict(os=os, signal=signal, subprocess=subprocess, socket=socket,
                  errno=errno, time=time)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), scope)
-    with tempfile.TemporaryDirectory() as directory:
-        marker = pathlib.Path(directory) / "port"
-        child = ("import socket,time,pathlib; s=socket.socket(); "
-                 "s.bind(('127.0.0.1',0)); s.listen(); pathlib.Path("
-                 + repr(str(marker)) + ").write_text(str(s.getsockname()[1])); time.sleep(60)")
-        parent = ("import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',"
-                  + repr(child) + "]); time.sleep(60)")
-        host = subprocess.Popen([sys.executable, "-c", parent], start_new_session=True)
-        try:
-            for _ in range(100):
-                if marker.exists():
-                    break
-                time.sleep(.05)
-            port = int(marker.read_text())
-            with socket.create_connection(("127.0.0.1", port), timeout=1):
-                pass
-            scope["stop"](host, port)
-            assert host.poll() is not None
-            with socket.socket() as probe:
-                assert probe.connect_ex(("127.0.0.1", port)) == errno.ECONNREFUSED
-            scope["stop"](host, port)
-            print(name + ": child listener closed; parent reaped; repeated stop succeeds")
-        finally:
+    for closes_only in [False, True]:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / "port"
+            child = ("import socket,time,pathlib,signal; s=socket.socket(); "
+                     "s.bind(('127.0.0.1',0)); s.listen(); "
+                     + ("signal.signal(signal.SIGTERM,lambda *_:s.close()); " if closes_only else "")
+                     + "pathlib.Path("
+                     + repr(str(marker)) + ").write_text(str(s.getsockname()[1])); time.sleep(60)")
+            parent = ("import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',"
+                      + repr(child) + "]); time.sleep(60)")
+            host = subprocess.Popen([sys.executable, "-c", parent], start_new_session=True)
             try:
-                os.killpg(host.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            host.wait(timeout=10)
+                for _ in range(100):
+                    if marker.exists():
+                        break
+                    time.sleep(.05)
+                port = int(marker.read_text())
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    pass
+                scope["stop"](host, port)
+                assert host.poll() is not None
+                with socket.socket() as probe:
+                    assert probe.connect_ex(("127.0.0.1", port)) == errno.ECONNREFUSED
+                scope["stop"](host, port)
+                try:
+                    os.killpg(host.pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    raise AssertionError("child process group survived shutdown")
+                print(name + f": group drained, listener closed, parent reaped, repeat stop; closes_only={closes_only}")
+            finally:
+                try:
+                    os.killpg(host.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                host.wait(timeout=10)

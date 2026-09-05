@@ -70,15 +70,21 @@ def stop(host, port):
     for attempt in range(200):
         with socket.socket() as probe:
             probe.settimeout(.2)
-            if probe.connect_ex(("127.0.0.1", port)) == errno.ECONNREFUSED:
-                return
+            listener_closed = probe.connect_ex(("127.0.0.1", port)) == errno.ECONNREFUSED
+        try:
+            os.killpg(host.pid, 0)
+            group_gone = False
+        except ProcessLookupError:
+            group_gone = True
+        if listener_closed and group_gone:
+            return
         if attempt == 100:
             try:
                 os.killpg(host.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         time.sleep(.05)
-    raise RuntimeError(f"old Spin listener {port} survived group termination")
+    raise RuntimeError(f"old Spin process group or listener {port} survived termination")
 
 
 def verify(path, count):
