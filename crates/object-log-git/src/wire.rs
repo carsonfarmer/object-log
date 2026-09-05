@@ -103,6 +103,17 @@ impl ShallowRequest<'_> {
     }
 }
 
+pub(crate) struct ReceiveControls {
+    pub(crate) updates: Box<[RefUpdate]>,
+    pub(crate) report_status: bool,
+}
+
+impl ReceiveControls {
+    pub(crate) fn needs_pack(&self) -> bool {
+        self.updates.iter().any(|update| update.target.is_some())
+    }
+}
+
 pub(crate) struct ReceiveRequest<'a> {
     pub(crate) updates: Box<[RefUpdate]>,
     pub(crate) pack: &'a [u8],
@@ -522,6 +533,29 @@ pub(crate) fn parse_receive(
     input: &[u8],
     format: ObjectFormat,
 ) -> Result<ReceiveRequest<'_>, Error> {
+    let (controls, pack) = parse_receive_controls(input, format)?;
+    within(pack.len(), MAX_RECEIVE_PACK_BYTES, "pack bytes")?;
+    let needs_pack = controls.needs_pack();
+    if needs_pack && (pack.is_empty() || !pack.starts_with(b"PACK")) {
+        return Err(Error::Protocol("create or update has no Git pack"));
+    }
+    if !needs_pack && !pack.is_empty() {
+        return Err(Error::Protocol("delete-only request has a Git pack"));
+    }
+    Ok(ReceiveRequest {
+        updates: controls.updates,
+        pack,
+        report_status: controls.report_status,
+    })
+}
+
+/// Parse and validate commands through the first flush without inspecting pack
+/// bytes. A streaming caller supplies only the bounded control prefix and checks
+/// that the returned remainder is empty; the ordinary wrapper accepts a tail.
+pub(crate) fn parse_receive_controls(
+    input: &[u8],
+    format: ObjectFormat,
+) -> Result<(ReceiveControls, &[u8]), Error> {
     let mut packets = input;
     let mut updates = Vec::new();
     let mut capabilities = 0_u8;
@@ -579,20 +613,13 @@ pub(crate) fn parse_receive(
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(Error::Protocol("duplicate ref command"));
     }
-    let pack = packets;
-    within(pack.len(), MAX_RECEIVE_PACK_BYTES, "pack bytes")?;
-    let needs_pack = updates.iter().any(|update| update.target.is_some());
-    if needs_pack && (pack.is_empty() || !pack.starts_with(b"PACK")) {
-        return Err(Error::Protocol("create or update has no Git pack"));
-    }
-    if !needs_pack && !pack.is_empty() {
-        return Err(Error::Protocol("delete-only request has a Git pack"));
-    }
-    Ok(ReceiveRequest {
-        updates: updates.into_boxed_slice(),
-        pack,
-        report_status: capabilities & 1 != 0,
-    })
+    Ok((
+        ReceiveControls {
+            updates: updates.into_boxed_slice(),
+            report_status: capabilities & 1 != 0,
+        },
+        packets,
+    ))
 }
 
 pub(crate) fn write_receive_status(
@@ -1360,6 +1387,34 @@ mod tests {
             Some(id(ObjectFormat::Sha256, SHA256_A)?)
         );
         assert_eq!(request.updates[0].target, None);
+        Ok(())
+    }
+
+    #[test]
+    fn receive_controls_validate_before_a_pack_exists() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let hex = format.digest_len() * 2;
+            let command = format!(
+                "{} {} refs/heads/main\0report-status {}",
+                "0".repeat(hex),
+                "1".repeat(hex),
+                std::str::from_utf8(format_capability(format))?
+            );
+            let mut input = Vec::new();
+            encode::data_to_write(command.as_bytes(), &mut input)?;
+            encode::flush_to_write(&mut input)?;
+            let (controls, rest) = parse_receive_controls(&input, format)?;
+            assert!(controls.needs_pack());
+            assert!(controls.report_status);
+            assert!(rest.is_empty());
+            protocol(parse_receive(&input, format));
+            input.extend_from_slice(b"not yet a complete pack");
+            let (controls, rest) = parse_receive_controls(&input, format)?;
+            assert_eq!(controls.updates.len(), 1);
+            assert_eq!(rest, b"not yet a complete pack");
+            protocol(parse_receive(&input, format));
+            protocol(parse_receive_controls(b"0000", format));
+        }
         Ok(())
     }
 
