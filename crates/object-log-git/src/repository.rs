@@ -531,10 +531,10 @@ async fn peel_ref(
     reader: &mut durable::Reader<'_>,
     id: ObjectId,
 ) -> Result<Option<ObjectId>, Error> {
-    let mut object = reader.find(id).await?.ok_or(Error::InvalidReference)?;
-    if object.kind != gix_object::Kind::Tag {
+    if reader.verify(id).await?.ok_or(Error::InvalidReference)? != gix_object::Kind::Tag {
         return Ok(None);
     }
+    let mut object = reader.find(id).await?.ok_or(Error::InvalidReference)?;
     for _ in 0..crate::pack::MAX_OBJECTS {
         operation.work(object.data.len())?;
         let tag =
@@ -542,13 +542,18 @@ async fn peel_ref(
                 .map_err(crate::pack::pack_error)?;
         let target = ObjectId::from_bytes(id.format(), tag.target().as_slice())?;
         let expected = tag.target_kind;
-        object = reader.find(target).await?.ok_or(Error::InvalidReference)?;
-        if object.kind != expected {
+        if reader
+            .verify(target)
+            .await?
+            .ok_or(Error::InvalidReference)?
+            != expected
+        {
             return Err(Error::InvalidReference);
         }
         if expected != gix_object::Kind::Tag {
             return Ok(Some(target));
         }
+        object = reader.find(target).await?.ok_or(Error::InvalidReference)?;
     }
     Err(Error::InvalidObjectGraph("tag chain is too long"))
 }

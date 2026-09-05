@@ -70,6 +70,16 @@ impl Graph {
             let index = graph.queue[cursor] as usize;
             cursor += 1;
             let id = graph.nodes[index].id;
+            // Direct refs have no declared kind. Verify them without collecting
+            // their bodies: a blob has no graph edges, however large it is.
+            if graph.nodes[index].kind.is_none() {
+                let kind = reader.verify(id).await?.ok_or(Error::InvalidReference)?;
+                graph.expect_kind(index, kind)?;
+                if kind == Kind::Blob {
+                    graph.nodes[index].verified = true;
+                    continue;
+                }
+            }
             let object = reader
                 .find(id)
                 .await?
@@ -386,6 +396,68 @@ mod tests {
                 roots,
             )
             .await
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_large_blob_roots_are_verified_without_materializing_the_body() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let blob = (Kind::Blob, vec![42; 50 * 1024 * 1024]);
+            let blob_id = id(format, &blob)?;
+            let bytes = bytes::Bytes::from(pack(format, &[blob])?);
+            let backend =
+                ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("large-blob-root"))
+                    .await?;
+            let log = Log::open(
+                &backend,
+                &LogId::new("large-blob-root")?,
+                Options::default(),
+            )
+            .await?;
+            let view = log.load().await?;
+            let stage = Pool::new(LIVE_BYTES).admit()?;
+            let input = pack::ingest::Input::receive(
+                &stage,
+                &log,
+                &view,
+                futures::stream::iter([Ok(bytes)]),
+            )
+            .await?;
+            let (descriptor, root) = input.scan(format).await?.normalize(&mut NoBases).await?;
+            drop(input);
+            drop(stage);
+            let operation = Pool::new(16 * 1024 * 1024).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
+            let catalog = durable::load(
+                &operation,
+                &log,
+                &view,
+                format,
+                &[(descriptor, root.reference().clone())],
+            )
+            .await?;
+            let graph = Graph::load(
+                &operation,
+                &mut Reader::new(&log, &view, &catalog),
+                &[blob_id],
+            )
+            .await?;
+            assert_eq!(graph.nodes.len(), 1);
+            assert_eq!(graph.nodes[0].kind, Some(Kind::Blob));
+            assert!(graph.nodes[0].verified);
+            assert!(graph.edges.is_empty());
+        }
+        Ok(())
+    }
+
+    struct NoBases;
+    impl pack::ingest::BaseProvider for NoBases {
+        async fn provide<'a>(
+            &mut self,
+            _: &pack::ingest::Input<'a>,
+            _: ObjectId,
+        ) -> Result<Option<pack::ingest::Decoded<'a>>, Error> {
+            Ok(None)
         }
     }
 
