@@ -30,6 +30,7 @@ type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> TestResult {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let root = TempDir::new()?;
     let backend = ValidatedBackend::new(
         Arc::new(InMemory::new()),
@@ -335,7 +336,7 @@ fn git<const N: usize>(directory: Option<&Path>, args: [&str; N]) -> TestResult 
     if output.status.success() {
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
+        Err(format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into())
     }
 }
 
@@ -351,7 +352,7 @@ fn git_stdout<const N: usize>(directory: Option<&Path>, args: [&str; N]) -> Test
     if output.status.success() {
         Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).into_owned().into())
+        Err(format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into())
     }
 }
 

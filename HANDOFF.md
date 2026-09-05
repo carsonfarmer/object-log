@@ -1,6 +1,6 @@
 # object-log handoff
 
-Updated: 2026-09-04 17:50 PDT
+Updated: 2026-09-04 18:07 PDT
 
 ## Start here
 
@@ -11,7 +11,7 @@ Read these files in order:
 3. `docs/evidence/git-fetch-pack-2026-09-04.md`
 4. This file
 
-Task 3 is ready for accepted integration on `cf/git-repository-task3`. Its local
+Task 3 was integrated at `ae65d80`. Its preserved local
 worktree is:
 
 ```text
@@ -65,13 +65,27 @@ main documentation. See `docs/evidence/git-repository-2026-09-04.md`.
 - Independent Rust correctness and simplification reviews completed; findings
   were fixed, including pre-allocation rejection of impossible core node counts.
 
+## Task 4 acceptance
+
+Task 4 adds command-local catalogs and bounded iterative graph traversal.
+Seven focused graph tests and the full gate pass (311 passed, 9 ignored).
+Independent correctness/simplification review approved after fixing tag-blob
+reads and nonadjacent duplicate tree names. See
+`docs/evidence/git-graph-2026-09-04.md`.
+
+Linux CI failed Task 3's native loopback test twice with a generic HTTP 500.
+The follow-up flush fix `a4228b6` corrects a proven Tokio file-write ordering
+bug and adds both-hash multi-buffer recovery tests plus better diagnostics.
+Local Linux reproduction did not establish that it caused CI's failure.
+Check the next hosted run before claiming Linux parity.
+
 ## Next actions
 
-Continue Task 4: iterative graph traversal and command-local catalogs, followed
-by exact want/have selection and protocol integration. The implementation
-worktree is `.object-log-worktrees/git-graph-task4` beside the main checkout,
-on branch `cf/git-graph-task4`. Its agent owns `graph.rs` and minimal private
-reader helpers. Integrate only after review and gates.
+Continue exact want/have selection and fetch wire integration in
+`.object-log-worktrees/git-fetch-commands` on `cf/git-fetch-commands`.
+A separate `cf/git-thin-resolution` worktree is implementing private bounded
+thin-pack resolution for the later receive path. Integrate reviewed tranches
+in order, preserve cumulative budgets, and retain the native oracle.
 
 The owner reaffirmed Spin serverless compatibility as a design constraint.
 A separate `cf/spin-transport-probe` worktree is testing Spin SDK 5.2 with the
