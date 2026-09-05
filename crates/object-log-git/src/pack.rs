@@ -4,6 +4,8 @@ use gix_pack::data::{Version, input::EntriesToBytesIter};
 
 use crate::{Error, ObjectFormat, ObjectId};
 
+pub(crate) mod ingest;
+
 #[path = "budget.rs"]
 pub(super) mod budget;
 pub(super) const MAX_RECEIVE_PACK_BYTES: usize = 9 * 1024 * 1024;

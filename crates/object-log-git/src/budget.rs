@@ -107,6 +107,10 @@ impl Drop for OperationState {
 pub(crate) struct Operation(Arc<OperationState>);
 
 impl Operation {
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     pub(crate) fn io(&self, bytes: usize) -> Result<(), Error> {
         let mut usage = self
             .0

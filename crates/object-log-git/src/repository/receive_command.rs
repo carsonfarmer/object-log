@@ -1,3 +1,6 @@
+#[path = "receive_stream.rs"]
+mod streamed;
+
 use super::catalog_reuse::Reuse;
 use std::io::Write as _;
 
@@ -10,7 +13,7 @@ use crate::{
     Error, ObjectId, ReceivePolicy, RefUpdate, durable,
     graph::Graph,
     pack::budget::{Operation, Reservation, hold},
-    wire::{self, ReceiveRequest, ReceiveStatus},
+    wire::{self, ReceiveControls, ReceiveStatus},
 };
 
 pub(super) struct Publication {
@@ -96,62 +99,22 @@ impl Repository {
         let command_memory =
             operation.reserve_state(input.len().min(wire::MAX_RECEIVE_BYTES) * 4 + 1024)?;
         operation.work(input.len())?;
-        let request = wire::parse_receive(&input, self.format)?;
+        let parsed = wire::parse_receive(&input, self.format)?;
+        let pack = parsed.pack;
+        let request = ReceiveControls {
+            updates: parsed.updates,
+            report_status: parsed.report_status,
+        };
         loop {
             match self
-                .prepare_receive_attempt(transaction_id, &request, policy)
+                .prepare_receive_attempt(transaction_id, &request, pack, policy)
                 .await
             {
                 Ok((prepared, prepared_memory)) => {
-                    let responses = [
-                        response(&operation, &request, ReceiveStatus::Success)?,
-                        response(
-                            &operation,
-                            &request,
-                            ReceiveStatus::Rejected(b"atomic ref conflict"),
-                        )?,
-                        response(
-                            &operation,
-                            &request,
-                            ReceiveStatus::Rejected(b"publication pending"),
-                        )?,
-                        response(
-                            &operation,
-                            &request,
-                            ReceiveStatus::Rejected(b"publication evidence expired"),
-                        )?,
-                    ];
-                    // Both publication and its one immediate resolution are admitted
-                    // before the head can change. Same-process proofs avoid pack reads.
-                    let options = self.log.options();
-                    let publication_memory = operation
-                        .reserve(publication_bytes(options, super::HEAD_DECODE_FACTOR)?)?;
-                    for _ in 0..2 {
-                        operation.work(options.max_commit_bytes + options.max_head_bytes * 2)?;
-                    }
-                    // A pending commit can read the same plan during resolution.
-                    drop(durable::publication_plan(&operation, &self.view)?);
-                    let plan_memory = durable::publication_plan(&operation, &self.view)?;
-                    let token_memory = operation.reserve(publication_bytes(options, 4)?)?;
-                    let recovery_token = hold(prepared.recovery_token()?, token_memory);
+                    let result = self.finish_receive(&request, prepared, prepared_memory);
                     drop(input_memory);
                     drop(command_memory);
-                    return Ok(PreparedPush {
-                        log: self.log,
-                        prepared,
-                        recovery_token,
-                        receive: Publication {
-                            _operation: operation,
-                            _memory: vec![
-                                self.state_memory,
-                                self.view_memory,
-                                prepared_memory,
-                                publication_memory,
-                                plan_memory,
-                            ],
-                            responses,
-                        },
-                    });
+                    return result;
                 }
                 Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
                     operation.retry()?;
@@ -160,30 +123,16 @@ impl Repository {
                     drop(self);
                     self = Self::open_attempt(&log, format, &operation).await?;
                 }
-                Err(source) => {
-                    let status = match &source {
-                        Error::InvalidPack(_) => {
-                            ReceiveStatus::InvalidPack(b"invalid pack or resource limit")
-                        }
-                        Error::StaleReference => ReceiveStatus::Rejected(b"stale reference"),
-                        Error::NonFastForward => ReceiveStatus::Rejected(b"non-fast-forward"),
-                        _ => ReceiveStatus::Rejected(b"invalid update or storage failure"),
-                    };
-                    return Err(Error::ReceiveRejected {
-                        response: response(&operation, &request, status)?,
-                        source: Box::new(source),
-                    });
-                }
+                Err(source) => return reject_receive(&operation, &request, source),
             }
         }
     }
 
-    async fn prepare_receive_attempt(
+    fn validate_receive_controls(
         &self,
         transaction_id: TransactionId,
-        request: &ReceiveRequest<'_>,
-        policy: ReceivePolicy,
-    ) -> Result<(object_log::PreparedCommit, Reservation), Error> {
+        request: &ReceiveControls,
+    ) -> Result<(), Error> {
         self.log.preflight(&self.view, transaction_id)?;
         for update in &request.updates {
             if self.state.refs.get(&update.name).copied() != update.expected {
@@ -191,47 +140,128 @@ impl Repository {
             }
         }
         validate_namespace(&self.operation, &self.state.refs, &request.updates)?;
-        let mut objects = Vec::new();
-        let mut descriptors = Vec::new();
-        let mut tree = self.state.catalog_tree(self.format);
-        if !request.pack.is_empty() {
+        Ok(())
+    }
+
+    fn finish_receive(
+        self,
+        request: &ReceiveControls,
+        prepared: object_log::PreparedCommit,
+        prepared_memory: Reservation,
+    ) -> Result<PreparedPush, Error> {
+        let operation = self.operation.clone();
+        let responses = [
+            response(&operation, request, ReceiveStatus::Success)?,
+            response(
+                &operation,
+                request,
+                ReceiveStatus::Rejected(b"atomic ref conflict"),
+            )?,
+            response(
+                &operation,
+                request,
+                ReceiveStatus::Rejected(b"publication pending"),
+            )?,
+            response(
+                &operation,
+                request,
+                ReceiveStatus::Rejected(b"publication evidence expired"),
+            )?,
+        ];
+        // Both publication and its one immediate resolution are admitted
+        // before the head can change. Same-process proofs avoid pack reads.
+        let options = self.log.options();
+        let publication_memory =
+            operation.reserve(publication_bytes(options, super::HEAD_DECODE_FACTOR)?)?;
+        for _ in 0..2 {
+            operation.work(options.max_commit_bytes + options.max_head_bytes * 2)?;
+        }
+        // A pending commit can read the same plan during resolution.
+        drop(durable::publication_plan(&operation, &self.view)?);
+        let plan_memory = durable::publication_plan(&operation, &self.view)?;
+        let token_memory = operation.reserve(publication_bytes(options, 4)?)?;
+        let recovery_token = hold(prepared.recovery_token()?, token_memory);
+        Ok(PreparedPush {
+            log: self.log,
+            prepared,
+            recovery_token,
+            receive: Publication {
+                _operation: operation,
+                _memory: vec![
+                    self.state_memory,
+                    self.view_memory,
+                    prepared_memory,
+                    publication_memory,
+                    plan_memory,
+                ],
+                responses,
+            },
+        })
+    }
+
+    async fn prepare_receive_attempt(
+        &self,
+        transaction_id: TransactionId,
+        request: &ReceiveControls,
+        pack: &[u8],
+        policy: ReceivePolicy,
+    ) -> Result<(object_log::PreparedCommit, Reservation), Error> {
+        self.validate_receive_controls(transaction_id, request)?;
+        let staged = if pack.is_empty() {
+            None
+        } else {
             let catalog = self.catalog().await?;
             let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
             let normalized =
-                crate::receive::normalize(&self.operation, self.format, request.pack, &mut reader)
-                    .await?;
-            // The client may resend retained objects that no ref advertises.
-            // Normalization still validates the input; reuse the authenticated
-            // existing pack instead of recording its descriptor a second time.
+                crate::receive::normalize(&self.operation, self.format, pack, &mut reader).await?;
             let reusable = self.reuse_catalog_objects(&normalized).await?;
-            if normalized.bytes.get(8..12) != Some(&[0, 0, 0, 0])
-                && !matches!(reusable, Reuse::KnownObjects)
+            if normalized.bytes.get(8..12) == Some(&[0, 0, 0, 0])
+                || matches!(reusable, Reuse::KnownObjects)
             {
+                None
+            } else {
                 drop(reader);
                 drop(catalog);
-                let (descriptor, root) = match reusable {
+                Some(match reusable {
                     Reuse::Pack(location) => (location.descriptor, location.root),
                     Reuse::Stage => {
                         durable::stage(&self.operation, &self.log, &self.view, normalized).await?
                     }
                     Reuse::KnownObjects => unreachable!(),
-                };
-                if let Some(current) = &tree {
-                    tree = Some(
-                        super::catalog_migration::insert_pack(
-                            current,
-                            &self.log,
-                            &self.view,
-                            &self.operation,
-                            descriptor,
-                            root,
-                        )
-                        .await?,
-                    );
-                } else {
-                    descriptors.push(descriptor);
-                    objects.push(root);
-                }
+                })
+            }
+        };
+        self.prepare_staged_receive(transaction_id, request, staged, policy)
+            .await
+    }
+
+    async fn prepare_staged_receive(
+        &self,
+        transaction_id: TransactionId,
+        request: &ReceiveControls,
+        staged: Option<(crate::format::PackDescriptor, object_log::StagedObject)>,
+        policy: ReceivePolicy,
+    ) -> Result<(object_log::PreparedCommit, Reservation), Error> {
+        self.validate_receive_controls(transaction_id, request)?;
+        let mut objects = Vec::new();
+        let mut descriptors = Vec::new();
+        let mut tree = self.state.catalog_tree(self.format);
+        if let Some((descriptor, root)) = staged {
+            if let Some(current) = &tree {
+                tree = Some(
+                    super::catalog_migration::insert_pack(
+                        current,
+                        &self.log,
+                        &self.view,
+                        &self.operation,
+                        descriptor,
+                        root,
+                    )
+                    .await?,
+                );
+            } else if !self.state.packs.contains_key(&descriptor.id) {
+                descriptors.push(descriptor);
+                objects.push(root);
             }
         }
         // Read staged and existing packs through exactly the same authenticated
@@ -261,8 +291,11 @@ impl Repository {
             let graph = Graph::load(&self.operation, &mut reader, &targets).await?;
             for node in &graph.nodes {
                 if !node.verified {
-                    let object = reader.find(node.id).await?.ok_or(Error::InvalidReference)?;
-                    if Some(object.kind) != node.kind {
+                    let kind = reader
+                        .verify(node.id)
+                        .await?
+                        .ok_or(Error::InvalidReference)?;
+                    if Some(kind) != node.kind {
                         return Err(Error::InvalidReference);
                     }
                 }
@@ -319,9 +352,26 @@ impl PreparedPush {
     }
 }
 
+fn reject_receive<T>(
+    operation: &Operation,
+    request: &ReceiveControls,
+    source: Error,
+) -> Result<T, Error> {
+    let status = match &source {
+        Error::InvalidPack(_) => ReceiveStatus::InvalidPack(b"invalid pack or resource limit"),
+        Error::StaleReference => ReceiveStatus::Rejected(b"stale reference"),
+        Error::NonFastForward => ReceiveStatus::Rejected(b"non-fast-forward"),
+        _ => ReceiveStatus::Rejected(b"invalid update or storage failure"),
+    };
+    Err(Error::ReceiveRejected {
+        response: response(operation, request, status)?,
+        source: Box::new(source),
+    })
+}
+
 fn response(
     operation: &Operation,
-    request: &ReceiveRequest<'_>,
+    request: &ReceiveControls,
     status: ReceiveStatus<'_>,
 ) -> Result<Bytes, Error> {
     wire_response(operation, |out| {
@@ -455,8 +505,11 @@ impl Repository {
             }
             for node in &graph.nodes {
                 if !node.verified {
-                    let object = reader.find(node.id).await?.ok_or(Error::InvalidReference)?;
-                    if Some(object.kind) != node.kind {
+                    let kind = reader
+                        .verify(node.id)
+                        .await?
+                        .ok_or(Error::InvalidReference)?;
+                    if Some(kind) != node.kind {
                         return Err(Error::InvalidReference);
                     }
                 }

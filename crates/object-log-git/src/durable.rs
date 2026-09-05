@@ -133,8 +133,8 @@ pub(crate) struct SelectedIndex<'a> {
     pack: Pack,
     root: StagedObject,
     operation: &'a Operation,
-    _log: &'a Log,
-    _view: &'a View,
+    log: &'a Log,
+    view: &'a View,
     _memory: Reservation,
 }
 
@@ -158,10 +158,66 @@ impl<'a> SelectedIndex<'a> {
             pack,
             root: root.clone(),
             operation,
-            _log: log,
-            _view: view,
+            log,
+            view,
             _memory: memory,
         })
+    }
+
+    /// Stream one indexed object and its same-pack dependency chain to verified
+    /// scratch for the receive attempt. No whole decoded object is retained.
+    pub(crate) async fn stage_base<'source>(
+        &self,
+        source: &crate::pack::ingest::Input<'source>,
+        id: ObjectId,
+        position: u32,
+    ) -> Result<crate::pack::ingest::Decoded<'source>, Error> {
+        if !source.matches_context(self.operation, self.log, self.view) {
+            return invalid("selected index belongs to another receive context");
+        }
+        self.verify_position(id, position)?;
+        let input = source
+            .stored_pack(
+                &self.root,
+                u64::from(self.pack.bytes),
+                self.pack.chunk_bytes,
+            )
+            .await?;
+        let count = self.num_objects() as usize;
+        let capacity = count.min(MAX_DELTA_DEPTH + 1);
+        let _memory = self
+            .operation
+            .reserve(count + capacity * size_of::<crate::pack::ingest::IndexedEntry>())?;
+        let mut visited = vec![false; count];
+        let mut chain = Vec::with_capacity(capacity);
+        let mut current = position;
+        loop {
+            if visited[current as usize] {
+                return invalid("selected delta graph cycles");
+            }
+            visited[current as usize] = true;
+            let expected = self.object_id_at(current)?;
+            let range = self.pack.entry_range(current);
+            let entry = input
+                .indexed_entry(
+                    u64::from(range.start),
+                    u64::from(range.end),
+                    expected,
+                    self.pack.crc(current),
+                )
+                .await?;
+            self.operation.work(count.max(1).ilog2() as usize + 1)?;
+            let base = self.pack.base(&entry.header)?;
+            chain.push(entry);
+            let Some(base) = base else {
+                break;
+            };
+            if chain.len() > MAX_DELTA_DEPTH {
+                return invalid("selected delta graph is too deep");
+            }
+            current = base;
+        }
+        source.decode_chain(&input, &chain).await
     }
 
     pub(crate) fn num_objects(&self) -> u32 {
@@ -177,6 +233,18 @@ impl<'a> SelectedIndex<'a> {
             self.pack.id.format(),
             self.pack.index.oid_at_index(position).as_bytes(),
         )
+    }
+
+    pub(crate) fn position_of(&self, id: ObjectId) -> Result<Option<u32>, Error> {
+        if id.format() != self.pack.id.format() {
+            return invalid("selected index object format differs");
+        }
+        self.operation
+            .work((self.num_objects().max(1).ilog2() as usize + 1) * id.as_bytes().len())?;
+        Ok(self
+            .pack
+            .index
+            .lookup(gix_hash::ObjectId::from_bytes_or_panic(id.as_bytes())))
     }
 
     pub(crate) fn entries(&self) -> impl Iterator<Item = Result<(ObjectId, u32), Error>> + '_ {
@@ -2132,10 +2200,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_base_decodes_full_and_delta_objects_without_materializing_them() -> TestResult
+    {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for deltas in [false, true] {
+                let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+                let (base_log, view) = open(store.clone(), "selected-base").await?;
+                let fixture = if deltas {
+                    fixture(format, 10, true, false)?
+                } else {
+                    pack_fixture(format, vec![vec![b'x'; MAX_OBJECT_BYTES]], false, false)?
+                };
+                let expected = fixture
+                    .objects
+                    .iter()
+                    .map(|(id, bytes)| (*id, bytes.len()))
+                    .collect::<Vec<_>>();
+                let (descriptor, root) =
+                    stage(&test_operation(), &base_log, &view, fixture.normalized).await?;
+                let operation = crate::pack::budget::Pool::new(3 * CHUNK_BYTES).admit()?;
+                let log = base_log.with_request_guard(Arc::new(operation.clone()));
+                let source =
+                    crate::pack::ingest::Input::receive(&operation, &log, &view, stream::empty())
+                        .await?;
+                let selected =
+                    SelectedIndex::load(&operation, &log, &view, &descriptor, &root).await?;
+                assert!(operation.reserve(MAX_OBJECT_BYTES).is_err());
+                let baseline = operation.live_bytes();
+                for (id, position) in selected.entries().collect::<Result<Vec<_>, _>>()? {
+                    let decoded = selected.stage_base(&source, id, position).await?;
+                    assert_eq!(decoded.id(), id);
+                    assert_eq!(
+                        decoded.len(),
+                        expected
+                            .iter()
+                            .find(|(expected, _)| *expected == id)
+                            .ok_or("missing expected base")?
+                            .1 as u64
+                    );
+                    drop(decoded);
+                    assert_eq!(operation.live_bytes(), baseline);
+                }
+                store.reset();
+                let id = expected[0].0;
+                assert!(selected.stage_base(&source, id, u32::MAX).await.is_err());
+                assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+                let other_operation = test_operation();
+                let foreign = crate::pack::ingest::Input::receive(
+                    &other_operation,
+                    &log,
+                    &view,
+                    stream::empty(),
+                )
+                .await?;
+                assert!(selected.stage_base(&foreign, id, 0).await.is_err());
+                assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+                drop(foreign);
+                drop(selected);
+                drop(source);
+                assert_eq!(operation.live_bytes(), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_base_rejects_authenticated_wrong_crc_and_delta_result_oid() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for wrong_oid in [false, true] {
+                let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+                let (base_log, view) = open(store, "selected-base-corrupt").await?;
+                let mut fixture = fixture(format, 3, true, false)?;
+                let (id, _, _) = indexed_entries(&fixture.normalized, format)?
+                    .into_iter()
+                    .find(|(_, header, _)| header.is_delta())
+                    .ok_or("missing delta")?;
+                let index = gix_pack::index::File::from_data(
+                    fixture.normalized.index.as_slice(),
+                    PathBuf::new(),
+                    object_hash(format),
+                )?;
+                let position = index
+                    .lookup(gix_hash::ObjectId::try_from(id.as_bytes())?)
+                    .ok_or("missing index ID")?;
+                let mut expected = id;
+                if wrong_oid {
+                    let mut fake = id.as_bytes().to_vec();
+                    let last = fake.len() - 1;
+                    fake[last] ^= 1;
+                    expected = ObjectId::from_bytes(format, &fake)?;
+                    fixture.normalized.index[index_oid_range(format, position as usize)]
+                        .copy_from_slice(&fake);
+                } else {
+                    let offset =
+                        index_crc_offset(&fixture.normalized.index, format, position as usize);
+                    fixture.normalized.index[offset] ^= 1;
+                }
+                rehash_index(&mut fixture.normalized.index, format)?;
+                let (descriptor, root) =
+                    stage(&test_operation(), &base_log, &view, fixture.normalized).await?;
+                let operation = test_operation();
+                let log = base_log.with_request_guard(Arc::new(operation.clone()));
+                let source =
+                    crate::pack::ingest::Input::receive(&operation, &log, &view, stream::empty())
+                        .await?;
+                let selected =
+                    SelectedIndex::load(&operation, &log, &view, &descriptor, &root).await?;
+                let error = selected
+                    .stage_base(&source, expected, position)
+                    .await
+                    .err()
+                    .ok_or("corrupt metadata accepted")?;
+                assert!(error.to_string().contains(if wrong_oid {
+                    "OID mismatch"
+                } else {
+                    "CRC mismatch"
+                }));
+                drop(selected);
+                drop(source);
+                assert_eq!(operation.live_bytes(), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_selected_base_releases_all_attempt_scratch() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (base_log, view) = open(store.clone(), "selected-base-cancel").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 3, true, false)?;
+        let (descriptor, root) =
+            stage(&test_operation(), &base_log, &view, fixture.normalized).await?;
+        let operation = test_operation();
+        let log = base_log.with_request_guard(Arc::new(operation.clone()));
+        let source =
+            crate::pack::ingest::Input::receive(&operation, &log, &view, stream::empty()).await?;
+        let selected = SelectedIndex::load(&operation, &log, &view, &descriptor, &root).await?;
+        let id = selected.object_id_at(0)?;
+        let baseline = operation.live_bytes();
+        store.reset();
+        let mut pause = store.pause_next_put(FailurePhase::Before);
+        let mut decode = Box::pin(selected.stage_base(&source, id, 0));
+        tokio::select! { entered = pause.wait_until_entered() => assert!(entered), result = &mut decode => { result?; return Err("selected decode did not pause".into()); } }
+        drop(decode);
+        assert!(!pause.release());
+        assert_eq!(operation.live_bytes(), baseline);
+        assert_eq!(base_log.load().await?.generation(), view.generation());
+        drop(selected);
+        drop(source);
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn selected_index_is_sparse_authenticated_and_checks_catalog_positions() -> TestResult {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let store = FaultStore::from_arc(Arc::new(InMemory::new()));
-            let (log, view) = open(store.clone(), "selected-index").await?;
+            let (base_log, view) = open(store.clone(), "selected-index").await?;
             let fixture = fixture(format, 3, true, false)?;
             let expected = fixture
                 .objects
@@ -2143,8 +2364,9 @@ mod tests {
                 .map(|(id, _)| *id)
                 .collect::<std::collections::BTreeSet<_>>();
             let (descriptor, root) =
-                stage(&test_operation(), &log, &view, fixture.normalized).await?;
+                stage(&test_operation(), &base_log, &view, fixture.normalized).await?;
             let operation = test_operation();
+            let log = base_log.with_request_guard(Arc::new(operation.clone()));
             store.reset();
             let selected = SelectedIndex::load(&operation, &log, &view, &descriptor, &root).await?;
             let entries = selected.entries().collect::<Result<Vec<_>, _>>()?;
@@ -2183,6 +2405,7 @@ mod tests {
             drop(selected);
             assert_eq!(operation.live_bytes(), 0);
             let operation = test_operation();
+            let log = base_log.with_request_guard(Arc::new(operation.clone()));
             let pressure = operation.reserve_state(crate::pack::budget::STATE_BYTES)?;
             store.reset();
             assert!(

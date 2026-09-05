@@ -833,6 +833,10 @@ async fn common_receive_expired_view_retry_keeps_cumulative_operation() -> TestR
 }
 
 async fn receive_expired_view(policy: crate::ReceivePolicy) -> TestResult {
+    receive_expired_view_kind(policy, false).await
+}
+
+async fn receive_expired_view_kind(policy: crate::ReceivePolicy, streaming: bool) -> TestResult {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let dead = fixture(format, b"old collectible")?;
         let fixture = fixture(format, b"retained")?;
@@ -908,9 +912,11 @@ async fn receive_expired_view(policy: crate::ReceivePolicy) -> TestResult {
                 true,
             )
         };
-        let push = old
-            .prepare_receive_with_policy(TransactionId::new(), input, policy)
-            .await?;
+        let push = if streaming {
+            old.prepare_receive_stream_with_policy(TransactionId::new(), receive_frames(&input, 31), policy).await?
+        } else {
+            old.prepare_receive_with_policy(TransactionId::new(), input, policy).await?
+        };
         assert!(
             operation.calls() > before + 6,
             "stale read and reopen stay charged"
@@ -1398,3 +1404,4 @@ async fn shallow_push_requires_complete_server_history() -> TestResult {
     }
     Ok(())
 }
+include!("receive_stream_tests.rs");
