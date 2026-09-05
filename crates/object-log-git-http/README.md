@@ -1,7 +1,11 @@
 # object-log-git-http
 
+This temporary native reference host preserves HTTP fault, disconnect, and local
+provider coverage while equivalent Spin coverage is developed. It contains no
+previous native Git implementation.
+
 The native server hosts one repository at `/repo` using the same
-`object-log-git::Repository` as the Spin component. The default engine supports
+`object-log-git::Repository` as the Spin component. The shared engine supports
 protocol-v2 discovery, clone, have-aware fetch, and classic receive-pack push
 for SHA-1 and SHA-256. Product code does not run Git or link to C Git;
 acceptance tests use unchanged Git clients.
@@ -43,12 +47,6 @@ runs under a task tracker even if its HTTP handler disconnects; shutdown waits.
 One process-wide engine pool admits one operation. Body collection occurs after
 admission; encoded and decoded request limits, idle timeouts, pack limits, and
 engine budgets still apply. Responses hold admission until consumed or dropped.
-
-The preserved native oracle is available with `OBJECT_LOG_GIT_ENGINE=oracle`
-and SHA-1. It uses protocol v0, local disposable repositories, and whole-reachable
-fetches. `OBJECT_LOG_SCRATCH` and `OBJECT_LOG_CONCURRENCY` configure that oracle.
-It remains available while replacement performance and runtime qualification
-are evaluated.
 
 Authentication, TLS, tenant routing, shallow/partial clone, and live AWS are
 separate deployment or follow-on work. Put the server behind a proxy that bounds

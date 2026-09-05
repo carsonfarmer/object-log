@@ -14,7 +14,7 @@ use object_log::{
     CommitStatus, Log, LogId, Options, Resolution, TransactionId, ValidatedBackend,
     sim::{FailurePhase, FaultStore, Operation},
 };
-use object_log_git::{ObjectFormat, ObjectId, RefUpdate, Repository};
+use object_log_git::{ObjectFormat, ObjectId, Repository};
 use object_log_git_http::SharedGitHttpServer;
 use object_store::{ObjectStoreExt, memory::InMemory, path::Path as StorePath};
 use tempfile::TempDir;
@@ -58,8 +58,7 @@ impl Fixture {
             format,
             String::from_utf8(git(&source, &["rev-parse", "HEAD"])?)?.trim(),
         )?;
-        let pack = root.path().join("pack");
-        std::fs::write(&pack, git(&source, &["pack-objects", "--all", "--stdout"])?)?;
+        let pack = git(&source, &["pack-objects", "--all", "--stdout"])?;
         let store = Arc::new(InMemory::new());
         let faults = FaultStore::from_arc(store.clone());
         let backend = ValidatedBackend::new(
@@ -68,17 +67,16 @@ impl Fixture {
         )
         .await?;
         let log = Log::open(&backend, &LogId::new("repository")?, options()).await?;
-        let prepared = Repository::open_native(&log, root.path().join("initial-cache"), format)
+        let prepared = Repository::open(&log, format)
             .await?
-            .prepare_push(
+            .prepare_receive(
                 TransactionId::new(),
-                vec![RefUpdate::new("refs/heads/main", None, Some(target))?],
-                Some(&pack),
+                update(format, "refs/heads/main", None, target, &pack),
             )
             .await?;
         assert!(matches!(
-            prepared.publish().await?,
-            CommitStatus::Committed(_)
+            prepared.publish_receive().await?.0,
+            Resolution::Committed(_)
         ));
         faults.reset();
         Ok(Self {
@@ -105,24 +103,24 @@ impl Fixture {
         );
         Bytes::from(format!("{:04x}{line}0000", line.len() + 4))
     }
+}
 
-    async fn add_tag(&self, name: &str) -> TestResult {
-        let repository =
-            Repository::open_native(&self.log, self.root.path().join(name), self.format).await?;
-        let push = repository
-            .prepare_push(
-                TransactionId::new(),
-                vec![RefUpdate::new(
-                    format!("refs/tags/{name}"),
-                    None,
-                    Some(self.target),
-                )?],
-                None,
-            )
-            .await?;
-        assert!(matches!(push.publish().await?, CommitStatus::Committed(_)));
-        Ok(())
-    }
+// Encode the same classic receive command emitted by an unchanged Git client.
+fn update(
+    format: ObjectFormat,
+    name: &str,
+    old: Option<ObjectId>,
+    target: ObjectId,
+    pack: &[u8],
+) -> Bytes {
+    let old = old.map_or_else(|| "0".repeat(target.to_string().len()), |id| id.to_string());
+    let line = format!(
+        "{old} {target} {name}\0report-status object-format={} atomic",
+        format_name(format)
+    );
+    let mut body = format!("{:04x}{line}0000", line.len() + 4).into_bytes();
+    body.extend_from_slice(pack);
+    Bytes::from(body)
 }
 
 fn options() -> Options {
@@ -210,9 +208,7 @@ async fn pending_http_returns_opaque_token_recoverable_after_host_drop() -> Test
             );
             host.shutdown().await;
             drop(host);
-            let Fixture {
-                log, backend, root, ..
-            } = fixture;
+            let Fixture { log, backend, .. } = fixture;
             drop(log);
             let reopened = Log::open(&backend, &LogId::new("repository")?, options()).await?;
             assert!(matches!(
@@ -220,8 +216,7 @@ async fn pending_http_returns_opaque_token_recoverable_after_host_drop() -> Test
                 Resolution::Committed(_)
             ));
             drop(token);
-            let repository =
-                Repository::open_native(&reopened, root.path().join("cold-cache"), format).await?;
+            let repository = Repository::open(&reopened, format).await?;
             assert!(repository.refs().is_empty());
         }
     }
@@ -233,6 +228,8 @@ async fn expired_http_never_reports_success_or_republishes() -> TestResult {
     let _serial = TEST_LOCK.lock().await;
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let fixture = Fixture::new(format).await?;
+        let (operations, snapshot) = expiration_evidence(&fixture).await?;
+        fixture.faults.reset();
         let host = fixture.host();
         let mut gate = fixture.faults.pause_put_at(2, FailurePhase::Before);
         let task = tokio::spawn(
@@ -241,15 +238,37 @@ async fn expired_http_never_reports_success_or_republishes() -> TestResult {
                 .oneshot(receive(Body::from(fixture.deletion()))?),
         );
         assert!(tokio::time::timeout(DEADLINE, gate.wait_until_entered()).await?);
-        // Competing native-oracle clients use their own pools. Advance and
-        // compact past this candidate with a one-entry resolution window.
-        fixture.add_tag("first").await?;
-        fixture.add_tag("second").await?;
-        let repository =
-            Repository::open_native(&fixture.log, fixture.root.path().join("checkpoint"), format)
-                .await?;
+        // Replay engine-generated tag creation/deletion through the log to model
+        // another process while this process's engine admission is occupied.
+        for operation in operations {
+            let view = fixture.log.load().await?;
+            let prepared = fixture.log.prepare(
+                &view,
+                TransactionId::new(),
+                operation.clone(),
+                Bytes::new(),
+                vec![],
+            )?;
+            assert!(matches!(
+                fixture.log.commit(prepared).await?,
+                CommitStatus::Committed(_)
+            ));
+        }
+        let view = fixture.log.load().await?;
+        let tail = fixture.log.read_tail(&view).await?;
+        let through = tail
+            .last()
+            .ok_or("missing competing transaction")?
+            .reference();
+        let objects = fixture
+            .log
+            .stage_objects(&view, snapshot.objects().to_vec())
+            .await?;
         assert!(matches!(
-            repository.checkpoint().await?,
+            fixture
+                .log
+                .publish_checkpoint(&view, through, snapshot.snapshot().clone(), objects)
+                .await?,
             object_log::CheckpointStatus::Published(_)
         ));
         assert!(gate.release());
@@ -508,4 +527,61 @@ async fn invalid_resolution_evidence_returns_recoverable_token_after_hidden_publ
         assert!(Repository::open(&reopened, format).await?.refs().is_empty());
     }
     Ok(())
+}
+
+// Capture valid transaction bytes without duplicating the private Git record codec.
+async fn expiration_evidence(
+    fixture: &Fixture,
+) -> TestResult<(Vec<Bytes>, object_log::CheckpointRecord)> {
+    let empty_pack = git(
+        &fixture.root.path().join("source"),
+        &["pack-objects", "--stdout"],
+    )?;
+    let create = update(
+        fixture.format,
+        "refs/tags/transient",
+        None,
+        fixture.target,
+        &empty_pack,
+    );
+    let line = format!(
+        "{} {} refs/tags/transient\0report-status object-format={} atomic",
+        fixture.target,
+        "0".repeat(fixture.target.to_string().len()),
+        format_name(fixture.format)
+    );
+    let delete = Bytes::from(format!("{:04x}{line}0000", line.len() + 4));
+    let mut operations = Vec::new();
+    for input in [create, delete] {
+        let prepared = Repository::open(&fixture.log, fixture.format)
+            .await?
+            .prepare_receive(TransactionId::new(), input)
+            .await?;
+        assert!(matches!(
+            prepared.publish_receive().await?.0,
+            Resolution::Committed(_)
+        ));
+        let view = fixture.log.load().await?;
+        let tail = fixture.log.read_tail(&view).await?;
+        operations.push(
+            tail.last()
+                .ok_or("missing tag transaction")?
+                .operation()
+                .clone(),
+        );
+    }
+    assert!(matches!(
+        Repository::open(&fixture.log, fixture.format)
+            .await?
+            .checkpoint()
+            .await?,
+        object_log::CheckpointStatus::Published(_)
+    ));
+    let view = fixture.log.load().await?;
+    let snapshot = fixture
+        .log
+        .read_checkpoint(&view)
+        .await?
+        .ok_or("missing checkpoint")?;
+    Ok((operations, snapshot))
 }

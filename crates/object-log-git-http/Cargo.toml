@@ -12,14 +12,12 @@ async-compression = { version = "0.4", features = ["gzip", "tokio"] }
 axum = "0.8"
 bytes = "1.10"
 futures = "0.3"
-gix-packetline = { version = "0.22.2", default-features = false }
 http-body-util = "0.1"
 object-log = { path = "../.." }
 object-log-git = { path = "../object-log-git" }
 object_store = { version = "0.14", features = ["aws"] }
-tempfile = "3.20"
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.47", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 tower-http = { version = "0.6", features = ["limit", "timeout"] }
 tracing = "0.1"
@@ -27,6 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
+tempfile = "3.20"
 object-log = { path = "../..", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
