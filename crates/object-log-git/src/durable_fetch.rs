@@ -14,13 +14,17 @@ struct Output<'a, S> {
     sink: &'a mut S,
     operation: &'a Operation,
     hash: gix_hash::Hasher,
-    bytes: usize,
-    limit: usize,
+    bytes: u64,
+    limit: u64,
 }
 
 impl<S: Sink<Bytes, Error = io::Error> + Unpin> Output<'_, S> {
     async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        if bytes.len() > self.limit - self.bytes {
+        if self
+            .bytes
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|end| end > self.limit)
+        {
             return invalid("fetch pack exceeds byte limit");
         }
         for chunk in bytes.chunks(FRAME) {
@@ -31,7 +35,7 @@ impl<S: Sink<Bytes, Error = io::Error> + Unpin> Output<'_, S> {
                 .send(hold(Bytes::copy_from_slice(chunk), memory))
                 .await
                 .map_err(output_error)?;
-            self.bytes += chunk.len();
+            self.bytes += chunk.len() as u64;
         }
         Ok(())
     }
@@ -222,7 +226,7 @@ impl<'a> Reader<'a> {
             operation: &self.catalog.operation,
             hash: gix_hash::hasher(hash),
             bytes: 0,
-            limit: crate::pack::MAX_STORED_PACK_BYTES - hash_len,
+            limit: crate::pack::budget::MAX_FETCH_OUTPUT_BYTES - hash_len as u64,
         };
         output
             .write(&gix_pack::data::header::encode(
@@ -292,4 +296,84 @@ pub(super) struct DecodedPlan<'a> {
     pub(super) input: crate::pack::ingest::Input<'a>,
     pub(super) chain: Vec<crate::pack::ingest::IndexedEntry>,
     _memory: Reservation,
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use crate::pack::budget::{LIVE_BYTES, MAX_FETCH_OUTPUT_BYTES, Pool, WORK_BYTES};
+
+    #[tokio::test]
+    async fn aggregate_output_crosses_stored_pack_and_wasm_word_boundaries() -> Result<(), Error> {
+        for hash in [gix_hash::Kind::Sha1, gix_hash::Kind::Sha256] {
+            for boundary in [
+                crate::pack::MAX_STORED_PACK_BYTES as u64,
+                u64::from(u32::MAX),
+            ] {
+                let operation = Pool::new(LIVE_BYTES).admit()?;
+                let mut frames = Vec::new();
+                let sink = futures::sink::unfold(&mut frames, |frames, bytes: Bytes| async move {
+                    frames.push(bytes.to_vec());
+                    Ok::<_, io::Error>(frames)
+                });
+                let mut sink = Box::pin(sink);
+                let mut output = Output {
+                    sink: &mut sink,
+                    operation: &operation,
+                    hash: gix_hash::hasher(hash),
+                    // Exercise aggregate accounting without allocating gigabytes.
+                    bytes: boundary - 1,
+                    limit: MAX_FETCH_OUTPUT_BYTES - hash.len_in_bytes() as u64,
+                };
+                output.write(&vec![7; FRAME + 1]).await?;
+                assert_eq!(output.bytes, boundary + FRAME as u64);
+                output.finish().await?;
+                drop(sink);
+                assert_eq!(
+                    frames.iter().map(Vec::len).collect::<Vec<_>>(),
+                    [FRAME, 1, hash.len_in_bytes()]
+                );
+                let mut expected = gix_hash::hasher(hash);
+                expected.update(&vec![7; FRAME + 1]);
+                assert_eq!(
+                    frames[2],
+                    expected.try_finalize().map_err(pack_error)?.as_slice()
+                );
+                assert_eq!(operation.live_bytes(), 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn output_bounds_and_work_fail_before_emitting_rejected_bytes() -> Result<(), Error> {
+        for (bytes, limit) in [(8, 8), (u64::MAX, u64::MAX), (9, 8)] {
+            let operation = Pool::new(LIVE_BYTES).admit()?;
+            let mut sink = futures::sink::drain().sink_map_err(|never| match never {});
+            let mut output = Output {
+                sink: &mut sink,
+                operation: &operation,
+                hash: gix_hash::hasher(gix_hash::Kind::Sha1),
+                bytes,
+                limit,
+            };
+            assert!(output.write(b"x").await.is_err());
+            assert_eq!(output.bytes, bytes);
+            assert_eq!(operation.work_bytes(), 0);
+        }
+        let operation = Pool::new(LIVE_BYTES).admit()?;
+        operation.work(WORK_BYTES)?;
+        let mut sink = futures::sink::drain().sink_map_err(|never| match never {});
+        let mut output = Output {
+            sink: &mut sink,
+            operation: &operation,
+            hash: gix_hash::hasher(gix_hash::Kind::Sha1),
+            bytes: 0,
+            limit: MAX_FETCH_OUTPUT_BYTES,
+        };
+        assert!(output.write(b"x").await.is_err());
+        assert_eq!(output.bytes, 0);
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
+    }
 }

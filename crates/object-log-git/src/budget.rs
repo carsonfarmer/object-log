@@ -20,6 +20,10 @@ pub(crate) const CALLS: usize = 512 + 12 * crate::MAX_STREAM_PACK_BYTES.div_ceil
 const MAINTENANCE_CALLS: usize = 8192 + CALLS;
 pub(crate) const TRANSFER_BYTES: u64 = 12 * crate::MAX_STREAM_PACK_BYTES as u64;
 pub(crate) const WORK_BYTES: u64 = 24 * crate::MAX_STREAM_PACK_BYTES as u64;
+// Output hashes and copies each pack byte. Source reads, decoding and protocol
+// framing consume the same work budget and can stop output earlier. This bound
+// is independent of how many individually bounded stored packs are selected.
+pub(crate) const MAX_FETCH_OUTPUT_BYTES: u64 = WORK_BYTES / 2;
 pub(crate) const THIN_ROUNDS: usize = 32;
 pub(crate) const RETRIES: usize = 1;
 const MEMORY_LIMIT: &str = "Git live-memory limit exceeded";

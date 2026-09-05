@@ -109,11 +109,11 @@ impl Repository {
 async fn send<S: Sink<Bytes, Error = io::Error> + Unpin>(
     sink: &mut S,
     operation: &Operation,
-    total: &mut usize,
+    total: &mut u64,
     bytes: &[u8],
 ) -> io::Result<()> {
     let length = total
-        .checked_add(bytes.len())
+        .checked_add(bytes.len() as u64)
         .filter(|length| *length <= wire::MAX_STREAM_RESPONSE_BYTES)
         .ok_or_else(|| io::Error::other(Error::InvalidProtocol("upload response bytes")))?;
     operation.work(bytes.len()).map_err(io::Error::other)?;
@@ -207,5 +207,34 @@ impl PreparedUpload {
             }
         };
         result.map_err(durable::output_error)
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn response_accounting_crosses_wasm_word_and_rejects_overflow() -> Result<(), Error> {
+        let operation = crate::pack::budget::Pool::new(crate::pack::budget::LIVE_BYTES).admit()?;
+        let mut sink = futures::sink::drain().sink_map_err(|never| match never {});
+        let mut total = u64::from(u32::MAX);
+        send(&mut sink, &operation, &mut total, b"0000")
+            .await
+            .map_err(durable::output_error)?;
+        assert_eq!(total, u64::from(u32::MAX) + 4);
+        total = wire::MAX_STREAM_RESPONSE_BYTES - 4;
+        send(&mut sink, &operation, &mut total, b"0000")
+            .await
+            .map_err(durable::output_error)?;
+        assert_eq!(total, wire::MAX_STREAM_RESPONSE_BYTES);
+        let work = operation.work_bytes();
+        assert!(send(&mut sink, &operation, &mut total, b"x").await.is_err());
+        total = u64::MAX;
+        assert!(send(&mut sink, &operation, &mut total, b"x").await.is_err());
+        assert_eq!(total, u64::MAX);
+        assert_eq!(operation.work_bytes(), work);
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
     }
 }

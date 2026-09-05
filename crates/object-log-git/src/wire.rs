@@ -8,8 +8,8 @@ use crate::{ObjectFormat, ObjectId, RefUpdate};
 pub(crate) const MAX_UPLOAD_BYTES: usize = 9 * 1024 * 1024;
 pub(crate) const MAX_RECEIVE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
-pub(crate) const MAX_STREAM_RESPONSE_BYTES: usize = crate::pack::MAX_STORED_PACK_BYTES
-    + 5 * crate::pack::MAX_STORED_PACK_BYTES.div_ceil(MAX_PACKET_PAYLOAD)
+pub(crate) const MAX_STREAM_RESPONSE_BYTES: u64 = crate::pack::budget::MAX_FETCH_OUTPUT_BYTES
+    + 5 * crate::pack::budget::MAX_FETCH_OUTPUT_BYTES.div_ceil(MAX_PACKET_PAYLOAD as u64)
     + 2 * 1024 * 1024;
 const MAX_COMMANDS: usize = 1_024;
 const MAX_ITEMS: usize = 32_768;
