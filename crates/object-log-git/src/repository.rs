@@ -818,15 +818,13 @@ async fn peel_ref(
             gix_object::TagRef::from_bytes(&object.data, crate::pack::object_hash(id.format()))
                 .map_err(crate::pack::pack_error)?;
         let target = ObjectId::from_bytes(id.format(), tag.target().as_slice())?;
-        if !reader.contains(target) {
-            return Err(Error::InvalidReference);
-        }
-        if tag.target_kind != gix_object::Kind::Tag {
-            return Ok(Some(target));
-        }
+        let expected = tag.target_kind;
         object = reader.find(target).await?.ok_or(Error::InvalidReference)?;
-        if object.kind != gix_object::Kind::Tag {
+        if object.kind != expected {
             return Err(Error::InvalidReference);
+        }
+        if expected != gix_object::Kind::Tag {
+            return Ok(Some(target));
         }
     }
     Err(Error::InvalidObjectGraph("tag chain is too long"))
@@ -1396,6 +1394,75 @@ mod tests {
             )));
             assert!(!text.contains("refs/tags/inner"));
             assert_eq!(faults.metrics().operation(Operation::Get).requests, 2);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_ls_refs_rejects_incorrect_final_tag_kind() -> TestResult {
+        use std::fmt::Write as _;
+
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let fixture = fixture(format, b"invalid tag target")?;
+            let source = fixture.directory.path().join("source");
+            let target = output(Some(&source), &["rev-parse", "HEAD^{tree}"])?;
+            let file = source.join("malformed-tag");
+            fs::write(
+                &file,
+                format!(
+                    "object {}\ntype blob\ntag bad\ntagger A <a@example.com> 0 +0000\n\nbad\n",
+                    target.trim()
+                ),
+            )?;
+            let bad = output(
+                Some(&source),
+                &[
+                    "hash-object",
+                    "--literally",
+                    "-w",
+                    "-t",
+                    "tag",
+                    "malformed-tag",
+                ],
+            )?;
+            let bad = ObjectId::parse(format, bad.trim())?;
+            let mut objects = output(Some(&source), &["rev-list", "--objects", "HEAD"])?;
+            writeln!(objects, "{bad}")?;
+            fs::write(&file, objects)?;
+            let packed = Command::new("git")
+                .current_dir(&source)
+                .args(["pack-objects", "--stdout"])
+                .stdin(fs::File::open(&file)?)
+                .output()?;
+            assert!(
+                packed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&packed.stderr)
+            );
+            fs::write(&fixture.pack, packed.stdout)?;
+            let (log, _, _) = test_log("upload-wrong-tag-kind").await?;
+            publish_durable_pack(&log, &fixture, format).await?;
+            let view = log.load().await?;
+            let record = Machine::new(format).transaction(
+                vec![RefUpdate::new("refs/tags/bad", None, Some(bad))?],
+                vec![],
+            )?;
+            let prepared =
+                log.prepare(&view, TransactionId::new(), record, Bytes::new(), vec![])?;
+            assert!(matches!(
+                log.commit(prepared).await?,
+                CommitStatus::Committed(_)
+            ));
+            let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+            let repository = Repository::open_with_pool(&log, format, &pool).await?;
+            let reply = repository
+                .upload_pack(upload_request(
+                    format,
+                    "ls-refs",
+                    &["peel".into(), "ref-prefix refs/tags/bad".into()],
+                )?)
+                .await;
+            assert!(matches!(reply, Err(Error::InvalidReference)));
         }
         Ok(())
     }
