@@ -21,6 +21,8 @@ mod graph;
     reason = "the next Git storage tranche consumes this internal module"
 )]
 mod pack;
+#[allow(dead_code, reason = "the receive-pack tranche consumes this helper")]
+mod receive;
 mod repository;
 #[allow(
     dead_code,
