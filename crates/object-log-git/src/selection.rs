@@ -13,7 +13,7 @@ pub(crate) struct Selection {
     pub(crate) common: Vec<ObjectId>,
     pub(crate) shallow: Vec<ObjectId>,
     pub(crate) unshallow: Vec<ObjectId>,
-    _memory: Reservation,
+    pub(crate) _memory: Reservation,
 }
 
 pub(crate) fn select(

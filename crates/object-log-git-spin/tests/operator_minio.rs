@@ -964,3 +964,6 @@ mod self_host;
 
 #[path = "support/fetch_roots.rs"]
 mod fetch_roots;
+
+#[path = "support/growing_history.rs"]
+mod growing_history;

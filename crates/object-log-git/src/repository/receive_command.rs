@@ -10,8 +10,9 @@ use object_log::{CommitStatus, Resolution, TransactionId};
 
 use super::{PreparedPush, Repository, pack_roots, wire_response};
 use crate::{
-    Error, ObjectId, ReceivePolicy, RefUpdate, durable,
-    graph::Graph,
+    Error, ObjectId, ReceivePolicy, RefUpdate,
+    closure::{CONNECTED, Closure, Edges},
+    durable,
     pack::budget::{Operation, Reservation, hold},
     wire::{self, ReceiveControls, ReceiveStatus},
 };
@@ -288,19 +289,12 @@ impl Repository {
                 .iter()
                 .filter_map(|update| update.target)
                 .collect::<Vec<_>>();
-            let graph = Graph::load(&self.operation, &mut reader, &targets).await?;
-            for node in &graph.nodes {
-                if !node.verified {
-                    let kind = reader
-                        .verify(node.id)
-                        .await?
-                        .ok_or(Error::InvalidReference)?;
-                    if Some(kind) != node.kind {
-                        return Err(Error::InvalidReference);
-                    }
-                }
-            }
-            validate_branches(&self.operation, &graph, &request.updates, policy)?;
+            let mut closure = Closure::new(&self.operation)?;
+            closure
+                .walk(&mut reader, &targets, CONNECTED, Edges::All)
+                .await?;
+            closure.verify_all(&mut reader).await?;
+            validate_branches(&mut closure, &mut reader, &request.updates, policy).await?;
         }
         let memory = self.operation.reserve(publication_bytes(
             self.log.options(),
@@ -383,15 +377,12 @@ fn response(
     })
 }
 
-fn validate_branches(
-    operation: &Operation,
-    graph: &Graph,
+async fn validate_branches(
+    closure: &mut Closure,
+    reader: &mut durable::Reader<'_>,
     updates: &[RefUpdate],
     policy: ReceivePolicy,
 ) -> Result<(), Error> {
-    let _memory = operation.reserve_state(graph.nodes.len() * (1 + std::mem::size_of::<u32>()))?;
-    let mut visited = vec![false; graph.nodes.len()];
-    let mut queue = Vec::with_capacity(graph.nodes.len());
     for update in updates {
         let Some(target) = update
             .target
@@ -399,8 +390,7 @@ fn validate_branches(
         else {
             continue;
         };
-        let index = graph.location(target).ok_or(Error::InvalidReference)?;
-        if graph.nodes[index as usize].kind != Some(Kind::Commit) {
+        if closure.kind(target) != Some(Kind::Commit) {
             return Err(Error::InvalidReference);
         }
         let Some(expected) = update.expected else {
@@ -409,31 +399,7 @@ fn validate_branches(
         if policy == ReceivePolicy::AllowNonFastForward {
             continue;
         }
-        operation.work(graph.nodes.len())?;
-        visited.fill(false);
-        queue.clear();
-        visited[index as usize] = true;
-        queue.push(index);
-        let mut cursor = 0;
-        let mut found = false;
-        while cursor < queue.len() {
-            let node = &graph.nodes[queue[cursor] as usize];
-            cursor += 1;
-            operation.work(1 + node.edges.len() * std::mem::size_of::<u32>())?;
-            if node.id == expected {
-                found = true;
-                break;
-            }
-            for &parent in &graph.edges[node.edges.clone()] {
-                if graph.nodes[parent as usize].kind == Some(Kind::Commit)
-                    && !visited[parent as usize]
-                {
-                    visited[parent as usize] = true;
-                    queue.push(parent);
-                }
-            }
-        }
-        if !found {
+        if !closure.reaches_commit(reader, target, expected).await? {
             return Err(Error::NonFastForward);
         }
     }
@@ -493,31 +459,18 @@ impl Repository {
             let catalog = self.catalog().await?;
             let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
             let roots = self.state.refs.values().copied().collect::<Vec<_>>();
-            let graph = Graph::load(&self.operation, &mut reader, &roots).await?;
-            for (name, id) in &self.state.refs {
-                if name.starts_with(b"refs/heads/")
-                    && graph
-                        .location(*id)
-                        .is_none_or(|index| graph.nodes[index as usize].kind != Some(Kind::Commit))
-                {
+            let mut closure = Closure::new(&self.operation)?;
+            closure
+                .walk(&mut reader, &roots, CONNECTED, Edges::All)
+                .await?;
+            for (name, &id) in &self.state.refs {
+                if name.starts_with(b"refs/heads/") && closure.kind(id) != Some(Kind::Commit) {
                     return Err(Error::InvalidReference);
                 }
             }
-            for node in &graph.nodes {
-                if !node.verified {
-                    let kind = reader
-                        .verify(node.id)
-                        .await?
-                        .ok_or(Error::InvalidReference)?;
-                    if Some(kind) != node.kind {
-                        return Err(Error::InvalidReference);
-                    }
-                }
-                live.insert(
-                    catalog
-                        .containing_pack(node.id)
-                        .ok_or(Error::InvalidReference)?,
-                );
+            closure.verify_all(&mut reader).await?;
+            for &id in closure.nodes.keys() {
+                live.insert(catalog.containing_pack(id).ok_or(Error::InvalidReference)?);
             }
         }
         self.checkpoint_snapshot(|id| live.contains(id)).await

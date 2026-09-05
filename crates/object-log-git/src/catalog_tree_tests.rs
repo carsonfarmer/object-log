@@ -753,3 +753,46 @@ async fn cache_evicts_under_memory_pressure_without_resetting_work() -> TestResu
     assert_eq!(operation.live_bytes(), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn cache_retains_more_than_256_small_nodes_within_the_same_byte_bound() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let (_, _, store, backend) = fixture_log("wide-cache-backend").await?;
+        let log = Log::open(
+            &backend,
+            &LogId::new("wide-cache")?,
+            Options {
+                max_object_bytes: 2 * 1024 * 1024,
+                ..Options::default()
+            },
+        )
+        .await?;
+        let view = log.load().await?;
+        let (descriptor, root, entries) = pack(&log, &view, format, 20_000, 91).await?;
+        let tree = CatalogTree::empty(format)
+            .insert_pack(&log, &view, &operation()?, descriptor, root, &entries)
+            .await?;
+        let operation = operation()?;
+        let guarded = log.with_request_guard(Arc::new(operation.clone()));
+        let mut cache = CatalogCache::new(&tree, &guarded, &view, &operation)?;
+        store.reset();
+        for &(id, _) in &entries {
+            assert!(cache.lookup(id).await?.is_some());
+        }
+        let calls = operation.calls();
+        assert!(calls > 256);
+        assert!(operation.live_bytes() <= 2 * 1024 * 1024);
+        for &(id, _) in entries.iter().rev() {
+            assert!(cache.lookup(id).await?.is_some());
+        }
+        assert_eq!(
+            operation.calls(),
+            calls,
+            "small catalog leaves should not be read twice"
+        );
+        assert_eq!(store.metrics().operation(Io::Put).requests, 0);
+        drop(cache);
+        assert_eq!(operation.live_bytes(), 0);
+    }
+    Ok(())
+}

@@ -1,9 +1,8 @@
 //! Backpressured pack output; the final digest is emitted only after every CRC.
 
 use super::{
-    Bytes, COMPRESS_BYTES, EntryHeader, Error, Location, MAX_DELTA_DEPTH, MAX_OBJECTS, ObjectId,
-    Operation, Reader, Reservation, hold, invalid, io, object_hash, output_error, pack_error,
-    size_of,
+    Bytes, COMPRESS_BYTES, EntryHeader, Error, Location, MAX_DELTA_DEPTH, ObjectId, Operation,
+    Reader, Reservation, hold, invalid, io, object_hash, output_error, pack_error, size_of,
 };
 use futures::{Sink, SinkExt};
 use gix_zlib::stream::deflate::{Compress, FlushCompress};
@@ -199,11 +198,13 @@ impl<'a> Reader<'a> {
         S: Sink<Bytes, Error = io::Error> + Unpin,
     {
         let format = self.catalog.format;
-        if ids.len() > MAX_OBJECTS as usize || ids.iter().any(|id| id.format() != format) {
+        if u32::try_from(ids.len()).is_err() || ids.iter().any(|id| id.format() != format) {
             return invalid("fetch selection is invalid");
         }
         let _selected_memory = self.catalog.operation.reserve(
-            ids.len() * (size_of::<ObjectId>() + size_of::<(ObjectId, ObjectId, u32)>()),
+            ids.len()
+                .checked_mul(size_of::<ObjectId>() + size_of::<(ObjectId, ObjectId, u32)>())
+                .ok_or(Error::InvalidReference)?,
         )?;
         let mut selected = ids.to_vec();
         selected.sort_unstable();

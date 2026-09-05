@@ -55,9 +55,18 @@ impl Repository {
                     && !graph.location(id).is_some_and(|index| {
                         graph.nodes[index as usize].kind == Some(gix_object::Kind::Tag)
                     })
-                    && peel_ref(&self.operation, reader, id, Some(&graph))
-                        .await?
-                        .is_some_and(|target| graph.location(target).is_some())
+                    && peel_ref(
+                        &self.operation,
+                        reader,
+                        id,
+                        Some(&|id| {
+                            graph
+                                .location(id)
+                                .and_then(|index| graph.nodes[index as usize].kind)
+                        }),
+                    )
+                    .await?
+                    .is_some_and(|target| graph.location(target).is_some())
                 {
                     roots.push(id);
                 }

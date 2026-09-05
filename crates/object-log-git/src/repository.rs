@@ -10,6 +10,7 @@ mod catalog_maintenance;
 mod catalog_migration;
 mod catalog_reuse;
 mod default_branch;
+mod fetch_closure;
 mod fetch_graph;
 mod maintenance;
 mod pack_compaction;
@@ -214,6 +215,11 @@ impl Repository {
         let raw_pack = shallow.is_none();
         let default = wire::ShallowRequest::default();
         let shallow = shallow.unwrap_or(&default);
+        if shallow.ids.is_empty() && !shallow.deepens() && filter.is_none() && uris.is_none() {
+            return self
+                .prepare_closure_fetch(wants, haves, include_tag, done, raw_pack)
+                .await;
+        }
         let catalog = self.catalog().await?;
         let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
         let graph = self
@@ -527,7 +533,7 @@ async fn peel_ref(
     operation: &Operation,
     reader: &mut durable::Reader<'_>,
     id: ObjectId,
-    wanted: Option<&crate::graph::Graph>,
+    wanted: Option<&(dyn Fn(ObjectId) -> Option<gix_object::Kind> + Sync)>,
 ) -> Result<Option<ObjectId>, Error> {
     let kind = if wanted.is_some() {
         reader.object_kind(id).await?
@@ -552,10 +558,10 @@ async fn peel_ref(
         if expected != gix_object::Kind::Tag
             && let Some(graph) = wanted
         {
-            let Some(index) = graph.location(target) else {
+            let Some(kind) = graph(target) else {
                 return Ok(None);
             };
-            if graph.nodes[index as usize].kind != Some(expected) {
+            if kind != expected {
                 return Err(Error::InvalidReference);
             }
             // The graph's retained leaves are fully verified before output.

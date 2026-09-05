@@ -7,9 +7,9 @@ use super::{HEAD_DECODE_FACTOR, Repository, memory_bound};
 use crate::{
     Error, ObjectFormat, ObjectId,
     catalog_tree::CatalogTree,
+    closure::{CONNECTED, Closure, Edges},
     durable,
     format::{CatalogOperation, Record},
-    graph::Graph,
     pack::{
         self,
         budget::{Pool, Reservation},
@@ -73,26 +73,23 @@ impl Repository {
             .operation
             .reserve_state(memory_bound(self.state.refs.len(), size_of::<ObjectId>())?)?;
         let roots = self.state.refs.values().copied().collect::<Vec<_>>();
-        let graph = Graph::load(&self.operation, &mut reader, &roots).await?;
-        for (name, id) in &self.state.refs {
+        let mut closure = Closure::new(&self.operation)?;
+        closure
+            .walk(&mut reader, &roots, CONNECTED, Edges::All)
+            .await?;
+        for (name, &id) in &self.state.refs {
             if name.starts_with(b"refs/heads/")
-                && graph.location(*id).is_none_or(|index| {
-                    graph.nodes[index as usize].kind != Some(gix_object::Kind::Commit)
-                })
+                && closure.kind(id) != Some(gix_object::Kind::Commit)
             {
                 return Err(Error::InvalidReference);
             }
         }
-        for node in &graph.nodes {
-            if !node.verified && reader.verify(node.id).await? != node.kind {
-                return Err(Error::InvalidReference);
-            }
-        }
+        closure.verify_all(&mut reader).await?;
         let _ids_memory = self
             .operation
-            .reserve_state(memory_bound(graph.nodes.len(), size_of::<ObjectId>())?)?;
-        let mut ids = graph.nodes.iter().map(|node| node.id).collect::<Vec<_>>();
-        drop(graph);
+            .reserve_state(memory_bound(closure.nodes.len(), size_of::<ObjectId>())?)?;
+        let mut ids = closure.nodes.keys().copied().collect::<Vec<_>>();
+        drop(closure);
         self.operation.work(memory_bound(
             ids.len(),
             (ids.len().max(1).ilog2() as usize + 1) * size_of::<ObjectId>(),
@@ -113,7 +110,9 @@ impl Repository {
                     "object exceeds bounded compaction pack".into(),
                 ));
             }
-            if used > envelope && bound > preferred.saturating_sub(used) {
+            if position - start == pack::MAX_OBJECTS as usize
+                || (used > envelope && bound > preferred.saturating_sub(used))
+            {
                 tree = self
                     .compact_group(&mut reader, &tree, &ids[start..position])
                     .await?;

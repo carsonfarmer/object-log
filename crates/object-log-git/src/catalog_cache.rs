@@ -9,7 +9,6 @@ use crate::{
 use object_log::{Digest, ObjectRef};
 use object_log::{Log, StagedObject, View};
 
-const MAX_NODES: usize = 256;
 const RETAINED_BYTES: usize = 2 * 1024 * 1024;
 type Key = (Digest, u64);
 
@@ -26,9 +25,9 @@ pub(crate) struct CatalogCache<'a> {
     view: &'a View,
     operation: &'a Operation,
     tree: CatalogTree,
-    // Sorted fixed-capacity storage avoids unaccounted map-node allocations.
+    // Sorted, adaptively admitted storage includes headers in the byte bound.
     nodes: Vec<Cached>,
-    _memory: Reservation,
+    memory: Reservation,
     bytes: usize,
     clock: u64,
 }
@@ -40,14 +39,14 @@ impl<'a> CatalogCache<'a> {
         view: &'a View,
         operation: &'a Operation,
     ) -> Result<Self, Error> {
-        let memory = operation.reserve_state(MAX_NODES * size_of::<Cached>())?;
+        let memory = operation.reserve_state(0)?;
         Ok(Self {
             log,
             view,
             operation,
             tree: tree.clone(),
-            nodes: Vec::with_capacity(MAX_NODES),
-            _memory: memory,
+            nodes: Vec::new(),
+            memory,
             bytes: 0,
             clock: 0,
         })
@@ -96,7 +95,8 @@ impl<'a> CatalogCache<'a> {
             .clock
             .checked_add(1)
             .ok_or_else(|| invalid("catalog cache clock overflow"))?;
-        self.operation.work(9 * size_of::<Key>())?;
+        self.operation
+            .work((self.nodes.len().max(1).ilog2() as usize + 1) * size_of::<Key>())?;
         let reference = proof.reference();
         let key = (reference.digest(), reference.len());
         if let Ok(index) = self.nodes.binary_search_by_key(&key, |entry| entry.key) {
@@ -134,9 +134,7 @@ impl<'a> CatalogCache<'a> {
             return Err(invalid("catalog decoded node exceeds memory bound"));
         }
         node.memory.shrink(bound - bytes)?;
-        while self.nodes.len() == MAX_NODES || self.bytes + bytes > RETAINED_BYTES {
-            self.evict()?;
-        }
+        self.make_room(bytes)?;
         self.operation
             .work(self.nodes.len() * size_of::<Cached>())?;
         let index = self.nodes.partition_point(|entry| entry.key < key);
@@ -152,6 +150,46 @@ impl<'a> CatalogCache<'a> {
         );
         self.bytes += bytes;
         Ok(index)
+    }
+
+    fn make_room(&mut self, bytes: usize) -> Result<(), Error> {
+        loop {
+            let capacity = if self.nodes.len() == self.nodes.capacity() {
+                self.nodes
+                    .capacity()
+                    .max(16)
+                    .checked_mul(2)
+                    .ok_or_else(|| invalid("catalog cache capacity overflow"))?
+            } else {
+                self.nodes.capacity()
+            };
+            let headers = capacity
+                .checked_mul(size_of::<Cached>())
+                .ok_or_else(|| invalid("catalog cache size overflow"))?;
+            if self.bytes + bytes + headers > RETAINED_BYTES {
+                self.evict()?;
+                continue;
+            }
+            if capacity != self.nodes.capacity() {
+                // Old and replacement allocations coexist until the move. Both
+                // are admitted; retained payload plus headers stays below 2 MiB.
+                let memory = match self.operation.reserve_state(headers) {
+                    Ok(memory) => memory,
+                    Err(error) if self.nodes.is_empty() => return Err(error),
+                    Err(_) => {
+                        self.evict()?;
+                        continue;
+                    }
+                };
+                self.operation
+                    .work(self.nodes.len() * size_of::<Cached>())?;
+                let mut nodes = Vec::with_capacity(capacity);
+                nodes.append(&mut self.nodes);
+                self.nodes = nodes;
+                self.memory = memory;
+            }
+            return Ok(());
+        }
     }
 
     fn remove(&mut self, index: usize) {

@@ -3,6 +3,7 @@
 #![deny(missing_docs, unsafe_code)]
 
 mod catalog_tree;
+mod closure;
 
 mod durable;
 mod format;
@@ -13,6 +14,7 @@ mod receive;
 mod repository;
 mod selection;
 mod state;
+mod structure;
 mod wire;
 
 pub use packfile_uri::PackfileUris;

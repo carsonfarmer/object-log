@@ -1,10 +1,6 @@
-use std::{
-    collections::{HashMap, HashSet},
-    mem::size_of,
-    ops::Range,
-};
+use std::{collections::HashMap, mem::size_of, ops::Range};
 
-use gix_object::{Kind, commit::ref_iter::Token, tree::EntryKind};
+use gix_object::Kind;
 
 use crate::{
     Error, ObjectId,
@@ -12,7 +8,7 @@ use crate::{
     pack::{
         MAX_OBJECTS,
         budget::{Operation, Reservation},
-        invalid, object_hash, pack_error,
+        invalid, pack_error,
     },
 };
 
@@ -96,113 +92,17 @@ impl Graph {
                 .ok_or_else(|| Error::InvalidPack("graph object is missing".into()))?;
             graph.expect_kind(index, object.kind)?;
             graph.nodes[index].verified = true;
-            graph.operation.work(object.data.len())?;
-            // Commit iterators may allocate a multiline extra header. Reserve
-            // its input bound before parsing, including Vec growth headroom.
-            // Tree name sets borrow the input and fit twice its bytes plus
-            // the minimum hash-table allocation, even for SHA-1 entries.
-            let _scratch = if object.kind == Kind::Tree {
-                graph.operation.reserve_state(object.data.len() * 2 + 128)?
-            } else {
-                graph.operation.reserve(if object.kind == Kind::Commit {
-                    object.data.len() * 2
-                } else {
-                    0
-                })?
-            };
             let start = graph.edges.len();
-            let hash = object_hash(id.format());
-            match object.kind {
-                Kind::Commit => {
-                    let mut complete = false;
-                    for token in gix_object::CommitRefIter::from_bytes(&object.data, hash) {
-                        match token.map_err(pack_error)? {
-                            Token::Tree { id: target } => {
-                                graph
-                                    .link(reader, id, target.as_slice(), Kind::Tree, true)
-                                    .await?;
-                            }
-                            Token::Parent { id: target } => {
-                                graph
-                                    .link(reader, id, target.as_slice(), Kind::Commit, true)
-                                    .await?;
-                            }
-                            Token::Committer { signature } => {
-                                graph.nodes[index].commit_time =
-                                    signature.time().map_err(pack_error)?.seconds;
-                            }
-                            Token::Message(_) => complete = true,
-                            _ => {}
-                        }
-                    }
-                    if !complete {
-                        return invalid("commit headers are incomplete");
-                    }
-                }
-                Kind::Tree => graph.tree(reader, id, &object.data).await?,
-                Kind::Tag => {
-                    let tag =
-                        gix_object::TagRef::from_bytes(&object.data, hash).map_err(pack_error)?;
-                    graph
-                        .link(
-                            reader,
-                            id,
-                            tag.target().as_slice(),
-                            tag.target_kind,
-                            tag.target_kind != Kind::Blob,
-                        )
-                        .await?;
-                }
-                Kind::Blob => {}
-            }
-            graph.nodes[index].edges = start..graph.edges.len();
-        }
-        Ok(())
-    }
-
-    async fn tree(
-        &mut self,
-        reader: &mut Reader<'_>,
-        id: ObjectId,
-        data: &[u8],
-    ) -> Result<(), Error> {
-        let mut previous = None;
-        let mut names = HashSet::with_capacity(data.len() / (id.format().digest_len() + 8));
-        for entry in gix_object::TreeRefIter::from_bytes(data, object_hash(id.format())) {
-            let entry = entry.map_err(pack_error)?;
-            if !matches!(
-                entry.mode.value(),
-                0o040_000 | 0o100_644 | 0o100_755 | 0o120_000 | 0o160_000
-            ) {
-                return invalid("tree entry mode is invalid");
-            }
-            gix_validate::path::component(
-                entry.filename,
-                (entry.mode.kind() == EntryKind::Link)
-                    .then_some(gix_validate::path::component::Mode::Symlink),
-                gix_validate::path::component::Options {
-                    protect_windows: false,
-                    protect_hfs: true,
-                    protect_ntfs: true,
-                },
+            let operation = graph.operation.clone();
+            graph.nodes[index].commit_time = crate::structure::visit(
+                &operation,
+                id,
+                object.kind,
+                &object.data,
+                GraphLinks { graph, reader },
             )
-            .map_err(pack_error)?;
-            if !names.insert(entry.filename)
-                || previous
-                    .as_ref()
-                    .is_some_and(|last: &gix_object::tree::EntryRef<'_>| last >= &entry)
-            {
-                return invalid("tree entries are duplicated or unordered");
-            }
-            ObjectId::from_bytes(id.format(), entry.oid.as_bytes())?;
-            previous = Some(entry);
-            let kind = match entry.mode.kind() {
-                EntryKind::Tree => Kind::Tree,
-                EntryKind::Blob | EntryKind::BlobExecutable | EntryKind::Link => Kind::Blob,
-                EntryKind::Commit => continue,
-            };
-            self.link(reader, id, entry.oid.as_bytes(), kind, kind != Kind::Blob)
-                .await?;
+            .await?;
+            graph.nodes[index].edges = start..graph.edges.len();
         }
         Ok(())
     }
@@ -263,15 +163,13 @@ impl Graph {
     async fn link(
         &mut self,
         reader: &mut Reader<'_>,
-        source: ObjectId,
-        bytes: &[u8],
+        id: ObjectId,
         kind: Kind,
         verify: bool,
     ) -> Result<(), Error> {
         if self.edges.len() == MAX_EDGES {
             return invalid("graph exceeds edge limit");
         }
-        let id = ObjectId::from_bytes(source.format(), bytes)?;
         let index = self.schedule(reader, id, Some(kind), verify).await?;
         if self.edges.len() == self.edges.capacity() {
             let capacity = (self.edges.capacity().max(128) * 2).min(MAX_EDGES);
@@ -281,6 +179,16 @@ impl Graph {
         }
         self.edges.push(index);
         Ok(())
+    }
+}
+
+struct GraphLinks<'a, 'store> {
+    graph: &'a mut Graph,
+    reader: &'a mut Reader<'store>,
+}
+impl crate::structure::Links for GraphLinks<'_, '_> {
+    async fn link(&mut self, id: ObjectId, kind: Kind, verify: bool) -> Result<(), Error> {
+        self.graph.link(self.reader, id, kind, verify).await
     }
 }
 
@@ -298,6 +206,7 @@ mod tests {
     use crate::{
         ObjectFormat,
         durable::{self, Catalog},
+        pack::object_hash,
         pack::{
             self,
             budget::{LIVE_BYTES, Pool},
@@ -306,6 +215,7 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
     type Raw = (Kind, Vec<u8>);
+    include!("closure_tests.rs");
 
     fn id(format: ObjectFormat, object: &Raw) -> TestResult<ObjectId> {
         let hash = gix_object::compute_hash(object_hash(format), object.0, &object.1)?;

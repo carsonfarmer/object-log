@@ -6,8 +6,8 @@ use super::{Repository, memory_bound};
 use crate::{
     Error, ObjectId,
     catalog_tree::{CatalogTree, PackLocation},
+    closure::{CONNECTED, Closure, Edges},
     durable,
-    graph::Graph,
     state::CatalogState,
 };
 
@@ -22,34 +22,31 @@ impl Repository {
         let roots = self.state.refs.values().copied().collect::<Vec<_>>();
         let catalog = self.catalog().await?;
         let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
-        let graph = Graph::load(&self.operation, &mut reader, &roots).await?;
-        for (name, id) in &self.state.refs {
-            if name.starts_with(b"refs/heads/")
-                && graph
-                    .location(*id)
-                    .is_none_or(|index| graph.nodes[index as usize].kind != Some(Kind::Commit))
-            {
+        let mut closure = Closure::new(&self.operation)?;
+        closure
+            .walk(&mut reader, &roots, CONNECTED, Edges::All)
+            .await?;
+        for (name, &id) in &self.state.refs {
+            if name.starts_with(b"refs/heads/") && closure.kind(id) != Some(Kind::Commit) {
                 return Err(Error::InvalidReference);
             }
         }
+        closure.verify_all(&mut reader).await?;
         let _locations_memory = self.operation.reserve_state(memory_bound(
-            graph.nodes.len(),
+            closure.nodes.len(),
             size_of::<(ObjectId, PackLocation)>(),
         )?)?;
-        let mut locations = Vec::with_capacity(graph.nodes.len());
-        for node in &graph.nodes {
-            if !node.verified && reader.verify(node.id).await? != node.kind {
-                return Err(Error::InvalidReference);
-            }
+        let mut locations = Vec::with_capacity(closure.nodes.len());
+        for &id in closure.nodes.keys() {
             locations.push((
-                node.id,
+                id,
                 reader
-                    .selected_location(node.id)
+                    .selected_location(id)
                     .await?
                     .ok_or(Error::InvalidReference)?,
             ));
         }
-        drop(graph);
+        drop(closure);
         drop(reader);
         drop(catalog);
         self.operation.work(memory_bound(
