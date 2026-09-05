@@ -133,7 +133,13 @@ The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs. Ref listing without peeling avoids index loads. Common
 advertised-tip fetches skip unrelated histories and blob bodies. Non-tip wants,
 stored haves outside the wanted closure, and some shallow requests retain full
-reachability checks; the graph bound still applies. Known blob leaves are
+reachability checks. Ordinary fetch, receive and maintenance retain object
+membership and a traversal frontier without storing every graph edge. Both-hash
+Spin/MinIO tests cover a connected history of 32,770 objects across accepted
+pushes, full and incremental fetch, compaction, checkpointing, collection and
+cold clone. Individual stored packs remain limited to 32,768 objects; shallow,
+filtered and URI fetches retain the earlier bounded graph path. All paths remain
+subject to memory and operation limits. Known blob leaves are
 deferred until selected content needs verification. Exact want/have
 selection, protocol-v2 upload commands, and classic receive preparation and
 publication now use that same repository. Thin inputs become self-contained

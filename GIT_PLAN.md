@@ -27,7 +27,11 @@ capacity at 50 MiB files and 1 GiB pushes. Streaming receive and fetch now meet
 that minimum in both-hash Spin/MinIO lifecycles. Aggregate clone also combines
 three separate 720 MiB pushes into a pack over 2,080 MiB. The real object-log
 history fixture covers incremental updates and compaction/checkpoint/GC with
-cold recovery; graph and operation budgets still define a finite scale envelope.
+cold recovery. Ordinary receive, fetch and maintenance use an edge-free closure
+walker, tested through a connected 32,770-object history and full maintenance for
+both hashes. Stored packs retain their 32,768-object bound; shallow, filtered
+and URI fetches retain the earlier graph path. Memory and operation budgets
+still define a finite scale envelope.
 Use ordinary Spin defaults for runtime
 behavior; no host memory cap, pooling override, or one-instance wrapper is required.
 

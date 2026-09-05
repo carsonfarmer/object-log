@@ -34,11 +34,16 @@ Check hosted CI after each push. Verification belongs in tests and commits.
   and decoding without raising operation quotas or changing the core API.
 - Advertised-tip fetches can skip unrelated histories and blob bodies. Known
   external haves, non-tip wants and existing shallow cuts/exclusions retain full
-  reachability checks. Continue #19 for the remaining graph/maintenance envelope
+  reachability checks. Ordinary fetch, receive and maintenance now share an
+  edge-free closure walker; both-hash connected-history tests cross 32,768
+  objects through push, clone, incremental fetch and full maintenance. Adaptive
+  catalog node caching stays inside the same 2 MiB allowance. Shallow, filtered
+  and URI fetches still use the bounded graph. Continue #19 for that remaining envelope
   and #25 API simplicity; capacity issue #26 is complete.
 - The current 14-case comparison passes functional/resource
   checks, but SHA-1 8 MiB push remains 1.361× native Git at p50 after 30 pairs;
-  #23 needs phase-level profiling. Ordinary Spin reliability remains in #21.
+  #23 profiling found scan and repeated leaf verification dominate; investigate
+  private verification reuse without weakening authentication. Ordinary Spin reliability remains in #21.
 
 Use exclusive implementation worktrees; root alone integrates main. Keep useful
 regression tests, sparse authenticated reads, cumulative retry counters, recovery,
