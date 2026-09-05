@@ -97,7 +97,7 @@ try:
             url = f"http://127.0.0.1:{port}/repo"
             variables = dict(endpoint=endpoint, bucket="object-log-test", access_key="objectlog",
                              secret_key="objectlog-local-test-secret", prefix="shallow-" + name,
-                             object_format=name)
+                             object_format=name, auth_mode="disabled")
             config = root / "config.toml"
             config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
             log_path = ROOT / "tests" / ("shallow-" + name + ".log")
