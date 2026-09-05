@@ -135,6 +135,14 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
     if !(get && (upload_advert || receive_advert) || post && (upload || receive)) {
         return Ok(Reply(404, "text/plain", Bytes::from_static(b"not found\n")));
     }
+    let read_only = spin_sdk::variables::get("read_only")?.parse::<bool>()?;
+    if read_only && (receive || receive_advert) {
+        return Ok(Reply(
+            403,
+            "text/plain",
+            Bytes::from_static(b"repository is read-only\n"),
+        ));
+    }
     let Ok(encoding) = validate_headers(&request, upload, upload_advert, post) else {
         return Ok(Reply(
             400,

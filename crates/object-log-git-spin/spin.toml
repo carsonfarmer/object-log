@@ -13,6 +13,7 @@ region = { default = "us-east-1" }
 prefix = { default = "object-log-git" }
 log_id = { default = "repository" }
 object_format = { default = "sha1" }
+read_only = { default = "false" }
 
 [[trigger.http]]
 route = "/repo/..."
@@ -31,6 +32,7 @@ region = "{{ region }}"
 prefix = "{{ prefix }}"
 log_id = "{{ log_id }}"
 object_format = "{{ object_format }}"
+read_only = "{{ read_only }}"
 
 [component.git.build]
 command = "cargo build --locked -p object-log-git-spin --target wasm32-wasip2 --release"

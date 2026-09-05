@@ -1,0 +1,1230 @@
+COMMAND: cargo build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling stable_deref_trait v1.2.1
+   Compiling typenum v1.20.1
+   Compiling memchr v2.8.3
+   Compiling zmij v1.0.23
+   Compiling smallvec v1.16.0
+   Compiling serde_core v1.0.229
+   Compiling itoa v1.0.18
+   Compiling anyhow v1.0.104
+   Compiling autocfg v1.5.1
+   Compiling subtle v2.6.1
+   Compiling thiserror v2.0.20
+   Compiling pin-project-lite v0.2.17
+   Compiling parking_lot_core v0.9.12
+   Compiling generic-array v0.14.7
+   Compiling scopeguard v1.2.0
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.1.5
+   Compiling regex-automata v0.4.18
+   Compiling hashbrown v0.17.1
+   Compiling lock_api v0.4.14
+   Compiling hashbrown v0.15.5
+   Compiling writeable v0.6.4
+   Compiling rand_core v0.10.1
+   Compiling futures-core v0.3.34
+   Compiling getrandom v0.4.3
+   Compiling semver v1.0.28
+   Compiling hybrid-array v0.4.14
+   Compiling litemap v0.8.3
+   Compiling bitflags v2.13.1
+   Compiling futures-sink v0.3.34
+   Compiling bytes v1.12.1
+   Compiling icu_properties_data v2.3.0
+   Compiling byteorder v1.5.0
+   Compiling serde_json v1.0.151
+   Compiling icu_normalizer_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling parking_lot v0.12.5
+   Compiling serde v1.0.229
+   Compiling bstr v1.13.1
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling crc32fast v1.5.1
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling heapless v0.8.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling digest v0.11.3
+   Compiling hash32 v0.3.1
+   Compiling futures-channel v0.3.34
+   Compiling gix-trace v0.1.21
+   Compiling futures-io v0.3.34
+   Compiling slab v0.4.12
+   Compiling prettyplease v0.2.37
+   Compiling futures-task v0.3.34
+   Compiling http v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling jiff-tzdb v0.1.8
+   Compiling log v0.4.34
+   Compiling indexmap v2.14.1
+   Compiling percent-encoding v2.3.2
+   Compiling id-arena v2.3.0
+   Compiling leb128fmt v0.1.0
+   Compiling unicode-xid v0.2.6
+   Compiling once_cell v1.21.4
+   Compiling form_urlencoded v1.2.2
+   Compiling jiff-tzdb-platform v0.1.3
+   Compiling sha1 v0.10.7
+   Compiling gix-error v0.3.2
+   Compiling faster-hex v0.10.0
+   Compiling prodash v31.0.0
+   Compiling shlex v2.0.1
+   Compiling jiff-core v0.1.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling sha1-checked v0.10.0
+   Compiling tinyvec v1.12.0
+   Compiling sha2 v0.11.0
+   Compiling wasmparser v0.244.0
+   Compiling gix-features v0.49.1
+   Compiling http-body v1.1.0
+   Compiling cc v1.4.4
+   Compiling smartstring v1.0.1
+   Compiling wit-bindgen-rust v0.51.0
+   Compiling wit-bindgen-rt v0.24.0
+   Compiling heck v0.5.0
+   Compiling jiff v0.2.35
+   Compiling unicode-normalization v0.1.25
+   Compiling tracing-core v0.1.36
+   Compiling gix-validate v0.11.4
+   Compiling chacha20 v0.10.2
+   Compiling synstructure v0.13.2
+   Compiling syn v1.0.109
+   Compiling either v1.18.0
+   Compiling static_assertions v1.1.0
+   Compiling fastrand v2.5.0
+   Compiling wit-bindgen-rust-macro v0.51.0
+   Compiling ryu v1.0.23
+   Compiling gix-utils v0.3.6
+   Compiling blake3 v1.8.7
+   Compiling itertools v0.15.0
+   Compiling rand v0.10.2
+   Compiling http-body-util v0.1.5
+   Compiling md-5 v0.11.0
+   Compiling crc-fast v1.10.0
+   Compiling constant_time_eq v0.4.2
+   Compiling wit-bindgen v0.51.0
+   Compiling humantime v2.4.0
+   Compiling base64 v0.22.1
+   Compiling arrayvec v0.7.8
+   Compiling zlib-rs v0.6.7
+   Compiling serde_derive v1.0.229
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-macro v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling async-trait v0.1.92
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio v1.53.1
+   Compiling futures-util v0.3.34
+   Compiling gix-date v0.16.0
+   Compiling minicbor-derive v0.19.5
+   Compiling zerofrom v0.1.8
+   Compiling gix-hash v0.26.2
+   Compiling gix-actor v0.42.0
+   Compiling gix-path v0.12.6
+   Compiling gix-hashtable v0.16.0
+   Compiling yoke v0.8.3
+   Compiling gix-object v0.64.1
+   Compiling tracing v0.1.44
+   Compiling gix-zlib v0.1.0
+   Compiling wasi v0.13.1+wasi-0.2.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling wasm-encoder v0.244.0
+   Compiling wit-parser v0.244.0
+   Compiling smartcow v0.2.1
+   Compiling gix-chunk v0.8.0
+   Compiling uuid v1.26.0
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling chrono v0.4.45
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling futures-executor v0.3.34
+   Compiling serde_urlencoded v0.7.1
+   Compiling futures v0.3.34
+   Compiling hyper v1.11.1
+   Compiling quick-xml v0.41.0
+   Compiling minicbor v2.3.0
+   Compiling wasm-metadata v0.244.0
+   Compiling hex v0.4.3
+   Compiling adler2 v2.0.1
+   Compiling memmap2 v0.9.11
+   Compiling simd-adler32 v0.3.10
+   Compiling spin-sdk v5.2.0
+   Compiling icu_provider v2.3.1
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling miniz_oxide v0.9.1
+   Compiling gix-pack v0.74.2
+   Compiling wit-component v0.244.0
+   Compiling wit-bindgen-core v0.51.0
+   Compiling spin-executor v5.2.0
+   Compiling routefinder v0.5.4
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling gix-packetline v0.22.2
+   Compiling flate2 v1.1.10
+   Compiling sha2 v0.10.9
+   Compiling spin-macro v5.2.0
+   Compiling hmac v0.12.1
+   Compiling url v2.5.8
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `release` profile [optimized] target(s) in 15.19s
+
+COMMAND: cargo test --locked --features test-util -p object-log
+    Blocking waiting for file lock on build directory
+   Compiling libc v0.2.189
+   Compiling smallvec v1.16.0
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-utils v0.8.22
+   Compiling zerocopy v0.8.56
+   Compiling crossbeam-epoch v0.9.20
+   Compiling futures-sink v0.3.34
+   Compiling zerocopy-derive v0.8.56
+   Compiling getrandom v0.4.3
+   Compiling crossbeam-deque v0.8.7
+   Compiling slab v0.4.12
+   Compiling cfg_aliases v0.2.2
+   Compiling cc v1.4.4
+   Compiling rayon-core v1.13.0
+   Compiling futures-channel v0.3.34
+   Compiling nix v0.31.3
+   Compiling icu_normalizer v2.3.0
+   Compiling same-file v1.0.6
+   Compiling futures-util v0.3.34
+   Compiling walkdir v2.5.0
+   Compiling form_urlencoded v1.2.2
+   Compiling serde_json v1.0.151
+   Compiling tokio v1.53.1
+   Compiling ciborium-io v0.2.2
+   Compiling clap_lex v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling regex-syntax v0.8.11
+   Compiling plotters-backend v0.3.7
+   Compiling clap_builder v4.6.6
+   Compiling itertools v0.13.0
+   Compiling cast v0.3.0
+   Compiling idna_adapter v1.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling idna v1.1.0
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling url v2.5.8
+   Compiling chrono v0.4.45
+   Compiling plotters v0.3.7
+   Compiling parking_lot_core v0.9.12
+   Compiling errno v0.3.14
+   Compiling parking_lot v0.12.5
+   Compiling blake3 v1.8.7
+   Compiling regex-automata v0.4.18
+   Compiling rustix v1.1.4
+   Compiling tinytemplate v1.2.1
+   Compiling uuid v1.26.0
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.6.0
+   Compiling clap v4.6.6
+   Compiling tempfile v3.27.0
+   Compiling regex v1.13.1
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling object_store v0.14.1
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log)
+   Compiling criterion v0.7.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.66s
+     Running unittests src/lib.rs (target/debug/deps/object_log-b1a423b5039618a7)
+
+running 58 tests
+test format::tests::changed_envelope_is_corrupt ... ok
+test format::tests::checkpoint_encoder_preserves_format_and_snapshot ... ok
+test format::tests::collection_plan_enforces_count_sum_and_encoded_byte_limits ... ok
+test format::tests::collection_plan_rejects_malformed_physical_keys ... ok
+test format::tests::collection_plan_round_trip_preserves_exact_physical_keys ... ok
+test format::tests::commit_round_trip_preserves_opaque_bytes ... ok
+test format::tests::collection_plan_rejects_non_positive_or_non_canonical_sets ... ok
+test format::tests::empty_head_encoding_is_stable ... ok
+test format::tests::future_format_version_fails_closed ... ok
+test format::tests::head_enforces_its_durable_bounds_and_sequence_evidence ... ok
+test format::tests::head_rejects_checkpoint_sequence_overflow ... ok
+test format::tests::head_rejects_duplicate_and_unsorted_retention_ids ... ok
+test format::tests::head_rejects_duplicate_transaction_across_base_and_tail ... ok
+test format::tests::head_rejects_outcomes_without_a_checkpoint ... ok
+test format::tests::reference_node_rejects_child_count_before_child_decode ... ok
+test format::tests::head_rejects_sequence_gap ... ok
+test format::tests::head_round_trip_preserves_collection_state_and_enforces_exclusion ... ok
+test format::tests::node_rejects_impossible_child_count_before_reserving ... ok
+test format::tests::head_round_trip_preserves_order_and_base ... ok
+test format::tests::recovery_token_excludes_staging_proof ... ok
+test format::tests::recovery_token_round_trip_preserves_the_exact_candidate ... ok
+test format::tests::reference_node_rejects_invalid_child_fields ... ok
+test format::tests::reference_node_rejects_truncation_digest_and_value_type ... ok
+test format::tests::reference_node_rejects_noncanonical_shapes ... ok
+test format::tests::recovery_token_cannot_change_the_durable_options ... ok
+test format::tests::reference_node_round_trip_is_stable_and_keeps_payload_backing ... ok
+test format::tests::trailing_bytes_are_rejected ... ok
+test format::tests::unknown_field_is_not_canonical ... ok
+test log::tests::checkpoint_allocation_skips_a_planned_physical_key ... ok
+test log::tests::commit_ref_len_matches_the_encoded_commit_and_read_reference ... ok
+test log::tests::active_plan_fences_the_new_commit_physical_key ... ok
+test log::tests::fresh_staging_does_not_accept_a_collision_after_an_ambiguous_error ... ok
+test log::tests::fresh_commit_rejects_a_collision_but_exact_recovery_can_reuse_it ... ok
+test log::tests::fresh_staging_reallocates_a_colliding_physical_id ... ok
+test log::tests::active_plan_rejects_existing_ref_with_conflicting_length ... ok
+test format::tests::reference_node_accepts_exact_payload_and_child_limits ... ok
+test log::tests::old_incarnation_candidate_cannot_delete_current_data ... ok
+test log::tests::active_plan_fences_an_exact_checkpoint_retry ... ok
+test log::tests::oversized_live_reference_fails_before_collection_io ... ok
+test log::tests::recovery_rejects_a_commit_from_another_log ... ok
+test log::tests::recovery_applies_durable_inline_limits ... ok
+test log::tests::recovery_rejects_a_commit_from_the_wrong_parent ... ok
+test sim::tests::delete_pause_after_stops_after_visible_delete ... ok
+test sim::tests::delete_pause_before_preserves_visibility_until_release ... ok
+test sim::tests::put_pause_after_stops_after_visibility ... ok
+test sim::tests::put_pause_at_second_occurrence_skips_first_request ... ok
+test store::tests::delete_batch_rejects_excess_before_io ... ok
+test sim::tests::delete_pause_at_second_occurrence_skips_first_request ... ok
+test store::tests::delete_batch_drains_partial_failures_before_retry ... ok
+test log::tests::resume_rejects_a_different_current_plan_before_delete ... ok
+test sim::tests::put_pause_before_blocks_visibility_and_releases_once ... ok
+test store::tests::new_immutable_keys_get_distinct_physical_ids ... ok
+test store::tests::scoped_listing_classifies_only_canonical_immutable_paths ... ok
+test store::tests::scoped_listing_does_not_cross_log_segments ... ok
+test store::tests::delete_batch_accepts_exact_limit ... ok
+test store::tests::immutable_delete_is_repeatable_in_memory_and_filesystem ... ok
+test format::tests::reference_node_encoder_bounds_the_maximum_git_root ... ok
+test format::tests::reference_node_encoder_matches_derive_at_cbor_boundaries ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+
+     Running tests/checkpoint.rs (target/debug/deps/checkpoint-f18a227668684986)
+
+running 20 tests
+test checkpoint_staging_rejects_missing_declared_object ... ok
+test checkpoint_before_append_preserves_the_base ... ok
+test checkpoint_can_root_a_traversable_object_tree ... ok
+test checkpoint_replaces_one_prefix_and_preserves_its_suffix ... ok
+test lost_checkpoint_success_resolves_as_published ... ok
+test append_before_checkpoint_preserves_both_entries ... ok
+test checkpoint_limit_fails_before_index_publication ... ok
+test failed_checkpoint_update_retries_the_exact_prefix ... ok
+test checkpoint_rejects_missing_source_history_before_publication ... ok
+test checkpoint_declares_live_objects_for_lazy_restore ... ok
+test checkpoint_staging_rejects_corrupt_declared_object ... ok
+test checkpoint_retains_a_pending_commit_outcome ... ok
+test checkpoint_reports_expired_when_the_durable_window_is_zero ... ok
+test checkpoint_read_rejects_missing_and_corrupt_roots ... ok
+test exact_recovery_does_not_report_conflict_after_evidence_expires ... ok
+test checkpoint_root_limit_fails_before_index_publication ... ok
+test staging_rejects_missing_and_corrupt_existing_objects ... ok
+test stale_checkpoint_returns_the_current_view ... ok
+test reopened_checkpoint_resolution_rejects_invalid_descendants ... ok
+test superseded_pending_checkpoint_reports_expired_not_conflict ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/gc.rs (target/debug/deps/gc-3246a469ffb3bad8)
+
+running 28 tests
+test a_missing_object_in_a_retained_view_is_corruption ... ok
+test append_after_resume_loads_the_fence_wins_the_clear_cas ... ok
+test cancellation_before_and_after_fence_installation_is_restart_safe ... ok
+test append_and_collection_have_one_cas_winner_and_preserve_the_fence ... ok
+test collection_fence_finds_a_planned_descendant_of_a_new_node ... ok
+test corrupt_live_node_fails_before_collection_io ... ok
+test cancelled_deletes_repeat_safely_before_and_after_visibility ... ok
+test collection_recovers_lost_fence_and_clear_responses ... ok
+test collection_fence_rejects_stale_and_planned_dependencies ... ok
+test checkpoint_and_collection_have_one_cas_winner ... ok
+test collection_deletes_only_unreachable_data_and_classifies_missing_reads ... ok
+test corrupt_live_blob_fails_before_collection_io ... ok
+test collection_preserves_the_checkpoint_tail_and_nested_live_graph ... ok
+test compacted_commit_resolves_after_collection_removes_its_body ... ok
+test compacted_commit_and_checkpoint_reads_expire_with_their_views ... ok
+test empty_collection_does_not_write_or_advance_the_head ... ok
+test failed_plan_cleanup_is_collected_by_the_next_run ... ok
+test invalid_collection_plans_fail_before_delete_or_clear ... ok
+test invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion ... ok
+test per_record_reference_limit_is_not_a_whole_graph_limit ... ok
+test resume_propagates_a_read_failure_before_any_delete ... ok
+test released_then_reacquired_id_does_not_make_an_old_view_retained ... ok
+test partial_delete_failures_leave_the_plan_and_repeat_the_complete_set ... ok
+test retention_and_collection_have_one_winner_and_release_is_idempotent ... ok
+test stable_retention_id_resolves_a_lost_success_response ... ok
+test stale_retention_no_ops_are_resolved_from_the_current_head ... ok
+test unknown_entries_count_toward_the_scan_bound_and_survive ... ok
+test two_collectors_clear_only_the_exact_plan_and_delayed_delete_is_isolated ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/gc_acceptance.rs (target/debug/deps/gc_acceptance-451afc820afadfe7)
+
+running 1 test
+test memory_gc_removes_100k_objects ... ignored, large local GC acceptance test; run make gc-acceptance
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/minio.rs (target/debug/deps/minio-eb9a2a18dc7c7259)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/model.rs (target/debug/deps/model-dd4c1e0b5208fecc)
+
+running 24 tests
+test failure_before_put_makes_no_change ... ok
+test failure_after_conditional_put_hides_visible_change ... ok
+test materialize_uses_the_supplied_view_after_head_advances ... ok
+test preflight_has_no_store_requests_and_reserves_nothing ... ok
+test pending_evidence_survives_failed_published_commit_verification ... ok
+test pending_evidence_survives_reopen_and_failed_resolution_read ... ok
+test recovery_token_can_stage_and_publish_after_process_loss ... ok
+test materialized_roots_are_authenticated_epoch_scoped_proofs ... ok
+test clones_share_atomic_request_accounting ... ok
+test failure_after_delete_hides_a_visible_delete ... ok
+test batched_existing_staging_deduplicates_the_object_graph ... ok
+test failure_after_multipart_completion_hides_visible_object ... ok
+test concurrent_writers_have_one_winner_and_one_definite_loser ... ok
+test decoded_published_commit_rejects_missing_and_corrupt_descendants ... ok
+test recovery_token_discards_staging_proof_and_verifies_the_blob ... ok
+test recovery_token_survives_failed_referenced_object_validation ... ok
+test scheduled_occurrence_and_read_failure_are_reproducible ... ok
+test recovery_token_rejects_missing_and_corrupt_blobs_before_head_update ... ok
+test same_handle_pending_resolution_keeps_staging_proof ... ok
+test separately_opened_handle_rejects_new_work_with_foreign_proof ... ok
+test separately_opened_handle_verifies_prepared_and_pending_work ... ok
+test validated_backend_opens_tenants_without_more_probes ... ok
+test staged_blob_and_node_publish_without_dependency_reads ... ok
+test seeded_model_covers_reopen_readers_writers_and_pending_resolution ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+
+     Running tests/protocol.rs (target/debug/deps/protocol-65641822b2356b55)
+
+running 19 tests
+test open_rejects_options_that_differ_from_the_durable_contract ... ok
+test encoded_commit_limit_fails_before_publication ... ok
+test lost_success_response_resolves_to_the_original_commit ... ok
+test object_read_rejects_a_changed_referenced_object ... ok
+test pending_candidate_resolves_not_committed_after_another_writer_wins ... ok
+test rejected_candidate_remains_pending_when_the_winner_read_fails ... ok
+test refresh_distinguishes_current_and_changed_heads ... ok
+test repeated_first_attempt_requires_the_recovery_path ... ok
+test log_exposes_its_durable_options ... ok
+test capability_probe_rejects_false_not_modified_responses ... ok
+test log_ids_reject_unsafe_namespace_forms ... ok
+test referenced_objects_are_durable_before_head_publication ... ok
+test concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it ... ok
+test cancelled_head_update_resumes_after_reopen ... ok
+test stale_view_is_rejected_without_publishing_its_candidate ... ok
+test tail_replay_leaves_referenced_objects_lazy ... ok
+test tail_order_survives_out_of_order_read_completion ... ok
+test view_is_bound_to_one_durable_log_incarnation ... ok
+test two_writers_publish_one_order_and_require_explicit_reprepare ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/store_conformance.rs (target/debug/deps/store_conformance-9d3e9364e62d44bb)
+
+running 4 tests
+test probe_removes_only_its_object ... ok
+test memory_backend_conforms ... ok
+test log_namespaces_are_isolated ... ok
+test filesystem_backend_reports_missing_update ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests object_log
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+COMMAND: cargo test --locked -p object-log-git-spin
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.229
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.4
+   Compiling itoa v1.0.18
+   Compiling stable_deref_trait v1.2.1
+   Compiling version_check v0.9.5
+   Compiling smallvec v1.16.0
+   Compiling typenum v1.20.1
+   Compiling equivalent v1.0.2
+   Compiling pin-project-lite v0.2.17
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling futures-core v0.3.34
+   Compiling once_cell v1.21.4
+   Compiling subtle v2.6.1
+   Compiling bytes v1.12.1
+   Compiling generic-array v0.14.7
+   Compiling futures-sink v0.3.34
+   Compiling bitflags v2.13.1
+   Compiling getrandom v0.4.3
+   Compiling rand_core v0.10.1
+   Compiling pkg-config v0.3.34
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling slab v0.4.12
+   Compiling thiserror v2.0.20
+   Compiling futures-channel v0.3.34
+   Compiling zmij v1.0.23
+   Compiling parking_lot_core v0.9.12
+   Compiling regex-automata v0.4.18
+   Compiling foldhash v0.1.5
+   Compiling futures-io v0.3.34
+   Compiling hashbrown v0.17.1
+   Compiling futures-task v0.3.34
+   Compiling autocfg v1.5.1
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling litemap v0.8.3
+   Compiling log v0.4.34
+   Compiling writeable v0.6.4
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling http v1.5.0
+   Compiling aws-lc-rs v1.18.1
+   Compiling icu_properties_data v2.3.0
+   Compiling crc32fast v1.5.1
+   Compiling serde v1.0.229
+   Compiling jobserver v0.1.35
+   Compiling mio v1.2.3
+   Compiling socket2 v0.6.5
+   Compiling cc v1.4.4
+   Compiling hybrid-array v0.4.14
+   Compiling icu_normalizer_data v2.3.0
+   Compiling parking_lot v0.12.5
+   Compiling anyhow v1.0.104
+   Compiling core-foundation-sys v0.8.7
+   Compiling zeroize v1.9.0
+   Compiling percent-encoding v2.3.2
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling utf8_iter v1.0.4
+   Compiling tinyvec_macros v0.1.1
+   Compiling bstr v1.13.1
+   Compiling semver v1.0.28
+   Compiling digest v0.10.7
+   Compiling tinyvec v1.12.0
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling cmake v0.1.58
+   Compiling hashbrown v0.15.5
+   Compiling gix-trace v0.1.21
+   Compiling fastrand v2.5.0
+   Compiling unicode-normalization v0.1.25
+   Compiling http-body v1.1.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling tracing-core v0.1.36
+   Compiling serde_json v1.0.151
+   Compiling heapless v0.8.0
+   Compiling httparse v1.10.1
+   Compiling byteorder v1.5.0
+   Compiling digest v0.11.3
+   Compiling untrusted v0.9.0
+   Compiling rustls v0.23.43
+   Compiling hash32 v0.3.1
+   Compiling gix-utils v0.3.6
+   Compiling form_urlencoded v1.2.2
+   Compiling prodash v31.0.0
+   Compiling cpufeatures v0.2.17
+   Compiling tower-service v0.3.3
+   Compiling atomic-waker v1.1.2
+   Compiling fnv v1.0.7
+   Compiling prettyplease v0.2.37
+   Compiling try-lock v0.2.5
+   Compiling num-traits v0.2.19
+   Compiling leb128fmt v0.1.0
+   Compiling aws-lc-sys v0.45.0
+   Compiling want v0.3.1
+   Compiling id-arena v2.3.0
+   Compiling gix-features v0.49.1
+   Compiling unicode-xid v0.2.6
+   Compiling sha1 v0.10.7
+   Compiling indexmap v2.14.1
+   Compiling gix-validate v0.11.4
+   Compiling gix-error v0.3.2
+   Compiling faster-hex v0.10.0
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling cpufeatures v0.3.1
+   Compiling sync_wrapper v1.0.2
+   Compiling base64 v0.22.1
+   Compiling ipnet v2.12.1
+   Compiling jiff-core v0.1.0
+   Compiling tower-layer v0.3.3
+   Compiling wasmparser v0.244.0
+   Compiling rustix v1.1.4
+   Compiling security-framework v3.7.0
+   Compiling sha2 v0.11.0
+   Compiling sha1-checked v0.10.0
+   Compiling iana-time-zone v0.1.65
+   Compiling errno v0.3.14
+   Compiling smartstring v1.0.1
+   Compiling heck v0.5.0
+   Compiling wit-bindgen-rust v0.51.0
+   Compiling wit-bindgen-rt v0.24.0
+   Compiling blake3 v1.8.7
+   Compiling http-body-util v0.1.5
+   Compiling jiff v0.2.35
+   Compiling chacha20 v0.10.2
+   Compiling ryu v1.0.23
+   Compiling wit-bindgen-rust-macro v0.51.0
+   Compiling spin v0.10.1
+   Compiling static_assertions v1.1.0
+   Compiling syn v1.0.109
+   Compiling either v1.18.0
+   Compiling rand v0.10.2
+   Compiling crc-fast v1.10.0
+   Compiling synstructure v0.13.2
+   Compiling itertools v0.15.0
+   Compiling tempfile v3.27.0
+   Compiling md-5 v0.11.0
+   Compiling wit-bindgen v0.51.0
+   Compiling arrayvec v0.7.8
+   Compiling constant_time_eq v0.4.2
+   Compiling humantime v2.4.0
+   Compiling zlib-rs v0.6.7
+   Compiling wasi v0.13.1+wasi-0.2.0
+   Compiling smartcow v0.2.1
+   Compiling gix-chunk v0.8.0
+   Compiling zerovec-derive v0.11.6
+   Compiling serde_derive v1.0.229
+   Compiling displaydoc v0.2.7
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-macro v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.92
+   Compiling tokio v1.53.1
+   Compiling gix-date v0.16.0
+   Compiling futures-util v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling minicbor-derive v0.19.5
+   Compiling gix-actor v0.42.0
+   Compiling yoke v0.8.3
+   Compiling gix-path v0.12.6
+   Compiling gix-hash v0.26.2
+   Compiling tracing v0.1.44
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling gix-fs v0.22.1
+   Compiling gix-hashtable v0.16.0
+   Compiling uuid v1.26.0
+   Compiling gix-object v0.64.1
+   Compiling gix-tempfile v24.0.0
+   Compiling memmap2 v0.9.11
+   Compiling spin-sdk v5.2.0
+   Compiling simd-adler32 v0.3.10
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling wasm-encoder v0.244.0
+   Compiling wit-parser v0.244.0
+   Compiling hex v0.4.3
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling chrono v0.4.45
+   Compiling quick-xml v0.41.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling minicbor v2.3.0
+   Compiling futures-executor v0.3.34
+   Compiling adler2 v2.0.1
+   Compiling futures v0.3.34
+   Compiling miniz_oxide v0.9.1
+   Compiling spin-executor v5.2.0
+   Compiling spin-macro v5.2.0
+   Compiling icu_provider v2.3.1
+   Compiling gix-packetline v0.22.2
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling gix-zlib v0.1.0
+   Compiling routefinder v0.5.4
+   Compiling gix-pack v0.74.2
+   Compiling flate2 v1.1.10
+   Compiling wasm-metadata v0.244.0
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling tokio-util v0.7.19
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling tower v0.5.3
+   Compiling h2 v0.4.19
+   Compiling url v2.5.8
+   Compiling wit-bindgen-core v0.51.0
+   Compiling tower-http v0.6.11
+   Compiling wit-component v0.244.0
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling rustls-webpki v0.103.15
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.60s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git_spin-01bd7e6ec8aae479)
+
+running 7 tests
+test tests::input_limit_is_checked_before_append ... ok
+test tests::concatenated_gzip_members_are_preserved ... ok
+test transport::tests::exhausted_calls_fail_before_entering_wasi_http ... ok
+test transport::tests::quota_accepts_exact_limits_and_rejects_overflow_without_wrapping ... ok
+test transport::tests::overall_deadline_cannot_be_silently_ignored ... ok
+test transport::tests::connector_clones_share_bootstrap_and_command_quota ... ok
+test tests::compressed_input_is_bounded_after_expansion ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/minio.rs (target/debug/deps/minio-62ba51110b6214aa)
+
+running 3 tests
+test spin_minio_clients_recover_after_collection ... ignored, requires local MinIO, Spin 4, and a release WASIp2 component build
+test spin_minio_default_git_large_push_probes_then_streams_both_hashes ... ignored, requires local MinIO, Spin 4, and a release WASIp2 component build
+test spin_minio_large_fetch_uses_gzip_multi_round_negotiation ... ignored, requires local MinIO, Spin 4, and a release WASIp2 component build
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests object_log_git_spin
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+COMMAND: cargo clippy --locked -p object-log-git-spin --all-targets -- -D warnings
+    Blocking waiting for file lock on build directory
+    Checking cfg-if v1.0.4
+    Checking memchr v2.8.3
+    Checking stable_deref_trait v1.2.1
+    Checking typenum v1.20.1
+    Checking smallvec v1.16.0
+    Checking pin-project-lite v0.2.17
+    Checking futures-core v0.3.34
+    Checking itoa v1.0.18
+    Checking subtle v2.6.1
+    Checking once_cell v1.21.4
+    Checking libc v0.2.189
+    Checking serde_core v1.0.229
+    Checking zerofrom v0.1.8
+    Checking bytes v1.12.1
+    Checking futures-sink v0.3.34
+    Checking bitflags v2.13.1
+    Checking yoke v0.8.3
+    Checking rand_core v0.10.1
+    Checking slab v0.4.12
+    Checking thiserror v2.0.20
+    Checking futures-channel v0.3.34
+    Checking futures-io v0.3.34
+    Checking hashbrown v0.17.1
+    Checking regex-automata v0.4.18
+    Checking zerovec v0.11.8
+    Checking futures-task v0.3.34
+    Checking scopeguard v1.2.0
+    Checking writeable v0.6.4
+    Checking lock_api v0.4.14
+    Checking litemap v0.8.3
+    Checking zerotrie v0.2.5
+    Checking core-foundation-sys v0.8.7
+    Checking futures-util v0.3.34
+    Checking percent-encoding v2.3.2
+   Compiling foldhash v0.1.5
+    Checking tinyvec_macros v0.1.1
+   Compiling equivalent v1.0.2
+    Checking utf8_iter v1.0.4
+    Checking zeroize v1.9.0
+    Checking tinyvec v1.12.0
+   Compiling hashbrown v0.15.5
+    Checking http v1.5.0
+    Checking tinystr v0.8.4
+    Checking potential_utf v0.1.6
+    Checking gix-trace v0.1.21
+    Checking icu_collections v2.3.0
+    Checking fastrand v2.5.0
+    Checking icu_locale_core v2.3.0
+   Compiling semver v1.0.28
+    Checking unicode-normalization v0.1.25
+    Checking icu_normalizer_data v2.3.0
+   Compiling jobserver v0.1.35
+    Checking getrandom v0.4.3
+    Checking socket2 v0.6.5
+    Checking mio v1.2.3
+    Checking parking_lot_core v0.9.12
+    Checking crc32fast v1.5.1
+    Checking parking_lot v0.12.5
+    Checking icu_properties_data v2.3.0
+    Checking rustls-pki-types v1.15.1
+   Compiling cc v1.4.4
+   Compiling anyhow v1.0.104
+    Checking tracing-core v0.1.36
+    Checking tokio v1.53.1
+    Checking untrusted v0.9.0
+    Checking byteorder v1.5.0
+    Checking prodash v31.0.0
+    Checking gix-utils v0.3.6
+    Checking bstr v1.13.1
+    Checking generic-array v0.14.7
+    Checking hybrid-array v0.4.14
+    Checking http-body v1.1.0
+    Checking hash32 v0.3.1
+    Checking cpufeatures v0.2.17
+    Checking form_urlencoded v1.2.2
+   Compiling zmij v1.0.23
+    Checking try-lock v0.2.5
+    Checking tracing v0.1.44
+    Checking atomic-waker v1.1.2
+    Checking tower-service v0.3.3
+    Checking fnv v1.0.7
+    Checking want v0.3.1
+    Checking gix-features v0.49.1
+    Checking heapless v0.8.0
+    Checking icu_provider v2.3.1
+    Checking httparse v1.10.1
+   Compiling log v0.4.34
+    Checking gix-validate v0.11.4
+    Checking gix-error v0.3.2
+    Checking cpufeatures v0.3.1
+    Checking security-framework-sys v2.17.0
+    Checking core-foundation v0.10.1
+    Checking sync_wrapper v1.0.2
+    Checking ipnet v2.12.1
+    Checking tower-layer v0.3.3
+    Checking base64 v0.22.1
+    Checking jiff-core v0.1.0
+    Checking num-traits v0.2.19
+    Checking errno v0.3.14
+    Checking faster-hex v0.10.0
+    Checking icu_normalizer v2.3.0
+    Checking icu_properties v2.3.0
+    Checking iana-time-zone v0.1.65
+    Checking security-framework v3.7.0
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.7
+    Checking rustix v1.1.4
+    Checking gix-path v0.12.6
+    Checking digest v0.10.7
+    Checking http-body-util v0.1.5
+    Checking sha1 v0.10.7
+    Checking chacha20 v0.10.2
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking sha1-checked v0.10.0
+    Checking ryu v1.0.23
+    Checking either v1.18.0
+    Checking static_assertions v1.1.0
+    Checking spin v0.10.1
+    Checking itertools v0.15.0
+    Checking crc-fast v1.10.0
+   Compiling cmake v0.1.58
+    Checking smartstring v1.0.1
+    Checking rand v0.10.2
+    Checking gix-fs v0.22.1
+    Checking wit-bindgen-rt v0.24.0
+    Checking jiff v0.2.35
+    Checking constant_time_eq v0.4.2
+    Checking digest v0.11.3
+    Checking zlib-rs v0.6.7
+    Checking sha2 v0.11.0
+   Compiling aws-lc-sys v0.45.0
+    Checking serde v1.0.229
+    Checking indexmap v2.14.1
+   Compiling blake3 v1.8.7
+    Checking idna_adapter v1.2.2
+    Checking idna v1.1.0
+    Checking tempfile v3.27.0
+    Checking url v2.5.8
+    Checking serde_json v1.0.151
+    Checking md-5 v0.11.0
+    Checking chrono v0.4.45
+    Checking quick-xml v0.41.0
+    Checking gix-hash v0.26.2
+    Checking futures-executor v0.3.34
+    Checking gix-hashtable v0.16.0
+    Checking futures v0.3.34
+    Checking serde_urlencoded v0.7.1
+    Checking arrayvec v0.7.8
+    Checking humantime v2.4.0
+    Checking gix-tempfile v24.0.0
+    Checking minicbor v2.3.0
+    Checking wasi v0.13.1+wasi-0.2.0
+    Checking smartcow v0.2.1
+    Checking gix-chunk v0.8.0
+    Checking uuid v1.26.0
+    Checking memmap2 v0.9.11
+    Checking hex v0.4.3
+    Checking simd-adler32 v0.3.10
+    Checking adler2 v2.0.1
+    Checking routefinder v0.5.4
+    Checking miniz_oxide v0.9.1
+   Compiling wasmparser v0.244.0
+    Checking gix-packetline v0.22.2
+    Checking gix-zlib v0.1.0
+    Checking hmac v0.12.1
+    Checking sha2 v0.10.9
+    Checking flate2 v1.1.10
+    Checking spin-executor v5.2.0
+   Compiling spin-macro v5.2.0
+    Checking gix-date v0.16.0
+    Checking gix-actor v0.42.0
+    Checking gix-object v0.64.1
+    Checking tokio-util v0.7.19
+    Checking tower v0.5.3
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.19
+    Checking gix-pack v0.74.2
+    Checking hyper v1.11.1
+    Checking hyper-util v0.1.20
+   Compiling wit-parser v0.244.0
+   Compiling wasm-encoder v0.244.0
+   Compiling wasm-metadata v0.244.0
+   Compiling wit-bindgen-core v0.51.0
+   Compiling wit-component v0.244.0
+   Compiling wit-bindgen-rust v0.51.0
+   Compiling wit-bindgen-rust-macro v0.51.0
+    Checking wit-bindgen v0.51.0
+    Checking spin-sdk v5.2.0
+   Compiling aws-lc-rs v1.18.1
+   Compiling rustls v0.23.43
+    Checking rustls-webpki v0.103.15
+    Checking tokio-rustls v0.26.4
+    Checking rustls-platform-verifier v0.7.0
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.13.4
+    Checking object_store v0.14.1
+    Checking object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log)
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git)
+    Checking object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.06s
+
+COMMAND: cargo clippy --locked -p object-log-git-spin --target wasm32-wasip2 --lib -- -D warnings
+    Blocking waiting for file lock on build directory
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling version_check v0.9.5
+    Checking cfg-if v1.0.4
+    Checking stable_deref_trait v1.2.1
+    Checking typenum v1.20.1
+    Checking memchr v2.8.3
+   Compiling zmij v1.0.23
+    Checking smallvec v1.16.0
+   Compiling serde_core v1.0.229
+    Checking itoa v1.0.18
+   Compiling autocfg v1.5.1
+   Compiling anyhow v1.0.104
+    Checking subtle v2.6.1
+   Compiling thiserror v2.0.20
+    Checking pin-project-lite v0.2.17
+   Compiling parking_lot_core v0.9.12
+    Checking regex-automata v0.4.18
+   Compiling hashbrown v0.17.1
+   Compiling generic-array v0.14.7
+    Checking scopeguard v1.2.0
+   Compiling hashbrown v0.15.5
+    Checking lock_api v0.4.14
+    Checking futures-core v0.3.34
+    Checking litemap v0.8.3
+   Compiling bitflags v2.13.1
+   Compiling getrandom v0.4.3
+    Checking writeable v0.6.4
+    Checking rand_core v0.10.1
+    Checking hybrid-array v0.4.14
+   Compiling crc32fast v1.5.1
+   Compiling serde v1.0.229
+    Checking parking_lot v0.12.5
+   Compiling icu_normalizer_data v2.3.0
+   Compiling heapless v0.8.0
+    Checking bstr v1.13.1
+    Checking bytes v1.12.1
+   Compiling icu_properties_data v2.3.0
+   Compiling serde_json v1.0.151
+    Checking byteorder v1.5.0
+    Checking futures-sink v0.3.34
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking utf8_iter v1.0.4
+    Checking hash32 v0.3.1
+    Checking futures-channel v0.3.34
+    Checking digest v0.10.7
+   Compiling prettyplease v0.2.37
+    Checking gix-trace v0.1.21
+    Checking futures-task v0.3.34
+    Checking futures-io v0.3.34
+    Checking slab v0.4.12
+    Checking digest v0.11.3
+    Checking http v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling leb128fmt v0.1.0
+    Checking percent-encoding v2.3.2
+   Compiling id-arena v2.3.0
+    Checking once_cell v1.21.4
+    Checking jiff-tzdb v0.1.8
+   Compiling unicode-xid v0.2.6
+    Checking form_urlencoded v1.2.2
+    Checking sha1 v0.10.7
+    Checking gix-error v0.3.2
+    Checking jiff-tzdb-platform v0.1.3
+    Checking prodash v31.0.0
+    Checking faster-hex v0.10.0
+   Compiling find-msvc-tools v0.1.11
+    Checking tinyvec_macros v0.1.1
+    Checking jiff-core v0.1.0
+   Compiling shlex v2.0.1
+    Checking sha1-checked v0.10.0
+    Checking sha2 v0.11.0
+    Checking tinyvec v1.12.0
+   Compiling smartstring v1.0.1
+    Checking gix-features v0.49.1
+   Compiling cc v1.4.4
+   Compiling indexmap v2.14.1
+    Checking http-body v1.1.0
+   Compiling wit-bindgen-rt v0.24.0
+   Compiling heck v0.5.0
+   Compiling wit-bindgen-rust v0.51.0
+    Checking jiff v0.2.35
+    Checking unicode-normalization v0.1.25
+    Checking tracing-core v0.1.36
+    Checking gix-validate v0.11.4
+    Checking chacha20 v0.10.2
+   Compiling wasmparser v0.244.0
+    Checking fastrand v2.5.0
+    Checking static_assertions v1.1.0
+   Compiling wit-bindgen-rust-macro v0.51.0
+   Compiling syn v1.0.109
+    Checking ryu v1.0.23
+    Checking either v1.18.0
+    Checking rand v0.10.2
+    Checking gix-utils v0.3.6
+    Checking itertools v0.15.0
+    Checking http-body-util v0.1.5
+    Checking md-5 v0.11.0
+    Checking crc-fast v1.10.0
+    Checking arrayvec v0.7.8
+   Compiling wit-bindgen v0.51.0
+    Checking zlib-rs v0.6.7
+    Checking constant_time_eq v0.4.2
+    Checking base64 v0.22.1
+    Checking humantime v2.4.0
+    Checking wasi v0.13.1+wasi-0.2.0
+    Checking smartcow v0.2.1
+    Checking gix-chunk v0.8.0
+    Checking uuid v1.26.0
+    Checking memmap2 v0.9.11
+    Checking simd-adler32 v0.3.10
+    Checking adler2 v2.0.1
+   Compiling spin-sdk v5.2.0
+    Checking hex v0.4.3
+    Checking routefinder v0.5.4
+    Checking miniz_oxide v0.9.1
+   Compiling synstructure v0.13.2
+   Compiling blake3 v1.8.7
+    Checking hmac v0.12.1
+    Checking sha2 v0.10.9
+    Checking flate2 v1.1.10
+    Checking gix-date v0.16.0
+    Checking gix-actor v0.42.0
+   Compiling zerovec-derive v0.11.6
+   Compiling serde_derive v1.0.229
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-macro v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling async-trait v0.1.92
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling tracing-attributes v0.1.31
+   Compiling minicbor-derive v0.19.5
+    Checking tokio v1.53.1
+    Checking futures-util v0.3.34
+    Checking zerofrom v0.1.8
+    Checking tracing v0.1.44
+    Checking gix-hash v0.26.2
+    Checking gix-zlib v0.1.0
+    Checking gix-path v0.12.6
+   Compiling spin-macro v5.2.0
+    Checking gix-packetline v0.22.2
+    Checking yoke v0.8.3
+    Checking gix-hashtable v0.16.0
+    Checking minicbor v2.3.0
+    Checking gix-object v0.64.1
+    Checking zerovec v0.11.8
+    Checking zerotrie v0.2.5
+    Checking gix-pack v0.74.2
+   Compiling wasm-encoder v0.244.0
+   Compiling wit-parser v0.244.0
+    Checking hyper v1.11.1
+    Checking futures-executor v0.3.34
+    Checking tinystr v0.8.4
+    Checking potential_utf v0.1.6
+    Checking futures v0.3.34
+    Checking chrono v0.4.45
+    Checking quick-xml v0.41.0
+    Checking serde_urlencoded v0.7.1
+    Checking icu_collections v2.3.0
+    Checking spin-executor v5.2.0
+    Checking icu_locale_core v2.3.0
+    Checking icu_provider v2.3.1
+    Checking icu_normalizer v2.3.0
+    Checking icu_properties v2.3.0
+   Compiling wasm-metadata v0.244.0
+    Checking idna_adapter v1.2.2
+    Checking idna v1.1.0
+   Compiling wit-bindgen-core v0.51.0
+   Compiling wit-component v0.244.0
+    Checking url v2.5.8
+    Checking object_store v0.14.1
+    Checking object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log)
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git)
+    Checking object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.78s
+
+COMMAND: python3 crates/object-log-git-spin/tests/check_http.py
+HTTP fixture: isolated policy checks with a 50 ms inter-request gap
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+COMMAND: bash scripts/test-minio.sh minio spin_minio_clients_recover_after_collection object-log-git-spin ''
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/minio.rs (target/debug/deps/minio-62ba51110b6214aa)
+
+running 1 test
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-52995.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-53487.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-53577.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-53616.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-54092.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-54178.rss
+test spin_minio_clients_recover_after_collection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.63s
+
+
+COMMAND: python3 crates/object-log-git-spin/tests/check_http.py --back-to-back (ten subsequent runs, before file-config fixture refactor)
+Attempt 1: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 2: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 3: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 4: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 5: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 6: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 7: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 8: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 9: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Attempt 10: exit 0
+HTTP fixture: back-to-back admission probe
+sha1 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha1 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha1: invalid read_only fails closed
+sha256 read_only=default: actual component discovery and HTTP rejection passed without a provider
+sha256 read_only=true: actual component discovery and HTTP rejection passed without a provider
+sha256: invalid read_only fails closed
+
+Ten additional attempts passed; prior observed race did not reproduce in this batch.
+

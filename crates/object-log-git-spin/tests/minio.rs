@@ -132,6 +132,24 @@ async fn client_lifecycle(format: ObjectFormat) -> TestResult {
     );
     server.stop();
     {
+        let before = log.load().await?;
+        let (url, mut reader) = serve_spin_with_policy(format, &namespace, true).await?;
+        let read_only_clone = root.path().join("read-only");
+        git(None, ["clone", "--quiet", &url, path(&read_only_clone)?])?;
+        git(Some(&read_only_clone), ["fetch", "--quiet"])?;
+        git(Some(&read_only_clone), ["fsck", "--strict"])?;
+        assert_eq!(
+            std::fs::read_to_string(read_only_clone.join("file"))?,
+            "winner"
+        );
+        let rejected = git_output(Some(&source), ["push", "--quiet", &url, "HEAD:blocked"])?;
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("403"));
+        assert!(git_stdout(None, ["ls-remote", &url, "refs/heads/blocked"])?.is_empty());
+        assert!(log.refresh(&before).await?.is_none());
+        reader.stop();
+    }
+    {
         let repository = object_log_git::Repository::open(&log, format).await?;
         let object_log::CheckpointStatus::Published(view) = repository.checkpoint().await? else {
             return Err("checkpoint did not publish".into());
@@ -334,6 +352,14 @@ impl Drop for RunningHost {
 }
 
 async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, RunningHost)> {
+    serve_spin_with_policy(format, prefix, false).await
+}
+
+async fn serve_spin_with_policy(
+    format: ObjectFormat,
+    prefix: &str,
+    read_only: bool,
+) -> TestResult<(String, RunningHost)> {
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port();
@@ -372,6 +398,8 @@ async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, R
         &format!("prefix={prefix}"),
         "--variable",
         &format!("object_format={format}"),
+        "--variable",
+        &format!("read_only={read_only}"),
     ]);
     let child = process.stdout(log.try_clone()?).stderr(log).spawn()?;
     let mut host = RunningHost(Some((child, String::new())));

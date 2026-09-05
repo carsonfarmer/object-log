@@ -1,0 +1,26 @@
+Captured initial tool output, before the HTTP fixture gained policy isolation
+and --back-to-back. The original rotating runtime log was subsequently
+overwritten; the following lines are preserved from the session's tool output.
+
+COMMAND: python3 crates/object-log-git-spin/tests/check_http.py
+
+Traceback (most recent call last):
+  File "/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin/tests/check_http.py", line 62, in <module>
+    assert request("/repo/info/refs?service=git-upload-pack", {"Git-Protocol": "version=2", "Content-Encoding": encoding})[0] == 200
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
+COMMAND: cat crates/object-log-git-spin/tests/http-runtime.log
+
+Logging component stdio to "/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin/.spin/logs/"
+
+Serving http://127.0.0.1:19174
+Available Routes:
+  git: http://127.0.0.1:19174/repo (wildcard)
+2026-09-05T03:48:36.462910Z ERROR spin_trigger_http::server: Error processing request: maximum concurrent limit of 1 for component instances reached
+
+A second immediate run exited 1 in 0.308677791 seconds; its overwritten log
+was not retained. Later unpaced runs passed; see the ten-run record in
+spin-operator-policy-2026-09-05.txt. No deterministic reproduction or repair is
+claimed. Compilation was active during the original observations, but causation
+is not established.
