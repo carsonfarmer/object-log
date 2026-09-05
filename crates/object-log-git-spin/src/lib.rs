@@ -44,7 +44,7 @@ async fn repository() -> anyhow::Result<Repository> {
                 .with_connect_timeout(Duration::from_secs(5))
                 .with_read_timeout(Duration::from_secs(30)),
         )
-        .with_http_connector(transport::Transport)
+        .with_http_connector(transport::Transport::default())
         .with_crypto_provider(Arc::new(transport::Crypto))
         // object_store retries require Tokio timers; the engine handles uncertain publication.
         .with_retry(RetryConfig {

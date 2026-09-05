@@ -35,7 +35,7 @@ mod entry {
                     .with_connect_timeout(std::time::Duration::from_secs(5))
                     .with_read_timeout(std::time::Duration::from_secs(30)),
             )
-            .with_http_connector(Transport)
+            .with_http_connector(Transport::default())
             .with_crypto_provider(Arc::new(Crypto))
             .with_retry(RetryConfig {
                 max_retries: 0,

@@ -12,12 +12,45 @@ use object_store::client::{
 use sha2::{Digest, Sha256};
 use spin_executor::CancelOnDropToken;
 use spin_sdk::http::conversions::TryIntoOutgoingRequest;
-use std::task::Poll;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::Poll,
+};
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Transport;
-#[derive(Debug, Clone, Copy)]
+const HTTP_CALLS: usize = 512;
+const HTTP_BYTES: usize = 96 * 1024 * 1024;
+
+// One budget per incoming Git handler, including bootstrap and engine retries.
+#[derive(Debug, Default)]
+struct Budget {
+    calls: AtomicUsize,
+    bytes: AtomicUsize,
+}
+impl Budget {
+    fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<(), HttpError> {
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(amount).filter(|&next| next <= limit)
+            })
+            .map(|_| ())
+            .map_err(|_| http_error(std::io::Error::other("Git HTTP storage quota exceeded")))
+    }
+    fn call(&self) -> Result<(), HttpError> {
+        Self::charge(&self.calls, 1, HTTP_CALLS)
+    }
+    fn transfer(&self, bytes: usize) -> Result<(), HttpError> {
+        Self::charge(&self.bytes, bytes, HTTP_BYTES)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Transport(Arc<Budget>);
+#[derive(Debug, Clone)]
 struct Service {
+    budget: Arc<Budget>,
     connect: Option<u64>,
     read: Option<u64>,
 }
@@ -39,6 +72,7 @@ impl HttpConnector for Transport {
                 .transpose()
         };
         Ok(HttpClient::new(Service {
+            budget: Arc::clone(&self.0),
             connect: duration(ClientConfigKey::ConnectTimeout)?,
             read: duration(ClientConfigKey::ReadTimeout)?,
         }))
@@ -52,6 +86,7 @@ fn http_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Htt
 #[async_trait]
 impl HttpService for Service {
     async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.budget.call()?;
         let (mut parts, mut body) = request.into_parts();
         // Preserve exact framing supplied by object_store's body. In particular,
         // S3 bulk deletion requires Content-Length rather than chunked encoding.
@@ -84,9 +119,11 @@ impl HttpService for Service {
         let pending =
             spin_sdk::wit::wasi::http0_2_0::outgoing_handler::handle(outgoing, Some(options))
                 .map_err(http_error)?;
+        let upload_budget = Arc::clone(&self.budget);
         let upload = async move {
             while let Some(frame) = body.frame().await {
                 if let Ok(data) = frame.map_err(http_error)?.into_data() {
+                    upload_budget.transfer(data.len())?;
                     write_chunk(&output, &data).await?;
                 }
             }
@@ -139,11 +176,12 @@ impl HttpService for Service {
             builder = builder.header(name, value);
         }
         // Keep the response resource alive until its streaming body is dropped.
+        let response_budget = Arc::clone(&self.budget);
         let stream = response.take_body_stream().map(move |chunk| {
             let _keep_response_alive = &response;
-            chunk
-                .map(|chunk| Frame::data(Bytes::from(chunk)))
-                .map_err(http_error)
+            let chunk = chunk.map_err(http_error)?;
+            response_budget.transfer(chunk.len())?;
+            Ok(Frame::data(Bytes::from(chunk)))
         });
         builder
             .body(HttpResponseBody::new(StreamBody::new(stream)))
@@ -237,10 +275,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quota_accepts_exact_limits_and_rejects_overflow_without_wrapping() -> Result<(), HttpError> {
+        let budget = Budget::default();
+        for _ in 0..HTTP_CALLS {
+            budget.call()?;
+        }
+        assert!(budget.call().is_err());
+        assert_eq!(budget.calls.load(Ordering::Relaxed), HTTP_CALLS);
+        budget.transfer(HTTP_BYTES - 1)?;
+        budget.transfer(1)?;
+        assert!(budget.transfer(1).is_err());
+        assert!(budget.transfer(usize::MAX).is_err());
+        assert_eq!(budget.bytes.load(Ordering::Relaxed), HTTP_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn connector_clones_share_bootstrap_and_command_quota() -> Result<(), HttpError> {
+        let bootstrap = Transport::default();
+        let command = bootstrap.clone();
+        bootstrap.0.transfer(HTTP_BYTES / 2)?;
+        command.0.transfer(HTTP_BYTES / 2)?;
+        assert!(bootstrap.0.transfer(1).is_err());
+        let mut threads = Vec::new();
+        for _ in 0..32 {
+            let retry = command.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..16 {
+                    retry.0.call()?;
+                }
+                Ok::<_, HttpError>(())
+            }));
+        }
+        for thread in threads {
+            thread
+                .join()
+                .map_err(|_| http_error(std::io::Error::other("quota test thread failed")))??;
+        }
+        assert!(bootstrap.0.call().is_err());
+        // A new handler receives a distinct budget.
+        Transport::default().0.call()?;
+        Ok(())
+    }
+
+    #[test]
+    fn exhausted_calls_fail_before_entering_wasi_http() -> Result<(), HttpError> {
+        let budget = Arc::new(Budget::default());
+        for _ in 0..HTTP_CALLS {
+            budget.call()?;
+        }
+        let service = Service {
+            budget,
+            connect: None,
+            read: None,
+        };
+        let request = HttpRequest::new(object_store::client::HttpRequestBody::empty());
+        // Native WASI imports trap, so this also proves the boundary precedes I/O.
+        assert!(futures::executor::block_on(service.call(request)).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn overall_deadline_cannot_be_silently_ignored() {
-        assert!(Transport.connect(&ClientOptions::new()).is_err());
+        assert!(Transport::default().connect(&ClientOptions::new()).is_err());
         assert!(
-            Transport
+            Transport::default()
                 .connect(&ClientOptions::new().with_timeout_disabled())
                 .is_ok()
         );
