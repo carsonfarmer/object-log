@@ -252,6 +252,9 @@ async fn client_lifecycle(format: ObjectFormat) -> TestResult {
         .status
         .success()
     );
+    let (other_url, mut other_server) = serve_spin(format, &namespace).await?;
+    let race_winner = concurrent_clients([&url, &other_url], &source, &stale)?;
+    other_server.stop()?;
     server.stop()?;
     {
         let before = log.load().await?;
@@ -290,9 +293,126 @@ async fn client_lifecycle(format: ObjectFormat) -> TestResult {
         git(None, ["clone", "--quiet", &url, path(&cold)?])?;
         git(Some(&cold), ["fsck", "--strict"])?;
         assert_eq!(std::fs::read_to_string(cold.join("file"))?, "winner");
+        assert_eq!(
+            git_stdout(Some(&cold), ["rev-parse", "refs/remotes/origin/race"])?,
+            race_winner
+        );
         cold_server.stop()?;
     }
     Ok(())
+}
+
+// Start real Git clients before waiting for any of them. The explicit shared-old-tip
+// lease and pre-push rendezvous ensure both clients discover the same old ref
+// before either submits. The server must reject one; the winner must survive
+// checkpoint, collection and restart.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one synchronized two-host Git read and conflicting-push fixture"
+)]
+fn concurrent_clients(urls: [&str; 2], source: &Path, stale: &Path) -> TestResult<String> {
+    use std::{os::unix::fs::PermissionsExt, process::Stdio};
+    let url = urls[0];
+    let expected = git_stdout(None, ["ls-remote", url])?;
+    let mut reads = Vec::new();
+    for reader_url in urls.into_iter().cycle().take(4) {
+        reads.push(
+            git_command(None, ["ls-remote", reader_url])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+        );
+    }
+    for child in reads {
+        let output = child.wait_with_output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
+    }
+    let old = git_stdout(Some(source), ["rev-parse", "HEAD^"])?;
+    assert_eq!(old, git_stdout(Some(stale), ["rev-parse", "HEAD^"])?);
+    let seed = format!("{}:refs/heads/race", old.trim());
+    git(Some(source), ["push", "--quiet", url, &seed])?;
+    let lease = format!("--force-with-lease=refs/heads/race:{}", old.trim());
+    let rendezvous = TempDir::new()?;
+    let hook = rendezvous.path().join("pre-push");
+    std::fs::write(
+        &hook,
+        r#"#!/bin/sh
+set -eu
+read local_ref local_oid remote_ref remote_oid
+test "$remote_oid" = "$OBJECT_LOG_RACE_OLD"
+: > "$OBJECT_LOG_RACE_READY"
+for attempt in $(seq 1 100); do
+    if test -f "$OBJECT_LOG_RACE_PEER"; then exit 0; fi
+    sleep 0.05
+done
+echo 'competing client did not reach pre-push' >&2
+exit 1
+"#,
+    )?;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
+    let hooks = format!("core.hooksPath={}", path(rendezvous.path())?);
+    let mut pushes = Vec::new();
+    for (index, (directory, writer_url)) in [source, stale].into_iter().zip(urls).enumerate() {
+        pushes.push(
+            git_command(
+                Some(directory),
+                [
+                    "-c",
+                    &hooks,
+                    "push",
+                    "--quiet",
+                    &lease,
+                    writer_url,
+                    "HEAD:refs/heads/race",
+                ],
+            )
+            .env("OBJECT_LOG_RACE_OLD", old.trim())
+            .env(
+                "OBJECT_LOG_RACE_READY",
+                rendezvous.path().join(format!("ready-{index}")),
+            )
+            .env(
+                "OBJECT_LOG_RACE_PEER",
+                rendezvous.path().join(format!("ready-{}", 1 - index)),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+        );
+    }
+    let mut winners = Vec::new();
+    for (directory, child) in [source, stale].into_iter().zip(pushes) {
+        let output = child.wait_with_output()?;
+        if output.status.success() {
+            winners.push(git_stdout(Some(directory), ["rev-parse", "HEAD"])?);
+        } else {
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains("remote rejected"), "{error}");
+            assert!(
+                !error.contains("error: 500") && !error.contains("error: 503"),
+                "{error}"
+            );
+        }
+    }
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one shared-old-tip update must publish"
+    );
+    let winner = winners.pop().ok_or("missing race winner")?;
+    // No delay or retry between completed responses and the next request.
+    for _ in 0..8 {
+        assert_eq!(
+            git_stdout(None, ["ls-remote", url, "refs/heads/race"])?,
+            format!("{}\trefs/heads/race", winner.trim())
+        );
+    }
+    Ok(winner)
 }
 
 #[tokio::test]
