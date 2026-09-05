@@ -958,3 +958,6 @@ async fn sustained_cold_check(
     reader.stop()?;
     Ok(())
 }
+
+#[path = "support/self_host.rs"]
+mod self_host;
