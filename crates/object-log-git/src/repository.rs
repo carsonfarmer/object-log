@@ -6,6 +6,8 @@ use std::{
 
 use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, View, materialize};
 
+#[cfg(test)]
+mod catalog_migration;
 mod default_branch;
 mod maintenance;
 mod receive_command;
@@ -646,6 +648,7 @@ mod tests {
     include!("repository/partial_tests.rs");
     include!("repository/default_branch_tests.rs");
     include!("repository/uri_tests.rs");
+    include!("repository/catalog_migration_tests.rs");
 
     struct Fixture {
         directory: TempDir,

@@ -6,14 +6,22 @@ use object_log::{Materializer, ObjectRef, StagedObject};
 use crate::pack::budget::{Operation, Reservation};
 
 use crate::RefUpdate;
-use crate::format::{Metadata, PackDescriptor, Record};
+use crate::format::{CatalogOperation, Metadata, PackDescriptor, Record};
 use crate::{Error, ObjectFormat, ObjectId, RefSnapshot};
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum CatalogState {
+    #[default]
+    Legacy,
+    Tree(Option<StagedObject>),
+}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct State {
     pub(crate) refs: RefSnapshot,
     pub(crate) default_branch: Option<Vec<u8>>,
     pub(crate) packs: BTreeMap<ObjectId, (u64, StagedObject)>,
+    pub(crate) catalog: CatalogState,
 }
 
 impl State {
@@ -85,12 +93,15 @@ impl Materializer for Machine<'_> {
             Some(Metadata::Snapshot(target)) => Some(target),
             _ => None,
         };
+        let catalog = catalog_state(&record, objects)?;
         let (refs, packs) = record.into_snapshot()?;
         let state = State {
             refs,
             default_branch,
             packs: zip(packs, objects),
+            catalog,
         };
+        validate_empty_tree(&state)?;
         if let Some((budget, retained)) = self.1.zip(retained) {
             budget.finish(retained)?;
         }
@@ -106,6 +117,34 @@ impl Materializer for Machine<'_> {
         let record = Record::decode(operation, self.0, objects.len())?;
         if record.checkpoint {
             return Err(Error::InvalidRecord("operation is a checkpoint"));
+        }
+        match (&state.catalog, record.catalog) {
+            (CatalogState::Tree(_), Some(CatalogOperation::Unchanged))
+                if record.packs.is_empty() => {}
+            (CatalogState::Tree(_), Some(CatalogOperation::Replace)) => {}
+            (CatalogState::Legacy, Some(CatalogOperation::Replace))
+            | (CatalogState::Tree(_), _) => {
+                return Err(Error::InvalidRecord("invalid catalog mode transition"));
+            }
+            _ => {}
+        }
+        let next_catalog = record
+            .tree_root_operation()
+            .then(|| catalog_state(&record, objects))
+            .transpose()?;
+        if matches!(
+            next_catalog.as_ref().unwrap_or(&state.catalog),
+            CatalogState::Tree(None)
+        ) {
+            let survivors = state.refs.keys().any(|name| {
+                !record
+                    .refs
+                    .iter()
+                    .any(|update| &update.name == name && update.target.is_none())
+            });
+            if survivors || record.refs.iter().any(|update| update.target.is_some()) {
+                return Err(Error::InvalidRecord("empty catalog has refs"));
+            }
         }
         if state.default_branch.is_some() && record.metadata.is_none() {
             return Err(Error::InvalidRecord("Git state version downgrade"));
@@ -150,12 +189,37 @@ impl Materializer for Machine<'_> {
         if let Some(Metadata::Update { target, .. }) = record.metadata {
             state.default_branch = Some(target);
         }
-        state.packs.extend(zip(record.packs, objects));
+        if let Some(catalog) = next_catalog {
+            state.catalog = catalog;
+            state.packs = BTreeMap::new();
+        } else {
+            state.packs.extend(zip(record.packs, objects));
+        }
         if let Some((budget, retained)) = self.1.zip(retained) {
             budget.finish(retained)?;
         }
         Ok(())
     }
+}
+
+fn catalog_state(record: &Record, objects: &[StagedObject]) -> Result<CatalogState, Error> {
+    if !record.tree_root_operation() {
+        return Ok(CatalogState::Legacy);
+    }
+    if objects
+        .first()
+        .is_some_and(|root| root.reference().kind() != object_log::ObjectKind::Node)
+    {
+        return Err(Error::InvalidRecord("catalog root is not a node"));
+    }
+    Ok(CatalogState::Tree(objects.first().cloned()))
+}
+
+fn validate_empty_tree(state: &State) -> Result<(), Error> {
+    if matches!(state.catalog, CatalogState::Tree(None)) && !state.refs.is_empty() {
+        return Err(Error::InvalidRecord("empty catalog has refs"));
+    }
+    Ok(())
 }
 
 // Fourfold entry/name storage bounds BTree node occupancy, decoded Vec
@@ -220,6 +284,20 @@ impl StateBudget {
         }
         if !state.refs.is_empty() && state.refs.len() + creates == deletes {
             removed = removed.checked_add(REF_LEAF).ok_or_else(memory_error)?;
+        }
+        if record.catalog == Some(CatalogOperation::Migrate) {
+            removed = removed
+                .checked_add(
+                    state
+                        .packs
+                        .len()
+                        .checked_mul(PACK_MEMORY)
+                        .ok_or_else(memory_error)?,
+                )
+                .and_then(|bytes| {
+                    bytes.checked_add(if state.packs.is_empty() { 0 } else { PACK_LEAF })
+                })
+                .ok_or_else(memory_error)?;
         }
         let mut held = self.0.lock().map_err(|_| memory_error())?;
         let next = held.1.checked_add(added).ok_or_else(memory_error)?;

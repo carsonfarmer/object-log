@@ -1,0 +1,13 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-catalog-migration/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.01s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7d5666786ede979b)
+
+running 5 tests
+test repository::tests::catalog_migration_conflict_does_not_rebase_and_empty_is_explicit ... ok
+test repository::tests::catalog_migration_pending_token_recovers_without_process_cache ... ok
+test repository::tests::catalog_migration_index_failure_does_not_publish ... ok
+test repository::tests::catalog_migration_rejects_invalid_transitions_before_mutation ... ok
+test repository::tests::catalog_migration_preserves_both_hashes_metadata_and_cold_checkpoint ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 152 filtered out; finished in 0.23s
+

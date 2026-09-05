@@ -21,8 +21,14 @@ pub(crate) struct PackDescriptor {
 pub(crate) enum CatalogOperation {
     #[n(0)]
     LegacySnapshot,
+    #[n(1)]
+    TreeSnapshot,
     #[n(2)]
     Unchanged,
+    #[n(3)]
+    Migrate,
+    #[n(4)]
+    Replace,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
@@ -87,7 +93,7 @@ pub(crate) struct Record {
     #[n(4)]
     pub(crate) packs: Vec<PackDescriptor>,
     #[n(5)]
-    catalog: Option<CatalogOperation>,
+    pub(crate) catalog: Option<CatalogOperation>,
     #[n(6)]
     pub(crate) metadata: Option<Metadata>,
 }
@@ -152,7 +158,11 @@ impl Record {
                 "version or object format does not match",
             ));
         }
-        if record.packs.len() != object_count {
+        if if record.tree_root_operation() {
+            object_count > 1
+        } else {
+            record.packs.len() != object_count
+        } {
             return Err(Error::InvalidRecord("packs and objects are not aligned"));
         }
         record.validate()?;
@@ -221,6 +231,30 @@ impl Record {
         Ok(record)
     }
 
+    pub(crate) fn tree_root_operation(&self) -> bool {
+        matches!(
+            self.catalog,
+            Some(
+                CatalogOperation::TreeSnapshot
+                    | CatalogOperation::Migrate
+                    | CatalogOperation::Replace
+            )
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_catalog(mut self, catalog: CatalogOperation) -> Result<Self, Error> {
+        self.catalog = Some(catalog);
+        self.validate()?;
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn migration(format: ObjectFormat, default_branch: Vec<u8>) -> Result<Self, Error> {
+        Self::metadata_update(format, default_branch.clone(), default_branch)?
+            .with_catalog(CatalogOperation::Migrate)
+    }
+
     fn validate(&self) -> Result<(), Error> {
         let valid_metadata = match (&self.metadata, self.checkpoint) {
             (None, _) => self.version == 1 && self.catalog.is_none(),
@@ -235,12 +269,26 @@ impl Record {
             }
             _ => false,
         };
-        let catalog = if self.checkpoint {
-            CatalogOperation::LegacySnapshot
-        } else {
-            CatalogOperation::Unchanged
+        let valid_catalog = match (self.catalog, self.checkpoint) {
+            (None, _) => self.version == 1,
+            (Some(CatalogOperation::LegacySnapshot | CatalogOperation::TreeSnapshot), true)
+            | (
+                Some(
+                    CatalogOperation::Unchanged
+                    | CatalogOperation::Migrate
+                    | CatalogOperation::Replace,
+                ),
+                false,
+            ) => self.version == VERSION,
+            _ => false,
         };
-        if !valid_metadata || self.version == VERSION && self.catalog != Some(catalog) {
+        if !valid_metadata
+            || !valid_catalog
+            || self.tree_root_operation() && !self.packs.is_empty()
+            || self.catalog == Some(CatalogOperation::Migrate)
+                && (!self.refs.is_empty()
+                    || matches!(&self.metadata, Some(Metadata::Update { expected, target }) if expected != target))
+        {
             return Err(Error::InvalidRecord(
                 "invalid metadata or catalog operation",
             ));
@@ -253,7 +301,8 @@ impl Record {
         if self.refs.len() > limit
             || (!self.checkpoint
                 && self.refs.is_empty()
-                && !matches!(self.metadata, Some(Metadata::Update { .. })))
+                && !matches!(self.metadata, Some(Metadata::Update { .. }))
+                && self.catalog != Some(CatalogOperation::Replace))
         {
             return Err(Error::InvalidRecord("invalid ref count"));
         }
