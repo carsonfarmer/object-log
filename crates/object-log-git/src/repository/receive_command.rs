@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 use bytes::Bytes;
 use gix_object::Kind;
 use object_log::{CommitStatus, Resolution, TransactionId};
@@ -43,6 +45,7 @@ impl Repository {
             })
             .collect::<Vec<_>>();
         wire_response(&self.operation, |out| {
+            out.write_all(b"001f# service=git-receive-pack\n0000")?;
             wire::write_receive_advertisement(out, self.format, &refs)
         })
     }
