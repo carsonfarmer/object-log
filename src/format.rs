@@ -566,8 +566,122 @@ pub(crate) fn encode_head(head: &Head) -> Result<Bytes, Error> {
     })
 }
 
+// Validate variable-sized fields without allocating. The derived wire decoder
+// otherwise creates byte vectors and array elements before their fixed widths
+// are checked, and accepts duplicate map fields while retaining earlier values.
+fn validate_head_shape(bytes: &[u8]) -> Result<(), Error> {
+    let mut decoder = minicbor::Decoder::new(bytes);
+    head_shape_map(
+        &mut decoder,
+        &[1, 2, 3, 4, 6, 7, 8, 9, 10, 12],
+        |decoder, field| {
+            match field {
+                1 | 3 | 4 | 10 => {
+                    shape_uint(decoder)?;
+                }
+                2 => {
+                    let value = decoder.str().map_err(shape_error)?;
+                    valid(value.len() <= crate::MAX_LOG_ID_LEN)?;
+                }
+                5 => head_shape_map(decoder, &[1, 2, 3], |decoder, field| match field {
+                    1 => shape_uint(decoder),
+                    2 => shape_bytes(decoder, DIGEST_LEN),
+                    3 => head_shape_map(decoder, &[1, 2, 3, 4], |decoder, field| match field {
+                        1 | 3 => shape_uint(decoder),
+                        2 => shape_bytes(decoder, DIGEST_LEN),
+                        4 => shape_bytes(decoder, UUID_LEN),
+                        _ => Err(invalid_canonical_object()),
+                    }),
+                    _ => Err(invalid_canonical_object()),
+                })?,
+                6 | 7 => {
+                    let count = decoder
+                        .array()
+                        .map_err(shape_error)?
+                        .ok_or_else(invalid_canonical_object)?;
+                    // Iteration never reserves from an untrusted declared length.
+                    for _ in 0..count {
+                        head_shape_map(decoder, &[1, 2, 3, 4, 5], |decoder, field| match field {
+                            1 | 4 => shape_uint(decoder),
+                            2 | 5 => shape_bytes(decoder, UUID_LEN),
+                            3 => shape_bytes(decoder, DIGEST_LEN),
+                            _ => Err(invalid_canonical_object()),
+                        })?;
+                    }
+                }
+                8 => shape_bytes(decoder, UUID_LEN)?,
+                9 => head_shape_map(
+                    decoder,
+                    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                    |decoder, field| {
+                        valid((1..=12).contains(&field))?;
+                        shape_uint(decoder)
+                    },
+                )?,
+                11 => head_shape_map(decoder, &[1, 2, 3], |decoder, field| match field {
+                    1 => shape_bytes(decoder, UUID_LEN),
+                    2 => shape_bytes(decoder, DIGEST_LEN),
+                    3 => shape_uint(decoder),
+                    _ => Err(invalid_canonical_object()),
+                })?,
+                12 => {
+                    let count = decoder
+                        .array()
+                        .map_err(shape_error)?
+                        .ok_or_else(invalid_canonical_object)?;
+                    for _ in 0..count {
+                        shape_bytes(decoder, UUID_LEN)?;
+                    }
+                }
+                _ => return Err(invalid_canonical_object()),
+            }
+            Ok(())
+        },
+    )?;
+    valid(decoder.position() == bytes.len())
+}
+
+fn head_shape_map(
+    decoder: &mut minicbor::Decoder<'_>,
+    required_fields: &[u8],
+    mut field: impl FnMut(&mut minicbor::Decoder<'_>, u8) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let count = decoder
+        .map()
+        .map_err(shape_error)?
+        .ok_or_else(invalid_canonical_object)?;
+    let mut previous = 0;
+    let mut fields = 0_u16;
+    for _ in 0..count {
+        let key = decoder.u8().map_err(shape_error)?;
+        valid(key > previous)?;
+        field(decoder, key)?;
+        fields |= 1_u16
+            .checked_shl(u32::from(key))
+            .ok_or_else(invalid_canonical_object)?;
+        previous = key;
+    }
+    valid(required_fields.iter().all(|key| fields & (1 << key) != 0))
+}
+
+fn shape_bytes(decoder: &mut minicbor::Decoder<'_>, len: usize) -> Result<(), Error> {
+    valid(decoder.bytes().map_err(shape_error)?.len() == len)
+}
+
+fn shape_uint(decoder: &mut minicbor::Decoder<'_>) -> Result<(), Error> {
+    decoder.u64().map_err(shape_error).map(|_| ())
+}
+
+// Matches Result::map_err without allocating an intermediate error.
+#[allow(clippy::needless_pass_by_value)]
+fn shape_error(error: minicbor::decode::Error) -> Error {
+    Error::InvalidFormat(error.to_string())
+}
+
 pub(crate) fn decode_head(bytes: &[u8]) -> Result<Head, Error> {
-    let wire: HeadWire = decode_envelope(bytes)?;
+    let payload = &bytes[decode_borrowed_envelope(bytes)?];
+    validate_head_shape(payload)?;
+    let wire: HeadWire = decode_exact(payload)?;
     require_version(wire.format_version)?;
     let head = Head {
         log_id: LogId::new(wire.log_id)?,
@@ -797,7 +911,7 @@ const fn cbor_head_len(value: u64) -> usize {
 }
 
 pub(crate) fn decode_node(bytes: &Bytes, options: Options) -> Result<Node, Error> {
-    let envelope = decode_node_envelope(bytes)?;
+    let envelope = decode_borrowed_envelope(bytes)?;
     let (payload_range, children) = decode_node_payload(&bytes[envelope.clone()], options)?;
     Ok(Node {
         payload: bytes
@@ -811,7 +925,9 @@ macro_rules! exact_value {
         let value = $decoder
             .$method()
             .map_err(|error| Error::InvalidFormat(error.to_string()))?;
-        $encoder.$method(value).map_err(|_| invalid_node())?;
+        $encoder
+            .$method(value)
+            .map_err(|_| invalid_canonical_object())?;
         value
     }};
 }
@@ -822,14 +938,16 @@ macro_rules! exact_len {
             .$method()
             .map_err(|error| Error::InvalidFormat(error.to_string()))?
         else {
-            return Err(invalid_node());
+            return Err(invalid_canonical_object());
         };
-        $encoder.$method(value).map_err(|_| invalid_node())?;
+        $encoder
+            .$method(value)
+            .map_err(|_| invalid_canonical_object())?;
         value
     }};
 }
 
-fn decode_node_envelope(bytes: &[u8]) -> Result<Range<usize>, Error> {
+fn decode_borrowed_envelope(bytes: &[u8]) -> Result<Range<usize>, Error> {
     let mut decoder = minicbor::Decoder::new(bytes);
     let mut encoder = minicbor::Encoder::new(MatchingWriter(bytes));
     valid(exact_len!(decoder, encoder, map) == 2)?;
@@ -915,11 +1033,11 @@ impl minicbor::encode::Write for MatchingWriter<'_> {
 }
 
 fn valid(condition: bool) -> Result<(), Error> {
-    condition.then_some(()).ok_or_else(invalid_node)
+    condition.then_some(()).ok_or_else(invalid_canonical_object)
 }
 
-fn invalid_node() -> Error {
-    Error::InvalidFormat("reference node is not canonical format version 1".into())
+fn invalid_canonical_object() -> Error {
+    Error::InvalidFormat("encoded object is not canonical format version 1".into())
 }
 
 pub(crate) fn encode_recovery_token(prepared: &PreparedCommit) -> Result<Bytes, Error> {
@@ -992,19 +1110,73 @@ pub(crate) fn decode_collection_plan(
     if bytes.len() > options.max_collection_plan_bytes {
         return Err(Error::LimitExceeded("encoded collection plan bytes"));
     }
-    let wire: CollectionPlanWire = decode_envelope(bytes)?;
-    require_version(wire.format_version)?;
+    let envelope = decode_borrowed_envelope(bytes)?;
+    decode_collection_payload(&bytes[envelope], options)
+}
+
+// Each canonical candidate occupies at least 76 bytes: its five-field map,
+// fixed-width physical identity, kind, and a one-byte candidate length.
+const MIN_COLLECTION_CANDIDATE_BYTES: usize = 76;
+
+fn decode_collection_payload(bytes: &[u8], options: Options) -> Result<CollectionPlan, Error> {
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let mut encoder = minicbor::Encoder::new(MatchingWriter(bytes));
+    valid(exact_len!(decoder, encoder, map) == 4)?;
+    valid(exact_value!(decoder, encoder, u8) == 1)?;
+    require_version(exact_value!(decoder, encoder, u32))?;
+    valid(exact_value!(decoder, encoder, u8) == 2)?;
+    let log_id = LogId::new(exact_value!(decoder, encoder, str))?;
+    valid(exact_value!(decoder, encoder, u8) == 3)?;
+    let collection_epoch = exact_value!(decoder, encoder, u64);
+    valid(exact_value!(decoder, encoder, u8) == 4)?;
+    let count = usize::try_from(exact_len!(decoder, encoder, array))
+        .map_err(|_| Error::LimitExceeded("collection plan objects"))?;
+    if count > options.max_collection_objects {
+        return Err(Error::LimitExceeded("collection plan objects"));
+    }
+    valid(count <= (bytes.len() - decoder.position()) / MIN_COLLECTION_CANDIDATE_BYTES)?;
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(count)
+        .map_err(|_| Error::LimitExceeded("collection plan objects"))?;
+    for _ in 0..count {
+        valid(exact_len!(decoder, encoder, map) == 5)?;
+        valid(exact_value!(decoder, encoder, u8) == 1)?;
+        let incarnation = uuid(exact_value!(decoder, encoder, bytes), "object incarnation")?;
+        valid(exact_value!(decoder, encoder, u8) == 2)?;
+        let kind = match exact_value!(decoder, encoder, u8) {
+            value if value == ImmutableKindWire::Commit as u8 => ImmutableKind::Commit,
+            value if value == ImmutableKindWire::Blob as u8 => ImmutableKind::Blob,
+            value if value == ImmutableKindWire::Node as u8 => ImmutableKind::Node,
+            value if value == ImmutableKindWire::Checkpoint as u8 => ImmutableKind::Checkpoint,
+            value if value == ImmutableKindWire::CollectionPlan as u8 => {
+                ImmutableKind::CollectionPlan
+            }
+            _ => return Err(Error::InvalidFormat("invalid immutable kind".into())),
+        };
+        valid(exact_value!(decoder, encoder, u8) == 3)?;
+        let storage_id = storage_id(exact_value!(decoder, encoder, bytes))?;
+        valid(exact_value!(decoder, encoder, u8) == 4)?;
+        let digest = digest(exact_value!(decoder, encoder, bytes))?;
+        valid(exact_value!(decoder, encoder, u8) == 5)?;
+        let bytes = exact_value!(decoder, encoder, u64);
+        candidates.push(CollectionCandidate {
+            key: ImmutableKey {
+                incarnation,
+                kind,
+                storage_id,
+                digest,
+            },
+            bytes,
+        });
+    }
+    valid(decoder.position() == bytes.len())?;
     let plan = CollectionPlan {
-        log_id: LogId::new(wire.log_id)?,
-        collection_epoch: wire.collection_epoch,
-        candidates: wire
-            .candidates
-            .into_iter()
-            .map(CollectionCandidate::try_from)
-            .collect::<Result<_, _>>()?,
+        log_id,
+        collection_epoch,
+        candidates,
     };
     plan.validate(options)?;
-    require_canonical(bytes, &encode_collection_plan(&plan, options)?)?;
     Ok(plan)
 }
 
@@ -1238,32 +1410,6 @@ impl From<&CollectionCandidate> for CollectionCandidateWire {
             digest: value.key.digest.as_bytes().to_vec(),
             bytes: value.bytes,
         }
-    }
-}
-
-impl TryFrom<CollectionCandidateWire> for CollectionCandidate {
-    type Error = Error;
-
-    fn try_from(value: CollectionCandidateWire) -> Result<Self, Self::Error> {
-        let kind = match value.kind {
-            value if value == ImmutableKindWire::Commit as u8 => ImmutableKind::Commit,
-            value if value == ImmutableKindWire::Blob as u8 => ImmutableKind::Blob,
-            value if value == ImmutableKindWire::Node as u8 => ImmutableKind::Node,
-            value if value == ImmutableKindWire::Checkpoint as u8 => ImmutableKind::Checkpoint,
-            value if value == ImmutableKindWire::CollectionPlan as u8 => {
-                ImmutableKind::CollectionPlan
-            }
-            _ => return Err(Error::InvalidFormat("invalid immutable kind".into())),
-        };
-        Ok(Self {
-            key: ImmutableKey {
-                incarnation: uuid(&value.incarnation, "object incarnation")?,
-                kind,
-                storage_id: storage_id(&value.storage_id)?,
-                digest: digest(&value.digest)?,
-            },
-            bytes: value.bytes,
-        })
     }
 }
 
@@ -1553,6 +1699,85 @@ mod tests {
     }
 
     #[test]
+    fn collection_plan_checks_array_claim_before_allocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for count in [100_001, u64::MAX] {
+            let mut writer = minicbor::Encoder::new(Vec::new());
+            writer
+                .map(4)?
+                .u8(1)?
+                .u32(FORMAT_VERSION)?
+                .u8(2)?
+                .str("bounded-plan")?
+                .u8(3)?
+                .u64(1)?
+                .u8(4)?
+                .array(count)?;
+            let payload = writer.into_writer();
+            let encoded = minicbor::to_vec(super::EnvelopeWire {
+                digest: Digest::of(&payload).as_bytes().to_vec(),
+                payload,
+            })?;
+            assert!(matches!(
+                decode_collection_plan(&encoded, Options::default()),
+                Err(Error::LimitExceeded("collection plan objects"))
+            ));
+            // Even an unlimited caller cannot cause allocation from a dishonest
+            // array count: the declared candidates do not fit in the payload.
+            assert!(matches!(
+                decode_collection_plan(
+                    &encoded,
+                    Options {
+                        max_collection_objects: usize::MAX,
+                        ..Options::default()
+                    }
+                ),
+                Err(Error::InvalidFormat(_) | Error::LimitExceeded(_))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn collection_plan_preserves_all_kinds_and_rejects_late_noncanonical_data()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let kinds = [
+            ImmutableKind::Commit,
+            ImmutableKind::Blob,
+            ImmutableKind::Node,
+            ImmutableKind::Checkpoint,
+            ImmutableKind::CollectionPlan,
+        ];
+        for kind in kinds {
+            for length in [0, 23, 24, 255, 256, u64::from(u32::MAX), u64::MAX] {
+                let mut entry = candidate(1, length);
+                entry.key.kind = kind;
+                let plan = CollectionPlan {
+                    log_id: log_id(),
+                    collection_epoch: 1,
+                    candidates: vec![entry],
+                };
+                let encoded = encode_collection_plan(&plan, Options::default())?;
+                assert_eq!(decode_collection_plan(&encoded, Options::default())?, plan);
+                let range = super::decode_borrowed_envelope(&encoded)?;
+                let mut payload = encoded[range].to_vec();
+                // The final candidate length is authenticated yet noncanonical:
+                // append another CBOR item after the valid plan.
+                payload.push(0);
+                let malformed = minicbor::to_vec(super::EnvelopeWire {
+                    digest: Digest::of(&payload).as_bytes().to_vec(),
+                    payload,
+                })?;
+                assert!(matches!(
+                    decode_collection_plan(&malformed, Options::default()),
+                    Err(Error::InvalidFormat(_))
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn collection_plan_rejects_malformed_physical_keys() {
         let mut malformed = CollectionPlanWire {
             format_version: FORMAT_VERSION,
@@ -1579,6 +1804,40 @@ mod tests {
             decode_collection_plan(&encoded, Options::default()),
             Err(Error::InvalidFormat(_))
         ));
+    }
+
+    #[test]
+    fn head_shape_rejects_short_identity_arrays_and_duplicate_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let head = Head::empty(log_id(), incarnation(), Options::default());
+        let encoded = encode_head(&head)?;
+        let payload = &encoded[super::decode_borrowed_envelope(&encoded)?];
+        let mut wire: HeadWire = super::decode_exact(payload)?;
+        wire.retention_ids = vec![minicbor::bytes::ByteVec::from(Vec::new()); 100_000];
+        let malformed = minicbor::to_vec(&wire)?;
+        assert!(matches!(
+            super::validate_head_shape(&malformed),
+            Err(Error::InvalidFormat(_))
+        ));
+        assert!(matches!(
+            decode_head(&encode_envelope(&wire)?),
+            Err(Error::InvalidFormat(_))
+        ));
+
+        let mut duplicate = payload.to_vec();
+        duplicate[0] += 1; // Empty head has ten fields, still a one-byte map length.
+        duplicate.extend_from_slice(&[12, 0x80]);
+        assert!(matches!(
+            super::validate_head_shape(&duplicate),
+            Err(Error::InvalidFormat(_))
+        ));
+        let mut enormous = minicbor::Encoder::new(Vec::new());
+        enormous.map(1)?.u8(6)?.array(u64::MAX)?;
+        assert!(matches!(
+            super::validate_head_shape(&enormous.into_writer()),
+            Err(Error::InvalidFormat(_))
+        ));
+        Ok(())
     }
 
     #[test]

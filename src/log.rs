@@ -682,6 +682,8 @@ impl Log {
             }
         }
 
+        drop(plan);
+
         let mut candidate = current.head().clone();
         candidate.active_plan = None;
         candidate.advance_generation()?;
@@ -3928,6 +3930,86 @@ mod tests {
         let backend =
             ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("log-tests")).await?;
         Log::open(&backend, &LogId::new(id)?, options).await
+    }
+
+    #[tokio::test]
+    async fn authenticated_late_invalid_collection_plan_never_deletes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, _) = staged_read_log("late-invalid-plan", Options::default()).await?;
+        let source = log.load().await?;
+        let orphan = log
+            .put_object(&source, Bytes::from_static(b"keep until validated"))
+            .await?;
+        let plan = CollectionPlan {
+            log_id: log.store.log_id().clone(),
+            collection_epoch: 1,
+            candidates: vec![CollectionCandidate {
+                key: log.object_immutable_key(orphan.reference()),
+                bytes: orphan.reference().len(),
+            }],
+        };
+        let encoded = format::encode_collection_plan(&plan, log.options)?;
+        let mut decoder = minicbor::Decoder::new(&encoded);
+        decoder.map()?;
+        decoder.u8()?;
+        let mut payload = decoder.bytes()?.to_vec();
+        payload.push(0); // The complete valid candidate is followed by an invalid trailing item.
+        let mut writer = minicbor::Encoder::new(Vec::new());
+        writer
+            .map(2)?
+            .u8(1)?
+            .bytes(&payload)?
+            .u8(2)?
+            .bytes(Digest::of(&payload).as_bytes())?;
+        let bytes = Bytes::from(writer.into_writer());
+        let reference = super::CollectionPlanRef {
+            storage_id: StorageId::new(),
+            digest: Digest::of(&bytes),
+            len: u64::try_from(bytes.len())?,
+        };
+        log.store
+            .create(
+                StoreKey::Immutable(Log::collection_plan_key(log.incarnation, &reference)),
+                bytes,
+            )
+            .await?;
+        let mut head = source.head().clone();
+        head.generation += 1;
+        head.collection_epoch = 1;
+        head.active_plan = Some(reference);
+        let UpdateResult::Updated { version } = log
+            .store
+            .update(
+                StoreKey::Head,
+                format::encode_head(&head)?,
+                source.storage_version().clone(),
+            )
+            .await?
+        else {
+            return Err("test head publication conflicted".into());
+        };
+        let fenced = Log::view(head, version);
+        faults.reset();
+        assert!(matches!(
+            log.resume_collection(&fenced).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        assert_eq!(
+            log.load().await?.storage_version(),
+            fenced.storage_version()
+        );
+        assert!(
+            log.store
+                .read(
+                    log.object_key(orphan.reference()),
+                    log.options.max_object_bytes
+                )
+                .await?
+                .is_some()
+        );
+        Ok(())
     }
 
     async fn install_plan(
