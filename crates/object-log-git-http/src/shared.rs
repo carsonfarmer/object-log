@@ -129,6 +129,16 @@ async fn receive(
         .map_err(Error::from)?;
     let mut input = request_reader(body, encoding);
     let input = collect(&mut input, MAX_BODY).await?;
+    // Git probes authentication with a flush-only POST before a chunked push.
+    // This is an HTTP transport probe, not an empty ref transaction.
+    if input.as_ref() == b"0000" {
+        return Ok(response(
+            Service::ReceivePack,
+            false,
+            StatusCode::OK,
+            Body::empty(),
+        ));
+    }
     // A client disconnect must not cancel an in-flight durable publication.
     let (status, output) = host
         .tasks

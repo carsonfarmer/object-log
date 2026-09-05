@@ -227,6 +227,54 @@ async fn shared_large_fetch_uses_gzip_negotiation_and_chunked_output() -> TestRe
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_git_large_push_probes_then_streams_both_hashes() -> TestResult {
+    let _serial = SHARED_TEST.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let root = TempDir::new()?;
+        let (url, _, server, _) =
+            repository_server(&root, "git-http-large-push", Some(format)).await?;
+        let source = root.path().join("source");
+        let hash = match format {
+            ObjectFormat::Sha1 => "--object-format=sha1",
+            ObjectFormat::Sha256 => "--object-format=sha256",
+        };
+        git(
+            None,
+            ["init", "--quiet", "-b", "main", hash, path(&source)?],
+        )?;
+        let mut seed = 0x1234_5678_u32;
+        let content: Vec<u8> = (0..8 * 1024 * 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed.to_le_bytes()[0]
+            })
+            .collect();
+        std::fs::write(source.join("large"), &content)?;
+        git(Some(&source), ["add", "large"])?;
+        git(Some(&source), ["commit", "--quiet", "-m", "large"])?;
+        let output = git_trace(Some(&source), ["push", "--quiet", &url, "main"])?;
+        let trace = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        assert!(output.status.success(), "{trace}");
+        assert!(
+            trace.matches("=> send header: post ").count() >= 2,
+            "{trace}"
+        );
+        assert!(
+            trace.contains("=> send header: transfer-encoding: chunked"),
+            "{trace}"
+        );
+        let clone = root.path().join("clone");
+        git(None, ["clone", "--quiet", &url, path(&clone)?])?;
+        git(Some(&clone), ["fsck", "--strict"])?;
+        assert_eq!(std::fs::read(clone.join("large"))?, content);
+        server.abort();
+    }
+    Ok(())
+}
+
 async fn large_fetch(shared: Option<ObjectFormat>) -> TestResult {
     let root = TempDir::new()?;
     let (url, scratch, server, _) = repository_server(&root, "git-http-large", shared).await?;

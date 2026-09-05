@@ -180,6 +180,10 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
             repository.upload_pack(body).await?,
         ));
     }
+    // Git probes authentication before sending a chunked receive request.
+    if body.as_ref() == b"0000" {
+        return Ok(Reply(200, RECEIVE_RESULT, Bytes::new()));
+    }
     match repository.prepare_receive(TransactionId::new(), body).await {
         Ok(prepared) => {
             let token = prepared.recovery_token().clone();
