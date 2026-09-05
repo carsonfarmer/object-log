@@ -32,7 +32,13 @@ Check hosted CI after each push. Verification belongs in tests and commits.
   update, migration, compaction/checkpoint/GC and final cold verification. Private
   encoded-chunk sharing and verified small-delta reuse reduce repeated reads
   and decoding without raising operation quotas or changing the core API.
-- Continue the GitHub queue, especially #19, #21, #23, #25 and #26.
+- Advertised-tip fetches can skip unrelated histories and blob bodies. Known
+  external haves, non-tip wants and existing shallow cuts/exclusions retain full
+  reachability checks. Continue #19 for the remaining graph/maintenance envelope
+  and #25 API simplicity; capacity issue #26 is complete.
+- The current 14-case comparison passes functional/resource
+  checks, but SHA-1 8 MiB push remains 1.361× native Git at p50 after 30 pairs;
+  #23 needs phase-level profiling. Ordinary Spin reliability remains in #21.
 
 Use exclusive implementation worktrees; root alone integrates main. Keep useful
 regression tests, sparse authenticated reads, cumulative retry counters, recovery,

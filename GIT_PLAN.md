@@ -37,11 +37,12 @@ and Spin adapters. Independent reviews are recorded. The owner subsequently
 authorized removal of the previous native implementation. That implementation
 and the entire native HTTP crate are removed. Useful client coverage runs
 through actual Spin; publication/recovery faults run in the portable library.
-Installed Git remains the
-benchmark reference. The earlier WASIp2 SHA-1 8 MiB push measurement used the
-buffered receive path. The benchmark now exercises streaming receive; repeat
-the paired comparison before attributing that earlier ratio to current serving
-behavior. Performance review remains open in issue #23.
+Installed Git remains the benchmark reference. At `e9e5bdc`, all 14 paired
+benchmark cases pass object, pack-size, call and transfer checks. Streaming
+SHA-1 8 MiB push remains above the timing-review threshold after 30 pairs:
+1.361× Git at p50 and 1.270× at p95. This compares guest/InMemory command work
+with native Git subprocess/filesystem work, not HTTP or S3 latency. Issue #23
+tracks phase-level investigation; the other 13 cases stayed below the threshold.
 The historical foundation counts below describe their stated revision, not current size.
 
 Revision `b322985c616d948e7365739e3286baeaeb460acc` completes tasks 1 and 2 with

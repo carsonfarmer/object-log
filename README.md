@@ -130,8 +130,11 @@ references per object. Repositories using the original default profile keep thei
 options and smaller pack geometry; opening them does not migrate those options.
 
 The replacement has bounded iterative commit, tree, and tag traversal with
-command-local catalogs, so ref discovery avoids index loads. Known blob leaves
-are deferred until selected content needs verification. Exact want/have
+command-local catalogs. Ref listing without peeling avoids index loads. Common
+advertised-tip fetches skip unrelated histories and blob bodies. Non-tip wants,
+stored haves outside the wanted closure, and some shallow requests retain full
+reachability checks; the graph bound still applies. Known blob leaves are
+deferred until selected content needs verification. Exact want/have
 selection, protocol-v2 upload commands, and classic receive preparation and
 publication now use that same repository. Thin inputs become self-contained
 packs; ref updates validate connectivity and exact old IDs before one atomic
@@ -145,15 +148,16 @@ Spin and `MinIO`.
 Partial clones support `blob:none` and `blob:limit` filters, with later retrieval
 of reachable objects through ordinary Git promisor requests. The
 `make git-spin-partial-test` gate checks both hashes, lazy checkout, shallow
-interaction, and cold retrieval after checkpoint and collection. Packfile URIs
-remain follow-on work. Spin defaults to authenticated access; see its
+interaction, and cold retrieval after checkpoint and collection. Optional
+packfile URI downloads support byte ranges and resume; see the
+[Spin configuration](crates/object-log-git-spin/README.md#optional-packfile-uri-downloads).
+Spin defaults to authenticated access; see its
 [credential-helper setup](crates/object-log-git-spin/README.md).
-The [Spin performance record](docs/evidence/git-spin-performance-2026-09-04.md)
-retains one latency review finding; removing the old implementation does not
-change that measurement. See the
-[receive evidence](docs/evidence/git-receive-2026-09-04.md).
-The [Task 3 evidence](docs/evidence/git-repository-2026-09-04.md) records the
-recovery fixes, unchanged small-limit tests, independent reviews, and limits.
+The current [performance review](https://github.com/carsonfarmer/object-log/issues/23)
+retains one finding: streaming SHA-1 8 MiB push measured 1.361× native Git at
+p50 after 30 pairs. Object, pack-size, call and transfer checks pass; the other
+13 cases stay below the timing-review threshold. This guest/InMemory comparison
+does not measure remote object-store latency.
 An 88 MiB engine pool admits one operation per native process or WASI instance.
 Git attaches an operation-local request guard to the log and retains it across
 retries. Existing caller guards run first; denied admission never removes caller
