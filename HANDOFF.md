@@ -264,3 +264,8 @@ and authenticated packfile URIs. Preserve partial's `excluded_ref()` when mergin
 the default HEAD target. Test-only catalog and streaming foundations are not
 completed product features. Main integration remains root-only; no upstream
 communications or shared Docker restart without owner approval.
+
+Batch pushed as `9162b60`. Its first hosted CI run 33948885571 caught a README
+`doc_markdown` lint added after local verification. The immediate documentation
+fix passes a fresh complete `make check` (395/21), recorded with the batch's
+raw evidence. Require final README-inclusive gates before future acceptance.

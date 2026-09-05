@@ -228,7 +228,7 @@ make git-spin-minio-test
 ```
 
 The `MinIO` targets default to a pinned container on a loopback port. To use an
-installed native MinIO executable instead, set `OBJECT_LOG_MINIO_BINARY` to its
+installed native `MinIO` executable instead, set `OBJECT_LOG_MINIO_BINARY` to its
 absolute path. Native mode requires Python, `lsof`, and `shasum`; it reports the
 binary version and SHA-256, verifies ownership of the loopback listener, and
 removes its temporary data after stopping the process. Both modes create an empty
