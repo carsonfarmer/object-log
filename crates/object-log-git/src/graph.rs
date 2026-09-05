@@ -304,7 +304,7 @@ mod tests {
         (Kind::Commit, data.into_bytes())
     }
 
-    async fn tree(entries: &[(&str, &str, ObjectId)]) -> Raw {
+    fn tree(entries: &[(&str, &str, ObjectId)]) -> Raw {
         let mut data = Vec::new();
         for (mode, name, id) in entries {
             data.extend_from_slice(format!("{mode} {name}\0").as_bytes());
