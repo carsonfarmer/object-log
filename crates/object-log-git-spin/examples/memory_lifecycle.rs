@@ -55,10 +55,20 @@ fn decode(input: &Bytes) -> anyhow::Result<(ObjectFormat, [Bytes; 6])> {
     anyhow::ensure!(cursor == input.len(), "fixture trailing data");
     Ok((format, frames))
 }
+// Fixture input stays outside engine accounting. Copy one frame on demand so
+// the serving receive API never gets a slice retaining the full test envelope.
+fn receive_frames(input: &Bytes) -> impl futures::Stream<Item = Result<Bytes, Error>> + Unpin + '_ {
+    futures::stream::iter(
+        input
+            .chunks(64 * 1024)
+            .map(|chunk| Ok(Bytes::copy_from_slice(chunk))),
+    )
+}
+
 async fn publish(log: &Log, format: ObjectFormat, input: Bytes) -> anyhow::Result<Bytes> {
     let prepared = Repository::open(log, format)
         .await?
-        .prepare_receive(TransactionId::new(), input)
+        .prepare_receive_stream(TransactionId::new(), receive_frames(&input))
         .await?;
     let (resolution, response) = prepared.publish_receive().await?;
     anyhow::ensure!(
@@ -164,7 +174,7 @@ async fn lifecycle(input: Bytes, timings: bool) -> anyhow::Result<Vec<u8>> {
     let before = Repository::open(&log, format).await?.refs().clone();
     match Repository::open(&log, format)
         .await?
-        .prepare_receive(TransactionId::new(), rejected)
+        .prepare_receive_stream(TransactionId::new(), receive_frames(&rejected))
         .await
     {
         Err(Error::ReceiveRejected { response, .. }) => frame(&mut output, &response)?,
@@ -293,8 +303,26 @@ mod entry {
 
 #[cfg(test)]
 mod tests {
-    use super::decode;
+    use super::{decode, receive_frames};
     use bytes::Bytes;
+    use futures::StreamExt;
+
+    #[test]
+    fn receive_frames_do_not_retain_the_fixture_envelope() -> anyhow::Result<()> {
+        let input = Bytes::from(vec![7; 2 * 64 * 1024 + 1]);
+        let backing = input.as_ptr() as usize..input.as_ptr() as usize + input.len();
+        let mut frames = receive_frames(&input);
+        let mut total = 0;
+        while let Some(frame) = futures::executor::block_on(frames.next()) {
+            let frame = frame?;
+            assert!(frame.len() <= 64 * 1024);
+            assert!(!backing.contains(&(frame.as_ptr() as usize)));
+            assert!(frame.iter().all(|byte| *byte == 7));
+            total += frame.len();
+        }
+        assert_eq!(total, input.len());
+        Ok(())
+    }
 
     #[test]
     fn envelope_rejects_truncation_trailing_data_and_large_lengths() -> anyhow::Result<()> {

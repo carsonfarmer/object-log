@@ -106,6 +106,8 @@ def run():
                 "machine": platform.platform(), "processor": platform.processor(),
                 "driver_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
                 "runtime_configuration": "Spin defaults", "warmups": 1, "initial_pairs": 10, "escalated_pairs": 30,
+                "receive_path": "prepare_receive_stream; independent 64 KiB input frames copied on demand inside the guest command timer; fixture envelope remains outside engine accounting",
+                "fetch_path": "buffered upload_pack response retained for the existing fixture envelope; not the serving HTTP response stream",
                 "candidate_scope": "Guest common command: repository open, log reads/writes, graph/pack/ref work; InMemory provider. Whole fresh lifecycle HTTP and runtime startup recorded separately. No transport or JIT in guest timer.",
                 "oracle_scope": "Native Git subprocess pack-objects fetch or strict index-pack plus update-ref push; fixture creation, seed import and verification excluded. Filesystem provider; no log work.",
                 "io_scope": "Each guest command timer includes repository open and measured InMemory GET/PUT including body consumption; calls and combined payload bytes exclude bootstrap and verification. Serial depth is longest nonoverlapping interval chain, not a causal DAG or remote latency.",
