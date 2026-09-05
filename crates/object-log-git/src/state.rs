@@ -103,6 +103,11 @@ impl Materializer for Machine<'_> {
                 state.refs.remove(&update.name);
             }
         }
+        // Removing the final key retains an allocated BTree root. Drop it
+        // before releasing the empty map's leaf allowance.
+        if state.refs.is_empty() {
+            state.refs = BTreeMap::new();
+        }
         state.packs.extend(zip(record.packs, objects));
         if let Some((budget, retained)) = self.1.zip(retained) {
             budget.finish(retained)?;
@@ -257,9 +262,15 @@ mod tests {
             assert_eq!(operation.live_bytes(), needed);
         }
         let delete = machine.transaction(vec![RefUpdate::new(name, Some(id(1)), None)?], vec![])?;
-        machine.apply(&mut state, &delete, &[])?;
-        assert!(state.refs.is_empty());
-        assert_eq!(operation.live_bytes(), 0);
+        for round in 0..4 {
+            if round != 0 {
+                machine.apply(&mut state, &create, &[])?;
+                assert_eq!(operation.live_bytes(), needed);
+            }
+            machine.apply(&mut state, &delete, &[])?;
+            assert!(state.refs.is_empty());
+            assert_eq!(operation.live_bytes(), 0);
+        }
         Ok(())
     }
 

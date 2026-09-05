@@ -57,12 +57,14 @@ valid small Git transactions sharing one pack. This is recovery evidence, not
 a cold shared-engine fetch imports into a fresh filesystem Git receiver with
 strict index-pack/connectivity/fsck checks, and a subsequent receive succeeds.
 
-The checkpoint phase charges 2,054 calls and performs 2,051 physical requests:
-one head plus 1,024 commits read twice, then checkpoint/head PUTs. The three
-extra charged calls cover possible classification/conflict reads. Measured
+The checkpoint phase charges 2,069 calls and performs 2,051 physical requests:
+one head plus 1,024 commits read twice, then checkpoint/head PUTs. Eighteen
+extra charged calls cover three possible classification/conflict reads and
+15 extra immutable checkpoint identity attempts. Measured
 payloads were 479,216 downloaded / 81,191 uploaded bytes for SHA-1 and 505,869 /
-81,232 for SHA-256. Upload budgeting conservatively reserves the configured
-checkpoint/head maxima rather than only these small fixture payloads.
+81,232 for SHA-256. Upload budgeting reserves all 16 possible immutable checkpoint collision
+attempts using a core-owned encoded envelope bound. Head publication still
+reserves its configured maximum.
 
 Fault tests cover before/after head-CAS uncertainty, a concurrent ref winner,
 a late invalid 1,024th Git record with zero PUTs, preservation of unreachable
@@ -84,3 +86,21 @@ Focused maintenance tests, the Git suite and three GC tests, strict native
 all-target/all-feature Clippy, locked WASIp2 check, formatting, and the unchanged
 filesystem conditional-write rejection test pass. Raw logs are in the adjacent
 evidence directory. Local MinIO and actual Spin/operator acceptance are next.
+
+
+Follow-up independent review fixed two accounting edges. Deleting the final ref
+now drops the empty BTreeMap root before releasing its leaf reservation. The
+core exposes an allocation-free checkpoint PUT bound that reuses the allocator's
+16-attempt limit. Git reserves all those calls and uploaded bytes before
+publication. Tests cover all 16 physical collision attempts, encoded CBOR width
+boundaries, and repeated last-ref deletion/recreation. The 1,024-entry fixture
+now charges 2,069 calls; physical requests and payloads are unchanged.
+
+An existing, separate staging accounting gap remains: `durable::stage` charges
+one upload per blob/root, while `put_object` and `put_node` may retry fresh-ID
+collisions up to 16 times. Multiplying every large staged upload by 16 would
+reject ordinary 8 MiB pushes under the 96 MiB transfer limit. Root has been
+notified to track actual-attempt accounting as a separate design task. A
+regression should inject 15 AlreadyExists results followed by success and check
+cumulative calls/bytes and fail-closed quotas across an expired-view retry.
+This follow-up does not claim all core I/O is globally metered.

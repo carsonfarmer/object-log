@@ -48,7 +48,7 @@ async fn conservative_checkpoint_recovers_1024_transaction_tail_for_both_hashes(
         assert!(view.tail().is_empty());
         // Head + all 1,024 commits twice + possible classification reads +
         // checkpoint/head publication and possible conflicting-head refresh.
-        assert_eq!(operation.calls(), 2054);
+        assert_eq!(operation.calls(), 2069);
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 2049);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 2);
         assert_eq!(operation.live_bytes(), 0);

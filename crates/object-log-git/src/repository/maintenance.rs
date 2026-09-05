@@ -95,8 +95,14 @@ impl Repository {
         // publish_checkpoint validates the tail again before its first PUT.
         let _tail_memory = preflight_view(&self.operation, &self.log, &self.view)?;
         let _plan_memory = durable::publication_plan(&self.operation, &self.view)?;
-        self.operation.io(options.max_checkpoint_bytes)?;
-        self.operation.work(options.max_checkpoint_bytes)?;
+        let (attempts, uploaded) = self
+            .log
+            .checkpoint_write_bound(snapshot.len(), objects.len())?;
+        // All fresh-identity attempts resend the same immutable envelope.
+        for _ in 0..attempts {
+            self.operation.io(uploaded / attempts)?;
+        }
+        self.operation.work(uploaded)?;
         for _ in 0..2 {
             self.operation.io(options.max_head_bytes)?;
             self.operation.work(options.max_head_bytes)?;

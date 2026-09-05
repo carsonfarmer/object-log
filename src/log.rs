@@ -18,6 +18,7 @@ use crate::{
 };
 
 const MAX_CONCURRENT_READS: usize = 32;
+const MAX_FRESH_OBJECT_ATTEMPTS: usize = 16;
 
 /// Limits applied by one log writer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -726,6 +727,34 @@ impl Log {
         child_lengths: impl IntoIterator<Item = u64>,
     ) -> Result<usize, Error> {
         format::node_size(payload_bytes, child_lengths, self.options).map(|size| size.encoded)
+    }
+
+    /// Bounds immutable checkpoint PUT calls and their total uploaded bytes.
+    ///
+    /// Includes every fresh-identity collision retry. Performs no allocation or
+    /// I/O. The byte bound includes the core envelope and is capped by the
+    /// configured checkpoint limit: publication rejects larger encodings before
+    /// writing. This excludes tail validation, collection-plan reads, and head
+    /// publication/classification, which callers must account for separately.
+    /// This does not validate snapshot contents or staged-object provenance.
+    ///
+    /// # Errors
+    /// Returns a limit error for too many references or arithmetic overflow.
+    pub fn checkpoint_write_bound(
+        &self,
+        snapshot_bytes: usize,
+        object_count: usize,
+    ) -> Result<(usize, usize), Error> {
+        let bytes = format::checkpoint_size_bound(
+            self.store.log_id().as_str().len(),
+            snapshot_bytes,
+            object_count,
+            self.options,
+        )?;
+        let total = bytes
+            .checked_mul(MAX_FRESH_OBJECT_ATTEMPTS)
+            .ok_or(Error::LimitExceeded("checkpoint upload bytes"))?;
+        Ok((MAX_FRESH_OBJECT_ATTEMPTS, total))
     }
 
     /// Stores one immutable reference node after its direct children exist.
@@ -2161,12 +2190,10 @@ impl Log {
         blocked: Option<&[CollectionCandidate]>,
         mut new_storage_id: impl FnMut() -> StorageId,
     ) -> Result<ObjectRef, Error> {
-        const MAX_ATTEMPTS: usize = 16;
-
         let len =
             u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("object byte length"))?;
         let digest = Digest::of(&bytes);
-        for _ in 0..MAX_ATTEMPTS {
+        for _ in 0..MAX_FRESH_OBJECT_ATTEMPTS {
             let object = ObjectRef {
                 kind,
                 storage_id: new_storage_id(),
@@ -2475,6 +2502,49 @@ mod tests {
             .put_node(&view, Bytes::from_static(b"abc"), vec![first, second])
             .await?;
         assert_eq!(node.reference().len(), u64::try_from(predicted)?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_write_bound_includes_all_collision_attempts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend = ValidatedBackend::new(
+            Arc::new(faults.clone()),
+            Path::from("checkpoint-collisions"),
+        )
+        .await?;
+        let log = Log::open(
+            &backend,
+            &LogId::new("checkpoint-collisions")?,
+            Options::default(),
+        )
+        .await?;
+        let bytes = Bytes::from_static(b"checkpoint bytes");
+        let collision = StorageId::from_uuid(uuid::Uuid::from_u128(7));
+        let occupied = ObjectRef {
+            kind: ObjectKind::Checkpoint,
+            storage_id: collision,
+            digest: Digest::of(&bytes),
+            len: u64::try_from(bytes.len())?,
+        };
+        log.store
+            .create(log.object_key(&occupied), bytes.clone())
+            .await?;
+        faults.reset();
+        let (calls, uploaded) = log.checkpoint_write_bound(bytes.len(), 0)?;
+        let result = log
+            .create_fresh_object_with(ObjectKind::Checkpoint, bytes, None, || collision)
+            .await;
+        assert!(matches!(
+            result,
+            Err(Error::LimitExceeded("fresh physical storage identity"))
+        ));
+        assert_eq!(
+            faults.metrics().operation(Operation::Put).requests,
+            u64::try_from(calls)?
+        );
+        assert!(faults.metrics().uploaded_bytes() <= u64::try_from(uploaded)?);
         Ok(())
     }
 

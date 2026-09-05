@@ -643,6 +643,28 @@ pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Bytes, Error>
     })
 }
 
+// A reference occupies at most 66 bytes (map, keys, kind, digest, UUID,
+// and a maximum-width u64 length). The remaining maps, keys, fixed identity
+// fields, and maximum-width string/byte/array headers, including the outer
+// digest envelope, fit within 160 bytes.
+pub(crate) fn checkpoint_size_bound(
+    log_id_bytes: usize,
+    snapshot_bytes: usize,
+    object_count: usize,
+    options: Options,
+) -> Result<usize, Error> {
+    if object_count > options.max_object_refs {
+        return Err(Error::LimitExceeded("object references"));
+    }
+    object_count
+        .checked_mul(66)
+        .and_then(|bytes| bytes.checked_add(160))
+        .and_then(|bytes| bytes.checked_add(log_id_bytes))
+        .and_then(|bytes| bytes.checked_add(snapshot_bytes))
+        .map(|bytes| bytes.min(options.max_checkpoint_bytes))
+        .ok_or(Error::LimitExceeded("checkpoint bytes"))
+}
+
 pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, Error> {
     let wire: CheckpointWire = decode_envelope(bytes)?;
     require_version(wire.format_version)?;
@@ -1652,6 +1674,41 @@ mod tests {
         let decoded =
             decode_commit(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(decoded, commit);
+    }
+
+    #[test]
+    fn checkpoint_write_size_bound_covers_encoded_widths() -> Result<(), Error> {
+        for size in [0, 23, 24, 255, 256, 65_535, 65_536] {
+            for count in [0, 1, 23, 24] {
+                let checkpoint = Checkpoint {
+                    log_id: log_id(),
+                    incarnation: incarnation(),
+                    through_sequence: u64::MAX,
+                    through_commit: Digest::of(b"commit"),
+                    snapshot: Bytes::from(vec![0; size]),
+                    objects: vec![
+                        ObjectRef {
+                            kind: ObjectKind::Node,
+                            storage_id: storage_id(),
+                            digest: Digest::of(b"node"),
+                            len: u64::MAX,
+                        };
+                        count
+                    ],
+                };
+                let encoded = encode_checkpoint(&checkpoint)?;
+                let bound = super::checkpoint_size_bound(
+                    checkpoint.log_id.as_str().len(),
+                    size,
+                    count,
+                    Options::default(),
+                )?;
+                assert!(encoded.len() <= bound, "size={size}, count={count}");
+            }
+        }
+        assert!(super::checkpoint_size_bound(1, usize::MAX, 0, Options::default()).is_err());
+        assert!(super::checkpoint_size_bound(1, 1, usize::MAX, Options::default()).is_err());
+        Ok(())
     }
 
     #[test]
