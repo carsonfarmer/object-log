@@ -6,26 +6,26 @@ head as the only mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 
 ## Current work
 
-The current batch includes persisted default branches, cumulative request guards,
-bounded head/collection decoding, installed-collection resumption, and plain Spin
-launches. One safe storage GET/HEAD retry handles typed interrupted responses;
-writes are never retried by the transport. The previous native Git engine and
-HTTP host are removed; installed Git remains the independent oracle.
+The Git proof now supports explicit authenticated catalog migration, sparse
+selected-pack lookup, persisted default branches, cumulative request guards,
+bounded head/collection decoding, and installed-collection resumption. Native
+operator and WASI transports share one safe-read retry policy; native reqwest
+retains its existing protocol-level retry behavior. Writes retain pending-result
+semantics. The native Git engine and HTTP host are removed; installed Git remains
+the independent oracle.
 
-Validation: 442 workspace tests pass, 21 opt-in ignored; strict native/WASIp2,
-all seven separately run local provider targets, actual WASI lifecycle fixtures,
-SQLite recovery and large memory/MinIO GC pass. Tests use ordinary Spin defaults
-and isolated native MinIO. Hosted CI is checked after each push.
+Use workspace/native/WASIp2 checks and ordinary Spin with isolated local MinIO.
+Check hosted CI after each push. Verification belongs in tests and commits.
 
 ## Next implementation
 
 - Authenticated packfile URIs are implemented, including range resume and cold
   recovery. Preserve this path while adding catalog and streaming consumers.
-- Integrate the actual catalog Reader/publication consumers after the final
-  replica-content checkpoint check. Capacity and catalog workers own this work.
+- Integrate reviewed live-pack compaction and its operator command, then prove
+  repeated pushes, compaction, checkpoint/GC, and cold Git recovery.
 - Finish bounded streaming receive AND fetch/clone for the capacity target:
   at least 50 MiB files and 1 GiB pushes. Do not accept an unusable push-only cap.
-- Continue the GitHub queue, especially #19, #23, #24, #25, #26 and #32.
+- Continue the GitHub queue, especially #19, #23, #25, #26 and #32.
 
 Use exclusive implementation worktrees; root alone integrates main. Keep useful
 regression tests, sparse authenticated reads, cumulative retry counters, recovery,
