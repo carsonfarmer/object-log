@@ -5,9 +5,9 @@ use gix_packetline::{Channel, PacketLineRef, blocking_io::encode, decode};
 use crate::pack::{MAX_FETCH_PACK_BYTES, MAX_RECEIVE_PACK_BYTES};
 use crate::{ObjectFormat, ObjectId, RefUpdate};
 
-const MAX_UPLOAD_BYTES: usize = 9 * 1024 * 1024;
+pub(crate) const MAX_UPLOAD_BYTES: usize = 9 * 1024 * 1024;
 const MAX_RECEIVE_BYTES: usize = 1024 * 1024;
-const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
+pub(crate) const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
 const MAX_COMMANDS: usize = 1_024;
 const MAX_ITEMS: usize = 32_768;
 const MAX_PACKET_PAYLOAD: usize = 65_515;
@@ -71,11 +71,15 @@ pub(crate) fn write_upload_advertisement(
     output: &mut impl Write,
     format: ObjectFormat,
 ) -> Result<(), Error> {
-    output.write_all(match format {
+    output.write_all(upload_advertisement(format))?;
+    Ok(())
+}
+
+pub(crate) const fn upload_advertisement(format: ObjectFormat) -> &'static [u8] {
+    match format {
         ObjectFormat::Sha1 => UPLOAD_SHA1,
         ObjectFormat::Sha256 => UPLOAD_SHA256,
-    })?;
-    Ok(())
+    }
 }
 
 pub(crate) fn parse_upload(input: &[u8], format: ObjectFormat) -> Result<UploadRequest<'_>, Error> {

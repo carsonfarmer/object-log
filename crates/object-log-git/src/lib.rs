@@ -192,6 +192,12 @@ pub type RefSnapshot = BTreeMap<Vec<u8>, ObjectId>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Another common Git operation still owns the process allocation pool.
+    #[error("another Git operation is active")]
+    Busy,
+    /// An upload or receive command is malformed or exceeds protocol limits.
+    #[error("invalid Git protocol: {0}")]
+    InvalidProtocol(&'static str),
     /// An object ID is invalid.
     #[error("invalid Git object ID")]
     InvalidObjectId,
@@ -241,6 +247,19 @@ pub enum Error {
     #[cfg(feature = "native-oracle")]
     #[error("local Git task stopped")]
     BlockingTask,
+}
+
+impl From<wire::Error> for Error {
+    fn from(error: wire::Error) -> Self {
+        match error {
+            wire::Error::Protocol(message) | wire::Error::Limit(message) => {
+                Self::InvalidProtocol(message)
+            }
+            wire::Error::Io(error) => error
+                .downcast::<Self>()
+                .unwrap_or_else(|error| Self::PackStorage(error.to_string())),
+        }
+    }
 }
 
 #[cfg(feature = "native-oracle")]
