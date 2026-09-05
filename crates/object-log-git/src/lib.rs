@@ -14,6 +14,8 @@ mod durable;
 mod format;
 #[cfg(feature = "native-oracle")]
 mod git;
+#[allow(dead_code, reason = "the next fetch tranche consumes graph traversal")]
+mod graph;
 #[allow(
     dead_code,
     reason = "the next Git storage tranche consumes this internal module"

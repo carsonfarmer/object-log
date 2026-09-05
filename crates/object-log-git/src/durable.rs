@@ -470,6 +470,10 @@ impl<'a> Reader<'a> {
         }
     }
 
+    pub(crate) fn contains(&self, id: ObjectId) -> bool {
+        self.catalog.location(id).is_some()
+    }
+
     pub(crate) async fn find(&mut self, id: ObjectId) -> Result<Option<Object>, Error> {
         let Some(location) = self.catalog.location(id) else {
             return Ok(None);
