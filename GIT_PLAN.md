@@ -2,6 +2,13 @@
 
 ## Outcome
 
+The standalone object-log library is the product. A complete, usable Git
+implementation proves both its correctness and how simply an application can
+use it. Keep the full Git behavior below. When integration grows complicated,
+identify whether the cause is inherent Git behavior, a missing generic log
+capability, or unnecessary adapter machinery. Improve the appropriate layer;
+do not move Git rules into the generic log or cut behavior to reduce size.
+
 `object-log-git` must prove that the generic WAL can support Git smart HTTP
 discovery, clone, incremental fetch, atomic push, and cold recovery. Object
 storage is the durable authority. Local files and memory are cache data.
@@ -302,11 +309,11 @@ No tighter call-count or serial-depth performance gate exists yet. Measurement
 code must add zero product lines; keep it in test and support code. A failed
 hard gate blocks native-oracle deletion.
 
-## Source-size gates
+## Source-size review thresholds
 
 Count product and test lines separately from revision `2ee2174`.
 
-| Tranche | Expected change | Stop gate |
+| Tranche | Expected change | Review threshold (historical gates for completed tasks) |
 | --- | ---: | ---: |
 | Task 1: pack, durable, wire, and private budgets | Complete at 2,048 retained product lines | Retained product exceeds 2,050 |
 | Task 2 compressed-entry reuse | Complete at +141 product lines and +287 test lines | Any new dependency, named crate feature, public API, format-name change, or line-limit excess |
@@ -318,10 +325,14 @@ At revision `b322985`, the private replacement foundation has 2,189 raw product
 lines. The combined Git and HTTP implementation has 4,970 raw product lines.
 Task 2 stayed within its separate source-size gate. The native deletion target
 remains 2,165 product lines. After that deletion, the expected Git, HTTP, and
-Spin total is 3,480–4,125 product lines. Stop if it exceeds 4,150.
+Spin total is 3,480–4,125 product lines. Require architecture review if it
+exceeds 4,150.
 
-Do not continue past a missed intermediate gate because a later deletion might
-offset it. Reduce the current tranche before integration.
+Treat source-size thresholds, including the historical stop gates above, as
+architecture review signals. Report material overage and explain its cause
+before integration. Simplify unnecessary machinery, but never remove required
+behavior to satisfy a line count. Behavioral, resource, and provider gates
+remain acceptance requirements.
 
 ## Standards and prior art
 

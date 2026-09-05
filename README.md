@@ -6,6 +6,14 @@
 object-storage-backed write-ahead log. The key-value, `SQLite`, and Git crates
 test its public API.
 
+The design is inspired by Cursor's [Git at any scale](https://cursor.com/blog/git-at-any-scale):
+object storage holds the durable log and local repositories can be rebuilt.
+The standalone log is the product. Its examples must be complete, useful
+applications that demonstrate both correctness and ease of integration.
+When an example becomes complicated, distinguish domain requirements from
+missing generic capabilities and unnecessary integration machinery. Feed those
+lessons back into the log API while keeping domain rules outside the core.
+
 Durable Object behavior, tenancy, routing, and actor or service ownership are
 out of scope.
 
@@ -95,7 +103,7 @@ provisional 128 MiB WASI process model. The package manifest declares the
 Tokio runtime support used by the native oracle, so standalone all-feature
 checks do not depend on workspace feature unification. The
 [Git proof plan](GIT_PLAN.md) defines the 12 tasks, phase limits, performance
-gates, and source-size stop gates.
+gates, and source-size review thresholds.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The

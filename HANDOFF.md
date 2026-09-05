@@ -24,6 +24,12 @@ Build a small, fast object-storage WAL for higher-level storage systems. Keep
 the core byte-oriented and independent from Spin. The KV, SQLite, and Git
 crates prove the public API.
 
+Owner clarification: the examples must be complete and usable, and must prove
+ease of integration as well as correctness. Git is a real use case from which
+to improve the standalone log API. Classify complexity as domain behavior,
+a missing generic capability, or unnecessary integration machinery, and fix
+the appropriate layer. Cursor's "Git at any scale" is the design inspiration.
+
 The Git proof must keep its full target:
 
 - Git protocol-v2 discovery, clone, and have-aware fetch;
@@ -41,7 +47,7 @@ priority.
 ## Accepted state on main
 
 `main` is clean and pushed at
-`1e0c0d35bbcd7bf5b1ce8d555c9f66d16f24ca2c`.
+`d3669f1e89edf1d20a31059c0c5c82bbe1e0018d` (before this clarification).
 
 Task 2 is accepted at `b322985c616d948e7365739e3286baeaeb460acc`.
 It provides a private bounded fetch-pack writer with:
