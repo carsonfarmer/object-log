@@ -16,7 +16,9 @@ pub use log::{
     RetentionStatus,
 };
 pub use materialize::{MaterializeError, Materialized, Materializer, materialize};
-pub use store::{BackendCapabilities, BackendCapability, ValidatedBackend};
+pub use store::{
+    BackendCapabilities, BackendCapability, Request, RequestDenied, RequestGuard, ValidatedBackend,
+};
 
 /// Current durable object-log format version.
 pub const FORMAT_VERSION: u32 = format::FORMAT_VERSION;
@@ -502,6 +504,9 @@ pub enum Error {
     /// A writer used options that differ from the durable log options.
     #[error("configuration does not match the durable log contract: {0}")]
     ConfigurationMismatch(&'static str),
+    /// A request guard refused a client invocation before it started.
+    #[error("object-store request denied")]
+    RequestDenied,
     /// The object-store operation failed.
     #[error("object store: {0}")]
     Store(#[from] object_store::Error),

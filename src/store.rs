@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
 use futures::stream::{self, BoxStream};
+use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersion};
 use uuid::Uuid;
@@ -13,6 +13,51 @@ use uuid::Uuid;
 use crate::{Digest, Error, LogId, StorageId};
 
 pub(crate) const MAX_DELETE_BATCH: usize = 1_000;
+
+/// One logical invocation of the underlying object-store client.
+///
+/// Byte counts are payload bounds, not HTTP headers or wire bytes. Client retries,
+/// listing pages and delete batching may perform additional network requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Request {
+    /// GET or conditional GET; the core accepts at most this many body bytes.
+    Read {
+        /// Maximum accepted response body bytes.
+        max_bytes: usize,
+    },
+    /// Conditional PUT of an exact encoded payload.
+    Write {
+        /// Exact encoded request body bytes.
+        bytes: usize,
+    },
+    /// One listing stream. Its pages and returned metadata have no byte bound here.
+    List,
+    /// One delete stream containing this many immutable objects.
+    Delete {
+        /// Number of immutable keys submitted to the stream.
+        objects: usize,
+    },
+}
+
+/// A request was refused before invoking the object-store client.
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("object-store request denied")]
+pub struct RequestDenied;
+
+/// Operation-local request admission, shared by all clones of a guarded log.
+///
+/// Implementations must synchronize concurrent admissions atomically. Accepted
+/// charges are cumulative: cancellation and failures do not refund them. This
+/// synchronous callback must not block or call back into the log. It bounds core
+/// client invocations, not retries or pagination hidden inside the backend.
+pub trait RequestGuard: std::fmt::Debug + Send + Sync {
+    /// Admits one request immediately before the client is invoked.
+    ///
+    /// # Errors
+    /// Return `RequestDenied` to prevent this invocation entirely.
+    fn before_request(&self, request: Request) -> Result<(), RequestDenied>;
+}
 
 /// One backend behavior required by the publication protocol.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -226,6 +271,7 @@ pub(crate) struct ScopedStore {
     store: Arc<dyn ObjectStore>,
     scope: Path,
     log_id: LogId,
+    guard: Option<Arc<dyn RequestGuard>>,
 }
 
 impl ScopedStore {
@@ -238,7 +284,23 @@ impl ScopedStore {
             store,
             scope,
             log_id: log_id.clone(),
+            guard: None,
         }
+    }
+
+    pub(crate) fn with_request_guard(&self, guard: Arc<dyn RequestGuard>) -> Self {
+        Self {
+            guard: Some(guard),
+            ..self.clone()
+        }
+    }
+
+    fn admit(&self, request: Request) -> Result<(), Error> {
+        self.guard.as_ref().map_or(Ok(()), |guard| {
+            guard
+                .before_request(request)
+                .map_err(|_| Error::RequestDenied)
+        })
     }
 
     /// Returns the validated identity bound to this namespace.
@@ -258,6 +320,7 @@ impl ScopedStore {
         max_bytes: usize,
     ) -> Result<Option<StoredObject>, Error> {
         let location = self.location(key);
+        self.admit(Request::Read { max_bytes })?;
         match self.store.get(&location).await {
             Ok(result) => Ok(Some(collect_object(result, max_bytes).await?)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
@@ -270,6 +333,7 @@ impl ScopedStore {
         key: StoreKey,
         max_bytes: usize,
     ) -> Result<Option<(Digest, u64)>, Error> {
+        self.admit(Request::Read { max_bytes })?;
         let result = match self.store.get(&self.location(key)).await {
             Ok(result) => result,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
@@ -313,6 +377,7 @@ impl ScopedStore {
             return Err(Error::UnsupportedBackend("conditional read"));
         };
         let options = GetOptions::new().with_if_none_match(Some(e_tag.clone()));
+        self.admit(Request::Read { max_bytes })?;
         match self.store.get_opts(&self.location(key), options).await {
             Ok(result) => Ok(ConditionalRead::Modified(
                 collect_object(result, max_bytes).await?,
@@ -329,6 +394,7 @@ impl ScopedStore {
     ///
     /// Returns a storage error other than a definite already-exists response.
     pub(crate) async fn create(&self, key: StoreKey, bytes: Bytes) -> Result<CreateResult, Error> {
+        self.admit(Request::Write { bytes: bytes.len() })?;
         match self
             .store
             .put_opts(
@@ -360,6 +426,7 @@ impl ScopedStore {
         bytes: Bytes,
         observed: UpdateVersion,
     ) -> Result<UpdateResult, Error> {
+        self.admit(Request::Write { bytes: bytes.len() })?;
         match self
             .store
             .put_opts(
@@ -386,17 +453,21 @@ impl ScopedStore {
     /// must still count unclassified entries when they enforce scan limits.
     pub(crate) fn list_scoped(&self) -> BoxStream<'static, Result<ListedObject, Error>> {
         let scope = self.scope.clone();
-        self.store
-            .list(Some(&scope))
-            .map(move |result| {
-                result
-                    .map(|metadata| ListedObject {
-                        immutable_key: classify_immutable(&scope, &metadata.location),
-                        size: metadata.size,
-                    })
-                    .map_err(Error::from)
+        let guard = self.guard.clone();
+        let store = self.clone();
+        stream::once(async move {
+            store.admit(Request::List)?;
+            Ok::<_, Error>(store.store.list(Some(&store.scope)).map_err(Error::from))
+        })
+        .try_flatten()
+        .map(move |result| {
+            let _guard = &guard;
+            result.map(|metadata| ListedObject {
+                immutable_key: classify_immutable(&scope, &metadata.location),
+                size: metadata.size,
             })
-            .boxed()
+        })
+        .boxed()
     }
 
     /// Deletes one bounded batch of immutable physical keys.
@@ -419,6 +490,9 @@ impl ScopedStore {
         let locations = keys
             .map(|key| Ok(self.immutable_location(key)))
             .collect::<Vec<_>>();
+        self.admit(Request::Delete {
+            objects: expected_count,
+        })?;
         let mut results = self.store.delete_stream(stream::iter(locations).boxed());
         let mut first_error = None;
         while let Some(result) = results.next().await {
@@ -714,6 +788,52 @@ mod tests {
     use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
 
     type TestResult = Result<(), Box<dyn StdError>>;
+
+    #[tokio::test]
+    async fn request_guard_filesystem_refusals_never_reach_backend() -> TestResult {
+        #[derive(Debug)]
+        struct Deny;
+        impl RequestGuard for Deny {
+            fn before_request(&self, _: Request) -> Result<(), RequestDenied> {
+                Err(RequestDenied)
+            }
+        }
+        let directory = TempDir::new()?;
+        let faults = FaultStore::new(LocalFileSystem::new_with_prefix(directory.path())?);
+        let scoped = test_scope(Arc::new(faults.clone()), "guard-filesystem")?;
+        let key = ImmutableKey::new(Uuid::new_v4(), ImmutableKind::Blob, Digest::of(b"data"));
+        scoped
+            .create(StoreKey::Immutable(key), Bytes::from_static(b"data"))
+            .await?;
+        let denied = scoped.with_request_guard(Arc::new(Deny));
+        faults.reset();
+        assert!(matches!(
+            denied.read(StoreKey::Immutable(key), 4).await,
+            Err(Error::RequestDenied)
+        ));
+        assert!(matches!(
+            denied.create(StoreKey::Immutable(key), Bytes::new()).await,
+            Err(Error::RequestDenied)
+        ));
+        assert!(matches!(
+            denied.list_scoped().try_collect::<Vec<_>>().await,
+            Err(Error::RequestDenied)
+        ));
+        assert!(matches!(
+            denied.delete_immutable_batch(std::iter::once(key)).await,
+            Err(Error::RequestDenied)
+        ));
+        assert_eq!(faults.metrics().total_requests(), 0);
+        assert_eq!(
+            scoped
+                .read(StoreKey::Immutable(key), 4)
+                .await?
+                .ok_or("missing original")?
+                .bytes,
+            Bytes::from_static(b"data")
+        );
+        Ok(())
+    }
 
     #[test]
     fn new_immutable_keys_get_distinct_physical_ids() {

@@ -355,6 +355,26 @@ impl Log {
         })
     }
 
+    /// Clones this log with operation-local request admission.
+    ///
+    /// Preserves identity and staged proofs; all resulting clones and nested
+    /// operations share the guard. Replaces any prior guard on this clone only.
+    /// Keep the same guarded handle across an operation's retries. Admission is
+    /// optional caller policy, not part of the durable log contract. Backend
+    /// validation and opening performed before attachment are not charged.
+    /// Guards remain alive with the handle and in-flight futures. This is not
+    /// an allocation limit: decoding and retained state need separate bounds.
+    /// A refused first publication returns [`Error::RequestDenied`]. Resolution
+    /// retains pending evidence when admission prevents classification or retry;
+    /// refusal must never be interpreted as proof that publication failed.
+    #[must_use]
+    pub fn with_request_guard(&self, guard: Arc<dyn crate::RequestGuard>) -> Self {
+        Self {
+            store: self.store.with_request_guard(guard),
+            ..self.clone()
+        }
+    }
+
     /// Returns the limits fixed when this log was opened.
     #[must_use]
     pub const fn options(&self) -> Options {
@@ -447,7 +467,9 @@ impl Log {
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
-                    Err(Error::Store(_)) => return Ok(RetentionStatus::Pending),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        return Ok(RetentionStatus::Pending);
+                    }
                     Err(error) => return Err(error),
                 };
                 if current.head().retention_ids.contains(&id) {
@@ -503,7 +525,9 @@ impl Log {
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
-                    Err(Error::Store(_)) => return Ok(RetentionStatus::Pending),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        return Ok(RetentionStatus::Pending);
+                    }
                     Err(error) => return Err(error),
                 };
                 if current.head().retention_ids.contains(&id) {
@@ -595,7 +619,7 @@ impl Log {
                 self.cleanup_collection_plan(plan_key).await?;
                 match self.load().await {
                     Ok(current) => Ok(CollectionStart::Conflict(current)),
-                    Err(Error::Store(_)) => Ok(CollectionStart::Pending),
+                    Err(Error::Store(_) | Error::RequestDenied) => Ok(CollectionStart::Pending),
                     Err(error) => Err(error),
                 }
             }
@@ -646,6 +670,10 @@ impl Log {
                 .await
             {
                 Ok(()) => {}
+                Err(Error::RequestDenied) => {
+                    report.delete_attempts -= batch.len();
+                    return Ok(CollectionFinish::Pending(report));
+                }
                 Err(Error::Store(_)) => return Ok(CollectionFinish::Pending(report)),
                 Err(error) => return Err(error),
             }
@@ -671,7 +699,9 @@ impl Log {
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(current) => current,
-                    Err(Error::Store(_)) => return Ok(CollectionFinish::Pending(report)),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        return Ok(CollectionFinish::Pending(report));
+                    }
                     Err(error) => return Err(error),
                 };
                 if current.head().active_plan.is_none() {
@@ -681,7 +711,7 @@ impl Log {
                     Ok(CollectionFinish::Conflict(current, report))
                 }
             }
-            Err(Error::Store(_)) => Ok(CollectionFinish::Pending(report)),
+            Err(Error::Store(_) | Error::RequestDenied) => Ok(CollectionFinish::Pending(report)),
             Err(error) => Err(error),
         }
     }
@@ -1009,7 +1039,9 @@ impl Log {
                 };
                 let current = match self.load().await {
                     Ok(view) => view,
-                    Err(Error::Store(_)) => return Ok(CommitStatus::Pending(pending)),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        return Ok(CommitStatus::Pending(pending));
+                    }
                     Err(error) => return Err(error),
                 };
                 match Self::classify_resolution(&pending, current)? {
@@ -1043,7 +1075,9 @@ impl Log {
         self.validate_pending(&pending)?;
         let current = match self.load().await {
             Ok(view) => view,
-            Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+            Err(Error::Store(_) | Error::RequestDenied) => {
+                return Ok(Resolution::StillPending(pending));
+            }
             Err(error) => return Err(error),
         };
 
@@ -1054,7 +1088,9 @@ impl Log {
             {
                 match self.verify_published_commit(&pending.commit_ref).await {
                     Ok(()) => {}
-                    Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        return Ok(Resolution::StillPending(pending));
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -1072,7 +1108,9 @@ impl Log {
             .await
         {
             Ok(()) => {}
-            Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+            Err(Error::Store(_) | Error::RequestDenied) => {
+                return Ok(Resolution::StillPending(pending));
+            }
             Err(error) => return Err(error),
         }
         if !self.proof_matches(&pending.prepared.staging_domain) {
@@ -1081,7 +1119,9 @@ impl Log {
                 .await
             {
                 Ok(()) => {}
-                Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+                Err(Error::Store(_) | Error::RequestDenied) => {
+                    return Ok(Resolution::StillPending(pending));
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -1101,12 +1141,14 @@ impl Log {
             Ok(UpdateResult::Updated { version }) => {
                 Ok(Resolution::Committed(Self::view(candidate, version)))
             }
-            Err(Error::Store(_)) => Ok(Resolution::StillPending(pending)),
+            Err(Error::Store(_) | Error::RequestDenied) => Ok(Resolution::StillPending(pending)),
             Err(error) => Err(error),
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(view) => view,
-                    Err(Error::Store(_)) => return Ok(Resolution::StillPending(pending)),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        return Ok(Resolution::StillPending(pending));
+                    }
                     Err(error) => return Err(error),
                 };
                 Self::classify_resolution(&pending, current)?.ok_or_else(|| {
@@ -1306,7 +1348,9 @@ impl Log {
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(view) => view,
-                    Err(Error::Store(_)) => return Ok(CheckpointStatus::Pending(pending)),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        return Ok(CheckpointStatus::Pending(pending));
+                    }
                     Err(error) => return Err(error),
                 };
                 match Self::classify_checkpoint(&pending, current)? {
@@ -1349,7 +1393,7 @@ impl Log {
 
         let current = match self.load().await {
             Ok(view) => view,
-            Err(Error::Store(_)) => {
+            Err(Error::Store(_) | Error::RequestDenied) => {
                 return Ok(CheckpointResolution::StillPending(pending));
             }
             Err(error) => return Err(error),
@@ -1361,7 +1405,9 @@ impl Log {
                 }
                 return match self.verify_checkpoint(&pending.checkpoint).await {
                     Ok(()) => Ok(CheckpointResolution::Published(view)),
-                    Err(Error::Store(_)) => Ok(CheckpointResolution::StillPending(pending)),
+                    Err(Error::Store(_) | Error::RequestDenied) => {
+                        Ok(CheckpointResolution::StillPending(pending))
+                    }
                     Err(error) => Err(error),
                 };
             }
@@ -1376,14 +1422,14 @@ impl Log {
 
         match self.read_tail(&pending.view).await {
             Ok(_) => {}
-            Err(Error::Store(_)) => {
+            Err(Error::Store(_) | Error::RequestDenied) => {
                 return Ok(CheckpointResolution::StillPending(pending));
             }
             Err(error) => return Err(error),
         }
         match self.verify_checkpoint_publication(&pending).await {
             Ok(()) => {}
-            Err(Error::Store(_)) => {
+            Err(Error::Store(_) | Error::RequestDenied) => {
                 return Ok(CheckpointResolution::StillPending(pending));
             }
             Err(error) => return Err(error),
@@ -1403,12 +1449,14 @@ impl Log {
             Ok(UpdateResult::Updated { version }) => Ok(CheckpointResolution::Published(
                 Self::view(candidate, version),
             )),
-            Err(Error::Store(_)) => Ok(CheckpointResolution::StillPending(pending)),
+            Err(Error::Store(_) | Error::RequestDenied) => {
+                Ok(CheckpointResolution::StillPending(pending))
+            }
             Err(error) => Err(error),
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
                     Ok(view) => view,
-                    Err(Error::Store(_)) => {
+                    Err(Error::Store(_) | Error::RequestDenied) => {
                         return Ok(CheckpointResolution::StillPending(pending));
                     }
                     Err(error) => return Err(error),
@@ -2142,7 +2190,7 @@ impl Log {
             .delete_immutable_batch(std::iter::once(key))
             .await
         {
-            Ok(()) | Err(Error::Store(_)) => Ok(()),
+            Ok(()) | Err(Error::Store(_) | Error::RequestDenied) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -2312,6 +2360,8 @@ mod tests {
     use object_store::path::Path;
 
     use super::*;
+
+    include!("request_guard_tests.rs");
 
     #[tokio::test]
     async fn commit_ref_len_matches_the_encoded_commit_and_read_reference()
