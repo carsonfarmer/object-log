@@ -22,6 +22,11 @@ mod graph;
 )]
 mod pack;
 mod repository;
+#[allow(
+    dead_code,
+    reason = "wire command integration follows selected fetch packs"
+)]
+mod selection;
 mod state;
 #[allow(dead_code, reason = "the next Git engine tranche consumes this module")]
 mod wire;

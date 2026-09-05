@@ -10,7 +10,6 @@ use crate::{
     state::{Machine, State},
 };
 
-#[cfg(feature = "native-oracle")]
 use bytes::Bytes;
 #[cfg(feature = "native-oracle")]
 use object_log::{CheckpointStatus, CommitStatus, PreparedCommit, TransactionId};
@@ -150,6 +149,46 @@ impl Repository {
             &pack_roots(&self.state),
         )
         .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "wire command integration follows selected fetch packs"
+    )]
+    async fn fetch_pack(
+        &self,
+        wants: &[ObjectId],
+        haves: &[ObjectId],
+        include_tag: bool,
+    ) -> Result<Bytes, Error> {
+        let catalog = self.catalog().await?;
+        let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
+        let _roots_memory = self
+            .operation
+            .reserve_state(self.state.refs.len() * size_of::<ObjectId>())?;
+        let roots = self.state.refs.values().copied().collect::<Vec<_>>();
+        let graph = crate::graph::Graph::load(&self.operation, &mut reader, &roots).await?;
+        for (name, id) in &self.state.refs {
+            if name.starts_with(b"refs/heads/")
+                && graph.location(*id).is_none_or(|index| {
+                    graph.nodes[index as usize].kind != Some(gix_object::Kind::Commit)
+                })
+            {
+                return Err(Error::InvalidReference);
+            }
+        }
+        let selected =
+            crate::selection::select(&self.operation, &graph, wants, haves, include_tag)?;
+        for id in &selected.ids {
+            let node = &graph.nodes[graph.location(*id).ok_or(Error::InvalidReference)? as usize];
+            if !node.verified {
+                let object = reader.find(*id).await?.ok_or(Error::InvalidReference)?;
+                if Some(object.kind) != node.kind {
+                    return crate::pack::invalid("selected graph object has the wrong kind");
+                }
+            }
+        }
+        reader.fetch_pack(&selected.ids).await
     }
 
     /// Returns the refs from the exact durable view.
@@ -606,6 +645,7 @@ fn clear_partial_cache(path: &Path) -> Result<(), Error> {
 mod tests {
     use std::{
         error::Error as StdError,
+        fmt::Write as _,
         process::{Command, Output},
     };
 
@@ -723,6 +763,311 @@ mod tests {
         bytes.u8(4)?.array(0)?;
         let bytes = bytes.into_writer();
         assert!(Record::decode(&bytes, ObjectFormat::Sha1, 0).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one both-hash fixture checks full and incremental selection"
+    )]
+    async fn selected_fetch_matches_git_and_includes_complete_tag_chains() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let mut fixture = fixture(format, b"before")?;
+            let source = fixture.directory.path().join("source");
+            let old = fixture.target;
+            fs::write(source.join("file"), b"after")?;
+            command(Some(&source), &["commit", "--quiet", "-am", "after"])?;
+            fixture.target = ObjectId::parse(
+                format,
+                output(Some(&source), &["rev-parse", "HEAD"])?.trim(),
+            )?;
+            command(Some(&source), &["tag", "-a", "inner", "-m", "inner"])?;
+            command(
+                Some(&source),
+                &["tag", "-a", "outer", "-m", "outer", "inner"],
+            )?;
+            let inner = ObjectId::parse(
+                format,
+                output(Some(&source), &["rev-parse", "inner"])?.trim(),
+            )?;
+            let outer = ObjectId::parse(
+                format,
+                output(Some(&source), &["rev-parse", "outer"])?.trim(),
+            )?;
+            command(
+                Some(&source),
+                &["checkout", "--quiet", "-b", "unreachable", &old.to_string()],
+            )?;
+            fs::write(source.join("file"), b"unrelated")?;
+            command(Some(&source), &["commit", "--quiet", "-am", "unrelated"])?;
+            let unreachable = ObjectId::parse(
+                format,
+                output(Some(&source), &["rev-parse", "HEAD"])?.trim(),
+            )?;
+            command(Some(&source), &["checkout", "--quiet", "main"])?;
+            fs::write(
+                &fixture.pack,
+                command_output(Some(&source), &["pack-objects", "--all", "--stdout"])?.stdout,
+            )?;
+            let (log, _, _) = test_log("selected-fetch").await?;
+            publish_durable_pack(&log, &fixture, format).await?;
+            let view = log.load().await?;
+            let update = Machine::new(format).transaction(
+                vec![RefUpdate::new("refs/tags/outer", None, Some(outer))?],
+                vec![],
+            )?;
+            let prepared =
+                log.prepare(&view, TransactionId::new(), update, Bytes::new(), vec![])?;
+            assert!(matches!(
+                log.commit(prepared).await?,
+                CommitStatus::Committed(_)
+            ));
+            let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+            let repository = Repository::open_with_pool(&log, format, &pool).await?;
+            let full = output(
+                Some(&source),
+                &["rev-list", "--objects", &fixture.target.to_string()],
+            )?;
+            let mut full = full
+                .lines()
+                .map(|line| ObjectId::parse(format, line.split(' ').next().unwrap_or("")))
+                .collect::<Result<Vec<_>, _>>()?;
+            full.sort_unstable();
+            let pack = repository.fetch_pack(&[fixture.target], &[], false).await?;
+            assert_selected_pack(&source, &pack, format, &full, None, fixture.target)?;
+            drop(pack);
+            let expected = output(
+                Some(&source),
+                &[
+                    "rev-list",
+                    "--objects",
+                    &fixture.target.to_string(),
+                    &format!("^{old}"),
+                ],
+            )?;
+            let mut expected = expected
+                .lines()
+                .map(|line| ObjectId::parse(format, line.split(' ').next().unwrap_or("")))
+                .collect::<Result<Vec<_>, _>>()?;
+            expected.sort_unstable();
+            let pack = repository
+                .fetch_pack(
+                    &[fixture.target, fixture.target],
+                    &[old, old, unreachable],
+                    false,
+                )
+                .await?;
+            assert_selected_pack(&source, &pack, format, &expected, Some(old), fixture.target)?;
+            drop(pack);
+            expected.extend([inner, outer]);
+            expected.sort_unstable();
+            let pack = repository
+                .fetch_pack(&[fixture.target], &[old], true)
+                .await?;
+            assert_selected_pack(&source, &pack, format, &expected, Some(old), fixture.target)?;
+            drop(pack);
+            let empty = repository
+                .fetch_pack(&[fixture.target], &[fixture.target], false)
+                .await?;
+            assert_selected_pack(
+                &source,
+                &empty,
+                format,
+                &[],
+                Some(fixture.target),
+                fixture.target,
+            )?;
+            assert!(matches!(
+                repository.fetch_pack(&[unreachable], &[], false).await,
+                Err(Error::InvalidReference)
+            ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_fetch_rejects_wrong_tree_and_tag_leaf_kinds() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            for tag_leaf in [false, true] {
+                let mut fixture = fixture(format, b"valid")?;
+                let source = fixture.directory.path().join("source");
+                let mut objects = output(Some(&source), &["rev-list", "--objects", "HEAD"])?;
+                let file = source.join("raw-object");
+                fs::write(&file, [])?;
+                let actual_tree = output(
+                    Some(&source),
+                    &["hash-object", "-w", "-t", "tree", "raw-object"],
+                )?;
+                let actual_tree = ObjectId::parse(format, actual_tree.trim())?;
+                writeln!(objects, "{actual_tree}")?;
+                let (kind, data) = if tag_leaf {
+                    ("tag", format!("object {actual_tree}\ntype blob\ntag bad\ntagger A <a@example.com> 0 +0000\n\nbad\n").into_bytes())
+                } else {
+                    let mut tree = b"100644 wrong\0".to_vec();
+                    tree.extend_from_slice(actual_tree.as_bytes());
+                    ("tree", tree)
+                };
+                fs::write(&file, data)?;
+                let wrong = output(
+                    Some(&source),
+                    &["hash-object", "--literally", "-w", "-t", kind, "raw-object"],
+                )?;
+                let wrong = ObjectId::parse(format, wrong.trim())?;
+                writeln!(objects, "{wrong}")?;
+                let want = if tag_leaf {
+                    wrong
+                } else {
+                    fs::write(
+                        &file,
+                        format!(
+                            "tree {wrong}\nauthor A <a@example.com> 0 +0000\ncommitter A <a@example.com> 0 +0000\n\nbad\n"
+                        ),
+                    )?;
+                    let commit = output(
+                        Some(&source),
+                        &[
+                            "hash-object",
+                            "--literally",
+                            "-w",
+                            "-t",
+                            "commit",
+                            "raw-object",
+                        ],
+                    )?;
+                    fixture.target = ObjectId::parse(format, commit.trim())?;
+                    writeln!(objects, "{}", fixture.target)?;
+                    fixture.target
+                };
+                fs::write(&file, objects)?;
+                let packed = Command::new("git")
+                    .current_dir(&source)
+                    .args(["pack-objects", "--stdout"])
+                    .stdin(fs::File::open(&file)?)
+                    .output()?;
+                assert!(
+                    packed.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&packed.stderr)
+                );
+                fs::write(&fixture.pack, packed.stdout)?;
+                let (log, _, _) = test_log("wrong-selected-leaf").await?;
+                publish_durable_pack(&log, &fixture, format).await?;
+                if tag_leaf {
+                    let view = log.load().await?;
+                    let update = Machine::new(format).transaction(
+                        vec![RefUpdate::new("refs/tags/bad", None, Some(wrong))?],
+                        vec![],
+                    )?;
+                    let prepared =
+                        log.prepare(&view, TransactionId::new(), update, Bytes::new(), vec![])?;
+                    assert!(matches!(
+                        log.commit(prepared).await?,
+                        CommitStatus::Committed(_)
+                    ));
+                }
+                let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+                let repository = Repository::open_with_pool(&log, format, &pool).await?;
+                assert!(matches!(repository.fetch_pack(&[want], &[], false).await,
+                    Err(Error::InvalidPack(message)) if message == "selected graph object has the wrong kind"));
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_selected_pack(
+        source: &Path,
+        bytes: &[u8],
+        format: ObjectFormat,
+        expected: &[ObjectId],
+        have: Option<ObjectId>,
+        target: ObjectId,
+    ) -> TestResult {
+        let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+        let operation = pool.admit()?;
+        let normalized = crate::pack::normalize(&operation, format, bytes, &[])?;
+        let index = gix_pack::index::File::from_data(
+            normalized.index.as_slice(),
+            PathBuf::new(),
+            crate::pack::object_hash(format),
+        )?;
+        let ids = index
+            .iter()
+            .map(|entry| ObjectId::from_bytes(format, entry.oid.as_slice()))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ids, expected);
+        let receiver = tempfile::tempdir()?;
+        command(
+            Some(receiver.path()),
+            &[
+                "init",
+                "--bare",
+                "--quiet",
+                &format!(
+                    "--object-format={}",
+                    match format {
+                        ObjectFormat::Sha1 => "sha1",
+                        ObjectFormat::Sha256 => "sha256",
+                    }
+                ),
+            ],
+        )?;
+        let file = receiver.path().join("fetch-validation.pack");
+        if let Some(have) = have {
+            let history = output(Some(source), &["rev-list", "--objects", &have.to_string()])?;
+            let input = receiver.path().join("have-objects");
+            fs::write(&input, history)?;
+            let seed = Command::new("git")
+                .current_dir(source)
+                .args(["pack-objects", "--stdout"])
+                .stdin(fs::File::open(input)?)
+                .output()?;
+            assert!(seed.status.success());
+            fs::write(&file, seed.stdout)?;
+            let result = Command::new("git")
+                .current_dir(receiver.path())
+                .args([
+                    "index-pack",
+                    "--stdin",
+                    "--strict",
+                    "--check-self-contained-and-connected",
+                ])
+                .stdin(fs::File::open(&file)?)
+                .output()?;
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        fs::write(&file, bytes)?;
+        let mut command = Command::new("git");
+        command
+            .current_dir(receiver.path())
+            .args(["index-pack", "--stdin", "--strict"]);
+        let result = command.stdin(fs::File::open(&file)?).output()?;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let result = command
+            .arg("--check-self-contained-and-connected")
+            .stdin(fs::File::open(&file)?)
+            .output()?;
+        // Git returns one for graph links supplied by the receiver's have set,
+        // even though strict validation succeeds and all delta bases are in-pack.
+        assert_eq!(
+            result.status.code(),
+            Some(i32::from(have.is_some() && !expected.is_empty())),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        super::tests::command(
+            Some(receiver.path()),
+            &["update-ref", "refs/heads/fetched", &target.to_string()],
+        )?;
+        super::tests::command(Some(receiver.path()), &["fsck", "--strict", "--no-reflogs"])?;
         Ok(())
     }
 
