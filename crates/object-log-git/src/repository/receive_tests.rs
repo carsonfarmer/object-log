@@ -188,7 +188,7 @@ async fn common_receive_publish_recovery_ref_only_and_delete() -> TestResult {
 }
 
 #[tokio::test]
-async fn common_receive_rejects_stale_atomic_duplicate_and_corrupt_pack() -> TestResult {
+async fn common_receive_rejects_stale_atomic_and_corrupt_pack() -> TestResult {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let fixture = fixture(format, b"existing")?;
         let (log, faults, _) = test_log("common-receive-rejections").await?;
@@ -221,23 +221,19 @@ async fn common_receive_rejects_stale_atomic_duplicate_and_corrupt_pack() -> Tes
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
         drop(response);
         let update = RefUpdate::new("refs/tags/new", None, Some(fixture.target))?;
-        for corrupt in [false, true] {
-            let mut pack = fs::read(&fixture.pack)?;
-            if corrupt {
-                let last = pack.len() - 1;
-                pack[last] ^= 1;
-            }
-            let error = common_open(&log, format)
-                .await?
-                .prepare_receive(
-                    TransactionId::new(),
-                    receive_input(format, std::slice::from_ref(&update), &pack, true),
-                )
-                .await
-                .err()
-                .ok_or("duplicate or corrupt pack accepted")?;
-            assert!(matches!(error, Error::ReceiveRejected { .. }));
-        }
+        let mut pack = fs::read(&fixture.pack)?;
+        let last = pack.len() - 1;
+        pack[last] ^= 1;
+        let error = common_open(&log, format)
+            .await?
+            .prepare_receive(
+                TransactionId::new(),
+                receive_input(format, std::slice::from_ref(&update), &pack, true),
+            )
+            .await
+            .err()
+            .ok_or("corrupt repeated pack accepted")?;
+        assert!(matches!(error, Error::ReceiveRejected { .. }));
         assert_eq!(log.load().await?.tail(), before.tail());
         assert!(
             !common_open(&log, format)
@@ -245,6 +241,67 @@ async fn common_receive_rejects_stale_atomic_duplicate_and_corrupt_pack() -> Tes
                 .refs()
                 .contains_key(b"refs/tags/new".as_slice())
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn common_receive_reuses_retained_pack_for_new_refs_and_restored_history() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let fixture = fixture(format, b"retained history")?;
+        let (log, faults, _) = test_log("common-receive-retained-pack").await?;
+        publish_durable_pack(&log, &fixture, format).await?;
+        let pack = fs::read(&fixture.pack)?;
+        let initial_packs = common_open(&log, format).await?.state.packs;
+        for name in ["refs/tags/new", "refs/heads/main"] {
+            let repository = common_open(&log, format).await?;
+            // The second receive restores an entirely unadvertised history.
+            if name == "refs/heads/main" {
+                assert!(repository.refs().is_empty());
+            }
+            faults.reset();
+            let prepared = repository
+                .prepare_receive(
+                    TransactionId::new(),
+                    receive_input(
+                        format,
+                        &[RefUpdate::new(name, None, Some(fixture.target))?],
+                        &pack,
+                        true,
+                    ),
+                )
+                .await?;
+            assert_eq!(pack_puts(&faults), 0, "retained pack must not be restaged");
+            let (resolution, response) = prepared.publish_receive().await?;
+            assert!(matches!(resolution, object_log::Resolution::Committed(_)));
+            assert!(String::from_utf8_lossy(&response).contains(&format!("ok {name}")));
+            drop(response);
+            let recovered = cold_checked(&log, format).await?;
+            assert_eq!(recovered.refs().get(name.as_bytes()), Some(&fixture.target));
+            assert_eq!(recovered.state.packs.len(), initial_packs.len());
+            for (id, (bytes, root)) in &initial_packs {
+                let (retained_bytes, retained_root) = &recovered.state.packs[id];
+                assert_eq!(retained_bytes, bytes);
+                assert_eq!(retained_root.reference(), root.reference());
+            }
+            if name == "refs/tags/new" {
+                let updates = recovered
+                    .refs()
+                    .iter()
+                    .map(|(name, &id)| RefUpdate::new(name, Some(id), None))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let prepared = recovered
+                    .prepare_receive(
+                        TransactionId::new(),
+                        receive_input(format, &updates, &[], true),
+                    )
+                    .await?;
+                assert!(matches!(
+                    prepared.publish_receive().await?.0,
+                    object_log::Resolution::Committed(_)
+                ));
+            }
+        }
     }
     Ok(())
 }

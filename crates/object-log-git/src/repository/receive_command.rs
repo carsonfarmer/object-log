@@ -175,10 +175,12 @@ impl Repository {
             let normalized =
                 crate::receive::normalize(&self.operation, self.format, request.pack, &mut reader)
                     .await?;
-            if normalized.bytes.get(8..12) != Some(&[0, 0, 0, 0]) {
-                if self.state.packs.contains_key(&normalized.id) {
-                    return Err(Error::InvalidRecord("pack is already present"));
-                }
+            // The client may resend retained objects that no ref advertises.
+            // Normalization still validates the input; reuse the authenticated
+            // existing pack instead of recording its descriptor a second time.
+            if normalized.bytes.get(8..12) != Some(&[0, 0, 0, 0])
+                && !self.state.packs.contains_key(&normalized.id)
+            {
                 drop(reader);
                 drop(catalog);
                 let (descriptor, root) =
