@@ -581,7 +581,9 @@ fn validate_head_shape(bytes: &[u8]) -> Result<(), Error> {
                 }
                 2 => {
                     let value = decoder.str().map_err(shape_error)?;
-                    valid(value.len() <= crate::MAX_LOG_ID_LEN)?;
+                    if value.len() > crate::MAX_LOG_ID_LEN {
+                        return Err(Error::InvalidLogId);
+                    }
                 }
                 5 => head_shape_map(decoder, &[1, 2, 3], |decoder, field| match field {
                     1 => shape_uint(decoder),
@@ -1125,7 +1127,11 @@ fn decode_collection_payload(bytes: &[u8], options: Options) -> Result<Collectio
     valid(exact_value!(decoder, encoder, u8) == 1)?;
     require_version(exact_value!(decoder, encoder, u32))?;
     valid(exact_value!(decoder, encoder, u8) == 2)?;
-    let log_id = LogId::new(exact_value!(decoder, encoder, str))?;
+    let log_id = exact_value!(decoder, encoder, str);
+    if log_id.len() > crate::MAX_LOG_ID_LEN {
+        return Err(Error::InvalidLogId);
+    }
+    let log_id = LogId::new(log_id)?;
     valid(exact_value!(decoder, encoder, u8) == 3)?;
     let collection_epoch = exact_value!(decoder, encoder, u64);
     valid(exact_value!(decoder, encoder, u8) == 4)?;
@@ -1804,6 +1810,39 @@ mod tests {
             decode_collection_plan(&encoded, Options::default()),
             Err(Error::InvalidFormat(_))
         ));
+    }
+
+    #[test]
+    fn borrowed_log_ids_reject_oversize_and_accept_exact_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for length in [
+            crate::MAX_LOG_ID_LEN,
+            crate::MAX_LOG_ID_LEN + 1,
+            1024 * 1024,
+        ] {
+            let id = "a".repeat(length);
+            let head = Head::empty(log_id(), incarnation(), Options::default());
+            let encoded = encode_head(&head)?;
+            let payload = &encoded[super::decode_borrowed_envelope(&encoded)?];
+            let mut wire: HeadWire = super::decode_exact(payload)?;
+            wire.log_id = id.clone();
+            let plan = CollectionPlanWire {
+                format_version: FORMAT_VERSION,
+                log_id: id,
+                collection_epoch: 1,
+                candidates: vec![CollectionCandidateWire::from(&candidate(1, 1))],
+            };
+            let head_result = decode_head(&encode_envelope(&wire)?);
+            let plan_result = decode_collection_plan(&encode_envelope(&plan)?, Options::default());
+            if length == crate::MAX_LOG_ID_LEN {
+                assert_eq!(head_result?.log_id.as_str().len(), length);
+                assert_eq!(plan_result?.log_id.as_str().len(), length);
+            } else {
+                assert!(matches!(head_result, Err(Error::InvalidLogId)));
+                assert!(matches!(plan_result, Err(Error::InvalidLogId)));
+            }
+        }
+        Ok(())
     }
 
     #[test]
