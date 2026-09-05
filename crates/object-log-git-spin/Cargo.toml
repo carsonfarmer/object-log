@@ -44,3 +44,7 @@ crate-type = ["cdylib"]
 
 [dev-dependencies]
 wasmparser = "=0.244.0"
+
+[[example]]
+name = "memory_lifecycle"
+crate-type = ["cdylib"]

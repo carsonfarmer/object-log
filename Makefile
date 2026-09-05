@@ -46,3 +46,8 @@ git-http-minio-test:
 .PHONY: git-shared-performance-acceptance
 git-shared-performance-acceptance:
 	cargo +1.97.1 test --locked --release -p object-log-git --test shared_performance -- --ignored --exact shared_git_performance_acceptance --nocapture
+
+.PHONY: git-spin-memory-acceptance
+git-spin-memory-acceptance:
+	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
+	python3 crates/object-log-git-spin/tests/check_memory.py
