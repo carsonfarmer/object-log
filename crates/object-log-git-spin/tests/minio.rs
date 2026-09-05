@@ -434,7 +434,13 @@ async fn large_fetch(format: ObjectFormat) -> TestResult {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
     }
     let trace = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    assert!(trace.matches("=> send header: post ").count() >= 2);
+    // Count the fetch client's outbound packets, excluding ls-refs requests
+    // and the HTTP helper's matching `git<` trace copies.
+    let fetch_rounds = trace
+        .lines()
+        .filter(|line| line.ends_with("fetch> command=fetch"))
+        .count();
+    assert!(fetch_rounds >= 2, "expected multiple fetch rounds: {trace}");
     assert!(trace.contains("=> send header: content-encoding: gzip"));
     // Spin chooses HTTP response framing; Git must receive the protocol result.
     assert!(trace.contains("<= recv header: content-type: application/x-git-upload-pack-result"));
