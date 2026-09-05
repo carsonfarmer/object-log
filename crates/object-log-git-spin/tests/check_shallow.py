@@ -4,6 +4,8 @@ Run after the release WASIp2 build. Uses only loopback endpoints and destroys
 its MinIO container on exit. Host compilation is outside the serving budget.
 """
 import json
+import errno
+import signal
 import os
 import pathlib
 import socket
@@ -48,6 +50,32 @@ def ready(url, process=None):
     raise RuntimeError("server readiness timeout")
 
 
+def stop(host, port):
+    # Spin launches an HTTP child. Terminate this fixture's private group and
+    # prove the old listener is gone before a cold restart or maintenance.
+    try:
+        os.killpg(host.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        host.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(host.pid, signal.SIGKILL)
+        host.wait(timeout=10)
+    for attempt in range(200):
+        with socket.socket() as probe:
+            probe.settimeout(.2)
+            if probe.connect_ex(("127.0.0.1", port)) == errno.ECONNREFUSED:
+                return
+        if attempt == 100:
+            try:
+                os.killpg(host.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(.05)
+    raise RuntimeError(f"old Spin listener {port} survived group termination")
+
+
 def verify(path, count):
     assert git(path, "rev-list", "--count", "HEAD") == str(count)
     git(path, "fsck", "--strict", "--no-reflogs")
@@ -76,8 +104,12 @@ try:
             with log_path.open("w") as log:
                 def start():
                     host = subprocess.Popen([str(ROOT / "run.sh"), "--listen", f"127.0.0.1:{port}",
-                                             "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT)
-                    ready(f"http://127.0.0.1:{port}/.well-known/spin/health", host)
+                                             "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    try:
+                        ready(f"http://127.0.0.1:{port}/.well-known/spin/health", host)
+                    except BaseException:
+                        stop(host, port)
+                        raise
                     return host
                 host = start()
                 try:
@@ -98,7 +130,7 @@ try:
                     verify(clone, 3)
                     git(clone, "fetch", "--quiet", "--depth=5")
                     verify(clone, 5)
-                    host.terminate(); host.wait(timeout=10)
+                    stop(host, port)
                     host = start()
                     git(clone, "fetch", "--quiet", "--unshallow")
                     verify(clone, 8)
@@ -143,10 +175,10 @@ try:
                     verify(head_cut, 1)
                     print(name + ": depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge strict client acceptance passed", flush=True)
                 finally:
-                    host.terminate(); host.wait(timeout=10)
+                    stop(host, port)
 except Exception:
     for path in ROOT.glob("tests/shallow-*.log"):
         print(path.read_text())
     raise
 finally:
-    subprocess.run(["docker", "rm", "--force", CONTAINER], capture_output=True, check=False)
+    subprocess.run(["docker", "rm", "--force", CONTAINER], capture_output=True, check=False, timeout=20)
