@@ -6,7 +6,7 @@ use std::{
 
 use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, View, materialize};
 
-#[cfg(test)]
+mod catalog_maintenance;
 mod catalog_migration;
 mod default_branch;
 mod maintenance;
@@ -121,6 +121,9 @@ impl Repository {
     }
 
     async fn catalog(&self) -> Result<Catalog, Error> {
+        if let crate::state::CatalogState::Tree(root) = &self.state.catalog {
+            return Catalog::from_tree(&self.operation, self.format, root.clone());
+        }
         durable::load(
             &self.operation,
             &self.log,

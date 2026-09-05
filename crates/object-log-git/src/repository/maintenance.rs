@@ -65,8 +65,13 @@ impl Repository {
         let Some(through) = self.view.tail().last().cloned() else {
             return Ok(CheckpointStatus::Published(self.view));
         };
-        let count = self.state.packs.len();
         let metadata_bytes = self.state.default_branch().len();
+        let tree_root = match self.state.catalog {
+            crate::state::CatalogState::Legacy => None,
+            crate::state::CatalogState::Tree(root) => Some(root),
+        };
+        let count =
+            self.state.packs.len() + usize::from(tree_root.as_ref().is_some_and(Option::is_some));
         let _vectors_memory = self.operation.reserve(memory_bound(
             count,
             size_of::<PackDescriptor>() + size_of::<StagedObject>(),
@@ -79,6 +84,7 @@ impl Repository {
                 objects.push(root);
             }
         }
+        objects.extend(tree_root.as_ref().and_then(Option::as_ref).cloned());
         let options = self.log.options();
         let snapshot_bound = self
             .state
@@ -96,6 +102,11 @@ impl Repository {
         let snapshot = Record::snapshot(self.format, self.state.refs, packs)?;
         let snapshot = if let Some(target) = self.state.default_branch {
             snapshot.with_metadata(Metadata::Snapshot(target))?
+        } else {
+            snapshot
+        };
+        let snapshot = if tree_root.is_some() {
+            snapshot.with_catalog(crate::format::CatalogOperation::TreeSnapshot)?
         } else {
             snapshot
         }

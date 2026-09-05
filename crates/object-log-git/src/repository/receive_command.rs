@@ -192,6 +192,13 @@ impl Repository {
         validate_namespace(&self.operation, &self.state.refs, &request.updates)?;
         let mut objects = Vec::new();
         let mut descriptors = Vec::new();
+        let mut tree = match &self.state.catalog {
+            crate::state::CatalogState::Legacy => None,
+            crate::state::CatalogState::Tree(root) => Some(root.clone().map_or_else(
+                || crate::catalog_tree::CatalogTree::empty(self.format),
+                |root| crate::catalog_tree::CatalogTree::from_root(self.format, root),
+            )),
+        };
         if !request.pack.is_empty() {
             let catalog = self.catalog().await?;
             let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
@@ -208,8 +215,22 @@ impl Repository {
                 drop(catalog);
                 let (descriptor, root) =
                     durable::stage(&self.operation, &self.log, &self.view, normalized).await?;
-                descriptors.push(descriptor);
-                objects.push(root);
+                if let Some(current) = &tree {
+                    tree = Some(
+                        super::catalog_migration::insert_pack(
+                            current,
+                            &self.log,
+                            &self.view,
+                            &self.operation,
+                            descriptor,
+                            root,
+                        )
+                        .await?,
+                    );
+                } else {
+                    descriptors.push(descriptor);
+                    objects.push(root);
+                }
             }
         }
         // Read staged and existing packs through exactly the same authenticated
@@ -222,8 +243,11 @@ impl Repository {
                 .zip(objects.iter().map(|root| root.reference().clone())),
         );
         if request.updates.iter().any(|update| update.target.is_some()) {
-            let catalog =
-                durable::load(&self.operation, &self.log, &self.view, self.format, &roots).await?;
+            let catalog = if let Some(tree) = &tree {
+                durable::Catalog::from_tree(&self.operation, self.format, tree.root().cloned())?
+            } else {
+                durable::load(&self.operation, &self.log, &self.view, self.format, &roots).await?
+            };
             let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
             let _roots_memory = self
                 .operation
@@ -252,6 +276,9 @@ impl Repository {
             .state
             .transaction(self.format, request.updates.to_vec(), descriptors)?;
         self.operation.work(record.len())?;
+        if let Some(tree) = tree {
+            objects = tree.root().cloned().into_iter().collect();
+        }
         let prepared =
             self.log
                 .prepare(&self.view, transaction_id, record, Bytes::new(), objects)?;
@@ -397,6 +424,9 @@ impl Repository {
     }
 
     async fn checkpoint_attempt(self) -> Result<object_log::CheckpointStatus, Error> {
+        if matches!(self.state.catalog, crate::state::CatalogState::Tree(_)) {
+            return self.checkpoint_tree().await;
+        }
         if self.view.tail().is_empty() {
             return Ok(object_log::CheckpointStatus::Published(self.view));
         }

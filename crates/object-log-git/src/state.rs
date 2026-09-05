@@ -41,6 +41,11 @@ impl State {
         } else {
             record
         };
+        let record = if matches!(self.catalog, CatalogState::Tree(_)) {
+            record.with_catalog(CatalogOperation::Replace)?
+        } else {
+            record
+        };
         record.encode()
     }
 }

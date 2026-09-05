@@ -242,14 +242,12 @@ impl Record {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn with_catalog(mut self, catalog: CatalogOperation) -> Result<Self, Error> {
         self.catalog = Some(catalog);
         self.validate()?;
         Ok(self)
     }
 
-    #[cfg(test)]
     pub(crate) fn migration(format: ObjectFormat, default_branch: Vec<u8>) -> Result<Self, Error> {
         Self::metadata_update(format, default_branch.clone(), default_branch)?
             .with_catalog(CatalogOperation::Migrate)

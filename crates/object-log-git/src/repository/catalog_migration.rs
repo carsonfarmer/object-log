@@ -38,6 +38,8 @@ impl Repository {
         transaction_id: TransactionId,
         operation: &Operation,
     ) -> Result<Option<CommitStatus>, Error> {
+        let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+        let log = &guarded;
         loop {
             let result = async {
                 Self::open_attempt(log, format, operation)
@@ -67,27 +69,15 @@ impl Repository {
                 id: *id,
                 bytes: *bytes,
             };
-            let selected =
-                SelectedIndex::load(&self.operation, &self.log, &self.view, &descriptor, root)
-                    .await?;
-            let count = selected.num_objects() as usize;
-            let _entries_memory = self
-                .operation
-                .reserve_state(memory_bound(count, size_of::<(ObjectId, u32)>())?)?;
-            let mut entries = Vec::with_capacity(count);
-            for entry in selected.entries() {
-                entries.push(entry?);
-            }
-            tree = tree
-                .insert_pack(
-                    &self.log,
-                    &self.view,
-                    &self.operation,
-                    descriptor,
-                    root.clone(),
-                    &entries,
-                )
-                .await?;
+            tree = insert_pack(
+                &tree,
+                &self.log,
+                &self.view,
+                &self.operation,
+                descriptor,
+                root.clone(),
+            )
+            .await?;
         }
         if tree.root().is_none() && !self.state.refs.is_empty() {
             return Err(Error::InvalidRecord("empty catalog has refs"));
@@ -108,12 +98,28 @@ impl Repository {
             tree.root().cloned().into_iter().collect(),
         )?;
         let _plan = durable::publication_plan(&self.operation, &self.view)?;
-        self.operation.io(options.max_commit_bytes)?;
-        for _ in 0..2 {
-            self.operation.io(options.max_head_bytes)?;
-        }
         self.operation
             .work(options.max_commit_bytes + options.max_head_bytes * 2)?;
         Ok(Some(self.log.commit(prepared).await?))
     }
+}
+
+pub(super) async fn insert_pack(
+    tree: &CatalogTree,
+    log: &Log,
+    view: &object_log::View,
+    operation: &Operation,
+    descriptor: PackDescriptor,
+    root: object_log::StagedObject,
+) -> Result<CatalogTree, Error> {
+    let selected = SelectedIndex::load(operation, log, view, &descriptor, &root).await?;
+    let count = selected.num_objects() as usize;
+    let _entries_memory =
+        operation.reserve_state(memory_bound(count, size_of::<(ObjectId, u32)>())?)?;
+    let mut entries = Vec::with_capacity(count);
+    for entry in selected.entries() {
+        entries.push(entry?);
+    }
+    tree.insert_pack(log, view, operation, descriptor, root, &entries)
+        .await
 }
