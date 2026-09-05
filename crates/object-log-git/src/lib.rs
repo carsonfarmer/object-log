@@ -189,8 +189,8 @@ pub enum Error {
     /// An object ID is invalid.
     #[error("invalid Git object ID")]
     InvalidObjectId,
-    /// A ref name is not a supported valid branch or tag name.
-    #[error("invalid Git branch or tag name")]
+    /// A ref name is not a valid fully qualified name under `refs/`.
+    #[error("invalid Git reference name")]
     InvalidRefName,
     /// A durable record is invalid.
     #[error("invalid Git record: {0}")]
@@ -244,9 +244,7 @@ fn nibble(byte: u8) -> Result<u8, Error> {
 }
 
 fn is_valid_ref_name(value: &[u8]) -> bool {
-    (value.starts_with(b"refs/heads/") || value.starts_with(b"refs/tags/"))
-        && std::str::from_utf8(value).is_ok()
-        && gix_validate::reference::name(bstr::BStr::new(value)).is_ok()
+    value.starts_with(b"refs/") && gix_validate::reference::name(bstr::BStr::new(value)).is_ok()
 }
 
 #[cfg(test)]
@@ -262,8 +260,23 @@ mod tests {
             .map_err(|_| Error::InvalidRecord("test encoding failed"))?;
         assert!(minicbor::decode::<ObjectId>(&zero).is_err());
         assert!(RefUpdate::new("refs/heads/main", None, Some(id)).is_ok());
-        assert!(RefUpdate::new("refs/notes/x", None, Some(id)).is_err());
-        assert!(RefUpdate::new(b"refs/tags/\xff", None, Some(id)).is_err());
+        assert!(RefUpdate::new("refs/notes/x", None, Some(id)).is_ok());
+        assert!(RefUpdate::new(b"refs/tags/\xff", None, Some(id)).is_ok());
+        for name in [
+            "HEAD",
+            "FETCH_HEAD",
+            "ORIG_HEAD",
+            "main",
+            "refs/",
+            "refs/a..b",
+            "refs/a.lock",
+            "refs/a/b.lock",
+            "refs/a//b",
+            "refs/a@{b",
+            "refs/.hidden",
+        ] {
+            assert!(RefUpdate::new(name, None, Some(id)).is_err(), "{name}");
+        }
         assert!(RefUpdate::new("", None, Some(id)).is_err());
         assert!(RefUpdate::new(b"refs/heads/a\0b", None, Some(id)).is_err());
         assert!(RefUpdate::new("refs/heads/main", Some(id), Some(id)).is_err());
