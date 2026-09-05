@@ -52,7 +52,6 @@ pub struct Repository {
     format: ObjectFormat,
     view: View,
     state: State,
-    catalog: Catalog,
     operation: Operation,
     _state_memory: Reservation,
     _view_memory: Reservation,
@@ -79,7 +78,8 @@ pub struct PreparedPush {
 }
 
 impl Repository {
-    /// Loads one exact durable view and authenticates its Git pack indexes.
+    /// Loads refs and authenticated pack references from one exact durable view.
+    /// Pack indexes are loaded only by commands that read objects.
     ///
     /// # Errors
     ///
@@ -123,21 +123,33 @@ impl Repository {
         let (view, state) = materialized.into_parts();
         let state_memory = operation.reserve_state(state_bytes(&state)?)?;
         drop(materialization_memory);
-        let roots = pack_roots(&state);
-        let catalog = durable::load(operation, log, &view, format, &roots).await?;
 
         Ok(Self {
             log: log.clone(),
             format,
             view,
             state,
-            catalog,
             operation: operation.clone(),
             _state_memory: state_memory,
             _view_memory: view_memory,
             #[cfg(feature = "native-oracle")]
             native: None,
         })
+    }
+
+    #[cfg_attr(
+        not(feature = "native-oracle"),
+        allow(dead_code, reason = "shared fetch commands follow graph traversal")
+    )]
+    async fn catalog(&self) -> Result<Catalog, Error> {
+        durable::load(
+            &self.operation,
+            &self.log,
+            &self.view,
+            self.format,
+            &pack_roots(&self.state),
+        )
+        .await
     }
 
     /// Returns the refs from the exact durable view.
@@ -192,10 +204,11 @@ impl Repository {
         })
         .await?;
 
+        let catalog = repository.catalog().await?;
         let mut objects = git::ObjectSet::new();
         let mut recovered = BTreeMap::new();
         for &id in repository.state.packs.keys() {
-            let pack_objects = recover_pack(&repository, path, id).await?;
+            let pack_objects = recover_pack(&repository, &catalog, path, id).await?;
             git::extend_objects(&mut objects, pack_objects.iter().copied())?;
             recovered.insert(id, pack_objects);
         }
@@ -511,12 +524,12 @@ async fn read_native_pack(mut file: File) -> Result<Vec<u8>, Error> {
 #[cfg(feature = "native-oracle")]
 async fn recover_pack(
     repository: &Repository,
+    catalog: &Catalog,
     work_dir: &Path,
     expected: ObjectId,
 ) -> Result<Vec<gix::hash::ObjectId>, Error> {
     let path = work_dir.join("object-log-recovery.pack");
-    let bytes = repository
-        .catalog
+    let bytes = catalog
         .pack_bytes(&repository.log, &repository.view, expected)
         .await?;
     let mut output = File::create(&path)
@@ -820,8 +833,8 @@ mod tests {
         );
         assert_eq!(repository.state.packs.len(), 1);
         assert!(
-            faults.metrics().events.iter().any(|event| {
-                event.operation == Operation::Get && event.path.contains("/nodes/")
+            faults.metrics().events.iter().all(|event| {
+                event.operation != Operation::Get || !event.path.contains("/nodes/")
             })
         );
         assert!(
@@ -864,7 +877,7 @@ mod tests {
         assert!(bounded.admit().is_ok());
 
         faults.reset();
-        let mut pause = faults.pause_get_at(3, FailurePhase::Before);
+        let mut pause = faults.pause_get_at(2, FailurePhase::Before);
         let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
         {
             let opening = Repository::open_with_pool(&log, ObjectFormat::Sha1, &pool);
