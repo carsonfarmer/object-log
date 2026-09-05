@@ -66,3 +66,23 @@ It is not MinIO qualification or evidence of unchanged-client parity; those
 belong to the workspace's provider and Git acceptance gates.
 
 See [initial adapter evidence](EVIDENCE.md) for exact local gates and their limits.
+
+The supported runtime configuration disables outbound HTTP connection pooling.
+A pooled provider run produced a transient protocol error; the unpooled
+configuration passed the recorded Linux workload. The cause is not proven.
+`run.sh` rejects competing `--runtime-config-file` and `RUNTIME_CONFIG_FILE`
+settings instead of silently discarding them.
+
+Linux serving under a hard 128 MiB process limit requires an executable cache
+prepared with the same Spin version, platform, and component. Cold compilation
+was OOM-killed under that limit; cache setup peaked at 228–231 MB across two runs. Prepare
+the cache outside the serving cgroup, then retain it for fresh serving processes:
+
+```sh
+python3 crates/object-log-git-spin/prewarm_cache.py --directory /deployment/wasmtime-cache
+crates/object-log-git-spin/run.sh --cache /deployment/wasmtime-cache/wasmtime-cache.toml
+```
+
+This is a compiler cache, not repository state. See the
+[Linux qualification evidence](../../docs/evidence/git-spin-linux-2026-09-04.md)
+for exact limits, raw counters, provider conditions, and the cold-start failure.

@@ -1,0 +1,3 @@
+Logging component stdio to "/state/logs/"
+Preparing Wasm modules is taking a few seconds...
+

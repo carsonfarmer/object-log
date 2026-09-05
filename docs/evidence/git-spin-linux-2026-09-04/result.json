@@ -1,0 +1,132 @@
+{
+  "wasm_sha256": "fe263c5139bb42bf013f818cc823cb74368f6b0903bab058db1fcd2dff08cfa1",
+  "runtime_image": "rust:1.97.1-bookworm",
+  "runtime_image_id": "sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97",
+  "spin_version": "spin 4.0.2 (bfc7543 2026-06-23)",
+  "minio_image": "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+  "limit_bytes": 134217728,
+  "outbound_connection_pooling": false,
+  "runs": [
+    {
+      "label": "empty-cache",
+      "limit_bytes": 134217728,
+      "container": "object-log-linux-d83dae82c735-empty-cache",
+      "ready": false,
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": true,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:16:43.974940588Z",
+        "FinishedAt": "2026-09-05T02:16:50.519464258Z"
+      },
+      "memory_peak_bytes": 134217728,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 112052,
+        "oom": 3,
+        "oom_kill": 1,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    },
+    {
+      "label": "cache-setup",
+      "limit_bytes": 536870912,
+      "container": "object-log-linux-d83dae82c735-cache-setup",
+      "ready": true,
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 143,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:16:50.760254924Z",
+        "FinishedAt": "2026-09-05T02:16:51.366415216Z"
+      },
+      "memory_peak_bytes": 230866944,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    },
+    {
+      "label": "sha1-warm",
+      "limit_bytes": 134217728,
+      "container": "object-log-linux-d83dae82c735-sha1-warm",
+      "ready": true,
+      "client_flow": "push, clone, 8MiB push, have-aware fetch, fsck, tag create/delete, oversized rejection and head survival passed",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 143,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:16:51.552991383Z",
+        "FinishedAt": "2026-09-05T02:16:54.525706968Z"
+      },
+      "memory_peak_bytes": 134217728,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 25,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    },
+    {
+      "label": "sha256-warm",
+      "limit_bytes": 134217728,
+      "container": "object-log-linux-d83dae82c735-sha256-warm",
+      "ready": true,
+      "client_flow": "push, clone, 8MiB push, have-aware fetch, fsck, tag create/delete, oversized rejection and head survival passed",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 143,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:16:54.725593176Z",
+        "FinishedAt": "2026-09-05T02:16:57.375649303Z"
+      },
+      "memory_peak_bytes": 134217728,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 33,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    }
+  ],
+  "empty_cache_128m_startup_passed": false,
+  "warm_cache_128m_workloads_passed": true,
+  "cleanup_remaining_resources": []
+}
