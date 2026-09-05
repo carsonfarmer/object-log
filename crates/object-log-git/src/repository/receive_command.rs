@@ -400,10 +400,10 @@ impl Repository {
     }
 
     async fn checkpoint_attempt(self) -> Result<object_log::CheckpointStatus, Error> {
-        let Some(through) = self.view.tail().last().cloned() else {
+        if self.view.tail().is_empty() {
             return Ok(object_log::CheckpointStatus::Published(self.view));
-        };
-        let roots_memory = self.operation.reserve_state(
+        }
+        let _roots_memory = self.operation.reserve_state(
             self.state.refs.len() * std::mem::size_of::<ObjectId>()
                 + self.state.packs.len() * (std::mem::size_of::<ObjectId>() * 4 + 32),
         )?;
@@ -439,40 +439,7 @@ impl Repository {
                 );
             }
         }
-        let mut objects = Vec::new();
-        let mut packs = Vec::new();
-        for (id, (bytes, root)) in self.state.packs {
-            if live.contains(&id) {
-                packs.push(crate::format::PackDescriptor { id, bytes });
-                objects.push(root);
-            }
-        }
-        drop(roots_memory);
-        let options = self.log.options();
-        let snapshot_bound = self
-            .state
-            .refs
-            .keys()
-            .map(|name| name.len() + 128)
-            .sum::<usize>()
-            + packs.len() * 128
-            + 128;
-        let _publication_memory = self
-            .operation
-            .reserve(snapshot_bound * 4 + options.max_head_bytes * super::HEAD_DECODE_FACTOR)?;
-        let snapshot =
-            crate::format::Record::snapshot(self.format, self.state.refs, packs)?.encode()?;
-        self.operation.work(snapshot.len())?;
-        let _tail_memory = super::preflight_view(&self.operation, &self.view)?;
-        let _plan_memory = durable::publication_plan(&self.operation, &self.view)?;
-        // Includes the core checkpoint envelope and authenticated pack references.
-        self.operation.io(options.max_checkpoint_bytes)?;
-        self.operation.io(options.max_head_bytes)?;
-        self.operation.io(options.max_head_bytes)?;
-        Ok(self
-            .log
-            .publish_checkpoint(&self.view, &through, snapshot, objects)
-            .await?)
+        self.checkpoint_snapshot(|id| live.contains(id)).await
     }
 }
 

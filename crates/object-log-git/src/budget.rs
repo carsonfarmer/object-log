@@ -10,6 +10,9 @@ use crate::Error;
 pub(crate) const LIVE_BYTES: usize = 88 * 1024 * 1024;
 pub(crate) const STATE_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const CALLS: usize = 512;
+// Two complete 1,024-entry materialization/publication attempts plus head and
+// collection-plan requests. All byte, work, state, and live limits stay shared.
+const MAINTENANCE_CALLS: usize = 8192;
 pub(crate) const TRANSFER_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const WORK_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const THIN_ROUNDS: usize = 32;
@@ -48,6 +51,14 @@ impl Pool {
     }
 
     pub(crate) fn admit(&self) -> Result<Operation, Error> {
+        self.admit_with_calls(CALLS)
+    }
+
+    pub(crate) fn admit_maintenance(&self) -> Result<Operation, Error> {
+        self.admit_with_calls(MAINTENANCE_CALLS)
+    }
+
+    fn admit_with_calls(&self, call_limit: usize) -> Result<Operation, Error> {
         if self
             .0
             .active
@@ -59,6 +70,7 @@ impl Pool {
         Ok(Operation(Arc::new(OperationState {
             pool: self.0.clone(),
             calls: AtomicUsize::new(0),
+            call_limit,
             transfer: AtomicUsize::new(0),
             work: AtomicUsize::new(0),
             thin_rounds: AtomicUsize::new(0),
@@ -71,6 +83,7 @@ impl Pool {
 struct OperationState {
     pool: Arc<PoolState>,
     calls: AtomicUsize,
+    call_limit: usize,
     transfer: AtomicUsize,
     work: AtomicUsize,
     thin_rounds: AtomicUsize,
@@ -88,7 +101,12 @@ pub(crate) struct Operation(Arc<OperationState>);
 
 impl Operation {
     pub(crate) fn io(&self, bytes: usize) -> Result<(), Error> {
-        charge(&self.0.calls, 1, CALLS, "object-log call limit exceeded")?;
+        charge(
+            &self.0.calls,
+            1,
+            self.0.call_limit,
+            "object-log call limit exceeded",
+        )?;
         charge(
             &self.0.transfer,
             bytes,
@@ -242,6 +260,29 @@ pub(crate) fn hold(bytes: Bytes, reservation: Reservation) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_changes_only_the_call_limit_and_preserves_admission() -> Result<(), Error> {
+        let pool = Pool::new(LIVE_BYTES);
+        let operation = pool.admit_maintenance()?;
+        assert!(pool.admit().is_err());
+        for _ in 0..MAINTENANCE_CALLS {
+            operation.io(0)?;
+        }
+        assert!(operation.io(0).is_err());
+        assert!(operation.work(WORK_BYTES + 1).is_err());
+        assert!(operation.reserve_state(STATE_BYTES + 1).is_err());
+        assert!(operation.reserve(LIVE_BYTES + 1).is_err());
+        operation.retry()?;
+        assert!(operation.retry().is_err());
+        drop(operation);
+        let serving = pool.admit()?;
+        for _ in 0..CALLS {
+            serving.io(0)?;
+        }
+        assert!(serving.io(0).is_err());
+        Ok(())
+    }
 
     #[test]
     fn state_phase_is_shared_and_failed_growth_rolls_back() -> Result<(), Error> {

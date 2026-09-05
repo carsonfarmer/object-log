@@ -4,8 +4,9 @@ use std::{
     mem::size_of,
 };
 
-use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, StagedObject, View, materialize};
+use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, View, materialize};
 
+mod maintenance;
 mod receive_command;
 
 use crate::{
@@ -13,7 +14,7 @@ use crate::{
     durable::{self, Catalog},
     format::PackDescriptor,
     pack::budget::{Operation, Pool, Reservation},
-    state::{Machine, State},
+    state::{Machine, State, StateBudget},
     wire::{self, AdvertisedRef, FetchReply, UploadRequest},
 };
 
@@ -25,7 +26,6 @@ use bytes::Bytes;
 const HEAD_DECODE_FACTOR: usize = 64;
 const RECORD_DECODE_FACTOR: usize = 128;
 const VIEW_RETAIN_FACTOR: usize = 8;
-const STATE_RETAIN_FACTOR: usize = 4;
 
 /// One exact Git repository view backed by an object log.
 pub struct Repository {
@@ -83,15 +83,16 @@ impl Repository {
         let view = log.load().await?;
         let view_memory = operation.reserve_state(memory_bound(head, VIEW_RETAIN_FACTOR)?)?;
         drop(head_memory);
-        let materialization_memory = preflight_view(operation, &view)?;
-        let materialized = materialize(log, view, &Machine::new(format))
+        let materialization_memory = preflight_view(operation, log, &view)?;
+        let state_budget = StateBudget::new(operation)?;
+        let materialized = materialize(log, view, &Machine::budgeted(format, &state_budget))
             .await
             .map_err(|error| match error {
                 object_log::MaterializeError::Log(error) => Error::ObjectLog(error),
                 object_log::MaterializeError::State(error) => error,
             })?;
         let (view, state) = materialized.into_parts();
-        let state_memory = operation.reserve_state(state_bytes(&state)?)?;
+        let state_memory = state_budget.into_reservation()?;
         drop(materialization_memory);
 
         Ok(Self {
@@ -365,46 +366,31 @@ fn memory_bound(bytes: usize, factor: usize) -> Result<usize, Error> {
         .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))
 }
 
-fn preflight_view(operation: &Operation, view: &View) -> Result<Reservation, Error> {
-    let records = view
+fn preflight_view(operation: &Operation, log: &Log, view: &View) -> Result<Reservation, Error> {
+    for bytes in view
         .checkpoint()
         .into_iter()
         .map(|checkpoint| checkpoint.object().len())
-        .chain(view.tail().iter().map(object_log::CommitRef::len));
-    let mut total = 0_usize;
-    for bytes in records {
+        .chain(view.tail().iter().map(object_log::CommitRef::len))
+    {
         let bytes = usize::try_from(bytes)
             .map_err(|_| Error::InvalidPack("Git state exceeds memory".into()))?;
-        total = total
-            .checked_add(bytes)
-            .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))?;
         operation.io(bytes)?;
         operation.work(bytes)?;
     }
-    // Includes decoded Vec capacity, BTree nodes, proofs, and canonical re-encoding.
-    // Even malformed short ref records can expand substantially during decoding.
-    operation.reserve(memory_bound(total, RECORD_DECODE_FACTOR)?)
-}
-
-fn state_bytes(state: &State) -> Result<usize, Error> {
-    let refs = state.refs.iter().try_fold(0_usize, |total, (name, _)| {
-        total.checked_add(size_of::<(Vec<u8>, crate::ObjectId)>() + name.len())
-    });
-    let bytes = refs
-        .and_then(|bytes| {
-            bytes.checked_add(
-                state.packs.len()
-                    * (size_of::<(crate::ObjectId, (u64, StagedObject))>()
-                        + size_of::<(PackDescriptor, ObjectRef)>()),
-            )
-        })
+    // The core owns the bounded concurrent-read window. The additional head
+    // reservation covers a missing-record classification while records remain
+    // buffered; charge its possible read before entering materialization.
+    let window = log.materialization_read_bound(view)?;
+    let head = log.options().max_head_bytes;
+    if window != 0 {
+        operation.io(head)?;
+        operation.work(head)?;
+    }
+    let memory = memory_bound(window, RECORD_DECODE_FACTOR)?
+        .checked_add(memory_bound(head, HEAD_DECODE_FACTOR)?)
         .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))?;
-    // A nonempty BTreeMap allocates a full root leaf even for one entry.
-    let leaves = usize::from(!state.refs.is_empty()) * 12 * size_of::<(Vec<u8>, ObjectId)>()
-        + usize::from(!state.packs.is_empty()) * 12 * size_of::<(ObjectId, (u64, StagedObject))>();
-    memory_bound(bytes, STATE_RETAIN_FACTOR)?
-        .checked_add(leaves)
-        .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))
+    operation.reserve(memory)
 }
 
 fn pack_roots(state: &State) -> Vec<(PackDescriptor, ObjectRef)> {
@@ -565,6 +551,7 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
     include!("repository/receive_tests.rs");
     include!("repository/shallow_tests.rs");
+    include!("repository/maintenance_tests.rs");
 
     struct Fixture {
         directory: TempDir,
@@ -1367,9 +1354,9 @@ mod tests {
         let view = log.load().await?;
         faults.reset();
         let operation = Pool::new(0).admit()?;
-        assert!(preflight_view(&operation, &view).is_err());
+        assert!(preflight_view(&operation, &log, &view).is_err());
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
-        assert_eq!(operation.calls(), view.tail().len());
+        assert_eq!(operation.calls(), view.tail().len() + 1);
         assert_eq!(operation.live_bytes(), 0);
         Ok(())
     }

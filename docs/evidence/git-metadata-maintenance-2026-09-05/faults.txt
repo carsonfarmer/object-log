@@ -1,0 +1,46 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-maintenance-profile/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.62s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7b162a3d36c9d4b3)
+
+running 6 tests
+test repository::tests::conservative_checkpoint_expiry_retry_retains_cumulative_calls ... ok
+test repository::tests::conservative_checkpoint_keeps_unreachable_packs_without_catalog_reads ... ok
+test repository::tests::conservative_checkpoint_conflict_preserves_the_concurrent_ref_update ... ok
+test repository::tests::conservative_checkpoint_pending_preserves_exact_core_outcome ... ok
+Sha1: 1,024-entry maintenance checkpoint, 2054 charged calls, 2051 physical requests, 479216 downloaded bytes, 81191 uploaded bytes
+test repository::tests::conservative_checkpoint_late_invalid_metadata_never_publishes ... ok
+Sha256: 1,024-entry maintenance checkpoint, 2054 charged calls, 2051 physical requests, 505869 downloaded bytes, 81232 uploaded bytes
+test repository::tests::conservative_checkpoint_recovers_1024_transaction_tail_for_both_hashes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 121 filtered out; finished in 6.55s
+
+     Running tests/gc.rs (target/debug/deps/gc-ccb207d95a13fa9a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/minio.rs (target/debug/deps/minio-48f44135997a3b97)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/performance_acceptance.rs (target/debug/deps/performance_acceptance-d8a226191fbfd0be)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/ref_namespaces.rs (target/debug/deps/ref_namespaces-20c6769f9033e181)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/shared_performance.rs (target/debug/deps/shared_performance-7e9fccb356afb900)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

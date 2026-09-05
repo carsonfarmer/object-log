@@ -1,0 +1,2 @@
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-maintenance-profile/crates/object-log-git)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.06s

@@ -1,0 +1,21 @@
+   Compiling smallvec v1.16.0
+   Compiling tokio v1.53.1
+   Compiling regex-automata v0.4.18
+   Compiling icu_normalizer v2.3.0
+   Compiling parking_lot_core v0.9.12
+   Compiling parking_lot v0.12.5
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling regex v1.13.1
+   Compiling object_store v0.14.1
+   Compiling criterion v0.7.0
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-maintenance-profile)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.07s
+     Running tests/store_conformance.rs (target/debug/deps/store_conformance-3aff4b3fabd3e67c)
+
+running 1 test
+test filesystem_backend_reports_missing_update ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+

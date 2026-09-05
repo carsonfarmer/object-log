@@ -1,0 +1,180 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-maintenance-profile/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.41s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-33bf4616814da79e)
+
+running 128 tests
+test durable::tests::fetch_output_accepts_the_raw_maximum_and_rejects_the_next_byte ... ok
+test durable::tests::empty_object_has_one_exact_zlib_stream ... ok
+test durable::tests::fetch_pack_preflight_and_work_fail_before_object_gets ... ok
+test durable::tests::cache_metadata_is_reserved_before_the_first_chunk_read ... ok
+test durable::tests::blob_verification_checks_work_and_memory_before_cached_decode ... ok
+test durable::tests::fetch_output_reservation_lives_with_bytes_and_releases_on_cancel ... ok
+test durable::tests::catalog_reservation_releases_on_drop_and_cancel ... ok
+test durable::tests::catalog_preflight_rejects_derived_limit_without_gets ... ok
+test durable::tests::inflate_memory_and_hash_work_fail_before_cached_decode ... ok
+test durable::tests::collection_keeps_published_pack_tree_and_removes_unpublished_tree ... ok
+test durable::tests::entries_reject_crc_zlib_trailing_bytes_and_wrong_oid ... ok
+test durable::tests::malformed_variable_geometry_is_rejected_before_blob_reads ... ok
+test durable::tests::duplicate_ids_choose_the_lowest_pack_id_for_every_root_order ... ok
+test durable::tests::indexes_reject_corrupt_checksums_fans_ids_and_offsets ... ok
+test durable::tests::cancelled_blob_verification_releases_decoder_and_admission ... ok
+test durable::tests::streaming_blob_verification_checks_zlib_boundaries_size_and_oid ... ok
+test durable::tests::fetch_pack_rejects_a_missing_immediate_delta_base ... ok
+test format::tests::duplicate_and_unordered_items_are_rejected ... ok
+test format::tests::records_have_one_strict_encoding ... ok
+test durable::tests::fetch_pack_writes_empty_sha1_and_sha256_packs ... ok
+test durable::tests::chunk_boundaries_are_exact_and_verified_chunks_are_cached ... ok
+test graph::tests::malformed_and_truncated_objects_fail_instead_of_hiding_iterator_errors ... ok
+test graph::tests::missing_objects_and_conflicting_declared_or_actual_kinds_fail ... ok
+test durable::tests::range_visits_boundaries_and_stop_on_consumer_failure ... ok
+test graph::tests::tag_to_a_tree_leaf_defers_blob_content_verification ... ok
+test graph::tests::both_hashes_visit_merge_parents_nested_tags_and_skip_blob_bodies_and_gitlinks ... ok
+test pack::budget::tests::admission_reservations_and_slices_release_on_last_drop ... ok
+test pack::budget::tests::cancellation_releases_admission_and_reserved_memory ... ok
+test pack::budget::tests::counters_accept_exact_limits_and_reject_the_next_unit ... ok
+test pack::budget::tests::maintenance_changes_only_the_call_limit_and_preserves_admission ... ok
+test pack::budget::tests::reservation_growth_and_shrink_have_exact_bounds ... ok
+test pack::budget::tests::state_phase_is_shared_and_failed_growth_rolls_back ... ok
+test graph::tests::wide_repeated_edges_keep_one_leaf_and_reserve_before_allocation ... ok
+test pack::tests::delta_integer_rejects_target_width_overflow_and_truncation ... ok
+test pack::tests::enforces_the_git_generator_delta_depth_limit ... ok
+test durable::tests::stage_reserves_exact_maximum_before_writes_and_through_root_put ... ok
+test durable::tests::nodes_reject_wrong_child_kind_lengths_and_descriptor_bytes ... ok
+test pack::tests::accepts_empty_sha1_and_sha256_packs ... ok
+test pack::tests::normalizes_a_ref_delta_before_its_in_pack_base ... ok
+test durable::tests::range_fetch_rejects_crc_mismatch_without_retaining_output ... ok
+test durable::tests::multi_level_ofs_and_ref_delta_chains_round_trip_with_limits ... ok
+test pack::tests::normalizes_sha256_objects ... ok
+test pack::tests::rejects_bad_external_base_evidence ... ok
+test pack::tests::rejects_corrupt_or_ambiguous_pack_structure ... ok
+test pack::tests::rejects_each_resource_limit_before_returning_a_pack ... ok
+test durable::tests::sha1_and_sha256_stage_load_and_sparse_find_match_git ... ok
+test receive::tests::cancellation_releases_helper_and_reader_reservations ... ok
+test receive::tests::gix_missing_id_can_be_an_unresolved_internal_chain_base ... ok
+test receive::tests::internal_ref_chain_needs_no_store_lookup ... ok
+test pack::tests::scan_inflation_retains_only_delta_size_prefix ... ok
+test receive::tests::missing_base_and_exhausted_budgets_do_not_read_storage ... ok
+test pack::tests::normalizes_base_ofs_and_in_pack_ref_objects ... ok
+test receive::tests::original_duplicates_and_corrupt_packs_are_not_repaired ... ok
+test receive::tests::resolves_true_thin_base_and_releases_retained_memory ... ok
+test receive::tests::round_budget_is_checked_before_an_available_base_get ... ok
+test receive::tests::unavailable_root_does_not_refetch_a_supplied_intermediate ... ok
+test durable::tests::range_fetch_reuses_large_entries_without_a_contiguous_copy ... ok
+test receive::tests::mixed_chains_prune_redundant_durable_candidates ... ok
+test pack::tests::thin_pack_work_has_an_exact_operation_boundary ... ok
+test pack::tests::scan_inflation_checks_exact_sizes_and_adjacent_streams ... ok
+test repository::tests::checkpoint_preserves_conflict_and_pending_outcomes ... ok
+test pack::tests::resolves_a_thin_ref_delta_from_a_supplied_base ... ok
+test repository::tests::common_receive_active_collection_charges_plan_before_staging ... ok
+test durable::tests::variable_chunks_authenticate_geometry_and_keep_reads_sparse ... ok
+test pack::tests::pack_scan_uses_fixed_decode_memory_for_both_hashes ... ok
+test repository::tests::common_receive_conflict_and_lost_response_keep_exact_candidate ... ok
+test repository::tests::common_checkpoint_preserves_live_pack_and_collects_dead_pack ... ok
+test graph::tests::deep_history_uses_a_deduplicated_iterative_queue ... ok
+test repository::tests::common_open_accepts_384_transaction_history ... ok
+test repository::tests::common_receive_checks_every_leaf_and_rejects_missing_objects ... ok
+test repository::tests::common_receive_expired_candidate_never_reports_success ... ok
+test durable::tests::verifies_full_blobs_with_fixed_memory_and_installed_git_ids ... ok
+test repository::tests::common_receive_allow_rewrite_keeps_leases_cas_and_atomic_branch_validation ... ok
+test repository::tests::common_receive_token_survives_invalid_resolution_evidence ... ok
+test repository::tests::common_repository_preflights_state_and_releases_cancelled_load ... ok
+test repository::tests::common_receive_pending_never_reports_success ... ok
+test repository::tests::common_receive_rejects_stale_atomic_and_corrupt_pack ... ok
+test repository::tests::common_repository_retains_one_authenticated_exact_view ... ok
+test durable::tests::cache_evicts_at_eight_mib_while_slices_keep_their_reservation ... ok
+test repository::tests::common_receive_fast_forward_branch_kind_and_tag_updates ... ok
+test repository::tests::common_receive_publish_recovery_ref_only_and_delete ... ok
+test repository::tests::decode_admission_covers_dense_malformed_ref_vectors ... ok
+test repository::tests::head_transfer_is_charged_before_read_and_after_retry ... ok
+test durable::tests::fetch_pack_reuses_full_and_ref_delta_streams_for_both_formats ... ok
+test repository::tests::common_receive_expired_view_retry_keeps_cumulative_operation ... ok
+test repository::tests::common_receive_reuses_retained_pack_for_new_refs_and_restored_history ... ok
+test repository::tests::materialization_rejects_before_tail_reads_without_resetting_budget ... ok
+test repository::tests::common_receive_true_thin_pack_uses_same_view_verified_base ... ok
+test repository::tests::upload_limits_fail_before_io_and_response_retains_its_memory ... ok
+test repository::tests::conservative_checkpoint_expiry_retry_retains_cumulative_calls ... ok
+test repository::tests::conservative_checkpoint_conflict_preserves_the_concurrent_ref_update ... ok
+test repository::tests::conservative_checkpoint_keeps_unreachable_packs_without_catalog_reads ... ok
+test state::tests::checkpoint_round_trips_empty_pack_set ... ok
+test state::tests::pack_descriptors_stay_aligned_with_roots ... ok
+test state::tests::retained_state_is_reserved_before_mutation_and_released_after_deletion ... ok
+test state::tests::transaction_is_sorted_and_applied_atomically ... ok
+test tests::public_values_reject_invalid_inputs ... ok
+test wire::tests::accepts_optional_line_feeds_and_empty_prefixes ... ok
+test repository::tests::common_receive_ref_namespace_applies_deletions_atomically ... ok
+test wire::tests::enforces_packet_and_reason_limits_before_output ... ok
+test wire::tests::enforces_output_count_limits_without_partial_output ... ok
+test wire::tests::enforces_receive_control_command_and_pack_limits ... ok
+test wire::tests::parses_fetch_flags_and_deduplicates_negotiation_ids ... ok
+test wire::tests::parses_git_254_ls_refs_fixture_without_copying_prefixes ... ok
+test wire::tests::parses_git_254_receive_fixture_and_borrows_pack ... ok
+test wire::tests::receive_defaults_sha1_accepts_line_feeds_and_enforces_pack_shape ... ok
+test wire::tests::rejects_invalid_receive_capabilities_commands_and_pack ... ok
+test wire::tests::rejects_invalid_upload_framing_and_arguments ... ok
+test wire::tests::upload_advertisement_matches_protocol_v2 ... ok
+test wire::tests::validates_complete_advertisements_before_output ... ok
+test wire::tests::writes_classic_receive_advertisements ... ok
+test wire::tests::writes_exact_ls_refs_fixture ... ok
+test wire::tests::writes_exact_receive_statuses ... ok
+test wire::tests::writes_fetch_sections_and_maximum_sideband_chunks ... ok
+test wire::tests::writes_sha256_ids_and_rejects_mixed_formats_before_output ... ok
+test repository::tests::upload_v2_discovers_refs_negotiates_and_frames_both_hashes ... ok
+test wire::tests::enforces_upload_count_and_byte_limits ... ok
+test repository::tests::oversized_publication_options_return_a_bounded_error ... ok
+test repository::tests::upload_ls_refs_rejects_incorrect_final_tag_kind ... ok
+test repository::tests::upload_ls_refs_peels_full_filtered_tag_chains ... ok
+test repository::tests::upload_expired_view_reopens_once_with_the_original_budget ... ok
+test repository::tests::conservative_checkpoint_pending_preserves_exact_core_outcome ... ok
+test repository::tests::selected_fetch_rejects_wrong_tree_and_tag_leaf_kinds ... ok
+test repository::tests::bounded_materialization_accepts_history_larger_than_the_decoder_window ... ok
+test repository::tests::selected_fetch_matches_git_and_includes_complete_tag_chains ... ok
+test graph::tests::object_limit_rejects_before_reads_and_work_stays_cumulative ... ok
+test repository::tests::conservative_checkpoint_late_invalid_metadata_never_publishes ... ok
+test repository::tests::conservative_checkpoint_recovers_1024_transaction_tail_for_both_hashes ... ok
+
+test result: ok. 128 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.94s
+
+     Running tests/gc.rs (target/debug/deps/gc-f34d6494c6572f7f)
+
+running 3 tests
+test cold_open_retries_from_an_empty_cache_after_its_view_expires ... ok
+test checkpoint_makes_dead_pack_collectable_and_keeps_live_pack ... ok
+test cold_open_does_not_retry_current_epoch_corruption ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+
+     Running tests/minio.rs (target/debug/deps/minio-87747bb799d749c2)
+
+running 1 test
+test minio_git_push_checkpoint_collection_and_cold_recovery ... ignored, requires OBJECT_LOG_MINIO_* and the pinned local MinIO from scripts/test-minio.sh
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/performance_acceptance.rs (target/debug/deps/performance_acceptance-14a3a024be4579c5)
+
+running 1 test
+test git_request_and_byte_accounting ... ignored, creates and recovers an 8 MiB Git pack
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ref_namespaces.rs (target/debug/deps/ref_namespaces-31de03e1d01ff36c)
+
+running 1 test
+test notes_mirror_and_byte_refs_survive_receive_checkpoint_and_cold_fetch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+     Running tests/shared_performance.rs (target/debug/deps/shared_performance-5c5e3274c9ba1c5d)
+
+running 2 tests
+test shared_git_performance_acceptance ... ignored, paired Git/shared performance acceptance; writes raw JSONL
+test timed_store::serial_depth_counts_chains_and_overlapping_requests ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests object_log_git
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
