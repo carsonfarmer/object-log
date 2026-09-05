@@ -329,6 +329,31 @@ impl Log {
         })
     }
 
+    /// Opens an existing writable log without creating or updating its head.
+    ///
+    /// This method only reads the durable head. Constructing the supplied
+    /// [`ValidatedBackend`] separately still performs capability probes,
+    /// including temporary writes in an isolated probe namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the head is absent, unreadable, or invalid, or its
+    /// durable options differ from `options`. An absent head is not initialized.
+    pub async fn open_existing(
+        backend: &ValidatedBackend,
+        log_id: &LogId,
+        options: Options,
+    ) -> Result<Self, Error> {
+        let store = backend.scope(log_id);
+        let incarnation = Self::load_incarnation(&store, options).await?;
+        Ok(Self {
+            store,
+            options,
+            incarnation,
+            staging_domain: Arc::new(StagingDomain),
+        })
+    }
+
     /// Returns the limits fixed when this log was opened.
     #[must_use]
     pub const fn options(&self) -> Options {
@@ -2808,6 +2833,127 @@ mod tests {
         assert_eq!(faults.metrics().operation(Operation::List).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_existing_never_initializes_a_missing_head()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("existing-only")).await?;
+        let id = LogId::new("missing")?;
+        faults.reset();
+        assert!(matches!(
+            Log::open_existing(&backend, &id, Options::default()).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        assert!(
+            backend
+                .scope(&id)
+                .read(StoreKey::Head, Options::default().max_head_bytes)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_existing_checks_durable_options_and_head_integrity_without_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("existing-validation"))
+                .await?;
+        let id = LogId::new("existing")?;
+        let log = Log::open(&backend, &id, Options::default()).await?;
+        let changed = Options {
+            max_inline_operation_bytes: 1,
+            ..Options::default()
+        };
+        faults.reset();
+        assert!(matches!(
+            Log::open_existing(&backend, &id, changed).await,
+            Err(Error::ConfigurationMismatch("options"))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        let stored = log
+            .store
+            .read(StoreKey::Head, log.options.max_head_bytes)
+            .await?
+            .ok_or("head is missing")?;
+        log.store
+            .update(
+                StoreKey::Head,
+                Bytes::from_static(b"malformed head"),
+                stored.version,
+            )
+            .await?;
+        faults.reset();
+        assert!(
+            Log::open_existing(&backend, &id, Options::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_existing_reopens_state_but_revalidates_foreign_staging_proofs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("existing-proofs")).await?;
+        let id = LogId::new("existing")?;
+        let first = Log::open(&backend, &id, Options::default()).await?;
+        let view = first.load().await?;
+        let object = first
+            .put_object(&view, Bytes::from_static(b"durable bytes"))
+            .await?;
+        faults.reset();
+        let reopened = Log::open_existing(&backend, &id, Options::default()).await?;
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        assert_eq!(reopened.incarnation, first.incarnation);
+        assert_eq!(reopened.options(), first.options());
+        let view = reopened.load().await?;
+        assert!(matches!(
+            reopened.prepare(
+                &view,
+                TransactionId::new(),
+                Bytes::new(),
+                Bytes::new(),
+                vec![object.clone()]
+            ),
+            Err(Error::InvalidStagedObject)
+        ));
+        let objects = reopened
+            .stage_objects(&view, vec![object.reference().clone()])
+            .await?;
+        let prepared = reopened.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(b"operation"),
+            Bytes::new(),
+            objects,
+        )?;
+        assert!(matches!(
+            reopened.commit(prepared).await?,
+            CommitStatus::Committed(_)
+        ));
+        let cold = Log::open_existing(&backend, &id, Options::default()).await?;
+        let view = cold.load().await?;
+        assert_eq!(
+            cold.read_tail(&view).await?[0].operation(),
+            &Bytes::from_static(b"operation")
+        );
+        assert_eq!(
+            cold.read_object(&view, object.reference()).await?,
+            Bytes::from_static(b"durable bytes")
+        );
         Ok(())
     }
 
