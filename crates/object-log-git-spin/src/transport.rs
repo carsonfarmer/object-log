@@ -42,16 +42,13 @@ struct Budget {
     bytes: AtomicU64,
 }
 impl Budget {
-    fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<(), HttpError> {
-        counter
+    fn call(&self) -> Result<(), HttpError> {
+        self.calls
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(amount).filter(|&next| next <= limit)
+                current.checked_add(1).filter(|&next| next <= HTTP_CALLS)
             })
             .map(|_| ())
             .map_err(|_| http_error(QuotaExceeded))
-    }
-    fn call(&self) -> Result<(), HttpError> {
-        Self::charge(&self.calls, 1, HTTP_CALLS)
     }
     fn transfer(&self, bytes: impl TryInto<u64>) -> Result<(), HttpError> {
         let bytes = bytes.try_into().map_err(|_| http_error(QuotaExceeded))?;

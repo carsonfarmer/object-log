@@ -346,6 +346,10 @@ impl Action {
 }
 
 fn command() -> Command {
+    let recovery_file = Arg::new("recovery-file")
+        .long("recovery-file")
+        .required(true)
+        .value_parser(clap::value_parser!(PathBuf));
     Command::new("object-log-git-maintain")
         .subcommand_required(true)
         .arg(
@@ -355,22 +359,8 @@ fn command() -> Command {
                 .value_parser(clap::value_parser!(PathBuf)),
         )
         .subcommand(Command::new("status"))
-        .subcommand(
-            Command::new("compact-packs").arg(
-                Arg::new("recovery-file")
-                    .long("recovery-file")
-                    .required(true)
-                    .value_parser(clap::value_parser!(PathBuf)),
-            ),
-        )
-        .subcommand(
-            Command::new("migrate-catalog").arg(
-                Arg::new("recovery-file")
-                    .long("recovery-file")
-                    .required(true)
-                    .value_parser(clap::value_parser!(PathBuf)),
-            ),
-        )
+        .subcommand(Command::new("compact-packs").arg(recovery_file.clone()))
+        .subcommand(Command::new("migrate-catalog").arg(recovery_file.clone()))
         .subcommand(
             Command::new("collect").arg(
                 Arg::new("resume-only")
@@ -392,12 +382,7 @@ fn command() -> Command {
                         .required(true)
                         .value_parser(clap::value_parser!(OsString)),
                 )
-                .arg(
-                    Arg::new("recovery-file")
-                        .long("recovery-file")
-                        .required(true)
-                        .value_parser(clap::value_parser!(PathBuf)),
-                ),
+                .arg(recovery_file),
         )
         .subcommand(
             Command::new("checkpoint").arg(
