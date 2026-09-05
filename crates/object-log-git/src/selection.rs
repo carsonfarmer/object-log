@@ -30,7 +30,7 @@ pub(crate) fn select(
     }
     let count = graph.nodes.len();
     let memory = operation.reserve_state(
-        count * (3 * size_of::<ObjectId>() + 5 + 2 * size_of::<u32>()) + size_of_val(haves),
+        count * (3 * size_of::<ObjectId>() + 6 + size_of::<u32>()) + size_of_val(haves),
     )?;
     operation.work(
         (wants.len() + haves.len() + shallow.ids.len()) * size_of::<ObjectId>()
@@ -72,17 +72,16 @@ pub(crate) fn select(
             );
         }
     }
-    closure(operation, graph, &mut wanted, &mut stack, &boundary)?;
-    let mut common = Vec::with_capacity(haves.len());
-    for &id in haves {
-        if let Some(index) = graph.location(id) {
-            common.push(id);
-            schedule(index, &mut present, &mut stack);
-        }
-    }
-    common.sort_unstable();
-    common.dedup();
-    closure(operation, graph, &mut present, &mut stack, &old)?;
+    closure(operation, graph, &mut wanted, &mut stack, &boundary, false)?;
+    let common = mark_present(
+        operation,
+        graph,
+        haves,
+        wants,
+        &old,
+        &mut present,
+        &mut stack,
+    )?;
     if include_tag {
         for (index, node) in graph.nodes.iter().enumerate() {
             if node.kind == Some(Kind::Tag) {
@@ -125,6 +124,131 @@ pub(crate) fn select(
     })
 }
 
+fn mark_present(
+    operation: &Operation,
+    graph: &Graph,
+    haves: &[ObjectId],
+    wants: &[ObjectId],
+    old: &[bool],
+    present: &mut [bool],
+    stack: &mut Vec<u32>,
+) -> Result<Vec<ObjectId>, Error> {
+    let count = graph.nodes.len();
+    let mut common = Vec::with_capacity(haves.len());
+    for &id in haves {
+        if let Some(index) = graph.location(id) {
+            common.push(id);
+            schedule(index, present, stack);
+        }
+    }
+    common.sort_unstable();
+    common.dedup();
+    closure(operation, graph, present, stack, old, false)?;
+    if wants.iter().all(|id| {
+        graph
+            .location(*id)
+            .is_some_and(|index| graph.nodes[index as usize].kind == Some(Kind::Commit))
+    }) {
+        return Ok(common);
+    }
+    // A commit have does not prove that a partial client has an explicitly
+    // requested tree/blob. Direct noncommit haves still prove their closures.
+    let mut requested_objects = vec![false; count];
+    let mut known_objects = vec![false; count];
+    for &id in wants {
+        let index = graph.location(id).ok_or(Error::InvalidReference)?;
+        if graph.nodes[index as usize].kind != Some(Kind::Commit) {
+            schedule(index, &mut requested_objects, stack);
+        }
+    }
+    closure(operation, graph, &mut requested_objects, stack, old, true)?;
+    for &id in &common {
+        let index = graph.location(id).ok_or(Error::InvalidReference)?;
+        if graph.nodes[index as usize].kind != Some(Kind::Commit) {
+            schedule(index, &mut known_objects, stack);
+        }
+    }
+    closure(operation, graph, &mut known_objects, stack, old, false)?;
+    for index in 0..count {
+        present[index] = (present[index] && !requested_objects[index]) || known_objects[index];
+    }
+    Ok(common)
+}
+
+pub(crate) async fn filter(
+    operation: &Operation,
+    graph: &Graph,
+    reader: &mut crate::durable::Reader<'_>,
+    ids: &mut Vec<ObjectId>,
+    wants: &[ObjectId],
+    filter: crate::wire::Filter,
+    include_tag: bool,
+) -> Result<(), Error> {
+    let _memory = operation.reserve_state(graph.nodes.len())?;
+    let mut provided = vec![false; graph.nodes.len()];
+    for &id in wants {
+        let index = graph.location(id).ok_or(Error::InvalidReference)? as usize;
+        provided[index] = true;
+        provided[peel(operation, graph, index)?] = true;
+    }
+    let mut retained = 0;
+    for offset in 0..ids.len() {
+        let id = ids[offset];
+        let index = graph.location(id).ok_or(Error::InvalidReference)? as usize;
+        operation.work(size_of::<ObjectId>())?;
+        let keep = if graph.nodes[index].kind != Some(Kind::Blob) || provided[index] {
+            true
+        } else {
+            match filter {
+                crate::wire::Filter::BlobNone => false,
+                crate::wire::Filter::BlobLimit(limit) => {
+                    let size = reader
+                        .object_size(id)
+                        .await?
+                        .ok_or(Error::InvalidReference)?;
+                    // Authenticated size metadata is not content verification.
+                    // Every retained blob is still fully verified before output.
+                    (size as u64) < limit
+                }
+            }
+        };
+        if keep {
+            ids[retained] = id;
+            retained += 1;
+        }
+    }
+    ids.truncate(retained);
+    if include_tag {
+        include_tags(operation, graph, ids)?;
+    }
+    Ok(())
+}
+
+// Include complete annotated-tag chains only when their peeled object is in
+// the emitted pack, after filtering. Selection reserves room for every node.
+fn include_tags(
+    operation: &Operation,
+    graph: &Graph,
+    ids: &mut Vec<ObjectId>,
+) -> Result<(), Error> {
+    let _memory = operation.reserve_state(graph.nodes.len())?;
+    let mut selected = vec![false; graph.nodes.len()];
+    for &id in ids.iter() {
+        selected[graph.location(id).ok_or(Error::InvalidReference)? as usize] = true;
+    }
+    for (index, node) in graph.nodes.iter().enumerate() {
+        operation.work(size_of::<ObjectId>())?;
+        if node.kind == Some(Kind::Tag)
+            && !selected[index]
+            && selected[peel(operation, graph, index)?]
+        {
+            ids.push(node.id);
+        }
+    }
+    ids.sort_unstable();
+    Ok(())
+}
+
 fn schedule(index: u32, seen: &mut [bool], stack: &mut Vec<u32>) {
     if !seen[index as usize] {
         seen[index as usize] = true;
@@ -138,12 +262,15 @@ fn closure(
     seen: &mut [bool],
     stack: &mut Vec<u32>,
     boundary: &[bool],
+    objects_only: bool,
 ) -> Result<(), Error> {
     while let Some(index) = stack.pop() {
         let edges = &graph.edges[graph.nodes[index as usize].edges.clone()];
         operation.work(size_of::<u32>() * (1 + edges.len()))?;
         for &child in edges {
-            if boundary[index as usize] && graph.nodes[child as usize].kind == Some(Kind::Commit) {
+            if (objects_only || boundary[index as usize])
+                && graph.nodes[child as usize].kind == Some(Kind::Commit)
+            {
                 continue;
             }
             schedule(child, seen, stack);
@@ -164,23 +291,8 @@ fn boundaries(
 ) -> Result<Vec<bool>, Error> {
     let count = graph.nodes.len();
     let _memory = operation.reserve_state(count * (3 + 2 * size_of::<u32>()))?;
-    let mut excluded = vec![false; count];
+    let excluded = exclusions_mask(operation, graph, exclusions)?;
     let mut queue = Vec::with_capacity(count);
-    for &id in exclusions {
-        let index = graph.location(id).ok_or(Error::InvalidReference)?;
-        let index = peel(operation, graph, index as usize)?;
-        if graph.nodes[index].kind != Some(Kind::Commit) {
-            return Err(Error::InvalidReference);
-        }
-        schedule(
-            u32::try_from(index).map_err(crate::pack::pack_error)?,
-            &mut excluded,
-            &mut queue,
-        );
-    }
-    // Exclusions are reachability predicates, not fetch have assertions.
-    let no_boundaries = vec![false; count];
-    closure(operation, graph, &mut excluded, &mut queue, &no_boundaries)?;
     let mut distance = vec![u32::MAX; count];
     let mut depth = request.depth.unwrap_or(i32::MAX as u32);
     for &id in wants {
@@ -261,6 +373,39 @@ fn boundaries(
         ));
     }
     Ok(result)
+}
+
+fn exclusions_mask(
+    operation: &Operation,
+    graph: &Graph,
+    exclusions: &[ObjectId],
+) -> Result<Vec<bool>, Error> {
+    let count = graph.nodes.len();
+    let mut excluded = vec![false; count];
+    let mut queue = Vec::with_capacity(count);
+    for &id in exclusions {
+        let index = graph.location(id).ok_or(Error::InvalidReference)?;
+        let index = peel(operation, graph, index as usize)?;
+        if graph.nodes[index].kind != Some(Kind::Commit) {
+            return Err(Error::InvalidReference);
+        }
+        schedule(
+            u32::try_from(index).map_err(crate::pack::pack_error)?,
+            &mut excluded,
+            &mut queue,
+        );
+    }
+    // Exclusions are reachability predicates, not fetch have assertions.
+    let no_boundaries = vec![false; count];
+    closure(
+        operation,
+        graph,
+        &mut excluded,
+        &mut queue,
+        &no_boundaries,
+        false,
+    )?;
+    Ok(excluded)
 }
 
 fn peel(operation: &Operation, graph: &Graph, mut index: usize) -> Result<usize, Error> {

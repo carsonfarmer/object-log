@@ -1,0 +1,2 @@
+sha1: depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge strict client acceptance passed
+sha256: depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge strict client acceptance passed

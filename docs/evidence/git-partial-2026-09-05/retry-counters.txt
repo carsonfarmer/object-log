@@ -1,0 +1,60 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.14s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7d5666786ede979b)
+
+running 1 test
+partial Sha1: cumulative calls=7, work=1578986, retained_response_bytes=66, fetch_store_gets=6, fetch_downloaded_bytes=2680
+partial Sha256: cumulative calls=7, work=1579679, retained_response_bytes=78, fetch_store_gets=6, fetch_downloaded_bytes=2845
+test repository::tests::partial_lazy_fetch_reopens_once_with_cumulative_counters ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.68s
+
+     Running tests/gc.rs (target/debug/deps/gc-52ff49d693b3319a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/minio.rs (target/debug/deps/minio-0b9c6e6898198840)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/partial.rs (target/debug/deps/partial-2f2a854622214330)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/partial_maintenance.rs (target/debug/deps/partial_maintenance-cd702f0a5153a907)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/performance_acceptance.rs (target/debug/deps/performance_acceptance-f955e359cbd86c26)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/ref_namespaces.rs (target/debug/deps/ref_namespaces-b3793e8b9adf2713)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/shallow.rs (target/debug/deps/shallow-dcebe63201bbacbf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/shared_performance.rs (target/debug/deps/shared_performance-654ec1d0e5e936b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

@@ -1,0 +1,33 @@
+Observed tool-transcript excerpts from interrupted pre-final gates.
+The final gate filenames are reruns; these excerpts preserve the observed
+failures, not a claim to contain the full original subprocess output.
+
+1. A workspace gate overlapped dependency cherry-picks and its rustdoc invocation
+   retained the earlier extern list. It failed with unresolved ReceivePolicy,
+   base64 and subtle. A fresh gate after dependencies settled was required.
+
+2. The first auth-combined cold-host client attempt failed after restart:
+RuntimeError: ['git', '-c', 'protocol.version=2', 'show', 'HEAD:large']: fatal: unable to access 'http://127.0.0.1:50087/repo/': Failed to connect to 127.0.0.1 port 50087 after 0 ms: Couldn't connect to server
+fatal: could not fetch 532c76d5b250473b62f619cb53d29ab243da3ee3 from promisor remote
+The captured Spin log printed Serving http://127.0.0.1:50087 for both starts.
+The cause of that connection refusal was not established.
+
+3. A subsequent local-provider client attempt failed on the initial push:
+RuntimeError: ['git', '-c', 'protocol.version=2', 'push', '--quiet', 'http://127.0.0.1:59410/repo', 'main', 'v1']: remote: Git request failed
+fatal: unable to access 'http://127.0.0.1:59410/repo/': The requested URL returned error: 500
+
+The concurrent workspace command reported:
+Caused by:
+  No space left on device (os error 28)
+error: failed to write query cache to `/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/target/debug/incremental/object_log_git-1gn142m0y3d4i/s-hm00pcayik-0zvgcit-working/query-cache.bin`: No space left on device (os error 28)
+error: could not compile `object-log-git` (lib test) due to 1 previous error
+
+Observed df state at investigation:
+/dev/disk3s5  926Gi  901Gi  117Mi  100%  /System/Volumes/Data
+This task's target/debug/incremental cache occupied 4.6G. Removing that disposable
+cache restored 7.2GiB free at the next observation; the coordinator subsequently
+reported 43GiB free after clearing other inactive historical build caches.
+
+No transport defect or causal attribution for the client failures is inferred
+from these resource-constrained runs. Every retry creates a fresh isolated local
+MinIO container and fresh Spin processes; later builds disable incremental cache.

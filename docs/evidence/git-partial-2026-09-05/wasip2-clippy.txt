@@ -1,0 +1,17 @@
+    Checking subtle v2.6.1
+    Checking base64 v0.22.1
+    Checking digest v0.10.7
+    Checking sha1 v0.10.7
+    Checking crc-fast v1.10.0
+    Checking sha2 v0.10.9
+    Checking hmac v0.12.1
+    Checking sha1-checked v0.10.0
+    Checking gix-hash v0.26.2
+    Checking object_store v0.14.1
+    Checking gix-hashtable v0.16.0
+    Checking gix-object v0.64.1
+    Checking gix-pack v0.74.2
+    Checking object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log)
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-git)
+    Checking object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-git-spin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.74s

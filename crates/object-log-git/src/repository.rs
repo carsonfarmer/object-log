@@ -124,7 +124,7 @@ impl Repository {
         haves: &[ObjectId],
         include_tag: bool,
     ) -> Result<Bytes, Error> {
-        self.fetch_pack_or_ack(wants, haves, include_tag, true, None)
+        self.fetch_pack_or_ack(wants, haves, include_tag, true, None, None)
             .await
     }
 
@@ -135,6 +135,7 @@ impl Repository {
         include_tag: bool,
         done: bool,
         shallow: Option<&wire::ShallowRequest<'_>>,
+        filter: Option<wire::Filter>,
     ) -> Result<Bytes, Error> {
         let catalog = self.catalog().await?;
         let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
@@ -160,34 +161,14 @@ impl Repository {
             .reserve_state(shallow.exclude.len() * size_of::<ObjectId>())?;
         let mut exclusions = Vec::with_capacity(shallow.exclude.len());
         for name in &shallow.exclude {
-            // Match unique Git ref expansion, including the advertised HEAD.
-            for candidate in self.state.refs.keys() {
-                self.operation.work((candidate.len() + name.len()) * 6)?;
-            }
-            let mut matches = self.state.refs.iter().filter(|(candidate, _)| {
-                (*name == b"HEAD" && candidate.as_slice() == b"refs/heads/main")
-                    || candidate.as_slice() == *name
-                    || candidate.strip_prefix(b"refs/") == Some(*name)
-                    || candidate.strip_prefix(b"refs/heads/") == Some(*name)
-                    || candidate.strip_prefix(b"refs/tags/") == Some(*name)
-                    || candidate.strip_prefix(b"refs/remotes/") == Some(*name)
-                    || candidate
-                        .strip_prefix(b"refs/remotes/")
-                        .and_then(|reference| reference.strip_suffix(b"/HEAD"))
-                        == Some(*name)
-            });
-            let (_, id) = matches.next().ok_or(Error::InvalidReference)?;
-            if matches.next().is_some() {
-                return Err(Error::InvalidReference);
-            }
-            exclusions.push(*id);
+            exclusions.push(self.excluded_ref(name)?);
         }
-        let selected = crate::selection::select(
+        let mut selected = crate::selection::select(
             &self.operation,
             &graph,
             wants,
             haves,
-            include_tag,
+            include_tag && filter.is_none(),
             shallow,
             &exclusions,
         )?;
@@ -199,6 +180,18 @@ impl Repository {
                     FetchReply::Acknowledgments(&selected.common),
                 )
             });
+        }
+        if let Some(filter) = filter {
+            crate::selection::filter(
+                &self.operation,
+                &graph,
+                &mut reader,
+                &mut selected.ids,
+                wants,
+                filter,
+                include_tag,
+            )
+            .await?;
         }
         for id in &selected.ids {
             let node = &graph.nodes[graph.location(*id).ok_or(Error::InvalidReference)? as usize];
@@ -224,6 +217,30 @@ impl Repository {
                 },
             )
         })
+    }
+
+    fn excluded_ref(&self, name: &[u8]) -> Result<ObjectId, Error> {
+        // Match unique Git ref expansion, including the advertised HEAD.
+        for candidate in self.state.refs.keys() {
+            self.operation.work((candidate.len() + name.len()) * 6)?;
+        }
+        let mut matches = self.state.refs.iter().filter(|(candidate, _)| {
+            (name == b"HEAD" && candidate.as_slice() == b"refs/heads/main")
+                || candidate.as_slice() == name
+                || candidate.strip_prefix(b"refs/") == Some(name)
+                || candidate.strip_prefix(b"refs/heads/") == Some(name)
+                || candidate.strip_prefix(b"refs/tags/") == Some(name)
+                || candidate.strip_prefix(b"refs/remotes/") == Some(name)
+                || candidate
+                    .strip_prefix(b"refs/remotes/")
+                    .and_then(|reference| reference.strip_suffix(b"/HEAD"))
+                    == Some(name)
+        });
+        let (_, id) = matches.next().ok_or(Error::InvalidReference)?;
+        if matches.next().is_some() {
+            return Err(Error::InvalidReference);
+        }
+        Ok(*id)
     }
 
     /// Returns protocol-v2 upload-pack discovery bytes for this object format.
@@ -279,9 +296,10 @@ impl Repository {
                 done,
                 include_tag,
                 shallow,
+                filter,
                 ..
             } => {
-                self.fetch_pack_or_ack(wants, haves, *include_tag, *done, Some(shallow))
+                self.fetch_pack_or_ack(wants, haves, *include_tag, *done, Some(shallow), *filter)
                     .await
             }
         }
@@ -552,6 +570,7 @@ mod tests {
     include!("repository/receive_tests.rs");
     include!("repository/shallow_tests.rs");
     include!("repository/maintenance_tests.rs");
+    include!("repository/partial_tests.rs");
 
     struct Fixture {
         directory: TempDir,

@@ -453,7 +453,6 @@ impl<'a> Reader<'a> {
     /// metadata without checking the decoded size or object ID. Selected content
     /// must still pass `verify`. Deltas and structural objects use `find`, so a
     /// delta reports its decoded result size, never its instruction-stream size.
-    #[allow(dead_code, reason = "pending coordinated partial-clone caller")]
     pub(crate) async fn object_size(&mut self, id: ObjectId) -> Result<Option<usize>, Error> {
         let Some(location) = self.catalog.location(id) else {
             return Ok(None);

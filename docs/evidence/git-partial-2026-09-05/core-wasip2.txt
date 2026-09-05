@@ -1,0 +1,2 @@
+    Checking object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.89s

@@ -1,0 +1,7 @@
+2026-09-05 local synthetic process regression (no Docker)
+AST-extracted stop() from both client fixtures. Each private-session Python parent
+spawned a child holding a live loopback TCP listener. Called stop(), verified parent
+exit and ECONNREFUSED, then called stop() again.
+check_shallow.py: descendant listener closed; parent reaped; repeated stop succeeds
+check_partial.py: descendant listener closed; parent reaped; repeated stop succeeds
+Provider cold-process qualification remains pending.

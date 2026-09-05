@@ -1,0 +1,6 @@
+    Checking object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log)
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-git)
+    Checking object-log-sqlite v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-sqlite)
+    Checking object-log-kv v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-kv)
+    Checking object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-git-spin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.00s

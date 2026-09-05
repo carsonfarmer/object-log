@@ -1,0 +1,17 @@
+   Compiling subtle v2.6.1
+   Compiling base64 v0.22.1
+   Compiling digest v0.10.7
+   Compiling sha1 v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling crc-fast v1.10.0
+   Compiling sha1-checked v0.10.0
+   Compiling gix-hash v0.26.2
+   Compiling gix-hashtable v0.16.0
+   Compiling gix-object v0.64.1
+   Compiling object_store v0.14.1
+   Compiling gix-pack v0.74.2
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/crates/object-log-git-spin)
+    Finished `release` profile [optimized] target(s) in 9.42s

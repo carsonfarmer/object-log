@@ -11,8 +11,8 @@ pub(crate) const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
 const MAX_COMMANDS: usize = 1_024;
 const MAX_ITEMS: usize = 32_768;
 const MAX_PACKET_PAYLOAD: usize = 65_515;
-const UPLOAD_SHA1: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0012fetch=shallow\n0017object-format=sha1\n0000";
-const UPLOAD_SHA256: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0012fetch=shallow\n0019object-format=sha256\n0000";
+const UPLOAD_SHA1: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0019fetch=shallow filter\n0017object-format=sha1\n0000";
+const UPLOAD_SHA256: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0019fetch=shallow filter\n0019object-format=sha256\n0000";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -35,6 +35,7 @@ pub(crate) enum UploadRequest<'a> {
         wants: Box<[ObjectId]>,
         haves: Box<[ObjectId]>,
         shallow: ShallowRequest<'a>,
+        filter: Option<Filter>,
         done: bool,
         #[allow(
             dead_code,
@@ -48,6 +49,42 @@ pub(crate) enum UploadRequest<'a> {
         ofs_delta: bool,
         include_tag: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Filter {
+    BlobNone,
+    BlobLimit(u64),
+}
+
+impl Filter {
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes == b"blob:none" {
+            return Ok(Self::BlobNone);
+        }
+        let number = bytes
+            .strip_prefix(b"blob:limit=")
+            .ok_or(Error::Protocol("unsupported object filter"))?;
+        let (number, factor) = match number.last() {
+            Some(b'k' | b'K') => (&number[..number.len() - 1], 1024_u64),
+            Some(b'm' | b'M') => (&number[..number.len() - 1], 1024_u64.pow(2)),
+            Some(b'g' | b'G') => (&number[..number.len() - 1], 1024_u64.pow(3)),
+            _ => (number, 1),
+        };
+        if number.is_empty() || !number.iter().all(u8::is_ascii_digit) {
+            return Err(Error::Protocol("invalid blob size filter"));
+        }
+        let size = number.iter().try_fold(0_u64, |value, digit| {
+            value
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u64::from(*digit - b'0')))
+                .ok_or(Error::Protocol("blob size filter overflow"))
+        })?;
+        Ok(Self::BlobLimit(
+            size.checked_mul(factor)
+                .ok_or(Error::Protocol("blob size filter overflow"))?,
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -180,6 +217,7 @@ fn parse_fetch<'a>(
 ) -> Result<UploadRequest<'a>, Error> {
     let (mut wants, mut haves) = (Vec::new(), Vec::new());
     let mut shallow = ShallowRequest::default();
+    let mut filter = None;
     let (mut boundaries, mut exclude) = (Vec::new(), Vec::new());
     let (mut done, mut options) = (false, 0_u8);
     while let Some(line) = data_until(packets, PacketLineRef::Flush)? {
@@ -200,6 +238,11 @@ fn parse_fetch<'a>(
                 return Err(Error::Protocol("duplicate fetch option"));
             }
             options |= bit;
+        } else if let Some(spec) = line.strip_prefix(b"filter ") {
+            if filter.is_some() {
+                return Err(Error::Protocol("duplicate filter"));
+            }
+            filter = Some(Filter::parse(spec)?);
         } else if let Some(id) = line.strip_prefix(b"shallow ") {
             within(boundaries.len() + 1, MAX_ITEMS, "shallow boundaries")?;
             boundaries.push(parse_id(id, format)?);
@@ -264,6 +307,7 @@ fn parse_fetch<'a>(
         wants: wants.into_boxed_slice(),
         haves: haves.into_boxed_slice(),
         shallow,
+        filter,
         done,
         thin_pack: options & 1 != 0,
         ofs_delta: options & 2 != 0,
@@ -1761,7 +1805,7 @@ mod tests {
                 vec![b"deepen-since 1", b"deepen-since 2"],
                 vec![b"deepen-not "],
                 vec![b"shallow 00"],
-                vec![b"filter blob:none"],
+                vec![b"filter tree:0"],
                 vec![b"packfile-uris https"],
             ] {
                 let mut options = vec![want.as_bytes()];
@@ -1791,6 +1835,76 @@ mod tests {
             },
         ));
         assert!(output.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn filter_forms_are_explicit_and_numeric_limits_checked() -> TestResult {
+        for (spec, expected) in [
+            ("blob:none", Filter::BlobNone),
+            ("blob:limit=0", Filter::BlobLimit(0)),
+            ("blob:limit=1024", Filter::BlobLimit(1024)),
+            ("blob:limit=1k", Filter::BlobLimit(1024)),
+            ("blob:limit=1M", Filter::BlobLimit(1024 * 1024)),
+            ("blob:limit=1g", Filter::BlobLimit(1024 * 1024 * 1024)),
+            (
+                "blob:limit=18446744073709551615",
+                Filter::BlobLimit(u64::MAX),
+            ),
+        ] {
+            assert_eq!(Filter::parse(spec.as_bytes())?, expected);
+        }
+        for spec in [
+            "",
+            "blob:limit=",
+            "blob:limit=k",
+            "blob:limit=-1",
+            "blob:limit=+1",
+            "blob:limit=1kb",
+            "blob:limit=18446744073709551616",
+            "blob:limit=18446744073709551615k",
+            "tree:0",
+            "object:type=blob",
+            "sparse:oid=HEAD",
+            "combine:blob:none+tree:1",
+            "blob:None",
+        ] {
+            protocol(Filter::parse(spec.as_bytes()));
+        }
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let oid = if format == ObjectFormat::Sha1 {
+                SHA1_A
+            } else {
+                SHA256_A
+            };
+            let want = format!("want {oid}");
+            protocol(parse_upload(
+                &upload(
+                    b"fetch",
+                    format,
+                    &[want.as_bytes(), b"filter blob:none", b"filter blob:limit=1"],
+                )?,
+                format,
+            ));
+            let input = upload(
+                b"fetch",
+                format,
+                &[
+                    want.as_bytes(),
+                    b"filter blob:none",
+                    b"deepen 1",
+                    b"include-tag",
+                    b"done",
+                ],
+            )?;
+            let UploadRequest::Fetch {
+                filter, shallow, ..
+            } = parse_upload(&input, format)?
+            else {
+                return Err("fetch".into());
+            };
+            assert_eq!(filter, Some(Filter::BlobNone));
+            assert_eq!(shallow.depth, Some(1));
+        }
         Ok(())
     }
 }
