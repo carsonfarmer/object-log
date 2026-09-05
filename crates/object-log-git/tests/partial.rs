@@ -103,177 +103,215 @@ async fn filtered_pack_selection_and_explicit_lazy_wants_match_git() -> TestResu
             prepared.publish_receive().await?.0,
             Resolution::Committed(_)
         ));
-        let mut cases = Vec::new();
-        for filter in [
-            "blob:none",
-            "blob:limit=0",
-            "blob:limit=4",
-            "blob:limit=1024",
-            "blob:limit=1k",
-            "blob:limit=4k",
-            "blob:limit=1m",
-        ] {
-            cases.push(vec![format!("want {tip}"), format!("filter {filter}")]);
-            cases.push(vec![
-                format!("want {tip}"),
-                format!("filter {filter}"),
-                "include-tag".into(),
-            ]);
-            cases.push(vec![
-                format!("want {blob}"),
-                format!("filter {filter}"),
-                format!("have {tip}"),
-            ]);
-        }
-        for want in [&blob, &blob_tag, &outer_tag, &tree, &tree_tag] {
-            for have in [&tip, &blob, &blob_tag, &outer_tag, &tree, &tree_tag] {
-                for filter in [None, Some("blob:none"), Some("blob:limit=1024")] {
-                    let mut args = vec![format!("want {want}"), format!("have {have}")];
-                    if let Some(filter) = filter {
-                        args.push(format!("filter {filter}"));
-                    }
-                    cases.push(args);
-                }
+        let mut uri_packs = std::collections::BTreeMap::new();
+        let mut uri_selections = std::collections::BTreeMap::new();
+        for migrated in [false, true] {
+            if migrated {
+                assert!(matches!(
+                    Repository::migrate_catalog(&log, format, TransactionId::new()).await?,
+                    Some(object_log::CommitStatus::Committed(_))
+                ));
+                assert!(matches!(
+                    Repository::open(&log, format).await?.checkpoint().await?,
+                    object_log::CheckpointStatus::Published(_)
+                ));
             }
-        }
-        cases.extend([
-            vec![
-                format!("want {tip}"),
-                "filter blob:none".into(),
-                "deepen 1".into(),
-                "include-tag".into(),
-            ],
-            vec![
-                format!("want {tip}"),
-                "filter blob:limit=1024".into(),
-                format!("shallow {old}"),
-                format!("have {old}"),
-            ],
-            vec![
-                format!("want {tip}"),
-                "filter blob:none".into(),
-                format!("shallow {tip}"),
-                format!("have {tip}"),
-                "deepen 1".into(),
-                "deepen-relative".into(),
-            ],
-            vec![format!("want {blob_tag}"), "filter blob:none".into()],
-            vec![
-                format!("want {outer_tag}"),
-                "filter blob:none".into(),
-                "include-tag".into(),
-            ],
-            vec![
-                format!("want {blob}"),
-                "filter blob:none".into(),
-                "include-tag".into(),
-            ],
-            vec![format!("want {blob}"), format!("have {tip}")],
-            vec![
-                format!("want {blob}"),
-                format!("have {blob}"),
-                "filter blob:none".into(),
-            ],
-        ]);
-        let base = object_log_git::PackfileUris::new("https://example.invalid/repo")?;
-        let mut uri_count = 0;
-        for mut args in cases {
-            args.push("done".into());
-            let input = request(name, &args)?;
-            let expected = reply(
-                path,
-                &git(path, &["upload-pack", "--stateless-rpc", ".git"], &input)?,
-            )?;
-            let actual = reply(
-                path,
-                &Repository::open(&log, format)
-                    .await?
-                    .upload_pack(input.into())
-                    .await?,
-            )?;
-            assert_eq!(actual, expected, "{name}: {args:?}");
-            args.insert(0, "packfile-uris https".into());
-            let response = Repository::open(&log, format)
-                .await?
-                .upload_pack_with_uris(request(name, &args)?.into(), &base)
-                .await?;
-            let mut combined = reply(path, &response)?;
-            let locations = uri_locations(&response)?;
-            assert!(locations.len() <= 8);
-            drop(response);
-            for (checksum, uri) in locations {
-                let fields = uri.split('/').collect::<Vec<_>>();
-                let id = object_log_git::ObjectId::parse(format, fields[fields.len() - 2])?;
-                let checksum = object_log_git::ObjectId::parse(format, &checksum)?;
-                let pack = Repository::open(&log, format)
-                    .await?
-                    .fetch_uri_pack(id, checksum)
-                    .await?;
-                let ids = reply(path, &frame_pack(&pack))?.ids;
-                assert_eq!(ids.len(), 1);
-                assert!(ids.contains(&id.to_string()));
-                for id in ids {
-                    assert!(combined.ids.insert(id));
-                }
-                uri_count += 1;
-            }
-            assert_eq!(combined, expected, "URI {name}: {args:?}");
-        }
-        assert!(uri_count > 0);
-        // URI access must reject stored-but-unreachable objects and reachable non-blobs.
-        let checksum = object_log_git::ObjectId::parse(format, &blob)?;
-        for rejected in [&unreachable, &tip, &tree] {
-            assert!(matches!(
-                Repository::open(&log, format)
-                    .await?
-                    .fetch_uri_pack(object_log_git::ObjectId::parse(format, rejected)?, checksum)
-                    .await,
-                Err(object_log_git::Error::InvalidReference)
-            ));
-        }
-        let args = vec![
-            format!("want {tip}"),
-            "packfile-uris http".into(),
-            "done".into(),
-        ];
-        let unsupported = request(name, &args)?;
-        assert!(
-            Repository::open(&log, format)
-                .await?
-                .upload_pack(unsupported.clone().into())
-                .await
-                .is_err()
-        );
-        let fallback = Repository::open(&log, format)
-            .await?
-            .upload_pack_with_uris(unsupported.into(), &base)
-            .await?;
-        assert!(uri_locations(&fallback)?.is_empty());
-        let fallback_ids = reply(path, &fallback)?;
-        drop(fallback);
-        let ordinary = Repository::open(&log, format)
-            .await?
-            .upload_pack(request(name, &[format!("want {tip}"), "done".into()])?.into())
-            .await?;
-        assert_eq!(fallback_ids, reply(path, &ordinary)?);
-        drop(ordinary);
-
-        for filter in ["blob:none", "blob:limit=1024"] {
-            let input = request(
-                name,
-                &[
-                    format!("want {unreachable}"),
+            // Reopen from durable state; neither URI selection nor download may
+            // depend on the pre-migration in-memory catalog or checkpoint tail.
+            let log = Log::open_existing(&store, &LogId::new("repository")?, log.options()).await?;
+            let mut cases = Vec::new();
+            for filter in [
+                "blob:none",
+                "blob:limit=0",
+                "blob:limit=4",
+                "blob:limit=1024",
+                "blob:limit=1k",
+                "blob:limit=4k",
+                "blob:limit=1m",
+            ] {
+                cases.push(vec![format!("want {tip}"), format!("filter {filter}")]);
+                cases.push(vec![
+                    format!("want {tip}"),
                     format!("filter {filter}"),
-                    "done".into(),
+                    "include-tag".into(),
+                ]);
+                cases.push(vec![
+                    format!("want {blob}"),
+                    format!("filter {filter}"),
+                    format!("have {tip}"),
+                ]);
+            }
+            for want in [&blob, &blob_tag, &outer_tag, &tree, &tree_tag] {
+                for have in [&tip, &blob, &blob_tag, &outer_tag, &tree, &tree_tag] {
+                    for filter in [None, Some("blob:none"), Some("blob:limit=1024")] {
+                        let mut args = vec![format!("want {want}"), format!("have {have}")];
+                        if let Some(filter) = filter {
+                            args.push(format!("filter {filter}"));
+                        }
+                        cases.push(args);
+                    }
+                }
+            }
+            cases.extend([
+                vec![
+                    format!("want {tip}"),
+                    "filter blob:none".into(),
+                    "deepen 1".into(),
+                    "include-tag".into(),
                 ],
-            )?;
-            assert!(matches!(
+                vec![
+                    format!("want {tip}"),
+                    "filter blob:limit=1024".into(),
+                    format!("shallow {old}"),
+                    format!("have {old}"),
+                ],
+                vec![
+                    format!("want {tip}"),
+                    "filter blob:none".into(),
+                    format!("shallow {tip}"),
+                    format!("have {tip}"),
+                    "deepen 1".into(),
+                    "deepen-relative".into(),
+                ],
+                vec![format!("want {blob_tag}"), "filter blob:none".into()],
+                vec![
+                    format!("want {outer_tag}"),
+                    "filter blob:none".into(),
+                    "include-tag".into(),
+                ],
+                vec![
+                    format!("want {blob}"),
+                    "filter blob:none".into(),
+                    "include-tag".into(),
+                ],
+                vec![format!("want {blob}"), format!("have {tip}")],
+                vec![
+                    format!("want {blob}"),
+                    format!("have {blob}"),
+                    "filter blob:none".into(),
+                ],
+            ]);
+            let base = object_log_git::PackfileUris::new("https://example.invalid/repo")?;
+            let mut uri_count = 0;
+            for mut args in cases {
+                args.push("done".into());
+                let input = request(name, &args)?;
+                let expected = reply(
+                    path,
+                    &git(path, &["upload-pack", "--stateless-rpc", ".git"], &input)?,
+                )?;
+                let actual = reply(
+                    path,
+                    &Repository::open(&log, format)
+                        .await?
+                        .upload_pack(input.into())
+                        .await?,
+                )?;
+                assert_eq!(actual, expected, "{name}: {args:?}");
+                args.insert(0, "packfile-uris https".into());
+                let response = Repository::open(&log, format)
+                    .await?
+                    .upload_pack_with_uris(request(name, &args)?.into(), &base)
+                    .await?;
+                let mut combined = reply(path, &response)?;
+                let locations = uri_locations(&response)?;
+                assert!(locations.len() <= 8);
+                if migrated {
+                    assert_eq!(
+                        uri_selections.get(&args),
+                        Some(&locations),
+                        "URI selection changed across migration"
+                    );
+                } else {
+                    uri_selections.insert(args.clone(), locations.clone());
+                }
+                drop(response);
+                for (checksum, uri) in locations {
+                    let fields = uri.split('/').collect::<Vec<_>>();
+                    let id = object_log_git::ObjectId::parse(format, fields[fields.len() - 2])?;
+                    let checksum = object_log_git::ObjectId::parse(format, &checksum)?;
+                    let pack = Repository::open(&log, format)
+                        .await?
+                        .fetch_uri_pack(id, checksum)
+                        .await?;
+                    if migrated {
+                        assert_eq!(
+                            uri_packs.get(&checksum).map(Vec::as_slice),
+                            Some(pack.as_ref()),
+                            "URI bytes changed across migration"
+                        );
+                    } else {
+                        uri_packs.insert(checksum, pack.to_vec());
+                    }
+                    let ids = reply(path, &frame_pack(&pack))?.ids;
+                    assert_eq!(ids.len(), 1);
+                    assert!(ids.contains(&id.to_string()));
+                    for id in ids {
+                        assert!(combined.ids.insert(id));
+                    }
+                    uri_count += 1;
+                }
+                assert_eq!(combined, expected, "URI {name}: {args:?}");
+            }
+            assert!(uri_count > 0);
+            // URI access must reject stored-but-unreachable objects and reachable non-blobs.
+            let checksum = object_log_git::ObjectId::parse(format, &blob)?;
+            for rejected in [&unreachable, &tip, &tree] {
+                assert!(matches!(
+                    Repository::open(&log, format)
+                        .await?
+                        .fetch_uri_pack(
+                            object_log_git::ObjectId::parse(format, rejected)?,
+                            checksum
+                        )
+                        .await,
+                    Err(object_log_git::Error::InvalidReference)
+                ));
+            }
+            let args = vec![
+                format!("want {tip}"),
+                "packfile-uris http".into(),
+                "done".into(),
+            ];
+            let unsupported = request(name, &args)?;
+            assert!(
                 Repository::open(&log, format)
                     .await?
-                    .upload_pack(input.into())
-                    .await,
-                Err(object_log_git::Error::InvalidReference)
-            ));
+                    .upload_pack(unsupported.clone().into())
+                    .await
+                    .is_err()
+            );
+            let fallback = Repository::open(&log, format)
+                .await?
+                .upload_pack_with_uris(unsupported.into(), &base)
+                .await?;
+            assert!(uri_locations(&fallback)?.is_empty());
+            let fallback_ids = reply(path, &fallback)?;
+            drop(fallback);
+            let ordinary = Repository::open(&log, format)
+                .await?
+                .upload_pack(request(name, &[format!("want {tip}"), "done".into()])?.into())
+                .await?;
+            assert_eq!(fallback_ids, reply(path, &ordinary)?);
+            drop(ordinary);
+
+            for filter in ["blob:none", "blob:limit=1024"] {
+                let input = request(
+                    name,
+                    &[
+                        format!("want {unreachable}"),
+                        format!("filter {filter}"),
+                        "done".into(),
+                    ],
+                )?;
+                assert!(matches!(
+                    Repository::open(&log, format)
+                        .await?
+                        .upload_pack(input.into())
+                        .await,
+                    Err(object_log_git::Error::InvalidReference)
+                ));
+            }
         }
     }
     Ok(())
