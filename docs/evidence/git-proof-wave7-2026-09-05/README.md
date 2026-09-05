@@ -45,3 +45,8 @@ Open: packfile URIs (#24), capacity (#26), catalog migration/compaction (#19),
 request admission accounting (#36), operator collection/general cold memory (#32),
 and Spin runtime/admission/pooled HTTP (#21/#22). This tranche does not complete
 the broader Git proof. No upstream communications occurred.
+
+Post-push correction: CI 33948885571 failed the README `doc_markdown` lint for
+an unquoted product name introduced after the earlier gate. The documentation
+fix was followed by a complete successful `make check` rerun (395 passed,
+21 opt-in ignored), retained in `docfix-check.txt`. No functional source changed.
