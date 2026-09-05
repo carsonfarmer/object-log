@@ -46,13 +46,6 @@ const VIEW_RETAIN_FACTOR: usize = 8;
 const STATE_RETAIN_FACTOR: usize = 4;
 
 /// One exact Git repository view backed by an object log.
-#[cfg_attr(
-    not(feature = "native-oracle"),
-    allow(
-        dead_code,
-        reason = "later common Git operations consume retained state"
-    )
-)]
 pub struct Repository {
     log: Log,
     format: ObjectFormat,
@@ -142,10 +135,6 @@ impl Repository {
         })
     }
 
-    #[cfg_attr(
-        not(feature = "native-oracle"),
-        allow(dead_code, reason = "shared fetch commands follow graph traversal")
-    )]
     async fn catalog(&self) -> Result<Catalog, Error> {
         durable::load(
             &self.operation,

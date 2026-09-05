@@ -35,7 +35,15 @@ pub(crate) enum UploadRequest<'a> {
         wants: Box<[ObjectId]>,
         haves: Box<[ObjectId]>,
         done: bool,
+        #[allow(
+            dead_code,
+            reason = "client permission; self-contained output needs no external bases"
+        )]
         thin_pack: bool,
+        #[allow(
+            dead_code,
+            reason = "client permission; output uses universally supported REF_DELTA"
+        )]
         ofs_delta: bool,
         include_tag: bool,
     },
@@ -67,6 +75,7 @@ pub(crate) enum ReceiveStatus<'a> {
     InvalidPack(&'a [u8]),
 }
 
+#[cfg(test)]
 pub(crate) fn write_upload_advertisement(
     output: &mut impl Write,
     format: ObjectFormat,

@@ -2,35 +2,16 @@
 
 #![deny(missing_docs, unsafe_code)]
 
-#[allow(
-    dead_code,
-    reason = "the next Git state tranche consumes this internal module"
-)]
 mod durable;
-#[allow(
-    dead_code,
-    reason = "the durable Git reader uses the pack descriptor without the native oracle"
-)]
 mod format;
 #[cfg(feature = "native-oracle")]
 mod git;
-#[allow(dead_code, reason = "the next fetch tranche consumes graph traversal")]
 mod graph;
-#[allow(
-    dead_code,
-    reason = "the next Git storage tranche consumes this internal module"
-)]
 mod pack;
-#[allow(dead_code, reason = "the receive-pack tranche consumes this helper")]
 mod receive;
 mod repository;
-#[allow(
-    dead_code,
-    reason = "wire command integration follows selected fetch packs"
-)]
 mod selection;
 mod state;
-#[allow(dead_code, reason = "the next Git engine tranche consumes this module")]
 mod wire;
 
 pub use repository::PreparedPush;

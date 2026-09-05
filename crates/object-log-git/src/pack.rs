@@ -98,6 +98,7 @@ impl From<Error> for NormalizeError {
     }
 }
 
+#[cfg(any(test, feature = "native-oracle"))]
 impl NormalizeError {
     fn into_error(self) -> Error {
         match self {
@@ -119,6 +120,7 @@ pub(crate) fn normalize_attempt(
     normalize_attempt_with(operation, format, input, external_bases, DEFAULT_LIMITS)
 }
 
+#[cfg(test)]
 pub(crate) fn normalize(
     operation: &budget::Operation,
     format: ObjectFormat,
@@ -144,6 +146,7 @@ pub(crate) fn normalize_stored(
         },
     )
 }
+#[cfg(any(test, feature = "native-oracle"))]
 fn normalize_with(
     operation: &budget::Operation,
     format: ObjectFormat,
