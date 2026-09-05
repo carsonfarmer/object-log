@@ -62,3 +62,7 @@ git-shared-minio-test:
 git-spin-minio-test:
 	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
 	./scripts/test-minio.sh loopback spin_minio_clients_recover_after_collection object-log-git-http ""
+.PHONY: git-spin-performance-acceptance
+git-spin-performance-acceptance:
+	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
+	python3 crates/object-log-git-spin/tests/check_performance.py

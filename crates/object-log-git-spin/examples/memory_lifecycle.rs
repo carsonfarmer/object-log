@@ -11,9 +11,12 @@ use object_log::{
     TransactionId, ValidatedBackend,
 };
 use object_log_git::{Error, ObjectFormat, Repository};
-use object_store::{memory::InMemory, path::Path};
+use object_store::path::Path;
+#[path = "../../object-log-git/tests/shared_performance/timed_store.rs"]
+mod timed_store;
 use spin_sdk::http::{Fields, IncomingRequest, OutgoingBody, OutgoingResponse, ResponseOutparam};
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
+use timed_store::{TimedStore, serial_depth};
 
 const INPUT_LIMIT: usize = 10 * 1024 * 1024;
 const OUTPUT_LIMIT: usize = 20 * 1024 * 1024;
@@ -64,8 +67,25 @@ async fn publish(log: &Log, format: ObjectFormat, input: Bytes) -> anyhow::Resul
     );
     Ok(response)
 }
+fn io_measurement(store: &TimedStore) -> anyhow::Result<String> {
+    let metrics = store.faults.metrics();
+    let intervals = store.intervals();
+    let calls = metrics.total_requests();
+    let transfer = metrics.downloaded_bytes() + metrics.uploaded_bytes();
+    anyhow::ensure!(intervals.len() as u64 == calls, "untimed operation");
+    anyhow::ensure!(calls <= 512 && transfer <= 96 * 1024 * 1024, "I/O limits");
+    Ok(format!(
+        "{{\"calls\":{calls},\"transfer_bytes\":{transfer},\"serial_depth\":{},\"intervals_ns\":[{}]}}",
+        serial_depth(&intervals),
+        intervals
+            .iter()
+            .map(|(start, end)| format!("[{start},{end}]"))
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
 #[allow(clippy::too_many_lines)] // Keep the acceptance lifecycle order explicit.
-async fn lifecycle(input: Bytes) -> anyhow::Result<Vec<u8>> {
+async fn lifecycle(input: Bytes, timings: bool) -> anyhow::Result<Vec<u8>> {
     let (
         format,
         [
@@ -80,35 +100,66 @@ async fn lifecycle(input: Bytes) -> anyhow::Result<Vec<u8>> {
     drop(input);
     // Test provider objects, envelope and aggregate responses live outside the Git
     // pool. Every command still uses the unchanged shared-engine admission limits.
+    let bootstrap = Instant::now();
+    let store = TimedStore::new();
     let backend =
-        ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("wasip2-memory")).await?;
+        ValidatedBackend::new(Arc::new(store.clone()), Path::from("wasip2-memory")).await?;
     let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
+    let bootstrap_ns = bootstrap.elapsed().as_nanos();
+    let mut measured = [0_u128; 5];
+    let mut io: [String; 5] = std::array::from_fn(|_| "null".to_owned());
     let mut output = Vec::with_capacity(OUTPUT_LIMIT);
-    frame(&mut output, &publish(&log, format, initial).await?)?;
+    store.reset();
+    let started = Instant::now();
+    let response = publish(&log, format, initial).await?;
+    measured[0] = started.elapsed().as_nanos();
+    if timings {
+        io[0] = io_measurement(&store)?;
+    }
+    frame(&mut output, &response)?;
+    drop(response);
     // Copy each result into the bounded test envelope, then drop its original
     // accounted Bytes before starting the next operation.
-    frame(
-        &mut output,
-        &Repository::open(&log, format)
-            .await?
-            .upload_pack(first_fetch)
-            .await?,
-    )?;
+    store.reset();
+    let started = Instant::now();
+    let response = Repository::open(&log, format)
+        .await?
+        .upload_pack(first_fetch)
+        .await?;
+    measured[1] = started.elapsed().as_nanos();
+    if timings {
+        io[1] = io_measurement(&store)?;
+    }
+    frame(&mut output, &response)?;
+    drop(response);
     if incremental.is_empty() {
         frame(&mut output, &[])?;
     } else {
-        frame(&mut output, &publish(&log, format, incremental).await?)?;
+        store.reset();
+        let started = Instant::now();
+        let response = publish(&log, format, incremental).await?;
+        measured[2] = started.elapsed().as_nanos();
+        if timings {
+            io[2] = io_measurement(&store)?;
+        }
+        frame(&mut output, &response)?;
+        drop(response);
     }
     if have_fetch.is_empty() {
         frame(&mut output, &[])?;
     } else {
-        frame(
-            &mut output,
-            &Repository::open(&log, format)
-                .await?
-                .upload_pack(have_fetch)
-                .await?,
-        )?;
+        store.reset();
+        let started = Instant::now();
+        let response = Repository::open(&log, format)
+            .await?
+            .upload_pack(have_fetch)
+            .await?;
+        measured[3] = started.elapsed().as_nanos();
+        if timings {
+            io[3] = io_measurement(&store)?;
+        }
+        frame(&mut output, &response)?;
+        drop(response);
     }
     let before = Repository::open(&log, format).await?.refs().clone();
     match Repository::open(&log, format)
@@ -155,13 +206,18 @@ async fn lifecycle(input: Bytes) -> anyhow::Result<Vec<u8>> {
     // Recovery must also survive a fresh core staging domain.
     drop(log);
     let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
-    frame(
-        &mut output,
-        &Repository::open(&log, format)
-            .await?
-            .upload_pack(final_fetch)
-            .await?,
-    )?;
+    store.reset();
+    let started = Instant::now();
+    let response = Repository::open(&log, format)
+        .await?
+        .upload_pack(final_fetch)
+        .await?;
+    measured[4] = started.elapsed().as_nanos();
+    if timings {
+        io[4] = io_measurement(&store)?;
+    }
+    frame(&mut output, &response)?;
+    drop(response);
     frame(
         &mut output,
         format!(
@@ -170,6 +226,12 @@ async fn lifecycle(input: Bytes) -> anyhow::Result<Vec<u8>> {
         )
         .as_bytes(),
     )?;
+    if timings {
+        frame(&mut output, format!(
+            "{{\"bootstrap_ns\":{bootstrap_ns},\"initial_push_ns\":{},\"initial_fetch_ns\":{},\"thin_push_ns\":{},\"incremental_fetch_ns\":{},\"recovered_fetch_ns\":{},\"io\":[{},{},{},{},{}]}}",
+            measured[0], measured[1], measured[2], measured[3], measured[4], io[0], io[1], io[2], io[3], io[4]
+        ).as_bytes())?;
+    }
     Ok(output)
 }
 
@@ -181,6 +243,7 @@ mod entry {
     };
     #[cfg_attr(target_arch = "wasm32", spin_sdk::http_component)]
     async fn handle(request: IncomingRequest, out: ResponseOutparam) {
+        let timings = request.path_with_query().as_deref() == Some("/performance");
         let result = async {
             let mut input = Vec::with_capacity(INPUT_LIMIT);
             let mut stream = request.into_body_stream();
@@ -192,7 +255,7 @@ mod entry {
                 );
                 input.extend_from_slice(&chunk);
             }
-            lifecycle(Bytes::from(input.into_boxed_slice())).await
+            lifecycle(Bytes::from(input.into_boxed_slice()), timings).await
         }
         .await;
         let (status, bytes) = match result {

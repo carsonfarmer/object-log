@@ -43,6 +43,7 @@ name = "transport_probe"
 crate-type = ["cdylib"]
 
 [dev-dependencies]
+object-log = { path = "../..", features = ["test-util"] }
 wasmparser = "=0.244.0"
 
 [[example]]

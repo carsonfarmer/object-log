@@ -64,7 +64,7 @@ def unpack(reply):
     return bytes(raw)
 
 
-def frames(body):
+def frames(body, count=7):
     output = []
     cursor = 0
     while cursor < len(body):
@@ -73,7 +73,7 @@ def frames(body):
         assert cursor+length <= len(body)
         output.append(body[cursor:cursor+length])
         cursor += length
-    assert cursor == len(body) and len(output) == 7
+    assert cursor == len(body) and len(output) == count
     return output
 
 
@@ -121,7 +121,7 @@ def fixture(directory, fmt, label):
         value ^= value >> 7
         value ^= (value << 17) & mask
         content[i] = value & 255
-    count = 384 if label == "history-thin" else 1
+    count = 384 if label in ("history", "history-thin") else 1
     tip = None
     for i in range(count):
         content[:8] = struct.pack("<Q", i)
