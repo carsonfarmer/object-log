@@ -73,15 +73,19 @@ impl Graph {
             let index = graph.queue[cursor] as usize;
             cursor += 1;
             let id = graph.nodes[index].id;
-            // Direct refs have no declared kind. Verify them without collecting
-            // their bodies: a blob has no graph edges, however large it is.
-            if graph.nodes[index].kind.is_none() || graph.nodes[index].kind == Some(Kind::Blob) {
+            // Discover direct roots without decoding their bodies twice.
+            if graph.nodes[index].kind.is_none() {
+                let kind = reader
+                    .object_kind(id)
+                    .await?
+                    .ok_or(Error::InvalidReference)?;
+                graph.expect_kind(index, kind)?;
+            }
+            if graph.nodes[index].kind == Some(Kind::Blob) {
                 let kind = reader.verify(id).await?.ok_or(Error::InvalidReference)?;
                 graph.expect_kind(index, kind)?;
-                if kind == Kind::Blob {
-                    graph.nodes[index].verified = true;
-                    continue;
-                }
+                graph.nodes[index].verified = true;
+                continue;
             }
             let object = reader
                 .find(id)
@@ -487,6 +491,77 @@ mod tests {
                 graph.nodes[graph.edges[outer.edges.start] as usize].id,
                 inner_id
             );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn structural_roots_decode_once_and_successful_extension_reuses_work() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let blob = (Kind::Blob, b"leaf".to_vec());
+            let blob_id = id(format, &blob)?;
+            let mut entries = Vec::new();
+            for index in 0..1024 {
+                entries.extend_from_slice(format!("100644 file{index:04}\0").as_bytes());
+                entries.extend_from_slice(blob_id.as_bytes());
+            }
+            let tree = (Kind::Tree, entries);
+            let tree_id = id(format, &tree)?;
+            let mut commit = commit(tree_id, &[], 1);
+            commit.1.extend_from_slice(&vec![b'x'; 65536]);
+            let commit_id = id(format, &commit)?;
+            let mut tagged = tag(commit_id, "commit", "large");
+            tagged.1.extend_from_slice(&vec![b'x'; 65536]);
+            let tag_id = id(format, &tagged)?;
+            for (root_id, kind) in [(tree_id, "tree"), (commit_id, "commit"), (tag_id, "tag")] {
+                let wrapper = tag(root_id, kind, "wrapper");
+                let wrapper_id = id(format, &wrapper)?;
+                let repository = Repository::new(
+                    format,
+                    &[vec![
+                        blob.clone(),
+                        tree.clone(),
+                        commit.clone(),
+                        tagged.clone(),
+                        wrapper,
+                    ]],
+                )
+                .await?;
+                let operation = &repository.operation;
+                let before = operation.work_bytes();
+                let mut graph = repository.graph(&[root_id]).await?;
+                let direct_work = operation.work_bytes() - before;
+                let before = operation.work_bytes();
+                let complete = repository.graph(&[wrapper_id]).await?;
+                let wrapped_work = operation.work_bytes() - before;
+                // A direct root cannot cost a second body decode compared to
+                // the same object reached through a small declared-kind tag.
+                assert!(
+                    direct_work < wrapped_work,
+                    "{format:?} {kind}: {direct_work} >= {wrapped_work}"
+                );
+                let count = graph.nodes.len();
+                let mut reader =
+                    Reader::new(&repository.log, &repository.view, &repository.catalog);
+                let before = operation.work_bytes();
+                graph.extend(&mut reader, &[root_id, wrapper_id]).await?;
+                assert_eq!(graph.nodes.len(), count + 1);
+                assert!(operation.work_bytes() - before < direct_work);
+                assert_eq!(graph.nodes.len(), complete.nodes.len());
+                // Work consumed by the successful extension is not refunded.
+                let remaining = pack::budget::WORK_BYTES - operation.work_bytes();
+                operation.work(remaining)?;
+                repository.store.reset();
+                assert!(graph.extend(&mut reader, &[root_id]).await.is_err());
+                assert_eq!(
+                    repository
+                        .store
+                        .metrics()
+                        .operation(StoreOperation::Get)
+                        .requests,
+                    0
+                );
+            }
         }
         Ok(())
     }

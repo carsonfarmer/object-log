@@ -44,8 +44,7 @@ impl Repository {
                 }
             }
             if !selective {
-                drop(graph);
-                graph = Graph::load(&self.operation, reader, &roots).await?;
+                graph.extend(reader, &roots).await?;
             }
         }
         if selective && include_tag {

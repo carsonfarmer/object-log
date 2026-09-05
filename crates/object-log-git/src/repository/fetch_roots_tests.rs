@@ -100,6 +100,16 @@ async fn advertised_tip_fetch_preserves_external_have_ancestry_and_acknowledgmen
             fs::write(&fixture.pack, command_output(Some(&source), &["pack-objects", "--all", "--stdout"])?.stdout)?;
             let (log, _, _) = test_log("external-have").await?;
             publish_durable_pack(&log, &fixture, format).await?;
+            // Stored but unpublished descendants do not authorize a have,
+            // including the Graph fallback used by filtered requests.
+            let repository = common_open(&log, format).await?;
+            let ack = repository.fetch_pack_or_ack(&[fixture.target], &[have], FetchOptions {
+                include_tag: false, done: false, shallow: None,
+                filter: Some(wire::Filter::BlobLimit(u64::MAX)), uris: None,
+            }).await?;
+            assert!(std::str::from_utf8(&ack)?.contains("NAK"));
+            assert!(!std::str::from_utf8(&ack)?.contains("ACK "));
+            drop(repository);
             let view = log.load().await?;
             let record = Machine::new(format).transaction(vec![RefUpdate::new("refs/heads/other", None, Some(have))?], vec![])?;
             let prepared = log.prepare(&view, TransactionId::new(), record, Bytes::new(), vec![])?;
@@ -108,14 +118,18 @@ async fn advertised_tip_fetch_preserves_external_have_ancestry_and_acknowledgmen
                 .lines().map(|line| ObjectId::parse(format, line.split(' ').next().unwrap_or(""))).collect::<Result<Vec<_>, _>>()?;
             expected.sort_unstable();
             assert_eq!(expected.len(), if descendant { 0 } else { 3 });
-            let repository = common_open(&log, format).await?;
-            let pack = repository.fetch_pack(&[fixture.target], &[have], false).await?;
-            assert_selected_pack(&source, &pack, format, &expected, Some(have), fixture.target)?;
-            let ack = repository.fetch_pack_or_ack(&[fixture.target], &[have], FetchOptions {
-                include_tag: false, done: false, shallow: None, filter: None, uris: None,
-            }).await?;
-            assert!(std::str::from_utf8(&ack)?.contains(&format!("ACK {have}\n")));
-            assert!(!std::str::from_utf8(&ack)?.contains("NAK"));
+            for filter in [None, Some(wire::Filter::BlobLimit(u64::MAX))] {
+                let repository = common_open(&log, format).await?;
+                let pack = repository.fetch_pack_or_ack(&[fixture.target], &[have], FetchOptions {
+                    include_tag: false, done: true, shallow: None, filter, uris: None,
+                }).await?;
+                assert_selected_pack(&source, &pack, format, &expected, Some(have), fixture.target)?;
+                let ack = repository.fetch_pack_or_ack(&[fixture.target], &[have], FetchOptions {
+                    include_tag: false, done: false, shallow: None, filter, uris: None,
+                }).await?;
+                assert!(std::str::from_utf8(&ack)?.contains(&format!("ACK {have}\n")));
+                assert!(!std::str::from_utf8(&ack)?.contains("NAK"));
+            }
         }
     }
     Ok(())
