@@ -531,6 +531,22 @@ impl<'a> Reader<'a> {
         Ok(self.location(id).await?.is_some())
     }
 
+    /// Authenticated stored entry extent, including its pack entry header.
+    /// This is sizing metadata; selected content still needs verification.
+    pub(crate) async fn packed_entry_bytes(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<Option<usize>, Error> {
+        let Some(location) = self.location(id).await? else {
+            return Ok(None);
+        };
+        self.catalog.operation.work(size_of::<Location>())?;
+        let range = self.pack(location.pack).entry_range(location.index);
+        Ok(Some(
+            usize::try_from(range.end - range.start).map_err(pack_error)?,
+        ))
+    }
+
     /// Size for filtering only: full blobs use authenticated, canonical pack
     /// metadata without checking the decoded size or object ID. Selected content
     /// must still pass `verify`. Deltas and structural objects use `find`, so a

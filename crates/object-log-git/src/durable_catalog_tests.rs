@@ -137,3 +137,29 @@ async fn tree_reader_evicts_under_state_pressure_but_never_replaces_pinned_index
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn packed_entry_size_authenticates_geometry_without_blob_reads() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (base_log, view) = open(store.clone(), "entry-size").await?;
+        let fixture = pack_fixture(format, vec![vec![b'x'; 1024]], false, false)?;
+        let id = fixture.objects[0].0;
+        let expected = fixture.normalized.bytes.len() - 12 - format.digest_len();
+        let operation = test_operation();
+        let log = base_log.with_request_guard(Arc::new(operation.clone()));
+        let (descriptor, root) = super::stage(&operation, &log, &view, fixture.normalized).await?;
+        let tree = crate::catalog_tree::CatalogTree::empty(format)
+            .insert_pack(&log, &view, &operation, descriptor, root, &[(id, 0)]).await?;
+        let catalog = Catalog::from_tree(&operation, format, tree.root().cloned())?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        store.reset();
+        assert_eq!(reader.packed_entry_bytes(id).await?, Some(expected));
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 2);
+        assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
+        let calls = operation.calls();
+        assert_eq!(reader.packed_entry_bytes(id).await?, Some(expected));
+        assert_eq!(operation.calls(), calls);
+    }
+    Ok(())
+}
