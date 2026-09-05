@@ -160,10 +160,12 @@ packfile URI downloads support byte ranges and resume; see the
 Spin defaults to authenticated access; see its
 [credential-helper setup](crates/object-log-git-spin/README.md).
 The current [performance review](https://github.com/carsonfarmer/object-log/issues/23)
-retains one finding: streaming SHA-1 8 MiB push measured 1.361× native Git at
-p50 after 30 pairs. Object, pack-size, call and transfer checks pass; the other
-13 cases stay below the timing-review threshold. This guest/InMemory comparison
-does not measure remote object-store latency.
+passes all 14 functional/resource comparisons. Reusing full-entry receive scan
+verification reduced 8 MiB push p50 by about 35% for both hashes in matched
+before/after runs; all cases stayed below the native-Git timing-review threshold.
+The private proof binds the exact stored source and request; deltas and structural
+objects retain normal verification. This guest/InMemory comparison does not
+measure HTTP or remote object-store latency.
 An 88 MiB engine pool admits one operation per native process or WASI instance.
 Git attaches an operation-local request guard to the log and retains it across
 retries. Existing caller guards run first; denied admission never removes caller

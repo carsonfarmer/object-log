@@ -40,10 +40,12 @@ Check hosted CI after each push. Verification belongs in tests and commits.
   catalog node caching stays inside the same 2 MiB allowance. Shallow, filtered
   and URI fetches still use the bounded graph. Continue #19 for that remaining envelope
   and #25 API simplicity; capacity issue #26 is complete.
-- The current 14-case comparison passes functional/resource
-  checks, but SHA-1 8 MiB push remains 1.361× native Git at p50 after 30 pairs;
-  #23 profiling found scan and repeated leaf verification dominate; investigate
-  private verification reuse without weakening authentication. Ordinary Spin reliability remains in #21.
+- The current 14-case comparison passes functional/resource and timing-review
+  checks. Private full-entry scan verification reuse reduces 8 MiB push p50 by
+  about 35% for both hashes without changing the core API or weakening source
+  authentication. Delta inputs retain normal verification. Ordinary Spin
+  reliability remains in #21.
+
 
 Use exclusive implementation worktrees; root alone integrates main. Keep useful
 regression tests, sparse authenticated reads, cumulative retry counters, recovery,
