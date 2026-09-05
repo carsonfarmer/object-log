@@ -159,3 +159,23 @@ Retain the oracle and the existing filesystem, MinIO, Criterion, recovery,
 and collection evidence. Report local, provider, guest-memory, and
 whole-process measurements separately. Source-size review cannot substitute
 for any required behavioral, resource, or provider gate.
+
+## Final acceptance census
+
+Independent recount at `27c54d0` reproduced the earlier method and historical
+counts before calculating the final result. Raw production preambles contain
+7,526 lines: Git 5,638, native HTTP 1,296, and Spin 592. Reclassifying 54 explicit
+test-helper lines yields **7,472 product Rust lines**, 18 fewer than at
+`0ed9b52`. Adjusted per-crate product counts are Git 5,584, HTTP 1,296, Spin 592.
+Source tests contain 7,538 lines; separate Rust integration/support has 2,730,
+Criterion 194, Spin examples 454, and Python qualification 910. Counts include
+comments and blank lines. The fixed top-level test-module boundary and the
+entire `receive_tests.rs` test file are treated consistently.
+
+The small cleanup gates unused helpers to tests or the retained native oracle;
+no required function was removed. Adapter additions implement Git's large-push
+HTTP probe and preserve recovery tokens after invalid resolution evidence.
+The final functional/resource and provider records pass under their documented
+conditions. The 30-pair WASIp2 SHA-1 8 MiB push timing remains above the owner
+review threshold, so the native oracle is retained. This is also the deletion
+review decision: no deletion is accepted in this tranche.

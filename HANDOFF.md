@@ -1,6 +1,6 @@
 # object-log handoff
 
-Updated: 2026-09-04, final adapter qualification.
+Updated: 2026-09-04, combined Git acceptance.
 
 ## Intent
 
@@ -15,14 +15,14 @@ thresholds are architecture review signals; required behavior is preserved.
 
 ## Accepted main and active work
 
-Main is pushed through `b4b05f3` (Tasks 1–9). Hosted Linux CI run
-33938325701 passed. Task 3's authenticated variable geometry preserves all
+Tasks 1–9 were pushed through `b4b05f3`; hosted Linux CI run
+33938325701 passed. The combined adapter acceptance is the current tranche. Task 3's authenticated variable geometry preserves all
 three original small-object-limit GC tests. Its original worktree and branch
 remain preserved. Later accepted work adds command-local catalogs, bounded
 iterative traversal, exact have-aware selection, protocol-v2 upload commands,
 thin receive normalization, atomic ref publication, and shared checkpointing.
 
-The combined adapter work is in:
+The combined adapter integration worktree is:
 
 ```text
 /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-native-shared
@@ -54,7 +54,8 @@ and drains its task tracker on shutdown.
   request audit, workspace Criterion, and large memory/MinIO GC gates pass.
 - Independent Rust correctness, simplification, architecture, quota, and
   adversarial reviews completed; findings were repaired. Final WASIp2 paired
-  performance evidence and prose review are being completed before integration.
+  performance and prose reviews are complete. All functional/resource gates pass;
+  one latency result requires owner review before native-oracle deletion.
 
 Evidence:
 
@@ -63,13 +64,16 @@ Evidence:
 - `docs/evidence/git-shared-performance-2026-09-04.md`
 - `docs/evidence/git-wasip2-memory-2026-09-04.md`
 - `docs/evidence/git-spin-linux-2026-09-04.md`
+- `docs/evidence/git-spin-performance-2026-09-04.md`
+- `docs/evidence/git-final-workspace-2026-09-04.txt`
 - `docs/evidence/git-final-architecture-2026-09-04.md`
 
 ## Spin deployment constraint
 
 A fresh Linux Spin process using a prepared executable cache passes the
-both-hash workload inside a hard 128 MiB cgroup with swap disabled. Both runs
-reach the cap and trigger reclaim; no spare process-memory margin is established.
+both-hash workload inside a hard 128 MiB cgroup with swap disabled. The runs
+reach the cap and trigger reclaim; the extended workload also shows small
+temporary accounting overshoots permitted by Linux. No spare margin is established.
 Empty-cache compilation is OOM-killed under 128 MiB. Prepare the exact component's
 cache on the deployment platform outside the serving cgroup using
 `crates/object-log-git-spin/prewarm_cache.py`, then serve with `run.sh --cache`.
@@ -90,8 +94,10 @@ runs and the prior failure are both recorded.
 - Spin's handler-wide connector budget also includes backend probes and log open:
   512 outgoing attempts and 96 MiB accepted/sent payload. Headers and bytes
   already buffered by the remote transport are outside that payload ledger.
-- The native oracle remains selectable. Its deletion is deferred until runtime
-  and performance qualification and any required owner review are complete.
+- The native oracle remains selectable. Its deletion is deferred for owner
+  performance review: actual WASIp2 SHA-1 8 MiB push is 1.655× p50 and 1.634× p95
+  against the same-run Git baseline after 30 pairs. No feature was cut to improve
+  those numbers.
 - Each live pack requires a catalog-root read. Issue #19 tracks compaction;
   the current proof does not establish arbitrary repository scale.
 - Generic local filesystem storage lacks conditional compare-and-swap. Its

@@ -86,7 +86,7 @@ API:
   established S3 client to the same engine. It needs no filesystem preopens;
   the generic log remains independent from Spin.
 
-Tasks 1–9 provide the private pack, sparse reader/writer, wire, and budget
+The completed Git proof provides the private pack, sparse reader/writer, wire, and budget
 foundations plus one common `Repository::open(&Log, ObjectFormat)` for native
 and `WASIp2`. The repository retains one exact view and exposes its refs without
 local paths. Durable packs use authenticated variable chunk geometry, including
@@ -101,8 +101,9 @@ are deferred until selected content needs verification. Exact want/have
 selection, protocol-v2 upload commands, and classic receive preparation and
 publication now use that same repository. Thin inputs become self-contained
 packs; ref updates validate connectivity and fast-forward rules before one
-publication. The native HTTP replacement and Spin adapter are under final
-client, provider, and memory qualification. See the
+publication. The native HTTP and Spin adapters pass client and local-provider qualification.
+The [Spin performance record](docs/evidence/git-spin-performance-2026-09-04.md)
+retains one latency review finding, so the native oracle remains. See the
 [receive evidence](docs/evidence/git-receive-2026-09-04.md).
 The [Task 3 evidence](docs/evidence/git-repository-2026-09-04.md) records the
 recovery fixes, unchanged small-limit tests, independent reviews, and limits.
@@ -204,6 +205,7 @@ make git-shared-performance-acceptance
 make git-minio-test
 make git-shared-minio-test
 make git-spin-memory-acceptance
+make git-spin-performance-acceptance
 make git-spin-minio-test
 ```
 

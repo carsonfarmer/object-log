@@ -21,9 +21,12 @@ The core `object-log` crate remains independent from Git.
 
 ## Current state
 
-Tasks 1–9 are accepted on main at `b4b05f3`. The shared native and Spin adapters
-are implemented and undergoing final provider, runtime, performance, and
-independent review gates. The native oracle remains available. The historical
+Tasks 1–9 were accepted at `b4b05f3`. Tasks 10–12 now pass unchanged-client,
+local-provider, functional, and resource qualification for the shared native
+and Spin adapters. Independent reviews are recorded. Native-oracle deletion
+remains deferred: the actual WASIp2 SHA-1 8 MiB push measured 1.655× p50 and
+1.634× p95 against native Git after 30 pairs, requiring owner performance
+review. See the [Spin measurements](docs/evidence/git-spin-performance-2026-09-04.md). The historical
 foundation counts below describe their stated revision, not current size.
 
 
@@ -231,11 +234,12 @@ the response.
    check connectivity and ref rules, and keep all counters cumulative.
 9. Complete: prepare and publish the ordered receive ref transaction. Preserve current
    conflict, pending-result, lost-response, and per-ref status behavior.
-10. Change the native Axum host into a thin adapter and run unchanged-client
+10. Complete: change the native Axum host into a thin adapter and run unchanged-client
     parity against the native oracle. Keep the oracle available for comparison.
-11. Add the thin Spin WASIp2 adapter. Record imports and peak process memory,
+11. Complete with documented runtime conditions: add the thin Spin WASIp2 adapter. Record imports and peak process memory,
     then run all memory-store acceptance and performance cases.
-12. Run the same accepted cases against local MinIO. Delete the native oracle
+12. Client/provider qualification complete: run the same accepted cases against
+    local MinIO. Native deletion is deferred for owner performance review. Delete the native oracle
     only after client and storage parity, all hard gates, and required owner
     reviews pass. Finish with Rust, adversarial, prose, and deletion reviews.
 
