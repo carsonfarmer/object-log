@@ -110,6 +110,7 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         .status
         .success()
     );
+    assert!(!operator(&config_path, &["collect"])?.status.success());
     let missing = operator(&config_path, &["status"])?;
     assert!(!missing.status.success());
     assert!(
@@ -337,7 +338,7 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         Bytes::from_static(b"unrelated repository")
     );
     println!(
-        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master, unborn default, catalog migration, tree push/fetch, compaction/checkpoint, old-pack reclamation, interrupted collection and cold push passed"
+        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master, unborn default, catalog migration, tree push/fetch, compaction/checkpoint, retention-aware fresh collection, old-pack reclamation, interrupted collection and cold push passed"
     );
     Ok(())
 }
@@ -438,8 +439,8 @@ async fn migration_lifecycle(
     Ok(next)
 }
 
-// The test library installs the plan; the operator can only resume it. Each
-// serving process has been drained and its group/listener checked by Host::stop.
+// Fresh planning runs through the CLI; a second library-installed plan tests
+// interrupted resumption. Serving processes are drained for deterministic checks.
 async fn collection_lifecycle(
     config: &Path,
     root: &Path,
@@ -452,6 +453,26 @@ async fn collection_lifecycle(
         decode(&operator(config, &["collect", "--resume-only"])?)?["outcome"],
         "no_active_plan"
     );
+    let retention = object_log::RetentionId::new();
+    let view = log.load().await?;
+    assert!(matches!(
+        log.retain(&view, retention).await?,
+        object_log::RetentionStatus::Applied(_)
+    ));
+    let retained = log.load().await?;
+    let blocked = operator(config, &["collect"])?;
+    assert_eq!(blocked.status.code(), Some(3));
+    assert_eq!(decode(&blocked)?["outcome"], "retained");
+    assert!(log.refresh(&retained).await?.is_none());
+    // The test owns this retention and releases only its exact ID.
+    assert!(matches!(
+        log.release_retention(&retained, retention).await?,
+        object_log::RetentionStatus::Applied(_)
+    ));
+    let collected = operator(config, &["collect"])?;
+    assert!(collected.status.success());
+    assert_eq!(decode(&collected)?["outcome"], "collected");
+    assert!(log.load().await?.collection_plan_bytes().is_none());
     let view = log.load().await?;
     log.put_object(&view, Bytes::from_static(b"unpublished collection fixture"))
         .await?;

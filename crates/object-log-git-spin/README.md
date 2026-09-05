@@ -103,10 +103,9 @@ opens the log, so measurements must include that fixed provider work.
 
 The one-shot operator command below supports head status, exact commit-token
 resumption, explicit default-branch updates, metadata checkpoints that retain
-every pack, catalog migration, pack compaction, and resumption of installed collection plans. Fresh plan creation
-and retention management still require shared-library calls while Spin is
-stopped. Issue #32 remains open for those commands and sustained-service
-qualification.
+every pack, catalog migration, pack compaction, and fresh or resumed collection.
+Retention management still requires shared-library calls. Issue #32 remains
+open for retention commands and sustained-service qualification.
 
 ## Local operator command
 
@@ -118,6 +117,7 @@ chmod 600 /deployment/repository.toml
 target/release/object-log-git-maintain --config /deployment/repository.toml status
 target/release/object-log-git-maintain --config /deployment/repository.toml resume-commit --token-file /private/push.token
 target/release/object-log-git-maintain --config /deployment/repository.toml checkpoint --retain-packs
+target/release/object-log-git-maintain --config /deployment/repository.toml collect
 target/release/object-log-git-maintain --config /deployment/repository.toml collect --resume-only
 target/release/object-log-git-maintain --config /deployment/repository.toml migrate-catalog --recovery-file /private/catalog.token
 target/release/object-log-git-maintain --config /deployment/repository.toml compact-packs --recovery-file /private/compaction.token
@@ -175,27 +175,37 @@ fresh head. This converges maintenance state but cannot establish the exact
 historical outcome of the earlier attempt: this command does not persist an
 exact checkpoint token or run unbounded resolution after the helper returns.
 
-`collect --resume-only` reloads the existing head and resumes only its installed,
-authenticated positive deletion plan. It never scans the namespace, starts a
-plan, checkpoints, releases retentions or deletes arbitrary keys. No token or
-local plan is required. A plan must already have been installed through the
-shared library; fresh collection planning is not exposed by this command.
+`collect` reloads the head and resumes its authenticated positive deletion plan
+if one is active. Otherwise it makes one attempt to plan and install a fresh
+collection, then runs only the installed plan. It does not checkpoint, release
+retentions or delete arbitrary keys. `collect --resume-only` never starts a plan;
+it reports `no_active_plan` when the loaded head has none. Neither command needs
+a local plan or receipt, and neither retries a conflicting installation.
 
-Stop ingress and drain all serving and maintenance processes before collection.
-Resolve known pending Git tokens before advancing checkpoint or GC; reconcile
-the current checkpoint objective before installing a plan. An earlier
-checkpoint's unknown exact outcome does not block cleanup forever once that
-objective is confirmed. A conservative retain-packs checkpoint does not make
-unreachable packs collectible; pack compaction remains separate work.
+Every existing retention blocks fresh planning with `retained` (exit 3).
+Retentions have no expiry. The command never creates, clears, bypasses or releases
+them. Their owners must explicitly release the exact IDs through the library
+when protection is no longer needed; an unknown owner remains a block.
 
-`no_active_plan` means the loaded head had no active plan. It does not classify
-an earlier attempt, prove prior plan-file cleanup, or prove that no garbage remains. `collected` means the core
-confirmed completion; `conflict` leaves a competing plan untouched. `pending`
-can follow partial deletion or a lost fence-clear reply. Stop, reload and repeat
-`collect --resume-only`; the core safely repeats the installed positive set.
-Never reconstruct a lost plan locally or infer rollback from an error. Resource
-or integrity errors may also follow earlier deletion; preserve the head fence
-and investigate rather than manually clearing it.
+Checkpoint first when the goal is to reclaim objects protected by older WAL
+history. Resolve known pending Git tokens before advancing that history, since
+checkpointing can expire their exact outcome evidence. A retained-packs
+checkpoint alone does not discard unreachable packs; compact them first when
+needed. Checkpointing improves reclamation but is not a prerequisite for core
+GC safety: the planner verifies the complete current live graph, including the
+tail. Conditional head writes, retentions and collection fences govern races.
+Offline maintenance windows are the initial operator workflow, keeping the
+reclamation objective predictable; process draining is not a durable lock.
+
+`no_candidates` describes that invocation's scan, not a guarantee that the
+latest namespace contains no garbage. `no_active_plan` does not classify an
+earlier attempt or prove prior plan-file cleanup. `collected` confirms core
+completion. An uncertain installation returns `pending` without starting any
+deletion; partial deletion or a lost fence-clear reply can also return pending.
+Reload and repeat the command to resume the head's plan, or make a new planning
+attempt if none was installed. `conflict` stops without rebasing. Any failed
+invocation may have partial effects; preserve head-based recovery and never
+manually clear a fence or reconstruct a local plan.
 
 The optional `collection` JSON object reports `candidate_count`,
 `candidate_bytes` and `delete_attempts` for this invocation only. Attempts are
@@ -233,10 +243,9 @@ as migration. Repeated commands are new attempts, not exact-attempt recovery.
 Resolve known pending receipts before starting another maintenance operation.
 
 Compaction does not checkpoint or delete objects. After confirmed compaction,
-run `checkpoint --retain-packs` to advance retained WAL history, then use the
-existing library to install a collection plan and `collect --resume-only` to
-finish it. Old packs remain protected until history advances. An oversized
-live set fails under the shared maintenance limits without partial root
+run `checkpoint --retain-packs` to advance retained WAL history, then use
+`collect` to plan and run collection. Old packs remain protected until history
+advances. An oversized live set fails under the shared maintenance limits without partial root
 publication; newly staged immutable objects may remain for later collection.
 
 `set-default-branch`, `migrate-catalog` and `compact-packs` require a new
@@ -264,9 +273,9 @@ outcome together with the exit status:
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, `compacted`, `migrated`, `already_tree`, `collected`, `no_active_plan`, or requested help. `not_committed` means resolution completed, not a successful push. |
+| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, `compacted`, `migrated`, `already_tree`, `collected`, `no_active_plan`, `no_candidates`, or requested help. `not_committed` means resolution completed, not a successful push. |
 | 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unavailable recovery output, unsupported platform or incompatible durable options. |
-| 3 | `conflict`, `stale_default`, or shared-engine `busy`; inspect the fresh state before another update. |
+| 3 | `conflict`, `retained`, `stale_default`, or shared-engine `busy`; inspect the fresh state before another update. |
 | 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |
 | 5 | Invalid/corrupt evidence, a missing head, resource limit, unsupported backend, collection fence, expired view or runtime setup failure. `invalid_git_state_or_limit` covers Git validation and budget failures. No raw error chain is printed. |
 
