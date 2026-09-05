@@ -1,0 +1,22 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/shallow-linux-correction/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.29s
+     Running tests/shallow.rs (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/target/debug/deps/shallow-dcebe63201bbacbf)
+
+running 1 test
+test shallow_depth_merge_deepen_unshallow_and_exclusion_match_git ... FAILED
+
+failures:
+
+---- shallow_depth_merge_deepen_unshallow_and_exclusion_match_git stdout ----
+
+thread 'shallow_depth_merge_deepen_unshallow_and_exclusion_match_git' (7666133) panicked at crates/object-log-git/tests/shallow.rs:268:13:
+unexpected objects sha1 ["want bc10fedc6955c7c232feae9eeebe22f8e8bf2561", "shallow 77293e3d1d78bac05379607ea692f9a6f4709978", "deepen 2147483647", "deepen-relative", "done"]: Reply { shallow: {}, unshallow: {"77293e3d1d78bac05379607ea692f9a6f4709978"}, ids: {"04ee127e9c63926a31ea7a25c750f7537237eba0", "247e6157b52fbc94d6d0aa345004f4a100e18df8", "2495546f969bb643dc7fc5fc030ccdfe04ef769d", "41d25b758f4195333884af05fc1e5fd2a4ca27cf", "4f126977b1aebf042ed48980c59cd36c95697af6", "5269750144f5478a80d16da8db48d5b2466af4aa", "569763d3394acc15730bf018b2049f7d81ca07e0", "56a6051ca2b02b04ef92d5150c9ef600403cb1de", "5b9dd22fab7d9bc3374fe40db6b127e4370d9ee4", "62f9457511f879886bb7728c986fe10b0ece6bcb", "6ac6fa7a9e45b44cdb92ae1e7680d256dc487ed2", "77293e3d1d78bac05379607ea692f9a6f4709978", "7813681f5b41c028345ca62a2be376bae70b7f61", "7daea7cf599fcc7f499b0c29db621072e0172c1c", "803548cb6ea13cf34e80a060b9b710e2f93ebaca", "9292e48d0f5d9199ad05538f6f537fa0ffc3d1f0", "9d4eae9bb5bb62e6862237bd879d952fd8a3b9a1", "a7dc524821a6f91415685e8f6b8578f0ed6e16ec", "aeb586d367d2c853470c3977f03cc03339ef8205", "bb401cfd1c903c3a6ed46fe681d2c62c3c1e2747", "bc10fedc6955c7c232feae9eeebe22f8e8bf2561", "bedec31cf9f94f63fd447e853f04ab9eb2a2947b", "bf0d87ab1b2b0ec1a11a3973d2845b42413d9767", "c227083464fb9af8955c90d2924774ee50abb547", "c7930257dfef505fd996e1d6f22f2f35149990d0", "cca0c5399570faed7d27a5476864ab14cd1938b9", "d3e3e9273f65bd225c7e7d249af78024f17ba089", "d8263ee9860594d2806b0dfd1bfd17528b0ba2a4", "df5d27d387b812fc66427a3f4fcf4a4016174c00", "e440e5c842586965a7fb77deda2eca68612b1f53"} } vs Reply { shallow: {}, unshallow: {"77293e3d1d78bac05379607ea692f9a6f4709978"}, ids: {"04ee127e9c63926a31ea7a25c750f7537237eba0", "247e6157b52fbc94d6d0aa345004f4a100e18df8", "2495546f969bb643dc7fc5fc030ccdfe04ef769d", "41d25b758f4195333884af05fc1e5fd2a4ca27cf", "4f126977b1aebf042ed48980c59cd36c95697af6", "5269750144f5478a80d16da8db48d5b2466af4aa", "569763d3394acc15730bf018b2049f7d81ca07e0", "56a6051ca2b02b04ef92d5150c9ef600403cb1de", "5b9dd22fab7d9bc3374fe40db6b127e4370d9ee4", "62f9457511f879886bb7728c986fe10b0ece6bcb", "6ac6fa7a9e45b44cdb92ae1e7680d256dc487ed2", "7813681f5b41c028345ca62a2be376bae70b7f61", "7daea7cf599fcc7f499b0c29db621072e0172c1c", "803548cb6ea13cf34e80a060b9b710e2f93ebaca", "9292e48d0f5d9199ad05538f6f537fa0ffc3d1f0", "9d4eae9bb5bb62e6862237bd879d952fd8a3b9a1", "a7dc524821a6f91415685e8f6b8578f0ed6e16ec", "aeb586d367d2c853470c3977f03cc03339ef8205", "bb401cfd1c903c3a6ed46fe681d2c62c3c1e2747", "bc10fedc6955c7c232feae9eeebe22f8e8bf2561", "bedec31cf9f94f63fd447e853f04ab9eb2a2947b", "bf0d87ab1b2b0ec1a11a3973d2845b42413d9767", "c227083464fb9af8955c90d2924774ee50abb547", "c7930257dfef505fd996e1d6f22f2f35149990d0", "cca0c5399570faed7d27a5476864ab14cd1938b9", "d3e3e9273f65bd225c7e7d249af78024f17ba089", "d8263ee9860594d2806b0dfd1bfd17528b0ba2a4", "df5d27d387b812fc66427a3f4fcf4a4016174c00", "e440e5c842586965a7fb77deda2eca68612b1f53"} }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    shallow_depth_merge_deepen_unshallow_and_exclusion_match_git
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+error: test failed, to rerun pass `-p object-log-git --test shallow`

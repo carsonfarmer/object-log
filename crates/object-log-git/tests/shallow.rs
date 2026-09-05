@@ -183,10 +183,53 @@ async fn shallow_depth_merge_deepen_unshallow_and_exclusion_match_git() -> TestR
             vec![
                 format!("want {tip}"),
                 format!("shallow {ancient}"),
-                "deepen 1".into(),
+                "deepen 2147483647".into(),
                 "deepen-relative".into(),
             ],
         ];
+        // Git before 2.55 incorrectly made finite relative deepening absolute
+        // when no client boundary was reachable from the wants. Compare with
+        // ordinary fetch (the required no-op behavior), not that historical bug.
+        // Exact equality checks boundaries AND the complete selected object set.
+        for boundary in [None, Some(ancient.as_str())] {
+            for depth in [1, 3] {
+                for have in [None, Some(commits[7].as_str())] {
+                    let mut normal = vec![format!("want {tip}")];
+                    if let Some(have) = have {
+                        normal.push(format!("have {have}"));
+                    }
+                    let mut relative = normal.clone();
+                    if let Some(boundary) = boundary {
+                        relative.push(format!("shallow {boundary}"));
+                    }
+                    relative.extend([
+                        format!("deepen {depth}"),
+                        "deepen-relative".into(),
+                        "done".into(),
+                    ]);
+                    normal.push("done".into());
+                    let expected = reply(
+                        path,
+                        &git(
+                            path,
+                            &["upload-pack", "--stateless-rpc", ".git"],
+                            &request(name, &normal)?,
+                        )?,
+                    )?;
+                    let actual = reply(
+                        path,
+                        &Repository::open(&log, format)
+                            .await?
+                            .upload_pack(request(name, &relative)?.into())
+                            .await?,
+                    )?;
+                    assert_eq!(
+                        actual, expected,
+                        "relative deepen without reachable boundary: {name} {relative:?}"
+                    );
+                }
+            }
+        }
         let negotiation = request(
             name,
             &[

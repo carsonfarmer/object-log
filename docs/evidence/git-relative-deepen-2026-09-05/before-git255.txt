@@ -1,0 +1,25 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/shallow-linux-correction)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/shallow-linux-correction/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.35s
+     Running tests/shallow.rs (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/target/debug/deps/shallow-dcebe63201bbacbf)
+
+running 1 test
+test shallow_depth_merge_deepen_unshallow_and_exclusion_match_git ... FAILED
+
+failures:
+
+---- shallow_depth_merge_deepen_unshallow_and_exclusion_match_git stdout ----
+
+thread 'shallow_depth_merge_deepen_unshallow_and_exclusion_match_git' (7659694) panicked at crates/object-log-git/tests/shallow.rs:223:13:
+assertion `left == right` failed: sha1 ["want bc10fedc6955c7c232feae9eeebe22f8e8bf2561", "shallow 77293e3d1d78bac05379607ea692f9a6f4709978", "deepen 1", "deepen-relative", "done"]
+  left: {"bc10fedc6955c7c232feae9eeebe22f8e8bf2561"}
+ right: {}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    shallow_depth_merge_deepen_unshallow_and_exclusion_match_git
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+error: test failed, to rerun pass `-p object-log-git --test shallow`
