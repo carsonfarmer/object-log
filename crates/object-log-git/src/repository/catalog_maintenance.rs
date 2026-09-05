@@ -97,7 +97,34 @@ impl Repository {
                 .await?;
             start = end;
         }
+        self.verify_changed_sources(&tree, &locations).await?;
         self.state.catalog = CatalogState::Tree(tree.root().cloned());
         self.checkpoint_snapshot(|_| true).await
+    }
+
+    pub(super) async fn verify_changed_sources(
+        &self,
+        tree: &CatalogTree,
+        locations: &[(ObjectId, PackLocation)],
+    ) -> Result<(), Error> {
+        let candidate =
+            durable::Catalog::from_tree(&self.operation, self.format, tree.root().cloned())?;
+        let mut reader = durable::Reader::new(&self.log, &self.view, &candidate);
+        for (id, original) in locations {
+            let chosen = reader
+                .selected_location(*id)
+                .await?
+                .ok_or(Error::InvalidReference)?;
+            // Equal logical pack IDs can name distinct immutable copies. Verify
+            // any changed source before discarding its previously verified copy.
+            if chosen.root.reference() != original.root.reference()
+                && reader.verify(*id).await?.is_none()
+            {
+                return Err(Error::InvalidReference);
+            }
+        }
+        drop(reader);
+        drop(candidate);
+        Ok(())
     }
 }

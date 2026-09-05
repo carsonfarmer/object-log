@@ -62,3 +62,32 @@ async fn tree_resend_after_multi_leaf_pruning_checkpoints_and_cold_fetches() -> 
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn tree_checkpoint_verifies_changed_physical_source_content() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let fixture = fixture(format, b"replica")?;
+        let (log, faults, _) = test_log("replica-corruption").await?;
+        let repository = common_open(&log, format).await?;
+        let bytes = fs::read(&fixture.pack)?;
+        let normalized = crate::pack::normalize(&repository.operation, format, &bytes, &[])?;
+        let (descriptor, original) = durable::stage(&repository.operation, &repository.log, &repository.view, normalized).await?;
+        let index = durable::SelectedIndex::load(&repository.operation, &repository.log, &repository.view, &descriptor, &original).await?;
+        let position = index.entries().collect::<Result<Vec<_>, _>>()?.into_iter().find(|(id, _)| *id == fixture.target).ok_or("target position")?.1;
+        drop(index);
+        let mut corrupted = crate::pack::normalize(&repository.operation, format, &bytes, &[])?;
+        let end = corrupted.bytes.len() - format.digest_len();
+        corrupted.bytes[12..end].fill(0);
+        // A separately authenticated physical copy with the same claimed Git
+        // pack/index identity still requires content verification before reuse.
+        let (_, replacement) = durable::stage(&repository.operation, &repository.log, &repository.view, corrupted).await?;
+        let tree = crate::catalog_tree::CatalogTree::empty(format).insert_pack(
+            &repository.log, &repository.view, &repository.operation, descriptor.clone(), replacement, &[(fixture.target, position)],
+        ).await?;
+        let locations = [(fixture.target, crate::catalog_tree::PackLocation { descriptor, root: original, index: position })];
+        faults.reset();
+        assert!(repository.verify_changed_sources(&tree, &locations).await.is_err());
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+    }
+    Ok(())
+}
