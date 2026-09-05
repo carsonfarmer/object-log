@@ -60,6 +60,36 @@ def port():
         return listener.getsockname()[1]
 
 
+def stop_process_group(process, timeout=10):
+    """Drain our private group, including children that outlive spin up."""
+    def alive():
+        process.poll()  # Reap the parent while retaining its Popen owner.
+        try:
+            os.killpg(process.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # macOS can briefly deny probing an exiting group. It is not proof
+            # of shutdown: keep waiting for ESRCH, or fail the bounded check.
+            return True
+
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    escalate = time.monotonic() + timeout / 2
+    killed = False
+    while alive():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Spin private process group survived shutdown")
+        if not killed and time.monotonic() >= escalate:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            killed = True
+        time.sleep(.01)
+    process.wait(timeout=timeout)
+
+
 @contextlib.contextmanager
 def host(variables, directory):
     config = pathlib.Path(directory) / "repository.toml"
@@ -82,14 +112,12 @@ def host(variables, directory):
             yield address
         finally:
             # spin up starts an HTTP child; stopping only its parent leaks a host.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=10)
+            stop_process_group(process)
             for _ in range(100):
                 try:
                     with socket.create_connection(("127.0.0.1", address), timeout=.1):
                         time.sleep(.05)
-                except OSError:
+                except ConnectionRefusedError:
                     break
             else:
                 raise RuntimeError("Spin listener survived process-group shutdown")

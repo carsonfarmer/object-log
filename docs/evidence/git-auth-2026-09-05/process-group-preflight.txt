@@ -1,0 +1,14 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/36cd/object-log)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/36cd/object-log/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/36cd/object-log/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.47s
+     Running tests/auth_minio.rs (target/debug/deps/auth_minio-cda27907ecff3255)
+
+running 1 test
+private group drained after escalation; non-listening child gone
+sha1: invalid config and auth rejected before backend/body; challenge and routes verified
+sha256: invalid config and auth rejected before backend/body; challenge and routes verified
+test auth_minio_preflight_without_backend_or_body ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 42.34s
+

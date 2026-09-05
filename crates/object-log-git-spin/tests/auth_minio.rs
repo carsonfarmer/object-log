@@ -17,9 +17,15 @@ fn auth_minio_credential_helper_lifecycle() -> Result<(), Box<dyn std::error::Er
 #[test]
 #[ignore = "requires Spin 4, Python, and release WASIp2 component"]
 fn auth_minio_preflight_without_backend_or_body() -> Result<(), Box<dyn std::error::Error>> {
-    let status = std::process::Command::new("python3")
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/check_auth.py"))
-        .status()?;
-    assert!(status.success(), "authentication preflight failed");
+    for script in ["check_fixture_processes.py", "check_auth.py"] {
+        let status = std::process::Command::new("python3")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join(script),
+            )
+            .status()?;
+        assert!(status.success(), "authentication preflight failed");
+    }
     Ok(())
 }
