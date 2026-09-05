@@ -1299,3 +1299,178 @@ async fn catalog_migration_conflict_and_cancellation_do_not_claim_a_receipt() ->
     }
     Ok(())
 }
+
+fn compaction_action(root: &Path, name: &str) -> TestResult<(Action, PathBuf)> {
+    let path = root.join(name);
+    Ok((Action::CompactPacks(Receipt::reserve(&path)?), path))
+}
+
+async fn compaction_fixture(
+    format: ObjectFormat,
+) -> TestResult<(Log, FaultStore, ValidatedBackend)> {
+    let (log, faults, backend) = fixture("compact", Options::default()).await?;
+    seed_git(
+        &log,
+        if format == ObjectFormat::Sha1 {
+            "sha1"
+        } else {
+            "sha256"
+        },
+        format,
+    )
+    .await?;
+    assert!(matches!(
+        Repository::migrate_catalog(&log, format, TransactionId::new()).await?,
+        Some(CommitStatus::Committed(_))
+    ));
+    assert!(matches!(
+        Repository::open(&log, format)
+            .await?
+            .set_default_branch(
+                TransactionId::new(),
+                b"refs/heads/main",
+                b"refs/heads/trunk"
+            )
+            .await?,
+        CommitStatus::Committed(_)
+    ));
+    faults.reset();
+    Ok((log, faults, backend))
+}
+
+async fn compaction_head_write(format: ObjectFormat) -> TestResult<u64> {
+    let (log, counts, _) = compaction_fixture(format).await?;
+    assert!(matches!(
+        Repository::compact_packs(&log, format, TransactionId::new()).await?,
+        CommitStatus::Committed(_)
+    ));
+    let writes = counts.metrics().operation(Operation::Put).requests;
+    assert!(writes > 2);
+    Ok(writes)
+}
+
+#[tokio::test]
+async fn pack_compaction_rejects_legacy_without_mutation_and_requires_receipt() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    let root = TempDir::new()?;
+    assert!(parse(arguments(root.path(), &["compact-packs"])).is_err());
+    let used = private_file(&root, "used", b"PRIVATE_TOKEN")?;
+    assert!(
+        parse(arguments(
+            root.path(),
+            &[
+                "compact-packs",
+                "--recovery-file",
+                used.to_str().ok_or("path")?
+            ]
+        ))
+        .is_err()
+    );
+    assert_eq!(std::fs::read(used)?, b"PRIVATE_TOKEN");
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let (log, faults, _) = fixture("legacy-compaction", Options::default()).await?;
+        let before = log.load().await?;
+        let (action, path) = compaction_action(root.path(), &format!("{format:?}"))?;
+        faults.reset();
+        let report = super::execute(&log, &action, format).await;
+        assert_eq!(report.exit(), 5);
+        assert_eq!(json(&report)?["outcome"], "invalid_git_state_or_limit");
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        assert!(log.refresh(&before).await?.is_none());
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pack_compaction_pending_recovers_nonempty_catalog_without_changing_refs_or_head()
+-> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let head_write = compaction_head_write(format).await?;
+        for phase in [FailurePhase::Before, FailurePhase::After] {
+            let root = TempDir::new()?;
+            let (log, faults, backend) = compaction_fixture(format).await?;
+            let refs = Repository::open(&log, format).await?.refs().clone();
+            let (action, path) = compaction_action(root.path(), "pending")?;
+            faults.reset();
+            faults.schedule(object_log::sim::Failure {
+                operation: Operation::Put,
+                occurrence: head_write,
+                phase,
+            });
+            let report = super::execute(&log, &action, format).await;
+            assert_eq!(report.exit(), 4);
+            assert_eq!(json(&report)?["outcome"], "pending");
+            assert_eq!(json(&report)?["recovery_token"], "saved");
+            assert!(report.generation.is_none());
+            let token = read_file(&path, TOKEN_BYTES)?;
+            drop(log);
+            let log =
+                Log::open_existing(&backend, &LogId::new("compact")?, Options::default()).await?;
+            let resume = Action::Resume(token.clone());
+            assert_eq!(
+                json(&super::execute(&log, &resume, format).await)?["outcome"],
+                "committed"
+            );
+            let confirmed = log.load().await?;
+            assert_eq!(
+                json(&super::execute(&log, &resume, format).await)?["outcome"],
+                "committed"
+            );
+            assert!(log.refresh(&confirmed).await?.is_none());
+            assert_eq!(read_file(&path, TOKEN_BYTES)?, token);
+            let repository = Repository::open(&log, format).await?;
+            assert_eq!(repository.refs(), &refs);
+            assert_eq!(repository.default_branch(), b"refs/heads/trunk");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pack_compaction_conflict_and_cancel_preserve_uncertainty() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let head_write = compaction_head_write(format).await?;
+        let root = TempDir::new()?;
+        let (log, faults, _) = compaction_fixture(format).await?;
+        let before = log.load().await?;
+        let (action, path) = compaction_action(root.path(), "conflict")?;
+        let mut pause = faults.pause_put_at(head_write, FailurePhase::Before);
+        let work = super::execute(&log, &action, format);
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        log.retain(&before, object_log::RetentionId::new()).await?;
+        let winner = log.load().await?;
+        assert!(pause.release());
+        let report = work.await;
+        assert_eq!(report.exit(), 3);
+        assert_eq!(json(&report)?["outcome"], "conflict");
+        assert!(log.refresh(&winner).await?.is_none());
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+
+        let (log, faults, _) = compaction_fixture(format).await?;
+        let (action, path) = compaction_action(root.path(), "cancel")?;
+        let mut pause = faults.pause_put_at(head_write, FailurePhase::After);
+        let work = bounded(
+            action.name(),
+            Duration::from_millis(100),
+            super::execute(&log, &action, format),
+        );
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        let report = work.await;
+        assert_eq!(report.exit(), 4);
+        assert_eq!(json(&report)?["outcome"], "pending");
+        assert_eq!(json(&report)?["recovery_token"], "unavailable");
+        assert!(report.generation.is_none());
+        assert!(!pause.release());
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+    }
+    Ok(())
+}

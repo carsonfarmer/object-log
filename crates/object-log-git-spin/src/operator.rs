@@ -22,7 +22,7 @@ const CONFIG_BYTES: usize = 16 * 1024;
 const TOKEN_BYTES: usize = 1024 * 1024;
 const OUTPUT_BYTES: usize = 2048;
 const DEADLINE: Duration = Duration::from_mins(1);
-const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | collect --resume-only | migrate-catalog --recovery-file FILE | set-default-branch --expected REF --target REF --recovery-file FILE";
+const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | collect --resume-only | migrate-catalog --recovery-file FILE | compact-packs --recovery-file FILE | set-default-branch --expected REF --target REF --recovery-file FILE";
 
 #[derive(Clone, Copy, Debug)]
 struct Failure(&'static str, u8);
@@ -321,6 +321,7 @@ enum Action {
     Checkpoint,
     CollectResume,
     MigrateCatalog(Receipt),
+    CompactPacks(Receipt),
     SetDefault {
         expected: Vec<u8>,
         target: Vec<u8>,
@@ -335,6 +336,7 @@ impl Action {
             Self::Checkpoint => "checkpoint",
             Self::CollectResume => "collect",
             Self::MigrateCatalog(_) => "migrate-catalog",
+            Self::CompactPacks(_) => "compact-packs",
             Self::SetDefault { .. } => "set-default-branch",
         }
     }
@@ -350,6 +352,14 @@ fn command() -> Command {
                 .value_parser(clap::value_parser!(PathBuf)),
         )
         .subcommand(Command::new("status"))
+        .subcommand(
+            Command::new("compact-packs").arg(
+                Arg::new("recovery-file")
+                    .long("recovery-file")
+                    .required(true)
+                    .value_parser(clap::value_parser!(PathBuf)),
+            ),
+        )
         .subcommand(
             Command::new("migrate-catalog").arg(
                 Arg::new("recovery-file")
@@ -421,6 +431,11 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
         Some(("status", _)) => Action::Status,
         Some(("checkpoint", _)) => Action::Checkpoint,
         Some(("collect", _)) => Action::CollectResume,
+        Some(("compact-packs", command)) => Action::CompactPacks(Receipt::reserve(
+            command
+                .get_one::<PathBuf>("recovery-file")
+                .ok_or(Failure("invalid_arguments", 2))?,
+        )?),
         Some(("migrate-catalog", command)) => Action::MigrateCatalog(Receipt::reserve(
             command
                 .get_one::<PathBuf>("recovery-file")
@@ -528,6 +543,17 @@ fn commit_report(
 async fn execute(log: &Log, action: &Action, format: ObjectFormat) -> Report {
     match action {
         Action::CollectResume => collect_resume(log).await,
+        Action::CompactPacks(receipt) => commit_report(
+            action.name(),
+            "compacted",
+            receipt,
+            Box::pin(Repository::compact_packs(
+                log,
+                format,
+                object_log::TransactionId::new(),
+            ))
+            .await,
+        ),
         Action::MigrateCatalog(receipt) => {
             match Repository::migrate_catalog(log, format, object_log::TransactionId::new()).await {
                 Ok(None) => Report::new(action.name(), "already_tree", 0),
@@ -636,6 +662,7 @@ async fn bounded(
                         | "set-default-branch"
                         | "collect"
                         | "migrate-catalog"
+                        | "compact-packs"
                 ) {
                     "pending"
                 } else {
@@ -643,7 +670,10 @@ async fn bounded(
                 },
                 4,
             );
-            if matches!(operation, "set-default-branch" | "migrate-catalog") {
+            if matches!(
+                operation,
+                "set-default-branch" | "migrate-catalog" | "compact-packs"
+            ) {
                 report.recovery_token = Some("unavailable");
             }
             report
