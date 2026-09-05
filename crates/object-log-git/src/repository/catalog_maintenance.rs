@@ -68,14 +68,21 @@ impl Repository {
                 .operation
                 .reserve_state(memory_bound(end - start, size_of::<(ObjectId, u32)>())?)?;
             let mut entries = Vec::with_capacity(end - start);
+            let selected = durable::SelectedIndex::load(
+                &self.operation,
+                &self.log,
+                &self.view,
+                &first.descriptor,
+                &first.root,
+            )
+            .await?;
             for (id, location) in &locations[start..end] {
-                if location.descriptor != first.descriptor
-                    || location.root.reference() != first.root.reference()
-                {
+                if location.descriptor != first.descriptor {
                     return Err(Error::InvalidPack(
                         "catalog pack identity differs across leaves".into(),
                     ));
                 }
+                selected.verify_position(*id, location.index)?;
                 entries.push((*id, location.index));
             }
             tree = tree

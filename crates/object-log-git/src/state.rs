@@ -25,6 +25,19 @@ pub(crate) struct State {
 }
 
 impl State {
+    pub(crate) fn catalog_tree(
+        &self,
+        format: ObjectFormat,
+    ) -> Option<crate::catalog_tree::CatalogTree> {
+        match &self.catalog {
+            CatalogState::Legacy => None,
+            CatalogState::Tree(root) => Some(root.clone().map_or_else(
+                || crate::catalog_tree::CatalogTree::empty(format),
+                |root| crate::catalog_tree::CatalogTree::from_root(format, root),
+            )),
+        }
+    }
+
     pub(crate) fn default_branch(&self) -> &[u8] {
         self.default_branch.as_deref().unwrap_or(b"refs/heads/main")
     }

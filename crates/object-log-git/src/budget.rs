@@ -167,6 +167,26 @@ impl Operation {
         Ok(reservation)
     }
 
+    pub(crate) fn has_headroom(&self, calls: usize, transfer: usize, work: usize) -> bool {
+        let Ok(usage) = self.0.io.lock() else {
+            return false;
+        };
+        usage
+            .calls
+            .checked_add(calls)
+            .is_some_and(|value| value <= self.0.call_limit)
+            && usage
+                .transfer
+                .checked_add(transfer)
+                .is_some_and(|value| value <= TRANSFER_BYTES)
+            && self
+                .0
+                .work
+                .load(Ordering::Relaxed)
+                .checked_add(work)
+                .is_some_and(|value| value <= WORK_BYTES)
+    }
+
     #[cfg(test)]
     pub(crate) fn calls(&self) -> usize {
         self.0

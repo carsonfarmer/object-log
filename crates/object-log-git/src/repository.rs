@@ -8,6 +8,7 @@ use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, View, materialize
 
 mod catalog_maintenance;
 mod catalog_migration;
+mod catalog_reuse;
 mod default_branch;
 mod maintenance;
 mod receive_command;
@@ -652,6 +653,7 @@ mod tests {
     include!("repository/default_branch_tests.rs");
     include!("repository/uri_tests.rs");
     include!("repository/catalog_migration_tests.rs");
+    include!("repository/catalog_consumer_tests.rs");
 
     struct Fixture {
         directory: TempDir,

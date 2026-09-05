@@ -1,3 +1,4 @@
+use super::catalog_reuse::Reuse;
 use std::io::Write as _;
 
 use bytes::Bytes;
@@ -192,13 +193,7 @@ impl Repository {
         validate_namespace(&self.operation, &self.state.refs, &request.updates)?;
         let mut objects = Vec::new();
         let mut descriptors = Vec::new();
-        let mut tree = match &self.state.catalog {
-            crate::state::CatalogState::Legacy => None,
-            crate::state::CatalogState::Tree(root) => Some(root.clone().map_or_else(
-                || crate::catalog_tree::CatalogTree::empty(self.format),
-                |root| crate::catalog_tree::CatalogTree::from_root(self.format, root),
-            )),
-        };
+        let mut tree = self.state.catalog_tree(self.format);
         if !request.pack.is_empty() {
             let catalog = self.catalog().await?;
             let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
@@ -208,13 +203,19 @@ impl Repository {
             // The client may resend retained objects that no ref advertises.
             // Normalization still validates the input; reuse the authenticated
             // existing pack instead of recording its descriptor a second time.
+            let reusable = self.reuse_catalog_objects(&normalized).await?;
             if normalized.bytes.get(8..12) != Some(&[0, 0, 0, 0])
-                && !self.state.packs.contains_key(&normalized.id)
+                && !matches!(reusable, Reuse::KnownObjects)
             {
                 drop(reader);
                 drop(catalog);
-                let (descriptor, root) =
-                    durable::stage(&self.operation, &self.log, &self.view, normalized).await?;
+                let (descriptor, root) = match reusable {
+                    Reuse::Pack(location) => (location.descriptor, location.root),
+                    Reuse::Stage => {
+                        durable::stage(&self.operation, &self.log, &self.view, normalized).await?
+                    }
+                    Reuse::KnownObjects => unreachable!(),
+                };
                 if let Some(current) = &tree {
                     tree = Some(
                         super::catalog_migration::insert_pack(

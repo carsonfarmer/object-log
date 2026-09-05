@@ -129,16 +129,15 @@ impl Catalog {
 
 /// One authenticated selected index, tied to the caller's exact read context.
 /// Loading and enumerating it never reads pack blob chunks or unrelated roots.
-#[allow(dead_code, reason = "pending coordinated catalog migration caller")]
 pub(crate) struct SelectedIndex<'a> {
     pack: Pack,
+    root: StagedObject,
     operation: &'a Operation,
     _log: &'a Log,
     _view: &'a View,
     _memory: Reservation,
 }
 
-#[allow(dead_code, reason = "pending coordinated catalog migration caller")]
 impl<'a> SelectedIndex<'a> {
     pub(crate) async fn load(
         operation: &'a Operation,
@@ -154,10 +153,10 @@ impl<'a> SelectedIndex<'a> {
         operation.work(
             bytes + entries * (entries.max(1).ilog2() as usize + 1) * size_of::<OffsetEntry>(),
         )?;
-        operation.io(bytes)?;
         let pack = load_pack(log, view, format, descriptor, root.reference()).await?;
         Ok(Self {
             pack,
+            root: root.clone(),
             operation,
             _log: log,
             _view: view,
