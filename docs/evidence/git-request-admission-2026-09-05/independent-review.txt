@@ -1,0 +1,31 @@
+    Blocking waiting for file lock on build directory
+   Compiling smallvec v1.16.0
+   Compiling tokio v1.53.1
+   Compiling icu_normalizer v2.3.0
+   Compiling parking_lot_core v0.9.12
+   Compiling parking_lot v0.12.5
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling object_store v0.14.1
+   Compiling criterion v0.7.0
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-request-activation)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.82s
+     Running unittests src/lib.rs (target/debug/deps/object_log-2ef6a6e920ad084a)
+
+running 12 tests
+test log::tests::request_guard_listing_retains_admission_until_stream_drop ... ok
+test log::tests::request_guard_listing_is_lazy_and_delete_describes_batch ... ok
+test log::tests::request_guard_composition_preserves_policy_and_prior_admissions ... ok
+test log::tests::request_guard_denies_before_io_and_preserves_clone_proofs ... ok
+test log::tests::request_guard_counts_collisions_and_missing_classification ... ok
+test log::tests::request_guard_charges_active_plan_before_staging ... ok
+test log::tests::request_guard_concurrent_admission_and_cancellation_are_cumulative ... ok
+test log::tests::request_guard_collection_denial_does_not_count_unsubmitted_deletes ... ok
+test log::tests::request_guard_denied_cold_success_verification_retains_evidence ... ok
+test log::tests::request_guard_denied_recovery_preserves_exact_commit_evidence ... ok
+test log::tests::request_guard_denied_checkpoint_recovery_keeps_candidate ... ok
+test store::tests::request_guard_filesystem_refusals_never_reach_backend ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 80 filtered out; finished in 0.01s
+

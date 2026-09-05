@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7b162a3d36c9d4b3)
+
+running 1 test
+Sha1: 1,024-entry maintenance checkpoint, 2051 charged calls, 2051 physical requests, 479216 downloaded bytes, 81191 uploaded bytes
+Sha256: 1,024-entry maintenance checkpoint, 2051 charged calls, 2051 physical requests, 505869 downloaded bytes, 81232 uploaded bytes
+test repository::tests::conservative_checkpoint_recovers_1024_transaction_tail_for_both_hashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 6.23s
+

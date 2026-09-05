@@ -1,0 +1,12 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.07s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7d5666786ede979b)
+
+running 4 tests
+test pack::budget::request_guard::tests::refusal_preserves_both_counters_and_retry_keeps_admissions ... ok
+test repository::tests::head_transfer_is_charged_before_read_and_after_retry ... ok
+test repository::tests::conservative_checkpoint_expiry_retry_retains_cumulative_calls ... ok
+test repository::tests::common_receive_expired_view_retry_keeps_cumulative_operation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 1.20s
+

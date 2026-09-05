@@ -1,0 +1,12 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-request-activation)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-request-activation/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.54s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7d5666786ede979b)
+
+running 3 tests
+test pack::budget::request_guard::tests::refusal_preserves_both_counters_and_retry_keeps_admissions ... ok
+test repository::tests::repository_preserves_callers_request_denial ... ok
+test pack::budget::request_guard::tests::concurrent_transfer_admission_is_atomic_and_retains_the_permit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.00s
+

@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7b162a3d36c9d4b3)
+
+running 1 test
+partial Sha1 filter=none: calls=6 work=19407549 response=2098185 GETs=4 downloaded=2099392
+partial Sha1 filter=blob:none: calls=4 work=1576808 response=223 GETs=2 downloaded=1049965
+partial Sha1 filter=blob:limit=4096: calls=4 work=1576856 response=223 GETs=2 downloaded=1049965
+partial Sha1 filter=blob:limit=4194304: calls=6 work=19407724 response=2098185 GETs=4 downloaded=2099392
+partial Sha256 filter=none: calls=6 work=19408027 response=2098227 GETs=4 downloaded=2099494
+partial Sha256 filter=blob:none: calls=4 work=1577244 response=265 GETs=2 downloaded=1050025
+partial Sha256 filter=blob:limit=4096: calls=4 work=1577292 response=265 GETs=2 downloaded=1050025
+partial Sha256 filter=blob:limit=4194304: calls=6 work=19408202 response=2098227 GETs=4 downloaded=2099494
+test repository::tests::filtered_fetch_accounts_for_store_work_and_retained_response ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 1.09s
+
