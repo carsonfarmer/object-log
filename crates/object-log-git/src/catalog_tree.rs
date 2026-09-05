@@ -429,7 +429,6 @@ impl Builder<'_> {
         };
         let _memory = self.operation.reserve(size)?;
         self.operation.work(size)?;
-        self.operation.io(size)?;
         let _plan = crate::durable::publication_plan(self.operation, self.view)?;
         let proof = self.log.put_node(self.view, bytes.into(), children).await?;
         Ok(Some(Child {
@@ -489,7 +488,6 @@ async fn read_reserved(
 ) -> Result<Loaded, Error> {
     let size =
         usize::try_from(proof.reference().len()).map_err(|_| invalid("catalog size overflow"))?;
-    operation.io(size)?;
     operation.work(size * 2)?;
     let (bytes, children) = log.read_staged_node(view, proof).await?;
     let payload = decode(&bytes, format, &children)?;

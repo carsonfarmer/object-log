@@ -63,11 +63,16 @@ pub(crate) async fn normalize(
                 _memory: candidate_memory,
             }) => {
                 // gix can report a blocked in-pack intermediate before the external root.
-                // Catalog probes do no I/O; only acquire an unseen, available candidate.
-                let id = std::iter::once(id)
-                    .chain(candidates)
-                    .find(|id| !attempted.contains(id) && reader.contains(*id))
-                    .ok_or_else(|| Error::InvalidPack(message))?;
+                // Authenticate only unseen candidates; preserve storage and
+                // expired-view errors instead of treating them as missing bases.
+                let mut available = None;
+                for candidate in std::iter::once(id).chain(candidates) {
+                    if !attempted.contains(&candidate) && reader.contains(candidate).await? {
+                        available = Some(candidate);
+                        break;
+                    }
+                }
+                let id = available.ok_or_else(|| Error::InvalidPack(message))?;
                 drop(candidate_memory);
                 operation.thin_round()?;
                 let object = reader.find(id).await?.ok_or_else(|| {

@@ -63,7 +63,7 @@ impl Graph {
             edge_memory: operation.reserve_state(0)?,
         };
         for &id in roots {
-            graph.schedule(reader, id, None, true)?;
+            graph.schedule(reader, id, None, true).await?;
         }
         let mut cursor = 0;
         while cursor < graph.queue.len() {
@@ -98,10 +98,14 @@ impl Graph {
                     for token in gix_object::CommitRefIter::from_bytes(&object.data, hash) {
                         match token.map_err(pack_error)? {
                             Token::Tree { id: target } => {
-                                graph.link(reader, id, target.as_slice(), Kind::Tree, true)?;
+                                graph
+                                    .link(reader, id, target.as_slice(), Kind::Tree, true)
+                                    .await?;
                             }
                             Token::Parent { id: target } => {
-                                graph.link(reader, id, target.as_slice(), Kind::Commit, true)?;
+                                graph
+                                    .link(reader, id, target.as_slice(), Kind::Commit, true)
+                                    .await?;
                             }
                             Token::Committer { signature } => {
                                 graph.nodes[index].commit_time =
@@ -115,17 +119,19 @@ impl Graph {
                         return invalid("commit headers are incomplete");
                     }
                 }
-                Kind::Tree => graph.tree(reader, id, &object.data)?,
+                Kind::Tree => graph.tree(reader, id, &object.data).await?,
                 Kind::Tag => {
                     let tag =
                         gix_object::TagRef::from_bytes(&object.data, hash).map_err(pack_error)?;
-                    graph.link(
-                        reader,
-                        id,
-                        tag.target().as_slice(),
-                        tag.target_kind,
-                        tag.target_kind != Kind::Blob,
-                    )?;
+                    graph
+                        .link(
+                            reader,
+                            id,
+                            tag.target().as_slice(),
+                            tag.target_kind,
+                            tag.target_kind != Kind::Blob,
+                        )
+                        .await?;
                 }
                 Kind::Blob => {}
             }
@@ -134,7 +140,12 @@ impl Graph {
         Ok(graph)
     }
 
-    fn tree(&mut self, reader: &Reader<'_>, id: ObjectId, data: &[u8]) -> Result<(), Error> {
+    async fn tree(
+        &mut self,
+        reader: &mut Reader<'_>,
+        id: ObjectId,
+        data: &[u8],
+    ) -> Result<(), Error> {
         let mut previous = None;
         let mut names = HashSet::with_capacity(data.len() / (id.format().digest_len() + 8));
         for entry in gix_object::TreeRefIter::from_bytes(data, object_hash(id.format())) {
@@ -170,7 +181,8 @@ impl Graph {
                 EntryKind::Blob | EntryKind::BlobExecutable | EntryKind::Link => Kind::Blob,
                 EntryKind::Commit => continue,
             };
-            self.link(reader, id, entry.oid.as_bytes(), kind, kind != Kind::Blob)?;
+            self.link(reader, id, entry.oid.as_bytes(), kind, kind != Kind::Blob)
+                .await?;
         }
         Ok(())
     }
@@ -188,15 +200,15 @@ impl Graph {
         Ok(())
     }
 
-    fn schedule(
+    async fn schedule(
         &mut self,
-        reader: &Reader<'_>,
+        reader: &mut Reader<'_>,
         id: ObjectId,
         kind: Option<Kind>,
         verify: bool,
     ) -> Result<u32, Error> {
         self.operation.work(size_of::<Node>())?;
-        if !reader.contains(id) {
+        if !reader.contains(id).await? {
             return invalid("graph references a missing object");
         }
         let index = if let Some(index) = self.location(id) {
@@ -228,9 +240,9 @@ impl Graph {
         Ok(index)
     }
 
-    fn link(
+    async fn link(
         &mut self,
-        reader: &Reader<'_>,
+        reader: &mut Reader<'_>,
         source: ObjectId,
         bytes: &[u8],
         kind: Kind,
@@ -240,7 +252,7 @@ impl Graph {
             return invalid("graph exceeds edge limit");
         }
         let id = ObjectId::from_bytes(source.format(), bytes)?;
-        let index = self.schedule(reader, id, Some(kind), verify)?;
+        let index = self.schedule(reader, id, Some(kind), verify).await?;
         if self.edges.len() == self.edges.capacity() {
             let capacity = (self.edges.capacity().max(128) * 2).min(MAX_EDGES);
             self.edge_memory
@@ -292,7 +304,7 @@ mod tests {
         (Kind::Commit, data.into_bytes())
     }
 
-    fn tree(entries: &[(&str, &str, ObjectId)]) -> Raw {
+    async fn tree(entries: &[(&str, &str, ObjectId)]) -> Raw {
         let mut data = Vec::new();
         for (mode, name, id) in entries {
             data.extend_from_slice(format!("{mode} {name}\0").as_bytes());

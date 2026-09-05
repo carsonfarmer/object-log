@@ -530,7 +530,8 @@ async fn descendant_bounds_inherit_the_ancestor_upper_bound() -> TestResult {
             .is_err()
     );
     let operation = operation()?;
-    let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+    let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+    let mut cache = CatalogCache::new(&tree, &guarded, &view, &operation)?;
     assert!(cache.lookup(entries[0].0).await.is_err());
     let calls = operation.calls();
     // Even an already decoded node must satisfy this traversal's bounds.
@@ -694,7 +695,8 @@ async fn cached_lookup_reuses_authenticated_paths_and_releases_memory() -> TestR
             .await?;
         let operation = operation()?;
         store.reset();
-        let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+        let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+        let mut cache = CatalogCache::new(&tree, &guarded, &view, &operation)?;
         for _ in 0..2 {
             for &(id, position) in &entries {
                 let found = cache.lookup(id).await?.ok_or("missing cached OID")?;
@@ -711,7 +713,8 @@ async fn cached_lookup_reuses_authenticated_paths_and_releases_memory() -> TestR
         drop(cache);
         assert_eq!(operation.live_bytes(), 0);
         // New command-local cache must authenticate its own paths.
-        let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+        let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+        let mut cache = CatalogCache::new(&tree, &guarded, &view, &operation)?;
         assert!(cache.lookup(entries[0].0).await?.is_some());
         assert_eq!(operation.calls(), 5);
     }
@@ -729,7 +732,8 @@ async fn cache_evicts_under_memory_pressure_without_resetting_work() -> TestResu
         .read_staged_node(&view, tree.root().ok_or("root")?)
         .await?;
     let operation = operation()?;
-    let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+    let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+    let mut cache = CatalogCache::new(&tree, &guarded, &view, &operation)?;
     store.reset();
     assert!(cache.lookup(entries[0].0).await?.is_some());
     let calls = operation.calls();

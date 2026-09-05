@@ -2,7 +2,6 @@
 
 #![deny(missing_docs, unsafe_code)]
 
-#[cfg(test)]
 mod catalog_tree;
 
 mod durable;
