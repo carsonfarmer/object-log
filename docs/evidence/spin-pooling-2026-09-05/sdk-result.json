@@ -1,0 +1,69 @@
+{
+  "spin": "spin 4.0.2 (bfc7543 2026-06-23)",
+  "minio_image": "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+  "wasm_sha256": "b1c7e63abd91d076911646e57e8fb9ebf325d3c7ac5d7da6731d2f57d7198227",
+  "sdk_only": true,
+  "runs": [
+    {
+      "pooling": true,
+      "attempts": 294,
+      "failures": [
+        {
+          "iteration": 35,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 75,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 76,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 80,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 135,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 153,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 243,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 274,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 282,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        },
+        {
+          "iteration": 293,
+          "error": "HTTP Error 500: Internal Server Error",
+          "body": "ErrorCode::HttpProtocolError"
+        }
+      ]
+    },
+    {
+      "pooling": false,
+      "attempts": 1000,
+      "failures": []
+    }
+  ]
+}

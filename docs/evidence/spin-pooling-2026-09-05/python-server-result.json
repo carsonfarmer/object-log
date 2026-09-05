@@ -1,0 +1,12 @@
+[
+  {
+    "pooled": true,
+    "attempts": 1000,
+    "failures": []
+  },
+  {
+    "pooled": false,
+    "attempts": 1000,
+    "failures": []
+  }
+]
