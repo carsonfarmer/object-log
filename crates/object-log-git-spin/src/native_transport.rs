@@ -62,6 +62,65 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    // Reqwest may abandon a speculative connection without sending HTTP.
+    // Only a reset/EOF before the first byte is not an attempted request.
+    fn request_header(mut input: impl Read) -> std::io::Result<Option<String>> {
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            match input.read(&mut byte) {
+                Ok(0) if header.is_empty() => return Ok(None),
+                Err(error)
+                    if header.is_empty()
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::UnexpectedEof
+                        ) =>
+                {
+                    return Ok(None);
+                }
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "partial HTTP request",
+                    ));
+                }
+                Ok(_) => header.push(byte[0]),
+                Err(error) => return Err(error),
+            }
+            if header.len() > 8192 {
+                return Err(std::io::Error::other("fixture header exceeds limit"));
+            }
+        }
+        Ok(Some(String::from_utf8_lossy(&header).into_owned()))
+    }
+
+    #[test]
+    fn empty_connection_resets_are_not_http_requests() -> Result<(), Box<dyn std::error::Error>> {
+        struct Reset;
+        impl Read for Reset {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::ConnectionReset.into())
+            }
+        }
+        assert!(request_header(Reset)?.is_none());
+        assert!(request_header(std::io::empty())?.is_none());
+        assert_eq!(
+            request_header(std::io::Cursor::new(b"GET / HTTP/1.1\r\n\r\n"))?,
+            Some("GET / HTTP/1.1\r\n\r\n".into())
+        );
+        assert_eq!(
+            request_header(std::io::Cursor::new(b"G").chain(Reset))
+                .err()
+                .ok_or("partial reset accepted")?
+                .kind(),
+            std::io::ErrorKind::ConnectionReset
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn native_connector_retries_only_pre_response_reads()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -77,6 +136,17 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let address = listener.local_addr()?;
             listener.set_nonblocking(true)?;
+            let client = Connector.connect(
+                &ClientOptions::new()
+                    .with_allow_http(true)
+                    .with_timeout(Duration::from_secs(2)),
+            )?;
+            let request = http::Request::builder()
+                .method(method.clone())
+                .uri(format!("http://{address}/object?versionId=7"))
+                .header("range", "bytes=3-5")
+                .header("if-match", "version")
+                .body(HttpRequestBody::empty())?;
             let done = Arc::new(AtomicBool::new(false));
             let server_done = Arc::clone(&done);
             let server = std::thread::spawn(move || -> std::io::Result<Vec<String>> {
@@ -92,18 +162,10 @@ mod tests {
                         Err(error) => return Err(error),
                     };
                     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-                    let mut header = Vec::new();
-                    while !header.ends_with(b"\r\n\r\n") && header.len() < 8192 {
-                        let mut byte = [0];
-                        match socket.read(&mut byte)? {
-                            0 => break,
-                            _ => header.push(byte[0]),
-                        }
-                    }
-                    if header.is_empty() {
+                    let Some(header) = request_header(&mut socket)? else {
                         continue;
-                    }
-                    requests.push(String::from_utf8_lossy(&header).into_owned());
+                    };
+                    requests.push(header);
                     if requests.len() > close_count {
                         write!(
                             socket,
@@ -117,27 +179,25 @@ mod tests {
                 }
                 Ok(requests)
             });
-            let client = Connector.connect(
-                &ClientOptions::new()
-                    .with_allow_http(true)
-                    .with_timeout(Duration::from_secs(2)),
-            )?;
-            let request = http::Request::builder()
-                .method(method.clone())
-                .uri(format!("http://{address}/object?versionId=7"))
-                .header("range", "bytes=3-5")
-                .header("if-match", "version")
-                .body(HttpRequestBody::empty())?;
-            let response = client.execute(request).await;
+            let response = match client.execute(request).await {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body_failed = response.into_body().collect().await.is_err();
+                    Ok((status, body_failed))
+                }
+                Err(error) => Err(error),
+            };
+            // Always stop and join before inspecting the client outcome, so a
+            // server error cannot be hidden behind a secondary connect failure.
+            done.store(true, Ordering::Relaxed);
+            let requests = server.join().map_err(|_| "HTTP fixture thread failed")??;
             if truncated {
-                assert!(response?.into_body().collect().await.is_err());
+                assert!(response?.1);
             } else if close_count == 0 || (close_count == 1 && expected == 2) {
-                assert_eq!(response?.status().as_u16(), status);
+                assert_eq!(response?, (status, false));
             } else {
                 assert!(response.is_err());
             }
-            done.store(true, Ordering::Relaxed);
-            let requests = server.join().map_err(|_| "HTTP fixture thread failed")??;
             assert_eq!(
                 requests.len(),
                 expected,
