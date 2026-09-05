@@ -15,7 +15,7 @@ use std::{
     path::Path,
     process::{Child, Command, Output},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[path = "support/spin_process.rs"]
@@ -47,27 +47,25 @@ async fn operator_minio_status_and_exact_resume_preserve_both_hashes() -> TestRe
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one both-hash operator-process and cold Spin lifecycle"
-)]
-async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
-    let root = tempfile::tempdir()?;
-    let prefix = format!("operator-{}", TransactionId::new());
+fn configuration(root: &Path, prefix: &str, name: &str) -> TestResult<std::path::PathBuf> {
     let mut config = String::new();
     for (key, value) in [
         ("endpoint", env::var("OBJECT_LOG_MINIO_ENDPOINT")?),
         ("bucket", env::var("OBJECT_LOG_MINIO_BUCKET")?),
         ("access_key", env::var("OBJECT_LOG_MINIO_ACCESS_KEY")?),
         ("secret_key", env::var("OBJECT_LOG_MINIO_SECRET_KEY")?),
-        ("prefix", prefix.clone()),
+        ("prefix", prefix.to_owned()),
         ("object_format", name.into()),
         ("auth_mode", "disabled".into()),
     ] {
         writeln!(config, "{key} = {}", serde_json::to_string(&value)?)?;
     }
-    let config_path = root.path().join("repository.toml");
+    let config_path = root.join("repository.toml");
     private_file(&config_path, config.as_bytes())?;
+    Ok(config_path)
+}
+
+async fn provider(prefix: &str) -> TestResult<(object_log::sim::FaultStore, ValidatedBackend)> {
     let store = AmazonS3Builder::new()
         .with_endpoint(env::var("OBJECT_LOG_MINIO_ENDPOINT")?)
         .with_bucket_name(env::var("OBJECT_LOG_MINIO_BUCKET")?)
@@ -78,8 +76,19 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         .with_virtual_hosted_style_request(false)
         .build()?;
     let faults = object_log::sim::FaultStore::new(store);
-    let backend =
-        ValidatedBackend::new(Arc::new(faults.clone()), StorePath::from(prefix.clone())).await?;
+    let backend = ValidatedBackend::new(Arc::new(faults.clone()), StorePath::from(prefix)).await?;
+    Ok((faults, backend))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one both-hash operator-process and cold Spin lifecycle"
+)]
+async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let prefix = format!("operator-{}", TransactionId::new());
+    let config_path = configuration(root.path(), &prefix, name)?;
+    let (faults, backend) = provider(&prefix).await?;
     let id = LogId::new("repository")?;
     assert!(
         !operator(&config_path, &["collect", "--resume-only"])?
@@ -264,7 +273,7 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
     let wrong_config = root.path().join("wrong-format.toml");
     private_file(
         &wrong_config,
-        config
+        fs::read_to_string(&config_path)?
             .replace(
                 &format!("object_format = \"{name}\""),
                 &format!("object_format = \"{wrong_name}\""),
@@ -806,4 +815,167 @@ async fn serve(config: &Path, state: &Path) -> TestResult<(Host, String)> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err("Spin startup timed out".into())
+}
+
+#[tokio::test]
+#[ignore = "long run: 1,100 fast-forward Git pushes per hash with plain Spin and local MinIO"]
+async fn operator_minio_sustains_1100_commit_pushes_per_hash() -> TestResult {
+    for name in ["sha1", "sha256"] {
+        sustained_commits(name).await?;
+    }
+    Ok(())
+}
+
+async fn sustained_commits(name: &str) -> TestResult {
+    const PUSHES: usize = 1100;
+    const CADENCE: usize = 32;
+    let started = Instant::now();
+    let root = tempfile::tempdir()?;
+    let prefix = format!("sustained-{}", TransactionId::new());
+    let config = configuration(root.path(), &prefix, name)?;
+    let (_, backend) = provider(&prefix).await?;
+    let source = root.path().join("source");
+    git(
+        None,
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            &format!("--object-format={name}"),
+            text(&source)?,
+        ],
+    )?;
+    fs::write(source.join("file"), "seed\n")?;
+    git(Some(&source), &["add", "file"])?;
+    git(Some(&source), &["commit", "-q", "-m", "seed"])?;
+    let (mut seed, url) = serve(&config, root.path()).await?;
+    git(Some(&source), &["push", "-q", &url, "HEAD:refs/heads/main"])?;
+    seed.stop()?;
+    let migration = operator(
+        &config,
+        &[
+            "migrate-catalog",
+            "--recovery-file",
+            text(&root.path().join("migration.token"))?,
+        ],
+    )?;
+    assert!(migration.status.success());
+    assert_eq!(decode(&migration)?["outcome"], "migrated");
+    let log = Log::open_existing(&backend, &LogId::new("repository")?, Options::default()).await?;
+    assert_eq!(log.options(), Options::default());
+    let mut completed = 0;
+    let mut cycles = 0;
+    let mut peak_tail = 0;
+    while completed < PUSHES {
+        let batch_started = Instant::now();
+        let end = (completed + CADENCE).min(PUSHES);
+        let (mut writer, url) = serve(&config, root.path()).await?;
+        while completed < end {
+            let next = completed + 1;
+            fs::write(source.join("file"), format!("{name} commit {next}\n"))?;
+            git(
+                Some(&source),
+                &["commit", "-q", "-am", &format!("commit {next}")],
+            )?;
+            git(Some(&source), &["push", "-q", &url, "HEAD:refs/heads/main"])
+                .map_err(|error| format!("{name} push {next}/{PUSHES}: {error}"))?;
+            completed = next;
+        }
+        let expected = git(Some(&source), &["rev-parse", "HEAD"])?;
+        writer.stop()?;
+        let view = log.load().await?;
+        peak_tail = peak_tail.max(view.tail().len());
+        assert!(view.tail().len() <= CADENCE + 2);
+        println!(
+            "{name}: pushes={completed}/{PUSHES}, batch_push_seconds={:.3}, observed_tail={}, maintenance starting",
+            batch_started.elapsed().as_secs_f64(),
+            view.tail().len()
+        );
+        let maintenance_started = Instant::now();
+        sustained_maintenance(&config, root.path(), completed)?;
+        cycles += 1;
+        assert!(log.load().await?.tail().is_empty());
+        sustained_cold_check(&config, root.path(), name, completed, &expected).await?;
+        println!(
+            "{name}: cycle={cycles}, pushes={completed}/{PUSHES}, maintenance_and_cold_check_seconds={:.3}, elapsed_seconds={:.3}",
+            maintenance_started.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+    assert_eq!(completed, PUSHES);
+    assert_eq!(cycles, PUSHES.div_ceil(CADENCE));
+    println!(
+        "{name}: sustained PASS: {completed} fast-forward commit pushes plus 1 seed push, {cycles} compact/checkpoint/collect cycles, {} operator invocations including migration, peak_tail={peak_tail}, default_tail_limit={}, elapsed_seconds={:.3}; counts are client invocations, not S3/network requests",
+        cycles * 3 + 1,
+        Options::default().max_tail_entries,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn sustained_maintenance(config: &Path, root: &Path, completed: usize) -> TestResult {
+    let receipt = root.join(format!("compact-{completed}.token"));
+    let compact = operator(
+        config,
+        &["compact-packs", "--recovery-file", text(&receipt)?],
+    )?;
+    assert!(
+        compact.status.success(),
+        "compaction after {completed} pushes: {}",
+        decode(&compact)?
+    );
+    assert_eq!(decode(&compact)?["outcome"], "compacted");
+    let checkpoint = operator(config, &["checkpoint", "--retain-packs"])?;
+    assert!(
+        checkpoint.status.success(),
+        "checkpoint after {completed} pushes: {}",
+        decode(&checkpoint)?
+    );
+    assert_eq!(decode(&checkpoint)?["outcome"], "checkpointed");
+    let collect = operator(config, &["collect"])?;
+    assert!(
+        collect.status.success(),
+        "collection after {completed} pushes: {}",
+        decode(&collect)?
+    );
+    assert_eq!(decode(&collect)?["outcome"], "collected");
+    Ok(())
+}
+
+async fn sustained_cold_check(
+    config: &Path,
+    root: &Path,
+    name: &str,
+    completed: usize,
+    expected: &[u8],
+) -> TestResult {
+    let (mut reader, url) = serve(config, root).await?;
+    let clone = root.join(format!("cold-{completed}"));
+    git(None, &["clone", "-q", &url, text(&clone)?])?;
+    assert_eq!(git(Some(&clone), &["rev-parse", "HEAD"])?, expected);
+    assert_eq!(
+        git(Some(&clone), &["symbolic-ref", "HEAD"])?,
+        b"refs/heads/main\n"
+    );
+    assert_eq!(
+        git(Some(&clone), &["rev-list", "--count", "HEAD"])?,
+        format!("{}\n", completed + 1).as_bytes()
+    );
+    assert_eq!(
+        fs::read_to_string(clone.join("file"))?,
+        format!("{name} commit {completed}\n")
+    );
+    git(Some(&clone), &["fsck", "--strict"])?;
+    let refs = git(None, &["ls-remote", "--refs", &url])?;
+    assert_eq!(
+        refs,
+        format!(
+            "{}\trefs/heads/main\n",
+            std::str::from_utf8(expected)?.trim()
+        )
+        .as_bytes()
+    );
+    reader.stop()?;
+    Ok(())
 }
