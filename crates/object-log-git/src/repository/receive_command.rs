@@ -98,10 +98,8 @@ impl Repository {
                     // Both publication and its one immediate resolution are admitted
                     // before the head can change. Same-process proofs avoid pack reads.
                     let options = self.log.options();
-                    let publication_memory = operation.reserve(
-                        options.max_head_bytes * super::HEAD_DECODE_FACTOR
-                            + options.max_commit_bytes * 4,
-                    )?;
+                    let publication_memory = operation
+                        .reserve(publication_bytes(options, super::HEAD_DECODE_FACTOR)?)?;
                     for _ in 0..2 {
                         operation.io(options.max_commit_bytes)?;
                         operation.io(options.max_head_bytes)?;
@@ -111,8 +109,7 @@ impl Repository {
                     // A pending commit can read the same plan during resolution.
                     drop(durable::publication_plan(&operation, &self.view)?);
                     let plan_memory = durable::publication_plan(&operation, &self.view)?;
-                    let token_memory = operation
-                        .reserve(options.max_commit_bytes * 4 + options.max_head_bytes * 4)?;
+                    let token_memory = operation.reserve(publication_bytes(options, 4)?)?;
                     let recovery_token = hold(prepared.recovery_token()?, token_memory);
                     drop(input_memory);
                     drop(command_memory);
@@ -222,10 +219,10 @@ impl Repository {
             }
             validate_branches(&self.operation, &graph, &request.updates)?;
         }
-        let memory = self.operation.reserve(
-            self.log.options().max_commit_bytes * 4
-                + self.log.options().max_head_bytes * super::VIEW_RETAIN_FACTOR,
-        )?;
+        let memory = self.operation.reserve(publication_bytes(
+            self.log.options(),
+            super::VIEW_RETAIN_FACTOR,
+        )?)?;
         let record =
             Machine::new(self.format).transaction(request.updates.to_vec(), descriptors)?;
         self.operation.work(record.len())?;
@@ -501,4 +498,10 @@ fn validate_namespace(
         }
     }
     Ok(())
+}
+
+fn publication_bytes(options: object_log::Options, head_factor: usize) -> Result<usize, Error> {
+    super::memory_bound(options.max_commit_bytes, 4)?
+        .checked_add(super::memory_bound(options.max_head_bytes, head_factor)?)
+        .ok_or_else(|| Error::InvalidPack("Git publication exceeds memory".into()))
 }
