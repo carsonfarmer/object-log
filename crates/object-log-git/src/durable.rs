@@ -563,14 +563,24 @@ impl<'a> Reader<'a> {
             ))
             .map_err(output_error)?;
         for (location, id, _) in entries {
-            let (entry, compressed) = self.stored_entry(location.pack, location.index).await?;
+            let stored = &self.catalog.packs[usize::from(location.pack)];
+            let range = stored.entry_range(location.index);
+            self.catalog
+                .operation
+                .work((range.end - range.start) as usize)?;
+            // A canonical u64 size takes at most ten bytes, followed by at
+            // most a SHA-256 base ID. Never gather the compressed entry.
+            let prefix = self
+                .read_range(location.pack, range.start..range.end.min(range.start + 42))
+                .await?;
+            let entry = parse_entry(&prefix, u64::from(range.start), format)?;
+            drop(prefix);
             let pack = &self.catalog.packs[usize::from(location.pack)];
             let base = pack
                 .base(&entry)?
                 .map(|index| ObjectId::from_bytes(format, pack.oid(index)))
                 .transpose()?;
             if base.is_some_and(|base| selected.binary_search(&base).is_err()) {
-                drop((entry, compressed));
                 let object = self
                     .find(id)
                     .await?
@@ -602,13 +612,42 @@ impl<'a> Reader<'a> {
             header
                 .write_to(entry.decompressed_size, &mut writer)
                 .map_err(output_error)?;
-            writer.write_all(&compressed).map_err(output_error)?;
+            self.copy_compressed_entry(location, &entry, &mut writer)
+                .await?;
         }
         let gix_hash::io::Write { hash, mut inner } = writer;
         let digest = hash.try_finalize().map_err(pack_error)?;
         inner.operation.work(hash_len)?;
         inner.bytes.extend_from_slice(digest.as_slice());
         Ok(hold(Bytes::from(inner.bytes), output_memory))
+    }
+
+    // Only write into private staging/output: CRC failure can follow writes.
+    async fn copy_compressed_entry(
+        &mut self,
+        location: Location,
+        entry: &PackEntry,
+        writer: &mut impl Write,
+    ) -> Result<(), Error> {
+        let pack = &self.catalog.packs[usize::from(location.pack)];
+        let range = pack.entry_range(location.index);
+        let mut crc = 0;
+        let mut skip = entry.header_size();
+        self.visit_range(location.pack, range, |bytes| {
+            crc = gix_features::hash::crc32_update(crc, bytes);
+            let header_bytes = skip.min(bytes.len());
+            skip -= header_bytes;
+            writer
+                .write_all(&bytes[header_bytes..])
+                .map_err(output_error)
+        })
+        .await?;
+        // The output is private until every entry validates. Failure drops
+        // it, so corrupt entries never become a successful fetch response.
+        if crc != pack.crc(location.index) {
+            return invalid("pack entry CRC does not match");
+        }
+        Ok(())
     }
 
     async fn entry(
@@ -647,23 +686,20 @@ impl<'a> Reader<'a> {
         if gix_features::hash::crc32(&bytes) != stored.crc(index) {
             return invalid("pack entry CRC does not match");
         }
-        let entry =
-            gix_pack::data::Entry::from_bytes(&bytes, offset, object_hash(stored.id.format()))
-                .map_err(pack_error)?;
-        if entry.header_size() != entry.header.size(entry.decompressed_size) {
-            return invalid("pack entry header is not canonical");
-        }
-        let size = usize::try_from(entry.decompressed_size)
-            .map_err(|_| Error::InvalidPack("pack entry size exceeds memory".into()))?;
-        if size > MAX_OBJECT_BYTES {
-            return invalid("pack entry exceeds object byte limit");
-        }
+        let entry = parse_entry(&bytes, offset, stored.id.format())?;
         let compressed = bytes.slice(entry.header_size()..);
         Ok((entry, compressed))
     }
 
     async fn read_range(&mut self, pack: u16, range: std::ops::Range<u32>) -> Result<Bytes, Error> {
-        let width = self.catalog.packs[usize::from(pack)].chunk_bytes;
+        let stored = &self.catalog.packs[usize::from(pack)];
+        if range.start > range.end || range.end > stored.bytes {
+            return invalid("pack range is invalid");
+        }
+        if range.is_empty() {
+            return Ok(Bytes::new());
+        }
+        let width = stored.chunk_bytes;
         let first = range.start as usize / width;
         let last = (range.end as usize - 1) / width;
         if first == last {
@@ -676,22 +712,36 @@ impl<'a> Reader<'a> {
         let length = (range.end - range.start) as usize;
         let memory = self.catalog.operation.reserve(length)?;
         let mut bytes = BytesMut::with_capacity(length);
-        for chunk_index in first..=last {
-            let chunk = self.chunk(pack, chunk_index).await?;
-            let start = if chunk_index == first {
-                range.start as usize % width
-            } else {
-                0
-            };
-            let end = if chunk_index == last {
-                let end = range.end as usize % width;
-                if end == 0 { chunk.len() } else { end }
-            } else {
-                chunk.len()
-            };
-            bytes.extend_from_slice(&chunk[start..end]);
-        }
+        self.visit_range(pack, range, |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })
+        .await?;
         Ok(hold(bytes.freeze(), memory))
+    }
+
+    // Each callback borrows one authenticated chunk slice. A consumer cannot
+    // retain cache-owned Bytes; this method never gathers the full range.
+    async fn visit_range(
+        &mut self,
+        pack: u16,
+        range: std::ops::Range<u32>,
+        mut visit: impl FnMut(&[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let stored = &self.catalog.packs[usize::from(pack)];
+        if range.start > range.end || range.end > stored.bytes {
+            return invalid("pack range is invalid");
+        }
+        let width = stored.chunk_bytes;
+        let mut position = range.start as usize;
+        while position < range.end as usize {
+            let chunk = self.chunk(pack, position / width).await?;
+            let start = position % width;
+            let count = (range.end as usize - position).min(chunk.len() - start);
+            visit(&chunk[start..start + count])?;
+            position += count;
+        }
+        Ok(())
     }
 
     async fn chunk(&mut self, pack: u16, index: usize) -> Result<Bytes, Error> {
@@ -737,6 +787,17 @@ impl<'a> Reader<'a> {
         self.cache.push_back(((pack, index), value.clone()));
         Ok(value)
     }
+}
+
+fn parse_entry(bytes: &[u8], offset: u64, format: ObjectFormat) -> Result<PackEntry, Error> {
+    let entry = PackEntry::from_bytes(bytes, offset, object_hash(format)).map_err(pack_error)?;
+    if entry.header_size() != entry.header.size(entry.decompressed_size) {
+        return invalid("pack entry header is not canonical");
+    }
+    if entry.decompressed_size > MAX_OBJECT_BYTES as u64 {
+        return invalid("pack entry exceeds object byte limit");
+    }
+    Ok(entry)
 }
 
 struct PackOutput<'a> {
@@ -1760,6 +1821,121 @@ mod tests {
                 verify_fetch_pack(&fallback, format, &[delta])?;
                 assert!(!inspect_pack(&fallback, format)?[0].0.is_delta());
             }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn range_fetch_reuses_large_entries_without_a_contiguous_copy() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+            let (log, view) = open(store.clone(), "range-fetch").await?;
+            let fixture = fixture(format, 1, false, true)?;
+            let id = fixture.objects[0].0;
+            let expected = fixture.normalized.bytes.clone();
+            let (descriptor, root) =
+                stage(&test_operation(), &log, &view, fixture.normalized).await?;
+            let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+            let mut reader = Reader::new(&log, &view, &catalog);
+            let range = catalog.packs[0].entry_range(0);
+            assert!(range.end - range.start > u32::try_from(CHUNK_BYTES)?);
+            // Warm the two authenticated chunks, then leave enough space for
+            // the output and selection but less than one compressed entry.
+            let mut length = 0;
+            reader
+                .visit_range(0, range.clone(), |bytes| {
+                    assert!(bytes.len() <= CHUNK_BYTES);
+                    length += bytes.len();
+                    Ok(())
+                })
+                .await?;
+            assert_eq!(length, (range.end - range.start) as usize);
+            let allowance = MAX_FETCH_PACK_BYTES + 1024;
+            let pressure = catalog
+                .operation
+                .reserve(LIVE_BYTES - catalog.operation.live_bytes() - allowance)?;
+            store.reset();
+            let output = reader.fetch_pack(&[id]).await?;
+            assert_eq!(&output[..], expected);
+            assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+            // With the fetch output alive, gathering the old contiguous range
+            // exceeds the same pool. Streaming reuse succeeded in that pool.
+            assert!(matches!(reader.read_range(0, range).await,
+                Err(Error::InvalidPack(message)) if message == "Git live-memory limit exceeded"));
+            verify_fetch_pack(&output, format, &[id])?;
+            drop(output);
+            drop(pressure);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn range_visits_boundaries_and_stop_on_consumer_failure() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "range-boundaries").await?;
+        let fixture = fixture(ObjectFormat::Sha1, 1, false, true)?;
+        let expected = fixture.normalized.bytes.clone();
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
+        let end = u32::try_from(expected.len())?;
+        let boundary = u32::try_from(CHUNK_BYTES)?;
+        let mut reader = Reader::new(&log, &view, &catalog);
+        for range in [
+            0..0,
+            end..end,
+            0..boundary,
+            boundary - 1..boundary + 1,
+            boundary..end,
+        ] {
+            let mut actual = Vec::new();
+            reader
+                .visit_range(0, range.clone(), |bytes| {
+                    actual.extend_from_slice(bytes);
+                    Ok(())
+                })
+                .await?;
+            assert_eq!(actual, expected[range.start as usize..range.end as usize]);
+        }
+        assert!(
+            reader
+                .visit_range(0, end..end + 1, |_| Ok(()))
+                .await
+                .is_err()
+        );
+        let reversed = std::ops::Range { start: 1, end: 0 };
+        assert!(reader.visit_range(0, reversed, |_| Ok(())).await.is_err());
+        drop(reader);
+        let mut reader = Reader::new(&log, &view, &catalog);
+        store.reset();
+        assert!(
+            reader
+                .visit_range(0, 0..end, |_| invalid("consumer stopped"))
+                .await
+                .is_err()
+        );
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn range_fetch_rejects_crc_mismatch_without_retaining_output() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+            let (log, view) = open(store, "range-crc").await?;
+            let fixture = fixture(format, 1, false, true)?;
+            let id = fixture.objects[0].0;
+            let mut normalized = fixture.normalized;
+            // One-object v2 index: header/fanout, ID, then CRC table.
+            normalized.index[8 + 1024 + format.digest_len()] ^= 1;
+            rehash_index(&mut normalized.index, format)?;
+            let (descriptor, root) = stage(&test_operation(), &log, &view, normalized).await?;
+            let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+            let baseline = catalog.operation.live_bytes();
+            let mut reader = Reader::new(&log, &view, &catalog);
+            assert!(matches!(reader.fetch_pack(&[id]).await,
+                Err(Error::InvalidPack(message)) if message == "pack entry CRC does not match"));
+            drop(reader);
+            assert_eq!(catalog.operation.live_bytes(), baseline);
         }
         Ok(())
     }
