@@ -1,6 +1,10 @@
 //! Two individually bounded pushes forming one connected closure over 32768.
-use super::{TestResult, configuration, decode, git, operator, serve, sustained_maintenance, text};
+use super::{
+    TestResult, configuration, decode, git, operator, serve_configured, sustained_maintenance, text,
+};
 use object_log::TransactionId;
+#[path = "../../../object-log-git/tests/support/upload.rs"]
+mod upload;
 use std::{
     fs,
     io::Write,
@@ -29,7 +33,7 @@ async fn operator_minio_growing_history_crosses_stored_pack_object_count() -> Te
         )?;
         let prefix = format!("growing-history-{}", TransactionId::new());
         let config = configuration(root.path(), &prefix, format)?;
-        let (mut writer, url) = serve(&config, root.path()).await?;
+        let (mut writer, url) = serve_configured(&config, root.path(), true).await?;
         for start in [0, 16_384] {
             append_history(&source, start, 16_384)?;
             git(Some(&source), &["push", "-q", &url, "main"])?;
@@ -46,10 +50,11 @@ async fn operator_minio_growing_history_crosses_stored_pack_object_count() -> Te
             .count();
         assert!(initial_count > 32_768);
         writer.stop()?;
-        let (mut reader, url) = serve(&config, root.path()).await?;
+        let (mut reader, url) = serve_configured(&config, root.path(), true).await?;
         let client = root.path().join("clone");
         git(None, &["clone", "-q", &url, text(&client)?])?;
         check(&client, &tip, 32_768, b"initial")?;
+        partial_parity(&source, root.path(), &url, format)?;
         fs::write(source.join("file"), b"incremental")?;
         git(Some(&source), &["commit", "-q", "-am", "incremental"])?;
         let updated = git(Some(&source), &["rev-parse", "HEAD"])?;
@@ -76,7 +81,7 @@ async fn operator_minio_growing_history_crosses_stored_pack_object_count() -> Te
         // This fixture's objects are tiny: count, rather than the preferred
         // byte bound, must split the compaction output into multiple packs.
         sustained_maintenance(&config, root.path(), 2)?;
-        let (mut cold, url) = serve(&config, root.path()).await?;
+        let (mut cold, url) = serve_configured(&config, root.path(), true).await?;
         let recovered = root.path().join("after-collection");
         git(None, &["clone", "-q", &url, text(&recovered)?])?;
         check(&recovered, &updated, 32_769, b"incremental")?;
@@ -126,6 +131,9 @@ fn append_history(repository: &Path, start: usize, count: usize) -> TestResult {
         }
         if sequence == 0 {
             bytes.extend_from_slice(b"M 100644 inline file\ndata 7\ninitial\n");
+            bytes.extend_from_slice(b"M 100644 inline large\ndata 65536\n");
+            bytes.extend_from_slice(&vec![b'u'; 65536]);
+            bytes.push(b'\n');
         }
         bytes.push(b'\n');
     }
@@ -147,4 +155,128 @@ fn append_history(repository: &Path, start: usize, count: usize) -> TestResult {
     }
     write_result?;
     Ok(())
+}
+
+fn partial_parity(source: &Path, root: &Path, url: &str, format: &str) -> TestResult {
+    let shallow = root.join("shallow");
+    git(None, &["clone", "-q", "--depth=1", url, text(&shallow)?])?;
+    assert_eq!(
+        git(Some(&shallow), &["rev-list", "--count", "HEAD"])?,
+        b"1\n"
+    );
+    git(Some(&shallow), &["fetch", "-q", "--deepen=32767", "origin"])?;
+    assert_eq!(
+        git(Some(&shallow), &["rev-list", "--count", "HEAD"])?,
+        b"32768\n"
+    );
+    git(Some(&shallow), &["fetch", "-q", "--unshallow", "origin"])?;
+    assert_eq!(
+        git(Some(&shallow), &["rev-parse", "--is-shallow-repository"])?,
+        b"false\n"
+    );
+    git(Some(&shallow), &["fsck", "--strict"])?;
+    let partial = root.join("partial");
+    git(
+        None,
+        &[
+            "clone",
+            "-q",
+            "--filter=blob:none",
+            "--no-checkout",
+            url,
+            text(&partial)?,
+        ],
+    )?;
+    assert_eq!(
+        git(Some(&partial), &["rev-list", "--count", "HEAD"])?,
+        b"32768\n"
+    );
+    assert_eq!(
+        git(Some(&partial), &["show", "HEAD:large"])?,
+        vec![b'u'; 65536]
+    );
+    git(Some(&partial), &["fsck", "--strict"])?;
+    upload::git(source, &["config", "uploadpack.allowFilter", "true"], &[])?;
+    let tip = upload::text(source, &["rev-parse", "HEAD"])?;
+    let old = upload::text(source, &["rev-parse", "HEAD~16383"])?;
+    let cases = [
+        vec![format!("want {tip}"), "deepen 32768".into()],
+        vec![
+            format!("want {tip}"),
+            format!("shallow {old}"),
+            format!("have {old}"),
+            "deepen 16384".into(),
+            "deepen-relative".into(),
+        ],
+        vec![format!("want {tip}"), "filter blob:none".into()],
+        vec![format!("want {tip}"), "filter blob:limit=65537".into()],
+        vec![
+            format!("want {tip}"),
+            "deepen 4".into(),
+            "filter blob:none".into(),
+        ],
+    ];
+    let mut uri_count = 0;
+    for mut args in cases {
+        args.push("done".into());
+        let input = upload::request(format, &args)?;
+        let expected = upload::reply(
+            source,
+            &upload::git(source, &["upload-pack", "--stateless-rpc", ".git"], &input)?,
+        )?;
+        let actual = http(root, &format!("{url}/git-upload-pack"), Some(&input))?;
+        assert_eq!(
+            upload::reply(source, &actual)?,
+            expected,
+            "{format}: {args:?}"
+        );
+        args.insert(0, "packfile-uris http".into());
+        let response = http(
+            root,
+            &format!("{url}/git-upload-pack"),
+            Some(&upload::request(format, &args)?),
+        )?;
+        let mut combined = upload::reply(source, &response)?;
+        for (_, uri) in upload::uri_locations(&response)? {
+            let suffix = uri.strip_prefix(url).ok_or("unexpected URI base")?;
+            let pack = http(root, &format!("{url}{suffix}"), None)?;
+            let reply = upload::reply(source, &upload::frame_pack(&pack))?;
+            assert_eq!(reply.ids.len(), 1);
+            for id in reply.ids {
+                assert!(combined.ids.insert(id));
+            }
+            uri_count += 1;
+        }
+        assert_eq!(combined, expected, "URI {format}: {args:?}");
+    }
+    assert!(uri_count > 0);
+    println!(
+        "partial history PASS {format}: depth1/deepen32767/unshallow and filtered lazy clone; exact installed-Git shallow/filter/URI object and boundary parity over32768 connected objects, {uri_count} authenticated URI downloads"
+    );
+    Ok(())
+}
+
+fn http(root: &Path, url: &str, input: Option<&[u8]>) -> TestResult<Vec<u8>> {
+    let mut command = Command::new("curl");
+    command.args(["--fail-with-body", "--silent", "--show-error"]);
+    if let Some(input) = input {
+        let path = root.join("upload-request");
+        fs::write(&path, input)?;
+        command.args([
+            "-H",
+            "Git-Protocol: version=2",
+            "-H",
+            "Content-Type: application/x-git-upload-pack-request",
+            "--data-binary",
+        ]);
+        command.arg(format!("@{}", path.display()));
+    }
+    let result = command.arg(url).output()?;
+    assert!(
+        result.status.success(),
+        "HTTP {url}: {} {}",
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout)
+    );
+    Ok(result.stdout)
 }

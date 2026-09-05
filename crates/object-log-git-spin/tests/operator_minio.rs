@@ -756,10 +756,19 @@ impl Drop for Host {
 }
 
 async fn serve(config: &Path, state: &Path) -> TestResult<(Host, String)> {
+    serve_configured(config, state, false).await
+}
+
+async fn serve_configured(config: &Path, state: &Path, uris: bool) -> TestResult<(Host, String)> {
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port();
     let address = format!("127.0.0.1:{port}");
+    let uri_base = if uris {
+        format!("http://{address}/repo")
+    } else {
+        String::new()
+    };
     let log = fs::File::create(state.join(format!("spin-{port}.log")))?;
     let mut host = Host(
         Some(
@@ -772,6 +781,8 @@ async fn serve(config: &Path, state: &Path) -> TestResult<(Host, String)> {
                     &address,
                     "--variable",
                     &format!("@{}", config.display()),
+                    "--variable",
+                    &format!("packfile_uri_base={uri_base}"),
                 ])
                 .arg("--state-dir")
                 .arg(state)

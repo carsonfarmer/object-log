@@ -6,20 +6,16 @@ use crate::{
     Error, ObjectId,
     durable::Reader,
     pack::{
-        MAX_OBJECTS,
         budget::{Operation, Reservation},
         invalid, pack_error,
     },
 };
 
 const MAX_GRAPH_BYTES: usize = 24 * 1024 * 1024;
-const OBJECTS: usize = MAX_OBJECTS as usize;
-// HashMap's backing table has at most two buckets per requested entry, plus
-// its trailing control group. Nodes and the work queue never grow.
-const FIXED_BYTES: usize = OBJECTS * (size_of::<Node>() + size_of::<u32>())
-    + 2 * OBJECTS * (size_of::<(ObjectId, u32)>() + 1)
-    + 16;
-const MAX_EDGES: usize = (MAX_GRAPH_BYTES - FIXED_BYTES) / size_of::<u32>();
+// Include nodes, queue, and a conservative bound for HashMap buckets/controls.
+fn table_bytes(capacity: usize) -> usize {
+    capacity * (size_of::<Node>() + size_of::<u32>() + 2 * (size_of::<(ObjectId, u32)>() + 1)) + 16
+}
 
 pub(crate) struct Graph {
     pub(crate) nodes: Vec<Node>,
@@ -27,7 +23,8 @@ pub(crate) struct Graph {
     locations: HashMap<ObjectId, u32>,
     queue: Vec<u32>,
     operation: Operation,
-    _memory: Reservation,
+    table_limit: usize,
+    table_memory: Reservation,
     edge_memory: Reservation,
 }
 
@@ -48,14 +45,14 @@ impl Graph {
         reader: &mut Reader<'_>,
         roots: &[ObjectId],
     ) -> Result<Self, Error> {
-        let memory = operation.reserve_state(FIXED_BYTES)?;
         let mut graph = Self {
-            nodes: Vec::with_capacity(OBJECTS),
+            nodes: Vec::new(),
             edges: Vec::new(),
-            locations: HashMap::with_capacity(OBJECTS),
-            queue: Vec::with_capacity(OBJECTS),
+            locations: HashMap::new(),
+            queue: Vec::new(),
             operation: operation.clone(),
-            _memory: memory,
+            table_limit: 0,
+            table_memory: operation.reserve_state(0)?,
             edge_memory: operation.reserve_state(0)?,
         };
         graph.extend(reader, roots).await?;
@@ -137,8 +134,8 @@ impl Graph {
             }
             index
         } else {
-            if self.nodes.len() == OBJECTS {
-                return invalid("graph exceeds object limit");
+            if self.nodes.len() == self.table_limit {
+                self.grow_table()?;
             }
             let index = u32::try_from(self.nodes.len()).map_err(pack_error)?;
             self.nodes.push(Node {
@@ -160,6 +157,58 @@ impl Graph {
         Ok(index)
     }
 
+    fn allocated_bytes(&self) -> usize {
+        (if self.table_limit == 0 {
+            0
+        } else {
+            table_bytes(self.table_limit)
+        }) + self.edges.capacity() * size_of::<u32>()
+    }
+
+    fn check_growth(&self, bytes: usize) -> Result<(), Error> {
+        // Both old and replacement allocations are live during growth.
+        if bytes > MAX_GRAPH_BYTES - self.allocated_bytes() {
+            return invalid("graph exceeds memory limit");
+        }
+        Ok(())
+    }
+
+    fn grow_table(&mut self) -> Result<(), Error> {
+        let capacity = self.table_limit.max(64) * 2;
+        let bytes = table_bytes(capacity);
+        self.check_growth(bytes)?;
+        let memory = self.operation.reserve_state(bytes)?;
+        self.operation.work(
+            self.nodes.len()
+                * (size_of::<Node>() + size_of::<u32>() + size_of::<(ObjectId, u32)>()),
+        )?;
+        let mut nodes = Vec::with_capacity(capacity);
+        let mut queue = Vec::with_capacity(capacity);
+        let mut locations = HashMap::with_capacity(capacity);
+        nodes.append(&mut self.nodes);
+        queue.append(&mut self.queue);
+        locations.extend(self.locations.drain());
+        self.nodes = nodes;
+        self.queue = queue;
+        self.locations = locations;
+        self.table_limit = capacity;
+        self.table_memory = memory;
+        Ok(())
+    }
+
+    fn grow_edges(&mut self) -> Result<(), Error> {
+        let capacity = self.edges.capacity().max(128) * 2;
+        let bytes = capacity * size_of::<u32>();
+        self.check_growth(bytes)?;
+        let memory = self.operation.reserve_state(bytes)?;
+        self.operation.work(self.edges.len() * size_of::<u32>())?;
+        let mut edges = Vec::with_capacity(capacity);
+        edges.append(&mut self.edges);
+        self.edges = edges;
+        self.edge_memory = memory;
+        Ok(())
+    }
+
     async fn link(
         &mut self,
         reader: &mut Reader<'_>,
@@ -167,15 +216,9 @@ impl Graph {
         kind: Kind,
         verify: bool,
     ) -> Result<(), Error> {
-        if self.edges.len() == MAX_EDGES {
-            return invalid("graph exceeds edge limit");
-        }
         let index = self.schedule(reader, id, Some(kind), verify).await?;
         if self.edges.len() == self.edges.capacity() {
-            let capacity = (self.edges.capacity().max(128) * 2).min(MAX_EDGES);
-            self.edge_memory
-                .grow((capacity - self.edges.capacity()) * size_of::<u32>())?;
-            self.edges.reserve_exact(capacity - self.edges.len());
+            self.grow_edges()?;
         }
         self.edges.push(index);
         Ok(())
@@ -579,7 +622,7 @@ mod tests {
         let root = (Kind::Tree, data);
         let root_id = id(format, &root)?;
         let repository = Repository::new(format, &[vec![root], vec![blob]]).await?;
-        let operation = Pool::new(FIXED_BYTES - 1).admit()?;
+        let operation = Pool::new(table_bytes(128) - 1).admit()?;
         let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
         assert!(
             Graph::load(&operation, &mut reader, &[root_id])
@@ -600,24 +643,78 @@ mod tests {
         assert_eq!(graph.edges.len(), 4096);
         assert_eq!(
             repository.operation.live_bytes() - before,
-            FIXED_BYTES + graph.edges.capacity() * size_of::<u32>()
+            graph.allocated_bytes()
         );
         drop(graph);
         assert_eq!(repository.operation.live_bytes(), before);
         Ok(())
     }
     #[tokio::test]
-    async fn object_limit_rejects_before_reads_and_work_stays_cumulative() -> TestResult {
+    async fn adaptive_graph_growth_charges_overlap_and_releases_failures() -> TestResult {
+        let blob = (Kind::Blob, b"leaf".to_vec());
+        let blob_id = id(ObjectFormat::Sha256, &blob)?;
+        let root = tree(&[("100644", "file", blob_id)]);
+        let root_id = id(ObjectFormat::Sha256, &root)?;
+        let repository = Repository::new(ObjectFormat::Sha256, &[vec![blob, root]]).await?;
+        let operation = Pool::new(LIVE_BYTES).admit()?;
+        let before = operation.live_bytes();
+        let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
+        let mut graph = Graph::load(&operation, &mut reader, &[root_id]).await?;
+        for table in [true, false] {
+            let allocated = graph.allocated_bytes();
+            let capacity = if table {
+                graph.table_limit
+            } else {
+                graph.edges.capacity()
+            };
+            let replacement = if table {
+                table_bytes(capacity * 2)
+            } else {
+                capacity * 2 * size_of::<u32>()
+            };
+            let pressure = operation
+                .reserve_state(crate::pack::budget::STATE_BYTES - allocated - replacement + 1)?;
+            let result = if table {
+                graph.grow_table()
+            } else {
+                graph.grow_edges()
+            };
+            assert!(result.is_err());
+            assert_eq!(graph.allocated_bytes(), allocated);
+            assert_eq!(graph.location(root_id), Some(0));
+            assert_eq!(graph.edges, [1]);
+            drop(pressure);
+            if table {
+                graph.grow_table()?;
+            } else {
+                graph.grow_edges()?;
+            }
+            assert!(graph.allocated_bytes() > allocated);
+        }
+        // The graph-specific bound also includes temporary replacements.
+        let allocated = graph.allocated_bytes();
+        assert!(graph.check_growth(MAX_GRAPH_BYTES - allocated + 1).is_err());
+        assert_eq!(graph.allocated_bytes(), allocated);
+        drop(graph);
+        assert_eq!(operation.live_bytes(), before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adaptive_graph_crosses_stored_pack_limit_and_work_stays_cumulative() -> TestResult {
         let format = ObjectFormat::Sha1;
         let mut groups = vec![Vec::new(), Vec::new()];
         let mut roots = Vec::new();
-        for index in 0..=MAX_OBJECTS {
+        for index in 0..=pack::MAX_OBJECTS {
             let object = (Kind::Blob, index.to_be_bytes().to_vec());
             roots.push(id(format, &object)?);
-            groups[index as usize / (OBJECTS / 2 + 1)].push(object);
+            groups[index as usize / (pack::MAX_OBJECTS as usize / 2 + 1)].push(object);
         }
         let repository = Repository::new(format, &groups).await?;
-        assert!(repository.graph(&roots).await.is_err());
+        let graph = repository.graph(&roots).await?;
+        assert_eq!(graph.nodes.len(), roots.len());
+        drop(graph);
+        repository.store.reset();
         assert_eq!(
             repository
                 .store
@@ -626,8 +723,11 @@ mod tests {
                 .requests,
             0
         );
-        assert!(repository.operation.work_bytes() > (OBJECTS * size_of::<Node>()) as u64);
-        // The failed attempt's work is retained; a retry never admits a fresh budget.
+        assert!(
+            repository.operation.work_bytes()
+                > (pack::MAX_OBJECTS as usize * size_of::<Node>()) as u64
+        );
+        // Completed work is retained; a retry never admits a fresh budget.
         let remaining = pack::budget::WORK_BYTES - repository.operation.work_bytes();
         repository.operation.work(remaining)?;
         assert!(repository.graph(&roots[..1]).await.is_err());
