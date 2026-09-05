@@ -709,6 +709,25 @@ impl Log {
         Ok(self.staged_object(view, object))
     }
 
+    /// Returns the exact encoded size of a node before its children are stored.
+    ///
+    /// Includes the payload, authenticated child references, and node envelope.
+    /// Child identities and kinds do not affect their encoded width; only their
+    /// byte lengths are needed. Performs no storage I/O or buffer allocation.
+    /// This checks encoding fit, not child existence, provenance, or publication
+    /// readiness. [`Self::put_node`] still validates the supplied child proofs.
+    ///
+    /// # Errors
+    /// Returns a limit error for too many children, size overflow, or an encoded
+    /// node exceeding this log's maximum object size.
+    pub fn node_size(
+        &self,
+        payload_bytes: usize,
+        child_lengths: impl IntoIterator<Item = u64>,
+    ) -> Result<usize, Error> {
+        format::node_size(payload_bytes, child_lengths, self.options).map(|size| size.encoded)
+    }
+
     /// Stores one immutable reference node after its direct children exist.
     ///
     /// The opaque payload can describe an adapter-specific tree node. All
@@ -2357,6 +2376,31 @@ mod tests {
             store.body_polls.load(std::sync::atomic::Ordering::Relaxed),
             0
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn node_size_preflights_without_io_and_matches_stored_nodes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("node-size")).await?;
+        let log = Log::open(&backend, &LogId::new("node")?, Options::default()).await?;
+        faults.reset();
+        let predicted = log.node_size(3, [24, 256])?;
+        assert!(matches!(
+            log.node_size(usize::MAX, []),
+            Err(Error::LimitExceeded("object bytes"))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        let view = log.load().await?;
+        let first = log.put_object(&view, Bytes::from(vec![1; 24])).await?;
+        let second = log.put_object(&view, Bytes::from(vec![2; 256])).await?;
+        let node = log
+            .put_node(&view, Bytes::from_static(b"abc"), vec![first, second])
+            .await?;
+        assert_eq!(node.reference().len(), u64::try_from(predicted)?);
         Ok(())
     }
 

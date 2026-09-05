@@ -666,29 +666,15 @@ pub(crate) fn encode_node(node: &Node, options: Options) -> Result<Bytes, Error>
     if node.children.len() > options.max_object_refs {
         return Err(Error::LimitExceeded("object references"));
     }
-    let payload_len =
-        u64::try_from(node.payload.len()).map_err(|_| Error::LimitExceeded("object bytes"))?;
-    let child_count = u64::try_from(node.children.len())
-        .map_err(|_| Error::LimitExceeded("object references"))?;
-    let children_len = node.children.iter().try_fold(0_usize, |sum, child| {
-        checked_node_len(sum, checked_node_len(57, cbor_head_len(child.len))?)
-    })?;
-    let inner_len = [
-        5,
-        cbor_head_len(payload_len),
+    let NodeSize {
+        encoded: outer_len,
+        inner,
+        children: child_count,
+    } = node_size(
         node.payload.len(),
-        cbor_head_len(child_count),
-        children_len,
-    ]
-    .into_iter()
-    .try_fold(0, checked_node_len)?;
-    let inner = u64::try_from(inner_len).map_err(|_| Error::LimitExceeded("object bytes"))?;
-    let outer_len = [37, cbor_head_len(inner), inner_len]
-        .into_iter()
-        .try_fold(0, checked_node_len)?;
-    if outer_len > options.max_object_bytes {
-        return Err(Error::LimitExceeded("object bytes"));
-    }
+        node.children.iter().map(ObjectRef::len),
+        options,
+    )?;
     let mut bytes = Vec::with_capacity(outer_len);
     {
         let mut encoder = minicbor::Encoder::new(&mut bytes);
@@ -722,6 +708,55 @@ pub(crate) fn encode_node(node: &Node, options: Options) -> Result<Bytes, Error>
         .map_err(|error| Error::InvalidFormat(format!("CBOR encoding failed: {error}")))?;
     debug_assert_eq!(bytes.len(), outer_len);
     Ok(Bytes::from(bytes))
+}
+
+/// Exact encoding geometry shared by preflight and the node encoder.
+pub(crate) struct NodeSize {
+    pub(crate) encoded: usize,
+    inner: u64,
+    children: u64,
+}
+
+pub(crate) fn node_size(
+    payload_bytes: usize,
+    child_lengths: impl IntoIterator<Item = u64>,
+    options: Options,
+) -> Result<NodeSize, Error> {
+    let mut count = 0_usize;
+    let mut children_len = 0_usize;
+    for length in child_lengths {
+        count = count
+            .checked_add(1)
+            .filter(|count| *count <= options.max_object_refs)
+            .ok_or(Error::LimitExceeded("object references"))?;
+        children_len =
+            checked_node_len(children_len, checked_node_len(57, cbor_head_len(length))?)?;
+    }
+    let payload_len =
+        u64::try_from(payload_bytes).map_err(|_| Error::LimitExceeded("object bytes"))?;
+    let child_count =
+        u64::try_from(count).map_err(|_| Error::LimitExceeded("object references"))?;
+    let inner_len = [
+        5,
+        cbor_head_len(payload_len),
+        payload_bytes,
+        cbor_head_len(child_count),
+        children_len,
+    ]
+    .into_iter()
+    .try_fold(0, checked_node_len)?;
+    let inner = u64::try_from(inner_len).map_err(|_| Error::LimitExceeded("object bytes"))?;
+    let encoded = [37, cbor_head_len(inner), inner_len]
+        .into_iter()
+        .try_fold(0, checked_node_len)?;
+    if encoded > options.max_object_bytes {
+        return Err(Error::LimitExceeded("object bytes"));
+    }
+    Ok(NodeSize {
+        encoded,
+        inner,
+        children: child_count,
+    })
 }
 
 fn checked_node_len(left: usize, right: usize) -> Result<usize, Error> {
@@ -1701,9 +1736,110 @@ mod tests {
                     .unwrap_or_else(|error| panic!("encode failed: {error}"));
                 let derived =
                     derived_node(&node).unwrap_or_else(|error| panic!("derive failed: {error}"));
+                let predicted = super::node_size(
+                    node.payload.len(),
+                    node.children.iter().map(ObjectRef::len),
+                    options,
+                )
+                .unwrap_or_else(|error| panic!("preflight failed: {error}"));
+                assert_eq!(predicted.encoded, encoded.len());
                 assert_eq!(encoded, derived);
             }
         }
+    }
+
+    #[test]
+    fn node_preflight_matches_large_child_lengths_and_envelope_boundaries() {
+        for length in [u64::from(u32::MAX), u64::from(u32::MAX) + 1, u64::MAX] {
+            let node = node(
+                Bytes::new(),
+                [ObjectKind::Blob, ObjectKind::Node, ObjectKind::Checkpoint]
+                    .into_iter()
+                    .map(|kind| object_ref(kind, length))
+                    .collect(),
+            );
+            let predicted = super::node_size(
+                0,
+                node.children.iter().map(ObjectRef::len),
+                Options::default(),
+            )
+            .unwrap_or_else(|error| panic!("preflight failed: {error}"));
+            let encoded =
+                encode_node(&node).unwrap_or_else(|error| panic!("encode failed: {error}"));
+            assert_eq!(predicted.encoded, encoded.len());
+            assert_eq!(
+                encoded,
+                derived_node(&node).unwrap_or_else(|error| panic!("derive: {error}"))
+            );
+        }
+        for payload_bytes in (0..=260).chain(65_525..=65_540) {
+            let node = node(Bytes::from(vec![0; payload_bytes]), Vec::new());
+            let predicted = super::node_size(payload_bytes, [], Options::default())
+                .unwrap_or_else(|error| panic!("preflight failed: {error}"));
+            let encoded =
+                encode_node(&node).unwrap_or_else(|error| panic!("encode failed: {error}"));
+            assert_eq!(predicted.encoded, encoded.len());
+            assert_eq!(
+                encoded,
+                derived_node(&node).unwrap_or_else(|error| panic!("derive: {error}"))
+            );
+        }
+    }
+
+    #[test]
+    fn node_preflight_checks_size_overflow_and_stops_at_the_reference_limit() {
+        assert!(matches!(
+            super::node_size(
+                usize::MAX,
+                [],
+                Options {
+                    max_object_bytes: usize::MAX,
+                    ..Options::default()
+                }
+            ),
+            Err(Error::LimitExceeded("object bytes"))
+        ));
+        let consumed = std::cell::Cell::new(0);
+        let lengths = std::iter::from_fn(|| {
+            consumed.set(consumed.get() + 1);
+            Some(0)
+        });
+        assert!(matches!(
+            super::node_size(
+                0,
+                lengths,
+                Options {
+                    max_object_refs: 2,
+                    ..Options::default()
+                }
+            ),
+            Err(Error::LimitExceeded("object references"))
+        ));
+        assert_eq!(consumed.get(), 3);
+        let exact = super::node_size(23, [0, u64::MAX], Options::default())
+            .unwrap_or_else(|error| panic!("preflight failed: {error}"));
+        let options = Options {
+            max_object_refs: 2,
+            max_object_bytes: exact.encoded,
+            ..Options::default()
+        };
+        assert_eq!(
+            super::node_size(23, [0, u64::MAX], options)
+                .unwrap_or_else(|error| panic!("exact limit failed: {error}"))
+                .encoded,
+            exact.encoded
+        );
+        assert!(matches!(
+            super::node_size(
+                23,
+                [0, u64::MAX],
+                Options {
+                    max_object_bytes: exact.encoded - 1,
+                    ..options
+                }
+            ),
+            Err(Error::LimitExceeded("object bytes"))
+        ));
     }
 
     #[test]
