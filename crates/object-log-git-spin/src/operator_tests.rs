@@ -894,7 +894,7 @@ async fn default_branch_concurrent_head_change_reports_conflict_without_receipt(
 }
 
 #[test]
-fn collection_requires_resume_only_and_rejects_planning_flags() -> TestResult {
+fn collection_accepts_default_planning_and_rejects_force_flags() -> TestResult {
     assert!(matches!(
         parse(arguments(
             Path::new("unused"),
@@ -903,8 +903,11 @@ fn collection_requires_resume_only_and_rejects_planning_flags() -> TestResult {
         .action,
         Action::CollectResume
     ));
+    assert!(matches!(
+        parse(arguments(Path::new("unused"), &["collect"]))?.action,
+        Action::Collect
+    ));
     for args in [
-        vec!["collect"],
         vec!["collect", "--start"],
         vec!["collect", "--resume-only", "--force"],
     ] {
@@ -1472,5 +1475,261 @@ async fn pack_compaction_conflict_and_cancel_preserve_uncertainty() -> TestResul
         assert!(!pause.release());
         assert_eq!(std::fs::metadata(path)?.len(), 0);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_collection_keeps_live_tail_and_reports_only_finish_attempts() -> TestResult {
+    let (log, faults, _) = fixture("fresh-live", Options::default()).await?;
+    let view = log.load().await?;
+    let live = log.put_object(&view, Bytes::from_static(b"live")).await?;
+    let reference = live.reference().clone();
+    let commit = log.prepare(
+        &view,
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![live],
+    )?;
+    assert!(matches!(
+        log.commit(commit).await?,
+        CommitStatus::Committed(_)
+    ));
+    let view = log.load().await?;
+    let orphan = log.put_object(&view, Bytes::from_static(b"orphan")).await?;
+    faults.reset();
+    let report = execute(&log, &Action::Collect).await;
+    assert_eq!(json(&report)?["outcome"], "collected");
+    assert_eq!(report.exit(), 0);
+    assert_eq!(json(&report)?["collection"]["candidate_count"], 1);
+    assert_eq!(json(&report)?["collection"]["delete_attempts"], 1);
+    assert_eq!(faults.metrics().operation(Operation::List).requests, 1);
+    let current = log.load().await?;
+    assert_eq!(current.tail().len(), 1);
+    assert_eq!(log.read_object(&current, &reference).await?, b"live"[..]);
+    assert!(log.read_object(&current, orphan.reference()).await.is_err());
+    let report = execute(&log, &Action::Collect).await;
+    assert_eq!(json(&report)?["outcome"], "no_candidates");
+    assert_eq!(json(&report)?["collection"]["delete_attempts"], 0);
+    assert!(report.generation.is_none());
+    assert!(log.refresh(&current).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_collection_retention_blocks_planning_and_racing_install() -> TestResult {
+    let (log, faults, _) = fixture("fresh-retained", Options::default()).await?;
+    let initial = log.load().await?;
+    let orphan = log
+        .put_object(&initial, Bytes::from_static(b"retained orphan"))
+        .await?;
+    let id = object_log::RetentionId::new();
+    assert!(matches!(
+        log.retain(&initial, id).await?,
+        object_log::RetentionStatus::Applied(_)
+    ));
+    let retained = log.load().await?;
+    faults.reset();
+    let report = execute(&log, &Action::Collect).await;
+    assert_eq!(json(&report)?["outcome"], "retained");
+    assert_eq!(report.exit(), 3);
+    for op in [Operation::Put, Operation::List, Operation::Delete] {
+        assert_eq!(faults.metrics().operation(op).requests, 0);
+    }
+    assert!(log.refresh(&retained).await?.is_none());
+    assert!(matches!(
+        log.release_retention(&retained, id).await?,
+        object_log::RetentionStatus::Applied(_)
+    ));
+    let view = log.load().await?;
+    faults.reset();
+    let mut pause = faults.pause_put_at(2, FailurePhase::Before);
+    let work = execute(&log, &Action::Collect);
+    tokio::pin!(work);
+    assert!(
+        tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+    );
+    log.retain(&view, object_log::RetentionId::new()).await?;
+    let winner = log.load().await?;
+    assert!(pause.release());
+    let report = work.await;
+    assert_eq!(json(&report)?["outcome"], "conflict");
+    assert_eq!(report.exit(), 3);
+    assert_eq!(faults.metrics().operation(Operation::List).requests, 1);
+    assert!(log.refresh(&winner).await?.is_none());
+    assert_eq!(
+        log.read_object(&winner, orphan.reference()).await?,
+        b"retained orphan"[..]
+    );
+    assert_eq!(
+        json(&execute(&log, &Action::Collect).await)?["outcome"],
+        "retained"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_collection_never_rebases_over_a_concurrent_live_publication() -> TestResult {
+    let (log, faults, _) = fixture("fresh-race", Options::default()).await?;
+    let view = log.load().await?;
+    let staged = log
+        .put_object(&view, Bytes::from_static(b"now live"))
+        .await?;
+    let reference = staged.reference().clone();
+    let prepared = log.prepare(
+        &view,
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![staged],
+    )?;
+    faults.reset();
+    let mut pause = faults.pause_put_at(2, FailurePhase::Before);
+    let work = execute(&log, &Action::Collect);
+    tokio::pin!(work);
+    assert!(
+        tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+    );
+    assert!(matches!(
+        log.commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
+    let winner = log.load().await?;
+    assert!(pause.release());
+    let report = work.await;
+    assert_eq!(json(&report)?["outcome"], "conflict");
+    assert_eq!(report.exit(), 3);
+    assert_eq!(faults.metrics().operation(Operation::List).requests, 1);
+    assert!(log.refresh(&winner).await?.is_none());
+    assert!(winner.collection_plan_bytes().is_none());
+    assert_eq!(log.read_object(&winner, &reference).await?, b"now live"[..]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_collection_uncertain_install_stops_before_delete_and_recovers_cold() -> TestResult {
+    for phase in [FailurePhase::Before, FailurePhase::After] {
+        let (log, faults, backend) = fixture("fresh-pending", Options::default()).await?;
+        let view = log.load().await?;
+        let orphan = log
+            .put_object(&view, Bytes::from_static(b"pending orphan"))
+            .await?;
+        faults.reset();
+        faults.schedule(object_log::sim::Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase,
+        });
+        let report = execute(&log, &Action::Collect).await;
+        assert_eq!(json(&report)?["outcome"], "pending");
+        assert_eq!(report.exit(), 4);
+        assert!(report.generation.is_none());
+        assert!(report.collection.is_none());
+        assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::List).requests, 1);
+        drop(log);
+        let log =
+            Log::open_existing(&backend, &LogId::new("fresh-pending")?, Options::default()).await?;
+        let current = log.load().await?;
+        assert_eq!(
+            log.read_object(&current, orphan.reference()).await?,
+            b"pending orphan"[..]
+        );
+        let active = current.collection_plan_bytes().is_some();
+        faults.reset();
+        assert_eq!(
+            json(&execute(&log, &Action::Collect).await)?["outcome"],
+            "collected"
+        );
+        assert_eq!(
+            faults.metrics().operation(Operation::List).requests,
+            u64::from(!active)
+        );
+        assert!(log.load().await?.collection_plan_bytes().is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_collection_cancelled_install_is_pending_without_deletion() -> TestResult {
+    let (log, faults, backend) = fixture("fresh-cancel", Options::default()).await?;
+    let view = log.load().await?;
+    log.put_object(&view, Bytes::from_static(b"cancelled orphan"))
+        .await?;
+    faults.reset();
+    let mut pause = faults.pause_put_at(2, FailurePhase::After);
+    let work = bounded(
+        "collect",
+        Duration::from_millis(100),
+        execute(&log, &Action::Collect),
+    );
+    tokio::pin!(work);
+    assert!(
+        tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+    );
+    let report = work.await;
+    assert_eq!(json(&report)?["outcome"], "pending");
+    assert!(report.collection.is_none());
+    assert!(!pause.release());
+    assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+    let cold =
+        Log::open_existing(&backend, &LogId::new("fresh-cancel")?, Options::default()).await?;
+    assert!(cold.load().await?.collection_plan_bytes().is_some());
+    faults.reset();
+    assert_eq!(
+        json(&execute(&cold, &Action::Collect).await)?["outcome"],
+        "collected"
+    );
+    assert_eq!(faults.metrics().operation(Operation::List).requests, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_collection_corrupt_live_graph_never_installs_or_deletes() -> TestResult {
+    use futures::TryStreamExt as _;
+    use object_store::{ObjectStore as _, ObjectStoreExt as _};
+    let (log, faults, _) = fixture("fresh-corrupt", Options::default()).await?;
+    let view = log.load().await?;
+    let live = log
+        .put_object(&view, Bytes::from_static(b"live data"))
+        .await?;
+    let path = faults
+        .list(None)
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .find(|entry| entry.location.as_ref().contains("/blobs/"))
+        .ok_or("missing live blob")?
+        .location;
+    let prepared = log.prepare(
+        &view,
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![live],
+    )?;
+    assert!(matches!(
+        log.commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
+    let current = log.load().await?;
+    let orphan = log
+        .put_object(&current, Bytes::from_static(b"orphan"))
+        .await?;
+    faults
+        .put(&path, Bytes::from_static(b"bad bytes").into())
+        .await?;
+    faults.reset();
+    let report = execute(&log, &Action::Collect).await;
+    assert_eq!(report.exit(), 5);
+    assert_eq!(json(&report)?["outcome"], "invalid_evidence");
+    for op in [Operation::Put, Operation::List, Operation::Delete] {
+        assert_eq!(faults.metrics().operation(op).requests, 0);
+    }
+    assert!(log.refresh(&current).await?.is_none());
+    assert_eq!(
+        log.read_object(&current, orphan.reference()).await?,
+        b"orphan"[..]
+    );
     Ok(())
 }

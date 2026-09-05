@@ -22,7 +22,7 @@ const CONFIG_BYTES: usize = 16 * 1024;
 const TOKEN_BYTES: usize = 1024 * 1024;
 const OUTPUT_BYTES: usize = 2048;
 const DEADLINE: Duration = Duration::from_mins(1);
-const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | collect --resume-only | migrate-catalog --recovery-file FILE | compact-packs --recovery-file FILE | set-default-branch --expected REF --target REF --recovery-file FILE";
+const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | collect [--resume-only] | migrate-catalog --recovery-file FILE | compact-packs --recovery-file FILE | set-default-branch --expected REF --target REF --recovery-file FILE";
 
 #[derive(Clone, Copy, Debug)]
 struct Failure(&'static str, u8);
@@ -320,6 +320,7 @@ enum Action {
     Resume(Vec<u8>),
     Checkpoint,
     CollectResume,
+    Collect,
     MigrateCatalog(Receipt),
     CompactPacks(Receipt),
     SetDefault {
@@ -334,7 +335,7 @@ impl Action {
             Self::Status => "status",
             Self::Resume(_) => "resume-commit",
             Self::Checkpoint => "checkpoint",
-            Self::CollectResume => "collect",
+            Self::CollectResume | Self::Collect => "collect",
             Self::MigrateCatalog(_) => "migrate-catalog",
             Self::CompactPacks(_) => "compact-packs",
             Self::SetDefault { .. } => "set-default-branch",
@@ -372,8 +373,7 @@ fn command() -> Command {
             Command::new("collect").arg(
                 Arg::new("resume-only")
                     .long("resume-only")
-                    .action(clap::ArgAction::SetTrue)
-                    .required(true),
+                    .action(clap::ArgAction::SetTrue),
             ),
         )
         .subcommand(
@@ -430,7 +430,13 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
     let action = match parsed.subcommand() {
         Some(("status", _)) => Action::Status,
         Some(("checkpoint", _)) => Action::Checkpoint,
-        Some(("collect", _)) => Action::CollectResume,
+        Some(("collect", command)) => {
+            if command.get_flag("resume-only") {
+                Action::CollectResume
+            } else {
+                Action::Collect
+            }
+        }
         Some(("compact-packs", command)) => Action::CompactPacks(Receipt::reserve(
             command
                 .get_one::<PathBuf>("recovery-file")
@@ -484,13 +490,34 @@ fn classify(error: &object_log::Error) -> Failure {
     }
 }
 
-async fn collect_resume(log: &Log) -> Report {
-    let view = match log.load().await {
+async fn collect(log: &Log, resume_only: bool) -> Report {
+    let mut view = match log.load().await {
         Ok(view) => view,
         Err(error) => return Report::failed("collect", classify(&error)),
     };
     if view.collection_plan_bytes().is_none() {
-        return Report::new("collect", "no_active_plan", 0).observed(&view);
+        if resume_only {
+            return Report::new("collect", "no_active_plan", 0).observed(&view);
+        }
+        view = match log.start_collection(&view).await {
+            Ok(
+                object_log::CollectionStart::Installed(view, _)
+                | object_log::CollectionStart::Active(view),
+            ) => view,
+            Ok(object_log::CollectionStart::Empty(counters)) => {
+                return Report::new("collect", "no_candidates", 0).collection(counters);
+            }
+            Ok(object_log::CollectionStart::Retained(view)) => {
+                return Report::new("collect", "retained", 3).observed(&view);
+            }
+            Ok(object_log::CollectionStart::Conflict(view)) => {
+                return Report::new("collect", "conflict", 3).observed(&view);
+            }
+            Ok(object_log::CollectionStart::Pending) | Err(object_log::Error::Store(_)) => {
+                return Report::new("collect", "pending", 4);
+            }
+            Err(error) => return Report::failed("collect", classify(&error)),
+        };
     }
     match log.resume_collection(&view).await {
         Ok(object_log::CollectionFinish::Complete(view, counters)) => {
@@ -542,7 +569,8 @@ fn commit_report(
 
 async fn execute(log: &Log, action: &Action, format: ObjectFormat) -> Report {
     match action {
-        Action::CollectResume => collect_resume(log).await,
+        Action::CollectResume => collect(log, true).await,
+        Action::Collect => collect(log, false).await,
         Action::CompactPacks(receipt) => commit_report(
             action.name(),
             "compacted",
