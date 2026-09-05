@@ -32,4 +32,5 @@ Strict all-target/all-feature core Clippy, locked default-feature core WASIp2
 checking, and formatting passed. Raw logs are in the adjacent directory. No
 provider, HTTP-attempt, Git integration, or runtime-memory qualification is
 claimed. Git wiring and removal of overlapping manual precharges are a separate
-tranche; checkpoint_write_bound remains available until guarded parity passes.
+tranche; the temporary checkpoint write-bound API has since been removed after guarded
+parity passed.

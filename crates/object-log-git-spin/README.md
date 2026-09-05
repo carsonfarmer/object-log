@@ -103,7 +103,7 @@ opens the log, so measurements must include that fixed provider work.
 
 The one-shot operator command below supports head status, exact commit-token
 resumption, explicit default-branch updates, metadata checkpoints that retain
-every pack, catalog migration, and resumption of installed collection plans. Fresh plan creation
+every pack, catalog migration, pack compaction, and resumption of installed collection plans. Fresh plan creation
 and retention management still require shared-library calls while Spin is
 stopped. Issue #32 remains open for those commands and sustained-service
 qualification.
@@ -120,6 +120,7 @@ target/release/object-log-git-maintain --config /deployment/repository.toml resu
 target/release/object-log-git-maintain --config /deployment/repository.toml checkpoint --retain-packs
 target/release/object-log-git-maintain --config /deployment/repository.toml collect --resume-only
 target/release/object-log-git-maintain --config /deployment/repository.toml migrate-catalog --recovery-file /private/catalog.token
+target/release/object-log-git-maintain --config /deployment/repository.toml compact-packs --recovery-file /private/compaction.token
 target/release/object-log-git-maintain --config /deployment/repository.toml set-default-branch --expected refs/heads/main --target refs/heads/trunk --recovery-file /private/default-branch.token
 ```
 
@@ -224,8 +225,22 @@ migrated and no new transaction was published. Neither outcome deletes objects.
 Conflicts are returned without rebasing. Oversized or invalid histories are
 rejected through the existing shared maintenance limits.
 
-Both `set-default-branch` and `migrate-catalog` require a new `--recovery-file`
-path on every invocation, including an already-migrated repository. The command
+`compact-packs` requires a migrated catalog and a stopped, drained service. It
+repackages reachable Git objects into bounded replacement packs and publishes
+one new catalog root, preserving every ref OID and symbolic HEAD. `compacted`
+confirms that publication; pending and conflict use the same receipt behavior
+as migration. Repeated commands are new attempts, not exact-attempt recovery.
+Resolve known pending receipts before starting another maintenance operation.
+
+Compaction does not checkpoint or delete objects. After confirmed compaction,
+run `checkpoint --retain-packs` to advance retained WAL history, then use the
+existing library to install a collection plan and `collect --resume-only` to
+finish it. Old packs remain protected until history advances. An oversized
+live set fails under the shared maintenance limits without partial root
+publication; newly staged immutable objects may remain for later collection.
+
+`set-default-branch`, `migrate-catalog` and `compact-packs` require a new
+`--recovery-file` path on every invocation, including an already-migrated repository. The command
 reserves and syncs an empty mode-0600 file before provider access, and never overwrites an existing
 path. Reservation happens before configuration validation, so even an invalid
 configuration can leave an empty file. Confirmed updates, already-tree results
@@ -249,7 +264,7 @@ outcome together with the exit status:
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, `migrated`, `already_tree`, `collected`, `no_active_plan`, or requested help. `not_committed` means resolution completed, not a successful push. |
+| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, `compacted`, `migrated`, `already_tree`, `collected`, `no_active_plan`, or requested help. `not_committed` means resolution completed, not a successful push. |
 | 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unavailable recovery output, unsupported platform or incompatible durable options. |
 | 3 | `conflict`, `stale_default`, or shared-engine `busy`; inspect the fresh state before another update. |
 | 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |

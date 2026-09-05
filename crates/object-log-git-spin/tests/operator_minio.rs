@@ -4,7 +4,7 @@
 use bytes::Bytes;
 use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
 use object_log_git::{ObjectFormat, Repository};
-use object_store::{aws::AmazonS3Builder, path::Path as StorePath};
+use object_store::{ObjectStoreExt as _, aws::AmazonS3Builder, path::Path as StorePath};
 use serde_json::Value;
 use std::{
     env,
@@ -78,7 +78,8 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         .with_virtual_hosted_style_request(false)
         .build()?;
     let faults = object_log::sim::FaultStore::new(store);
-    let backend = ValidatedBackend::new(Arc::new(faults.clone()), StorePath::from(prefix)).await?;
+    let backend =
+        ValidatedBackend::new(Arc::new(faults.clone()), StorePath::from(prefix.clone())).await?;
     let id = LogId::new("repository")?;
     assert!(
         !operator(&config_path, &["collect", "--resume-only"])?
@@ -92,6 +93,18 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
                 "migrate-catalog",
                 "--recovery-file",
                 text(&root.path().join("missing-migration.receipt"))?
+            ]
+        )?
+        .status
+        .success()
+    );
+    assert!(
+        !operator(
+            &config_path,
+            &[
+                "compact-packs",
+                "--recovery-file",
+                text(&root.path().join("missing-compaction.receipt"))?
             ]
         )?
         .status
@@ -298,6 +311,15 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         reader.stop()?;
     }
     default_branch_lifecycle(&config_path, root.path(), &source, &log, &new).await?;
+    let sentinel = StorePath::from(format!("unrelated-{}/blobs/sentinel", TransactionId::new()));
+    faults
+        .put(
+            &sentinel,
+            Bytes::from_static(b"unrelated repository").into(),
+        )
+        .await?;
+    let old_blobs = blob_paths(&faults, &prefix).await?;
+    assert!(!old_blobs.is_empty());
     let migrated_tip = migration_lifecycle(&config_path, root.path(), &source, &log, &new).await?;
     collection_lifecycle(
         &config_path,
@@ -308,10 +330,33 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         &migrated_tip,
     )
     .await?;
+    let remaining = blob_paths(&faults, &prefix).await?;
+    assert!(old_blobs.is_disjoint(&remaining));
+    assert_eq!(
+        faults.get(&sentinel).await?.bytes().await?,
+        Bytes::from_static(b"unrelated repository")
+    );
     println!(
-        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master, unborn default, catalog migration, tree push/fetch/checkpoint, interrupted collection and cold push passed"
+        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master, unborn default, catalog migration, tree push/fetch, compaction/checkpoint, old-pack reclamation, interrupted collection and cold push passed"
     );
     Ok(())
+}
+
+async fn blob_paths(
+    store: &object_log::sim::FaultStore,
+    prefix: &str,
+) -> TestResult<std::collections::BTreeSet<StorePath>> {
+    use futures::TryStreamExt as _;
+    use object_store::ObjectStore as _;
+    let scope = StorePath::from(prefix);
+    Ok(store
+        .list(Some(&scope))
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .filter(|entry| entry.location.as_ref().contains("/blobs/"))
+        .map(|entry| entry.location)
+        .collect())
 }
 
 async fn migration_lifecycle(
@@ -365,7 +410,28 @@ async fn migration_lifecycle(
     git(Some(&clone), &["fetch", "-q"])?;
     assert_eq!(git(Some(&clone), &["rev-parse", "origin/master"])?, next);
     git(Some(&clone), &["fsck", "--strict"])?;
+    let refs = git(None, &["ls-remote", &url])?;
     host.stop()?;
+    let receipt = root.join("compaction.receipt");
+    let report = operator(
+        config,
+        &["compact-packs", "--recovery-file", text(&receipt)?],
+    )?;
+    assert!(report.status.success());
+    assert_eq!(decode(&report)?["outcome"], "compacted");
+    assert_eq!(fs::metadata(receipt)?.len(), 0);
+    let (mut cold, url) = serve(config, root).await?;
+    assert_eq!(git(None, &["ls-remote", &url])?, refs);
+    let compacted = root.join("clone-compacted");
+    git(None, &["clone", "-q", &url, text(&compacted)?])?;
+    assert_eq!(git(Some(&compacted), &["rev-parse", "HEAD"])?, next);
+    assert_eq!(
+        git(Some(&compacted), &["symbolic-ref", "HEAD"])?,
+        b"refs/heads/master\n"
+    );
+    git(Some(&compacted), &["fsck", "--strict"])?;
+    assert_eq!(fs::read_to_string(compacted.join("file"))?, "three");
+    cold.stop()?;
     let report = operator(config, &["checkpoint", "--retain-packs"])?;
     assert!(report.status.success());
     assert_eq!(decode(&report)?["outcome"], "checkpointed");

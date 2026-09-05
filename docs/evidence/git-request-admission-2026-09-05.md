@@ -26,8 +26,9 @@ bounds. It does not measure hidden HTTP retries, network headers, listing pages,
 or provider batching. Work and memory reservations remain independently bounded.
 Manual I/O precharges are removed from serving open/materialization, pack staging,
 plan/catalog/chunk reads, receive publication and metadata checkpointing. CPU
-work and allocation reservations remain. checkpoint_write_bound remains for the
-existing conservative work estimate pending its separately reviewed replacement.
+work and allocation reservations remain. Checkpoint work uses a checked bound
+for encoding and hashing once; physical identity retries reuse those bytes and
+remain subject to actual request admission.
 
 An over-budget history now reads admitted records and stops immediately before
 the first forbidden request. Previously it could reject a synthetic full-tail
