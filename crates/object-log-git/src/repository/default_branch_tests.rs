@@ -149,3 +149,67 @@ async fn deepen_not_head_uses_persisted_default_with_partial_fetch() -> TestResu
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn guarded_default_branch_matches_requests_and_keeps_pending_policy() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        for phase in [None, Some(FailurePhase::Before), Some(FailurePhase::After)] {
+            let (log, faults, _) = test_log("guarded-default-parity").await?;
+            // One open GET and exactly two publication PUTs. Later recovery
+            // must still obey this caller's exhausted policy.
+            let caller = CallerGuard::new(3);
+            let repository = common_open(&log.with_request_guard(caller.clone()), format).await?;
+            let operation = repository.operation.clone();
+            let continuation = repository.log.clone();
+            let before = operation.calls();
+            faults.reset();
+            if let Some(phase) = phase {
+                faults.schedule(Failure {operation: Operation::Put, occurrence: 2, phase});
+            }
+            let status = repository.set_default_branch(TransactionId::new(), b"refs/heads/main", b"refs/heads/trunk").await?;
+            assert_eq!(operation.calls() - before, 2);
+            assert_eq!(operation.calls() - before, usize::try_from(faults.metrics().total_requests())?);
+            assert_eq!(caller.calls(), operation.calls());
+            assert_eq!(operation.live_bytes(), 0);
+            match (phase, status) {
+                (None, CommitStatus::Committed(_)) => {}
+                (Some(_), CommitStatus::Pending(pending)) => {
+                    let token = pending.recovery_token()?;
+                    faults.reset();
+                    let object_log::Resolution::StillPending(pending) = continuation.resolve(pending).await? else {
+                        return Err("caller denial discarded pending setter evidence".into());
+                    };
+                    assert_eq!(pending.recovery_token()?, token);
+                    assert_eq!(faults.metrics().total_requests(), 0);
+                    assert_eq!(operation.calls(), 3);
+                    assert!(matches!(log.resume(&token).await?, object_log::Resolution::Committed(_)));
+                }
+                _ => return Err("setter changed its publication outcome".into()),
+            }
+            assert_eq!(common_open(&log, format).await?.default_branch(), b"refs/heads/trunk");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn guarded_default_branch_denial_before_create_or_cas_never_publishes() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        for limit in [1, 2] {
+            let (log, faults, _) = test_log("guarded-default-denial").await?;
+            let caller = CallerGuard::new(limit);
+            let repository = common_open(&log.with_request_guard(caller.clone()), format).await?;
+            let operation = repository.operation.clone();
+            faults.reset();
+            assert!(matches!(repository.set_default_branch(TransactionId::new(), b"refs/heads/main", b"refs/heads/trunk").await,
+                Err(Error::ObjectLog(object_log::Error::RequestDenied))));
+            assert_eq!(faults.metrics().total_requests(), u64::try_from(limit - 1)?);
+            assert_eq!(operation.calls(), limit);
+            assert_eq!(caller.calls(), limit);
+            assert_eq!(operation.live_bytes(), 0);
+            assert!(log.load().await?.tail().is_empty());
+            assert_eq!(common_open(&log, format).await?.default_branch(), b"refs/heads/main");
+        }
+    }
+    Ok(())
+}

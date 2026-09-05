@@ -55,10 +55,6 @@ impl Repository {
             self.log
                 .prepare(&self.view, transaction_id, record, Bytes::new(), Vec::new())?;
         let _plan = durable::publication_plan(&self.operation, &self.view)?;
-        self.operation.io(options.max_commit_bytes)?;
-        for _ in 0..2 {
-            self.operation.io(options.max_head_bytes)?;
-        }
         self.operation
             .work(options.max_commit_bytes + options.max_head_bytes * 2)?;
         Ok(self.log.commit(prepared).await?)
