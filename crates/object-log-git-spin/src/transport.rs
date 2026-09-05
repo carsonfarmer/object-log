@@ -6,8 +6,8 @@ use http_body::{Body as _, Frame};
 use http_body_util::{BodyExt, StreamBody};
 use object_store::client::{
     ClientConfigKey, ClientOptions, CryptoProvider, DigestAlgorithm, DigestContext, HmacContext,
-    HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
-    HttpResponseBody, HttpService, Signer, SigningAlgorithm,
+    HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpRequestBody,
+    HttpResponse, HttpResponseBody, HttpService, Signer, SigningAlgorithm,
 };
 use sha2::{Digest, Sha256};
 use spin_executor::CancelOnDropToken;
@@ -97,6 +97,43 @@ fn http_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Htt
 #[async_trait]
 impl HttpService for Service {
     async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        retry_read(request, |request| self.call_once(request)).await
+    }
+}
+
+// A pooled connection can close before a response arrives. Retry only a bodyless
+// read, once, before exposing response bytes. Writes and streaming-body failures
+// retain their uncertain-result semantics; every attempt shares the same budget.
+async fn retry_read<F, Fut>(request: HttpRequest, mut attempt: F) -> Result<HttpResponse, HttpError>
+where
+    F: FnMut(HttpRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<HttpResponse, HttpError>>,
+{
+    let retryable = matches!(*request.method(), http::Method::GET | http::Method::HEAD)
+        && request.body().content_length() == 0;
+    let (parts, body) = request.into_parts();
+    let retry =
+        retryable.then(|| http::Request::from_parts(parts.clone(), HttpRequestBody::empty()));
+    let result = attempt(http::Request::from_parts(parts, body)).await;
+    if let (Some(request), Err(error)) = (retry, &result)
+        && std::error::Error::source(error)
+            .and_then(|source| source.downcast_ref::<spin_sdk::http::ErrorCode>())
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    spin_sdk::http::ErrorCode::ConnectionTerminated
+                        | spin_sdk::http::ErrorCode::HttpResponseIncomplete
+                        | spin_sdk::http::ErrorCode::HttpProtocolError
+                )
+            })
+    {
+        return attempt(request).await;
+    }
+    result
+}
+
+impl Service {
+    async fn call_once(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
         self.budget.call()?;
         let (mut parts, mut body) = request.into_parts();
         // Preserve exact framing supplied by object_store's body. In particular,
@@ -284,6 +321,77 @@ impl CryptoProvider for Crypto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_read_retry_is_bounded_and_preserves_request_and_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (method, body, expected) in [
+            (http::Method::GET, Bytes::new(), 2),
+            (http::Method::HEAD, Bytes::new(), 2),
+            (http::Method::GET, Bytes::from_static(b"body"), 1),
+            (http::Method::PUT, Bytes::new(), 1),
+            (http::Method::POST, Bytes::new(), 1),
+            (http::Method::DELETE, Bytes::new(), 1),
+        ] {
+            let budget = Budget::default();
+            let request = http::Request::builder()
+                .method(method.clone())
+                .uri("http://example.invalid/object?versionId=7")
+                .header("range", "bytes=3-5")
+                .header("if-match", "version")
+                .body(HttpRequestBody::from(body))?;
+            let result =
+                futures::executor::block_on(retry_read(request, |request| {
+                    assert_eq!(request.method(), method);
+                    assert_eq!(request.uri(), "http://example.invalid/object?versionId=7");
+                    assert_eq!(request.headers()["range"], "bytes=3-5");
+                    assert_eq!(request.headers()["if-match"], "version");
+                    futures::future::ready(budget.call().and_then(|()| {
+                        Err(http_error(spin_sdk::http::ErrorCode::HttpProtocolError))
+                    }))
+                }));
+            assert!(result.is_err());
+            assert_eq!(budget.calls.load(Ordering::Relaxed), expected);
+        }
+        let budget = Budget::default();
+        budget.calls.store(HTTP_CALLS - 1, Ordering::Relaxed);
+        let request = http::Request::new(HttpRequestBody::empty());
+        let result =
+            futures::executor::block_on(retry_read(request, |_| {
+                futures::future::ready(budget.call().and_then(|()| {
+                    Err(http_error(spin_sdk::http::ErrorCode::ConnectionTerminated))
+                }))
+            }));
+        assert!(
+            std::error::Error::source(&result.err().ok_or("read unexpectedly succeeded")?)
+                .is_some_and(<dyn std::error::Error + 'static>::is::<QuotaExceeded>)
+        );
+        assert_eq!(budget.calls.load(Ordering::Relaxed), HTTP_CALLS);
+        Ok(())
+    }
+
+    #[test]
+    fn read_retry_does_not_match_text_or_nontransport_errors() {
+        for error in [
+            http_error(QuotaExceeded),
+            http_error(std::io::Error::other("HttpProtocolError")),
+            http_error(spin_sdk::http::ErrorCode::HttpRequestDenied),
+        ] {
+            let mut error = Some(error);
+            let mut calls = 0;
+            let result = futures::executor::block_on(retry_read(
+                http::Request::new(HttpRequestBody::empty()),
+                |_| {
+                    calls += 1;
+                    futures::future::ready(Err(error
+                        .take()
+                        .unwrap_or_else(|| http_error(QuotaExceeded))))
+                },
+            ));
+            assert!(result.is_err());
+            assert_eq!(calls, 1);
+        }
+    }
 
     #[test]
     fn quota_marker_survives_storage_and_git_error_wrappers() -> Result<(), HttpError> {

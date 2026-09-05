@@ -64,6 +64,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         for value in scope.split("/"):
             key = hmac.new(key, value.encode(), hashlib.sha256).digest()
         assert hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest() == fields["Signature"]
+        if self.path in ("/probe/retry-close", "/probe/repeat-close", "/probe/write-close"):
+            calls.append((self.command, self.path))
+            if self.path != "/probe/retry-close" or calls.count((self.command, self.path)) == 1:
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.send_header("Last-Modified", "Fri, 04 Sep 2026 00:00:00 GMT")
+            self.send_header("ETag", '"fixture"')
+            self.end_headers()
+            return
         if self.path == "/probe/redirect":
             assert self.command == "PUT" and int(self.headers["Content-Length"]) == 8 * 1024 * 1024
             self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
@@ -188,6 +201,14 @@ with (ROOT / "runtime.log").open("w") as log:
             finally:
                 release.set()
             assert first.result() == b"held request released\n"
+        for route, expected in [("retry-close", b"read retry passed\n"),
+                                ("repeat-close", b"bounded retry failure passed\n"),
+                                ("write-close", b"write uncertainty preserved\n")]:
+            with urllib.request.urlopen("http://127.0.0.1:19172/" + route, timeout=10) as response:
+                assert response.read() == expected
+        assert calls[-5:] == [("GET", "/probe/retry-close"), ("GET", "/probe/retry-close"),
+                              ("GET", "/probe/repeat-close"), ("GET", "/probe/repeat-close"),
+                              ("PUT", "/probe/write-close")], calls
         print(json.dumps({"host_admission": "concurrent requests use Spin defaults","result": result.strip(), "failure": "503 propagated without retry", "calls": calls}))
     finally:
         process.terminate()

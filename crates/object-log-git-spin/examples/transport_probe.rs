@@ -13,6 +13,27 @@ use object_store::{
 use spin_sdk::http::{IntoResponse, Request, Response};
 use std::sync::Arc;
 use transport::{Crypto, Transport};
+async fn connection_case(store: &dyn ObjectStore, uri: &str) -> anyhow::Result<Option<Response>> {
+    if uri.ends_with("/retry-close") {
+        store.get(&Path::from("retry-close")).await?.bytes().await?;
+        return Ok(Some(Response::new(200, "read retry passed\n")));
+    }
+    if uri.ends_with("/repeat-close") {
+        anyhow::ensure!(store.get(&Path::from("repeat-close")).await.is_err());
+        return Ok(Some(Response::new(200, "bounded retry failure passed\n")));
+    }
+    if uri.ends_with("/write-close") {
+        anyhow::ensure!(
+            store
+                .put(&Path::from("write-close"), Bytes::new().into())
+                .await
+                .is_err()
+        );
+        return Ok(Some(Response::new(200, "write uncertainty preserved\n")));
+    }
+    Ok(None)
+}
+
 // SDK-generated ABI glue requires unsafe exports; application code remains safe.
 #[allow(unsafe_code, clippy::same_length_and_capacity)]
 mod entry {
@@ -42,6 +63,9 @@ mod entry {
                 ..RetryConfig::default()
             })
             .build()?;
+        if let Some(response) = super::connection_case(&store, request.uri()).await? {
+            return Ok(response);
+        }
         if request.uri().ends_with("/redirect") {
             let result = store
                 .put(
