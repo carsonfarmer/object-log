@@ -10,6 +10,10 @@ use crate::{
     pack::budget::{Operation, Reservation},
 };
 
+#[path = "catalog_cache.rs"]
+mod cache;
+pub(crate) use cache::CatalogCache;
+
 const VERSION: u8 = 1;
 const FANOUT: usize = 64;
 const MAX_HEIGHT: u8 = 8;
@@ -51,7 +55,7 @@ struct Payload {
 struct Loaded {
     payload: Payload,
     children: Vec<StagedObject>,
-    _memory: Reservation,
+    memory: Reservation,
     upper: Option<ObjectId>,
 }
 
@@ -229,7 +233,7 @@ impl Builder<'_> {
         let Loaded {
             payload,
             mut children,
-            _memory,
+            memory: _memory,
             upper: inherited_upper,
         } = node;
         if payload.level == 0 {
@@ -445,26 +449,55 @@ async fn load(
     expected: Option<(u8, ObjectId)>,
     upper: Option<ObjectId>,
 ) -> Result<Loaded, Error> {
+    let memory = operation.reserve_state(read_memory(proof)?)?;
+    let mut node = read_reserved(log, view, operation, format, proof, memory).await?;
+    check_bounds(&node, expected, upper)?;
+    node.upper = upper;
+    Ok(node)
+}
+
+fn read_memory(proof: &StagedObject) -> Result<usize, Error> {
     let size =
         usize::try_from(proof.reference().len()).map_err(|_| invalid("catalog size overflow"))?;
     if size > NODE_BYTES {
         return Err(invalid("catalog node exceeds byte limit"));
     }
-    let memory = operation.reserve_state(size * 128 + 4096)?;
-    operation.io(size)?;
-    operation.work(size * 2)?;
-    let (bytes, children) = log.read_staged_node(view, proof).await?;
-    let payload = decode(&bytes, format, &children)?;
+    Ok(size * 128 + 4096)
+}
+
+fn check_bounds(
+    node: &Loaded,
+    expected: Option<(u8, ObjectId)>,
+    upper: Option<ObjectId>,
+) -> Result<(), Error> {
+    let payload = &node.payload;
     if expected.is_some_and(|(level, lower)| payload.level != level || payload.keys[0] != lower)
         || upper.is_some_and(|upper| payload.keys.last().is_some_and(|key| *key >= upper))
     {
         return Err(invalid("catalog child bounds differ"));
     }
+    Ok(())
+}
+
+async fn read_reserved(
+    log: &Log,
+    view: &View,
+    operation: &Operation,
+    format: ObjectFormat,
+    proof: &StagedObject,
+    memory: Reservation,
+) -> Result<Loaded, Error> {
+    let size =
+        usize::try_from(proof.reference().len()).map_err(|_| invalid("catalog size overflow"))?;
+    operation.io(size)?;
+    operation.work(size * 2)?;
+    let (bytes, children) = log.read_staged_node(view, proof).await?;
+    let payload = decode(&bytes, format, &children)?;
     Ok(Loaded {
         payload,
         children,
-        _memory: memory,
-        upper,
+        memory,
+        upper: None,
     })
 }
 

@@ -1,0 +1,20 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-catalog-cache/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.83s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7d5666786ede979b)
+
+running 12 tests
+test catalog_tree::tests::huge_authenticated_array_counts_fail_before_allocation ... ok
+test catalog_tree::tests::cache_evicts_under_memory_pressure_without_resetting_work ... ok
+test catalog_tree::tests::catalog_quota_failure_and_cancellation_release_construction_memory ... ok
+test catalog_tree::tests::authenticated_malformed_tree_and_wrong_child_bounds_are_rejected ... ok
+test catalog_tree::tests::descendant_bounds_inherit_the_ancestor_upper_bound ... ok
+test catalog_tree::tests::cached_lookup_reuses_authenticated_paths_and_releases_memory ... ok
+test catalog_tree::tests::duplicate_oids_choose_lowest_pack_id_and_bad_input_has_no_writes ... ok
+test catalog_tree::tests::cold_materialization_and_gc_preserve_catalog_pack_dependencies ... ok
+test catalog_tree::tests::conflicting_catalog_candidates_resolve_and_losing_graph_is_collectible ... ok
+test catalog_tree::tests::both_hashes_split_lookup_and_cow_without_unrelated_reads ... ok
+test catalog_tree::tests::distinct_pack_tables_split_by_encoded_bytes_before_fanout ... ok
+test catalog_tree::tests::repeated_batches_grow_balanced_tree_and_keep_lookup_depth_bounded ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 120 filtered out; finished in 4.71s
+

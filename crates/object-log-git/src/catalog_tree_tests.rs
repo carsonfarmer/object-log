@@ -523,12 +523,19 @@ async fn descendant_bounds_inherit_the_ancestor_upper_bound() -> TestResult {
     let root = log
         .put_node(&view, minicbor::to_vec(root)?.into(), branches)
         .await?;
+    let tree = CatalogTree::from_root(format, root);
     assert!(
-        CatalogTree::from_root(format, root)
-            .lookup(&log, &view, &operation()?, entries[0].0)
+        tree.lookup(&log, &view, &operation()?, entries[0].0)
             .await
             .is_err()
     );
+    let operation = operation()?;
+    let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+    assert!(cache.lookup(entries[0].0).await.is_err());
+    let calls = operation.calls();
+    // Even an already decoded node must satisfy this traversal's bounds.
+    assert!(cache.lookup(entries[0].0).await.is_err());
+    assert_eq!(operation.calls(), calls);
     Ok(())
 }
 
@@ -667,5 +674,78 @@ async fn distinct_pack_tables_split_by_encoded_bytes_before_fanout() -> TestResu
         let child = load(&log, &view, &operation()?, format, &child, None, None).await?;
         assert!(child.payload.keys.len() < FANOUT);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cached_lookup_reuses_authenticated_paths_and_releases_memory() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let (log, view, store, _) = fixture_log("cached-paths").await?;
+        let (descriptor, root, entries) = pack(&log, &view, format, 128, 77).await?;
+        let tree = CatalogTree::empty(format)
+            .insert_pack(
+                &log,
+                &view,
+                &operation()?,
+                descriptor.clone(),
+                root.clone(),
+                &entries,
+            )
+            .await?;
+        let operation = operation()?;
+        store.reset();
+        let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+        for _ in 0..2 {
+            for &(id, position) in &entries {
+                let found = cache.lookup(id).await?.ok_or("missing cached OID")?;
+                assert_eq!(found.descriptor, descriptor);
+                assert_eq!(found.root.reference(), root.reference());
+                assert_eq!(found.index, position);
+            }
+        }
+        assert_eq!(store.metrics().operation(Io::Get).requests, 3);
+        assert_eq!(store.metrics().operation(Io::Put).requests, 0);
+        assert_eq!(operation.calls(), 3);
+        assert!(operation.work_bytes() > 0);
+        assert!(operation.live_bytes() < 256 * 1024);
+        drop(cache);
+        assert_eq!(operation.live_bytes(), 0);
+        // New command-local cache must authenticate its own paths.
+        let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+        assert!(cache.lookup(entries[0].0).await?.is_some());
+        assert_eq!(operation.calls(), 5);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cache_evicts_under_memory_pressure_without_resetting_work() -> TestResult {
+    let (log, view, store, _) = fixture_log("cache-pressure").await?;
+    let (descriptor, root, entries) = pack(&log, &view, ObjectFormat::Sha1, 128, 79).await?;
+    let tree = CatalogTree::empty(ObjectFormat::Sha1)
+        .insert_pack(&log, &view, &operation()?, descriptor, root, &entries)
+        .await?;
+    let (_, children) = log
+        .read_staged_node(&view, tree.root().ok_or("root")?)
+        .await?;
+    let operation = operation()?;
+    let mut cache = CatalogCache::new(&tree, &log, &view, &operation)?;
+    store.reset();
+    assert!(cache.lookup(entries[0].0).await?.is_some());
+    let calls = operation.calls();
+    let work = operation.work_bytes();
+    let pressure = operation.reserve_state(
+        crate::pack::budget::STATE_BYTES - operation.live_bytes() - read_memory(&children[1])? + 1,
+    )?;
+    // Initial decoder admission is one byte short. Evicting a retained leaf
+    // makes room before I/O; counters from the first lookup remain charged.
+    assert!(cache.lookup(entries[127].0).await?.is_some());
+    assert_eq!(operation.calls(), calls + 1);
+    assert!(operation.work_bytes() > work);
+    drop(pressure);
+    assert!(cache.lookup(entries[0].0).await?.is_some());
+    assert_eq!(operation.calls(), calls + 2);
+    drop(cache);
+    assert_eq!(operation.live_bytes(), 0);
     Ok(())
 }
