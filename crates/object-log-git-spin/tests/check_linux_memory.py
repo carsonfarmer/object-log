@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--wasm", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
+    git_version = run("git", "--version")
+    assert git_version.startswith("git version 2.54."), git_version
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     shutil.copyfile(args.wasm, output / "component.wasm")
@@ -47,7 +49,7 @@ def main():
     network, minio = token + "-network", token + "-minio"
     owned = []
     records = []
-    report = {"wasm_sha256": hashlib.sha256(args.wasm.read_bytes()).hexdigest(), "runtime_image": RUNTIME, "runtime_image_id": run("docker", "image", "inspect", RUNTIME, "--format", "{{.Id}}"), "spin_version": run("docker", "run", "--rm", "--mount", f"type=bind,src={args.spin.resolve().parent},dst=/spin,readonly", RUNTIME, "/spin/spin", "--version"), "minio_image": MINIO, "limit_bytes": LIMIT, "outbound_connection_pooling": False, "runs": records}
+    report = {"git_version": git_version, "wasm_sha256": hashlib.sha256(args.wasm.read_bytes()).hexdigest(), "runtime_image": RUNTIME, "runtime_image_id": run("docker", "image", "inspect", RUNTIME, "--format", "{{.Id}}"), "spin_version": run("docker", "run", "--rm", "--mount", f"type=bind,src={args.spin.resolve().parent},dst=/spin,readonly", RUNTIME, "/spin/spin", "--version"), "minio_image": MINIO, "limit_bytes": LIMIT, "outbound_connection_pooling": False, "runs": records}
     def save():
         (output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
     def start(label, memory, object_format, prefix):
@@ -130,7 +132,7 @@ exit "$code"
                     def git(*arguments, cwd=source, check=True):
                         nonlocal command_number
                         command_number += 1
-                        result = subprocess.run(["git", "-c", "protocol.version=2", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", *arguments], cwd=cwd, capture_output=True, text=True, env={**os.environ, "GIT_TRACE_CURL": "1", "GIT_TRACE_CURL_NO_DATA": "1"})
+                        result = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "gc.auto=0", "-c", "protocol.version=2", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", *arguments], cwd=cwd, capture_output=True, text=True, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "0", "GIT_TRACE_CURL": "1", "GIT_TRACE_CURL_NO_DATA": "1"})
                         (output / record["label"] / f"git-{command_number:02d}.log").write_text(repr(arguments) + "\n" + result.stdout + result.stderr)
                         if check and result.returncode != 0:
                             raise RuntimeError(result.stderr)
