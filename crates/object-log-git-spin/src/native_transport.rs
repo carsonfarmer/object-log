@@ -161,6 +161,9 @@ mod tests {
                         }
                         Err(error) => return Err(error),
                     };
+                    // Accepted sockets can inherit the nonblocking listener mode
+                    // on macOS. The bounded header reader needs blocking I/O.
+                    socket.set_nonblocking(false)?;
                     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
                     let Some(header) = request_header(&mut socket)? else {
                         continue;
