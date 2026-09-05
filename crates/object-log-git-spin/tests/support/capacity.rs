@@ -41,6 +41,11 @@ async fn spin_capacity_large_file_push_clone_and_fetch() -> TestResult {
             start.elapsed()
         );
         server.stop()?;
+        let packed_bytes = capacity_initial_pack_bytes(format, &namespace).await?;
+        eprintln!(
+            "capacity {format:?}: verified incoming self-contained pack {packed_bytes} bytes"
+        );
+        assert!(packed_bytes >= size);
         let (url, mut server) = serve_spin(format, &namespace).await?;
         let clone = root.path().join("clone");
         let start = std::time::Instant::now();
@@ -149,4 +154,78 @@ async fn capacity_maintenance(format: ObjectFormat, namespace: &str) -> TestResu
         object_log::CollectionFinish::Complete(..)
     ));
     Ok(())
+}
+
+// A three-object full commit/tree/blob pack takes Scanned::normalize's identity
+// fast path: it stages exactly the received bytes, without rewriting or bases.
+async fn capacity_initial_pack_bytes(format: ObjectFormat, namespace: &str) -> TestResult<u64> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let backend =
+        ValidatedBackend::new(Arc::new(build_minio()?), StorePath::from(namespace)).await?;
+    let log = Log::open_existing(
+        &backend,
+        &LogId::new("repository")?,
+        Options {
+            max_object_refs: 2080,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let view = log.load().await?;
+    let mut packs = Vec::new();
+    for record in log.read_tail(&view).await? {
+        for object in record.objects() {
+            let node = log.read_node(&view, object).await?;
+            if node.payload().starts_with(b"\xfftOc\0\0\0\x02") {
+                packs.push(node);
+            }
+        }
+    }
+    assert_eq!(packs.len(), 1);
+    let node = &packs[0];
+    let option = match format {
+        ObjectFormat::Sha1 => "--object-format=sha1",
+        ObjectFormat::Sha256 => "--object-format=sha256",
+    };
+    let mut child = git_command(None, ["show-index", option])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("show-index stdin missing")?
+        .write_all(node.payload())?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success());
+    let offsets = String::from_utf8(output.stdout)?
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .next()
+                .ok_or("index offset missing")?
+                .parse::<u64>()
+                .map_err(|error| Box::new(error) as Box<dyn StdError + Send + Sync>)
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    assert_eq!(offsets.len(), 3);
+    let first = log.read_object(&view, &node.children()[0]).await?;
+    assert_eq!(&first[..12], b"PACK\0\0\0\x02\0\0\0\x03");
+    let mut kinds = Vec::new();
+    for offset in offsets {
+        let mut start = 0;
+        for chunk in node.children() {
+            if offset < start + chunk.len() {
+                let bytes = log.read_object(&view, chunk).await?;
+                kinds.push((bytes[usize::try_from(offset - start)?] >> 4) & 7);
+                break;
+            }
+            start += chunk.len();
+        }
+    }
+    kinds.sort_unstable();
+    assert_eq!(kinds, [1, 2, 3]); // Full commit/tree/blob, no REF/OFS deltas.
+    Ok(node.children().iter().map(object_log::ObjectRef::len).sum())
 }

@@ -198,7 +198,7 @@ def main():
                         unavailable = subprocess.run(["git", "show", "HEAD:large"], cwd=clones["blob:none"], env=ENV, capture_output=True, timeout=10)
                         assert unavailable.returncode != 0
                         assert not present(clones["blob:none"], large)
-                        maintenance_env = dict(ENV, OBJECT_LOG_MINIO_ENDPOINT=endpoint,
+                        maintenance_env = dict(ENV, OBJECT_LOG_GIT_MAX_OBJECT_REFS="2080", OBJECT_LOG_MINIO_ENDPOINT=endpoint,
                             OBJECT_LOG_MINIO_ACCESS_KEY=access_key, OBJECT_LOG_MINIO_SECRET_KEY=secret_key,
                             OBJECT_LOG_MINIO_BUCKET=bucket, OBJECT_LOG_PARTIAL_PREFIX=prefix, OBJECT_LOG_PARTIAL_FORMAT=name)
                         print(run(["cargo", "test", "--locked", "-p", "object-log-git", "--features", "aws", "--test", "partial_maintenance",

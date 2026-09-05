@@ -109,7 +109,7 @@ def fixture(endpoint, bucket, access_key, secret_key, name):
                 git(root,'clone','--quiet','--depth=1',url,str(shallow))
                 # Old URI survives storage maintenance and a completely drained Spin group.
                 stop(host,port)
-                maintenance_env=dict(ENV,OBJECT_LOG_MINIO_ENDPOINT=endpoint,OBJECT_LOG_MINIO_ACCESS_KEY=access_key,
+                maintenance_env=dict(ENV,OBJECT_LOG_GIT_MAX_OBJECT_REFS="2080",OBJECT_LOG_MINIO_ENDPOINT=endpoint,OBJECT_LOG_MINIO_ACCESS_KEY=access_key,
                     OBJECT_LOG_MINIO_SECRET_KEY=secret_key,OBJECT_LOG_MINIO_BUCKET=bucket,OBJECT_LOG_PARTIAL_PREFIX=prefix,OBJECT_LOG_PARTIAL_FORMAT=name)
                 print(run(['cargo','test','--locked','-p','object-log-git','--features','aws','--test','partial_maintenance','--','--ignored','--nocapture'],ROOT.parent.parent,maintenance_env),flush=True)
                 variables['read_only']='true'

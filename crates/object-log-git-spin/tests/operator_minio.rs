@@ -238,33 +238,12 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
     fill_tail(&log, &source, name, format, &new).await?;
     assert_eq!(log.load().await?.tail().len(), 1024);
     let full_view = log.load().await?;
-    assert!(matches!(
-        Repository::open(&log, format).await,
-        Err(object_log_git::Error::ObjectLog(
-            object_log::Error::RequestDenied
-        ))
-    ));
-    let (mut blocked, blocked_url) = serve(&config_path, root.path()).await?;
-    let rejected = git(None, &["ls-remote", &blocked_url])
-        .err()
-        .ok_or("full tail unexpectedly served")?;
-    blocked.stop()?;
-    if !rejected.to_string().contains("HTTP 503") {
-        for entry in fs::read_dir(root.path())? {
-            let path = entry?.path();
-            if path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("spin-"))
-            {
-                eprintln!("{}", fs::read_to_string(path)?);
-            }
-        }
-    }
-    assert!(rejected.to_string().contains("HTTP 503"), "{rejected}");
+    drop(Repository::open(&log, format).await?);
+    let (mut full_host, full_url) = serve(&config_path, root.path()).await?;
+    git(None, &["ls-remote", &full_url])?;
+    full_host.stop()?;
     assert!(log.refresh(&full_view).await?.is_none());
-    println!(
-        "{name}: shared engine confirms full-tail admission denial; unchanged head produces Spin HTTP 503: {rejected}"
-    );
+    println!("{name}: bounded serving admission recovers the full tail without changing its head");
     let full = operator(&config_path, &["status"])?;
     assert!(full.status.success());
     assert_eq!(decode(&full)?["tail_entries"], 1024);

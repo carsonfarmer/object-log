@@ -26,7 +26,11 @@ async fn partial_fixture_checkpoint_and_gc() -> Result<(), Box<dyn std::error::E
         .with_disable_bulk_delete(false)
         .build()?;
     let backend = ValidatedBackend::new(Arc::new(store), Path::from(prefix)).await?;
-    let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
+    let mut options = Options::default();
+    if let Ok(refs) = env::var("OBJECT_LOG_GIT_MAX_OBJECT_REFS") {
+        options.max_object_refs = refs.parse()?;
+    }
+    let log = Log::open_existing(&backend, &LogId::new("repository")?, options).await?;
     let format = match env::var("OBJECT_LOG_PARTIAL_FORMAT")?.as_str() {
         "sha1" => ObjectFormat::Sha1,
         "sha256" => ObjectFormat::Sha256,
