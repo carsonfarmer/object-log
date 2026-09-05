@@ -86,7 +86,7 @@ API:
   protocol v2 for upload-pack discovery and fetch. Push remains standard
   receive-pack.
 
-Tasks 1–7 provide the private pack, sparse reader/writer, wire, and budget
+Tasks 1–9 provide the private pack, sparse reader/writer, wire, and budget
 foundations plus one common `Repository::open(&Log, ObjectFormat)` for native
 and `WASIp2`. The repository retains one exact view and exposes its refs without
 local paths. Durable packs use authenticated variable chunk geometry, including
@@ -97,7 +97,12 @@ remains available through `open_native` until replacement client parity passes.
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves
 are deferred until selected content needs verification. Exact want/have
-selection and protocol integration remain before a Git protocol-v2 client trial. Receive-pack and the Spin adapter follow.
+selection, protocol-v2 upload commands, and classic receive preparation and
+publication now use that same repository. Thin inputs become self-contained
+packs; ref updates validate connectivity and fast-forward rules before one
+publication. The native HTTP replacement and Spin adapter are under final
+client, provider, and memory qualification. See the
+[receive evidence](docs/evidence/git-receive-2026-09-04.md).
 The [Task 3 evidence](docs/evidence/git-repository-2026-09-04.md) records the
 recovery fixes, unchanged small-limit tests, independent reviews, and limits.
 One process-wide 88 MiB pool admits one active engine operation under the

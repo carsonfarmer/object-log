@@ -1,6 +1,6 @@
 # object-log handoff
 
-Updated: 2026-09-04 18:07 PDT
+Updated: 2026-09-04 (Tasks 8 and 9 accepted)
 
 ## Start here
 
@@ -95,9 +95,17 @@ peeled with actual-kind checks. Independent review found and repaired the final
 target-kind gap. The full workspace gate passes (318 passed, 9 ignored), with
 strict native and WASIp2 checks. See `docs/evidence/git-upload-2026-09-04.md`.
 
+## Tasks 8 and 9 acceptance
+
+Thin-base resolution, complete ref validation, atomic preparation/publication,
+and shared checkpointing pass the full workspace gate (339 passed, 9 ignored)
+and strict WASIp2 Clippy. Independent correctness and simplification findings
+were repaired, including collection-plan accounting and overflow-safe
+publication bounds. See `docs/evidence/git-receive-2026-09-04.md`.
+
 ## Next actions
 
-Tasks 8–10 are assembled for integration in `.object-log-worktrees/git-native-shared`.
+Tasks 10–12 are assembled for integration in `.object-log-worktrees/git-native-shared`.
 The common receive/checkpoint path and native adapter are passing focused real
 Git client tests for both hashes. Full gates, fault tests, performance evidence,
 and replacement MinIO acceptance are running before integration. Thin helper
