@@ -38,3 +38,10 @@ qualification. The fixture test names are:
 
 The latter needs the normal OBJECT_LOG_MINIO_* fixture variables; dummy values
 with endpoint http://127.0.0.1:9 suffice because no HTTP request is made.
+
+## Additional native-provider qualification
+
+The corrected process shutdown, authentication-compatible operator and shared
+maintenance correction subsequently passed native MinIO lifecycles for both
+hashes. See [the combined operator evidence](spin-operator-default-branch-2026-09-05.md).
+Docker-image requalification remains pending and distinct.

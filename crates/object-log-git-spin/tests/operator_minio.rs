@@ -86,6 +86,23 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
             .status
             .success()
     );
+    assert!(
+        !operator(
+            &config_path,
+            &[
+                "set-default-branch",
+                "--expected",
+                "refs/heads/main",
+                "--target",
+                "refs/heads/trunk",
+                "--recovery-file",
+                text(&root.path().join("missing.receipt"))?
+            ]
+        )?
+        .status
+        .success()
+    );
+    assert_eq!(fs::metadata(root.path().join("missing.receipt"))?.len(), 0);
     let absent_token = root.path().join("absent.token");
     private_file(&absent_token, b"no candidate")?;
     assert!(
@@ -247,9 +264,110 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         assert_eq!(git(Some(&clone), &["rev-parse", &tag])?, new);
         reader.stop()?;
     }
+    default_branch_lifecycle(&config_path, root.path(), &source, &log, &new).await?;
     println!(
-        "{name}: missing target, status, exact token resume, duplicate/loser, 1024-tail escape, wrong format, cold clone/fsck and three Spin push/checkpoint/fetch cycles passed"
+        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master and unborn default passed"
     );
+    Ok(())
+}
+
+async fn default_branch_lifecycle(
+    config: &Path,
+    root: &Path,
+    source: &Path,
+    log: &Log,
+    tip: &[u8],
+) -> TestResult {
+    let (mut writer, url) = serve(config, root).await?;
+    git(Some(source), &["push", "-q", &url, "HEAD:refs/heads/trunk"])?;
+    writer.stop()?;
+    let update = operator(
+        config,
+        &[
+            "set-default-branch",
+            "--expected",
+            "refs/heads/main",
+            "--target",
+            "refs/heads/trunk",
+            "--recovery-file",
+            text(&root.join("trunk.receipt"))?,
+        ],
+    )?;
+    assert!(update.status.success());
+    assert_eq!(decode(&update)?["outcome"], "updated");
+    assert_eq!(fs::metadata(root.join("trunk.receipt"))?.len(), 0);
+    let (mut reader, url) = serve(config, root).await?;
+    let trunk = root.join("clone-trunk");
+    git(None, &["clone", "-q", &url, text(&trunk)?])?;
+    assert_eq!(
+        git(Some(&trunk), &["symbolic-ref", "HEAD"])?,
+        b"refs/heads/trunk\n"
+    );
+    assert_eq!(git(Some(&trunk), &["rev-parse", "HEAD"])?, tip);
+    git(Some(&trunk), &["fsck", "--strict"])?;
+    reader.stop()?;
+
+    let before = log.load().await?;
+    let stale = operator(
+        config,
+        &[
+            "set-default-branch",
+            "--expected",
+            "refs/heads/main",
+            "--target",
+            "refs/heads/master",
+            "--recovery-file",
+            text(&root.join("stale.receipt"))?,
+        ],
+    )?;
+    assert_eq!(stale.status.code(), Some(3));
+    assert_eq!(decode(&stale)?["outcome"], "stale_default");
+    assert!(log.refresh(&before).await?.is_none());
+    let update = operator(
+        config,
+        &[
+            "set-default-branch",
+            "--expected",
+            "refs/heads/trunk",
+            "--target",
+            "refs/heads/master",
+            "--recovery-file",
+            text(&root.join("master.receipt"))?,
+        ],
+    )?;
+    assert!(update.status.success());
+    let (mut reader, url) = serve(config, root).await?;
+    let unborn = root.join("clone-unborn");
+    git(None, &["clone", "-q", &url, text(&unborn)?])?;
+    assert_eq!(
+        git(Some(&unborn), &["symbolic-ref", "HEAD"])?,
+        b"refs/heads/master\n"
+    );
+    assert!(git(Some(&unborn), &["rev-parse", "--verify", "HEAD"]).is_err());
+    reader.stop()?;
+
+    let (mut writer, url) = serve(config, root).await?;
+    git(
+        Some(source),
+        &["push", "-q", &url, "HEAD:refs/heads/master"],
+    )?;
+    writer.stop()?;
+    assert!(
+        operator(config, &["checkpoint", "--retain-packs"])?
+            .status
+            .success()
+    );
+    let (mut reader, url) = serve(config, root).await?;
+    let master = root.join("clone-master");
+    git(None, &["clone", "-q", &url, text(&master)?])?;
+    assert_eq!(
+        git(Some(&master), &["symbolic-ref", "HEAD"])?,
+        b"refs/heads/master\n"
+    );
+    assert_eq!(git(Some(&master), &["rev-parse", "HEAD"])?, tip);
+    git(Some(&master), &["fsck", "--strict"])?;
+    assert_eq!(fs::read_to_string(master.join("file"))?, "two");
+    reader.stop()?;
     Ok(())
 }
 

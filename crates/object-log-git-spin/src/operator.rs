@@ -2,7 +2,7 @@
 
 use std::{
     ffi::OsString,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -22,7 +22,7 @@ const CONFIG_BYTES: usize = 16 * 1024;
 const TOKEN_BYTES: usize = 1024 * 1024;
 const OUTPUT_BYTES: usize = 2048;
 const DEADLINE: Duration = Duration::from_mins(1);
-const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs";
+const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | set-default-branch --expected REF --target REF --recovery-file FILE";
 
 #[derive(Clone, Copy, Debug)]
 struct Failure(&'static str, u8);
@@ -52,6 +52,8 @@ pub(super) struct Report {
     collection_active: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_token: Option<&'static str>,
 }
 
 impl Report {
@@ -66,6 +68,7 @@ impl Report {
             collection_epoch: None,
             collection_active: None,
             usage: None,
+            recovery_token: None,
         }
     }
 
@@ -95,6 +98,46 @@ impl Report {
         }
         bytes.push(b'\n');
         output.write_all(&bytes)
+    }
+}
+
+struct Receipt {
+    file: File,
+    directory: File,
+}
+
+impl Receipt {
+    fn reserve(path: &Path) -> Result<Self, Failure> {
+        let unavailable = |_| Failure("recovery_file_unavailable", 2);
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
+            .open(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )
+            .map_err(unavailable)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(unavailable)?;
+        file.sync_all().map_err(unavailable)?;
+        directory.sync_all().map_err(unavailable)?;
+        Ok(Self { file, directory })
+    }
+
+    fn save(&self, token: &[u8]) -> std::io::Result<()> {
+        if token.is_empty() || token.len() > TOKEN_BYTES || self.file.metadata()?.len() != 0 {
+            return Err(std::io::Error::other("recovery token output limit"));
+        }
+        let mut output = &self.file;
+        output.write_all(token)?;
+        self.file.sync_all()?;
+        self.directory.sync_all()
     }
 }
 
@@ -256,6 +299,11 @@ enum Action {
     Status,
     Resume(Vec<u8>),
     Checkpoint,
+    SetDefault {
+        expected: Vec<u8>,
+        target: Vec<u8>,
+        receipt: Receipt,
+    },
 }
 impl Action {
     fn name(&self) -> &'static str {
@@ -263,6 +311,7 @@ impl Action {
             Self::Status => "status",
             Self::Resume(_) => "resume-commit",
             Self::Checkpoint => "checkpoint",
+            Self::SetDefault { .. } => "set-default-branch",
         }
     }
 }
@@ -277,6 +326,27 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
                 .value_parser(clap::value_parser!(PathBuf)),
         )
         .subcommand(Command::new("status"))
+        .subcommand(
+            Command::new("set-default-branch")
+                .arg(
+                    Arg::new("expected")
+                        .long("expected")
+                        .required(true)
+                        .value_parser(clap::value_parser!(OsString)),
+                )
+                .arg(
+                    Arg::new("target")
+                        .long("target")
+                        .required(true)
+                        .value_parser(clap::value_parser!(OsString)),
+                )
+                .arg(
+                    Arg::new("recovery-file")
+                        .long("recovery-file")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf)),
+                ),
+        )
         .subcommand(
             Command::new("checkpoint").arg(
                 Arg::new("retain-packs")
@@ -308,6 +378,24 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
     let action = match parsed.subcommand() {
         Some(("status", _)) => Action::Status,
         Some(("checkpoint", _)) => Action::Checkpoint,
+        Some(("set-default-branch", command)) => {
+            let name = |key| {
+                command
+                    .get_one::<OsString>(key)
+                    .map(|value| value.as_encoded_bytes().to_vec())
+                    .ok_or(Failure("invalid_arguments", 2))
+            };
+            let expected = name("expected")?;
+            let target = name("target")?;
+            let path = command
+                .get_one::<PathBuf>("recovery-file")
+                .ok_or(Failure("invalid_arguments", 2))?;
+            Action::SetDefault {
+                expected,
+                target,
+                receipt: Receipt::reserve(path)?,
+            }
+        }
         Some(("resume-commit", subcommand)) => {
             let path = subcommand
                 .get_one::<PathBuf>("token-file")
@@ -335,6 +423,44 @@ fn classify(error: &object_log::Error) -> Failure {
 
 async fn execute(log: &Log, action: &Action, format: ObjectFormat) -> Report {
     match action {
+        Action::SetDefault {
+            expected,
+            target,
+            receipt,
+        } => {
+            let result = async {
+                Repository::open(log, format)
+                    .await?
+                    .set_default_branch(object_log::TransactionId::new(), expected, target)
+                    .await
+            }
+            .await;
+            match result {
+                Ok(object_log::CommitStatus::Committed(view)) => {
+                    Report::new(action.name(), "updated", 0).observed(&view)
+                }
+                Ok(object_log::CommitStatus::Conflict(view)) => {
+                    Report::new(action.name(), "conflict", 3).observed(&view)
+                }
+                Ok(object_log::CommitStatus::Pending(pending)) => {
+                    let saved = pending
+                        .recovery_token()
+                        .ok()
+                        .is_some_and(|token| receipt.save(&token).is_ok());
+                    let mut report = Report::new(action.name(), "pending", 4);
+                    report.recovery_token = Some(if saved { "saved" } else { "unavailable" });
+                    report
+                }
+                Err(object_log_git::Error::StaleReference) => {
+                    Report::new(action.name(), "stale_default", 3)
+                }
+                Err(object_log_git::Error::Busy) => Report::new(action.name(), "busy", 3),
+                Err(object_log_git::Error::ObjectLog(error)) => {
+                    Report::failed(action.name(), classify(&error))
+                }
+                Err(_) => Report::new(action.name(), "invalid_git_state_or_limit", 5),
+            }
+        }
         Action::Checkpoint => match Repository::checkpoint_retaining_packs(log, format).await {
             Ok(object_log::CheckpointStatus::Published(view)) => {
                 Report::new(action.name(), "checkpointed", 0).observed(&view)
@@ -413,15 +539,22 @@ async fn bounded(
     tokio::time::timeout(deadline, work)
         .await
         .unwrap_or_else(|_| {
-            Report::new(
+            let mut report = Report::new(
                 operation,
-                if matches!(operation, "resume-commit" | "checkpoint") {
+                if matches!(
+                    operation,
+                    "resume-commit" | "checkpoint" | "set-default-branch"
+                ) {
                     "pending"
                 } else {
                     "backend_unavailable"
                 },
                 4,
-            )
+            );
+            if operation == "set-default-branch" {
+                report.recovery_token = Some("unavailable");
+            }
+            report
         })
 }
 

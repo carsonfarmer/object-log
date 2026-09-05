@@ -1,0 +1,2 @@
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `release` profile [optimized] target(s) in 2.35s

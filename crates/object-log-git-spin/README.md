@@ -106,7 +106,8 @@ normal Git response framing. Each invocation validates the backend and
 opens the log, so measurements must include that fixed provider work.
 
 The one-shot operator command below supports head status, exact commit-token
-resumption and metadata checkpoints that retain every pack. Collection still
+resumption, explicit default-branch updates and metadata checkpoints that retain
+every pack. Collection still
 requires shared-library calls, as demonstrated in [`tests/minio.rs`](tests/minio.rs)
 while Spin is stopped. Issue #32 remains open for collection commands, retention
 cleanup and broader memory and sustained-service qualification.
@@ -121,6 +122,7 @@ chmod 600 /deployment/repository.toml
 target/release/object-log-git-maintain --config /deployment/repository.toml status
 target/release/object-log-git-maintain --config /deployment/repository.toml resume-commit --token-file /private/push.token
 target/release/object-log-git-maintain --config /deployment/repository.toml checkpoint --retain-packs
+target/release/object-log-git-maintain --config /deployment/repository.toml set-default-branch --expected refs/heads/main --target refs/heads/trunk --recovery-file /private/default-branch.token
 ```
 
 The command opens an existing WAL; a missing or mistyped target never creates
@@ -142,7 +144,8 @@ token inputs; final-path symlinks, directories and FIFOs are rejected. Config
 is limited to 16 KiB and tokens to 1 MiB. The token bound covers ordinary
 default-options S3 tokens, but is a supported input cap, not a universal token
 schema maximum: provider version strings have no schema bound. Preserve the
-exact token file until resolution is confirmed. The command never changes it.
+exact token file until resolution is confirmed. Resumption never changes its
+token input.
 
 `status` reads the head without materializing Git state or loading pack
 catalogs. It reports generation, tail count, checkpoint-through sequence when
@@ -173,6 +176,30 @@ fresh head. This converges maintenance state but cannot establish the exact
 historical outcome of the earlier attempt: this command does not persist an
 exact checkpoint token or run unbounded resolution after the helper returns.
 
+`set-default-branch` publishes an explicit symbolic HEAD update through the same
+WAL CAS. Stop and drain serving processes first. Both names must be full branch
+refs; the target may be unborn. Existing ref OIDs and packs are preserved. Legacy
+repositories start with `refs/heads/main`. A stale expected default or any
+competing head update rejects this candidate; the command never rebases it.
+The persisted default survives checkpoints and cold serving restarts. This is
+an explicit repository update, not a Spin bootstrap variable.
+
+Each call requires a new `--recovery-file` path. The command reserves and syncs
+an empty mode-0600 file before provider access, and never overwrites an existing
+path. Reservation happens before configuration validation, so even an invalid
+configuration can leave an empty file. Confirmed updates and conflicts leave it
+empty. If publication returns pending, the command writes the exact core token
+and fsyncs the file and directory before reporting `recovery_token: "saved"`.
+Use `resume-commit --token-file` with that file to resolve the exact attempt.
+
+A write/fsync failure or deadline reports pending without a saved-token claim.
+The file may then be empty or partial. A crash or lost response before token
+persistence can leave the exact attempt unknown: observing the desired default
+later establishes visibility, not which attempt published it. Do not replay an
+unknown update automatically. Synchronous receipt writes and fsync are not
+preempted by the asynchronous backend deadline. Stronger recovery before
+publication remains tracked in #32.
+
 Every normal invocation emits one JSON line of at most 2 KiB. Output contains
 static outcome names and numeric head metadata; it deliberately omits target
 strings, paths, credentials, token bytes and provider diagnostics. Use the
@@ -180,15 +207,15 @@ outcome together with the exit status:
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, or requested help. `not_committed` means resolution completed, not a successful push. |
-| 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unsupported platform or incompatible durable options. |
-| 3 | Checkpoint `conflict` or shared-engine `busy`; retry against a fresh head after competing work finishes. |
+| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, or requested help. `not_committed` means resolution completed, not a successful push. |
+| 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unavailable recovery output, unsupported platform or incompatible durable options. |
+| 3 | `conflict`, `stale_default`, or shared-engine `busy`; inspect the fresh state before another update. |
 | 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |
 | 5 | Invalid/corrupt evidence, a missing head, resource limit, unsupported backend, collection fence, expired view or runtime setup failure. `invalid_git_state_or_limit` covers Git validation and budget failures. No raw error chain is printed. |
 
 Native S3 retries are disabled, connect timeout is five seconds, request timeout
 is thirty seconds, and the asynchronous backend operation has a sixty-second
-deadline. Deadline expiry during resume or checkpoint is pending: cancellation
+deadline. Deadline expiry during a mutation is pending: cancellation
 cannot prove publication failed. A new resume command may retry the same token.
 Input file reads precede the asynchronous deadline.
 

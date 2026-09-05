@@ -65,3 +65,10 @@ group and listener to disappear before maintenance. See
 [shutdown evidence](spin-fixture-shutdown-2026-09-05.md). This candidate's local
 configuration behavior passes its focused tests, but corrected full provider
 acceptance remains required before closing the operator qualification work.
+
+## Additional native-provider qualification
+
+The corrected process shutdown, authentication-compatible operator and shared
+maintenance correction subsequently passed native MinIO lifecycles for both
+hashes. See [the combined operator evidence](spin-operator-default-branch-2026-09-05.md).
+Docker-image requalification remains pending and distinct.

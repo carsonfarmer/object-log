@@ -1,0 +1,851 @@
+minio version RELEASE.2025-09-07T16-13-09Z (commit-id=07c3a429bfed433e49018cb0f78a52145d4bedeb)
+Runtime: go1.24.6 darwin/arm64
+License: GNU AGPLv3 - https://www.gnu.org/licenses/agpl-3.0.html
+Copyright: 2015-2025 MinIO, Inc.
+Native provider SHA256: 7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4
+Run directory: /tmp/object-log-operator-native.He8QT5
+{
+    "Location": "/object-log-test"
+}
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running tests/operator_minio.rs (target/debug/deps/operator_minio-cd157fa405323e75)
+
+running 1 test
+Operator status executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"status","outcome":"invalid_evidence"}
+        0.20 real         0.00 user         0.01 sys
+            10190848  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 842  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  43  involuntary context switches
+            50141063  instructions retired
+            34064171  cycles elapsed
+             2982368  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"checkpoint","outcome":"invalid_evidence"}
+        0.01 real         0.00 user         0.00 sys
+            10125312  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 838  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  44  involuntary context switches
+            40292112  instructions retired
+            15477720  cycles elapsed
+             2933216  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"resume-commit","outcome":"invalid_evidence"}
+        0.01 real         0.00 user         0.00 sys
+            10174464  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 841  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  45  involuntary context switches
+            40556710  instructions retired
+            14405612  cycles elapsed
+             2982368  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":0,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            10420224  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 856  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  50  involuntary context switches
+            41410585  instructions retired
+            15286191  cycles elapsed
+             3015136  peak memory footprint
+
+Operator status executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":1,"operation":"status","outcome":"observed","tail_entries":1}
+        0.01 real         0.00 user         0.00 sys
+            10371072  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 853  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  47  involuntary context switches
+            40802438  instructions retired
+            16805858  cycles elapsed
+             3031520  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":2,"operation":"resume-commit","outcome":"committed","tail_entries":2}
+        0.01 real         0.00 user         0.00 sys
+            10502144  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 861  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  15  messages sent
+                  15  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  63  involuntary context switches
+            42677295  instructions retired
+            17389193  cycles elapsed
+             3162616  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":2,"operation":"resume-commit","outcome":"committed","tail_entries":2}
+        0.01 real         0.00 user         0.00 sys
+            10502144  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 861  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  14  messages sent
+                  14  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  59  involuntary context switches
+            42360913  instructions retired
+            16545989  cycles elapsed
+             3162616  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":2,"operation":"resume-commit","outcome":"not_committed","tail_entries":2}
+        0.00 real         0.00 user         0.00 sys
+            10371072  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 853  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  49  involuntary context switches
+            41363790  instructions retired
+            16132064  cycles elapsed
+             3031520  peak memory footprint
+
+sha1: shared engine confirms full-tail call limit; unchanged head produces Spin HTTP 400: git ["ls-remote", "http://127.0.0.1:63411/repo"]: error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400
+fatal: expected flush after ref listing
+
+Operator status executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":1024,"operation":"status","outcome":"observed","tail_entries":1024}
+        0.01 real         0.00 user         0.00 sys
+            11386880  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 915  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  16  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  48  involuntary context switches
+            52504224  instructions retired
+            19111979  cycles elapsed
+             4080144  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"checkpoint","outcome":"invalid_git_state_or_limit"}
+        0.01 real         0.00 user         0.00 sys
+            13271040  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1031  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  43  messages sent
+                  22  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  57  involuntary context switches
+            66644535  instructions retired
+            25564953  cycles elapsed
+             5849592  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1023,"collection_active":false,"collection_epoch":0,"generation":1025,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.08 real         0.04 user         0.01 sys
+            14467072  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1103  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2061  messages sent
+                2067  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 356  involuntary context switches
+           736131250  instructions retired
+           239211815  cycles elapsed
+             7062032  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1023,"collection_active":false,"collection_epoch":0,"generation":1025,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11501568  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 923  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  12  messages sent
+                  18  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  54  involuntary context switches
+            53032363  instructions retired
+            20708066  cycles elapsed
+             4080144  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1024,"collection_active":false,"collection_epoch":0,"generation":1027,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11714560  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 935  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  22  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  67  involuntary context switches
+            57786438  instructions retired
+            21160150  cycles elapsed
+             4293112  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1025,"collection_active":false,"collection_epoch":0,"generation":1029,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11796480  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 940  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  21  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  64  involuntary context switches
+            57841355  instructions retired
+            20677204  cycles elapsed
+             4375032  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1026,"collection_active":false,"collection_epoch":0,"generation":1031,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11698176  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 934  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  21  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  64  involuntary context switches
+            57787830  instructions retired
+            21680785  cycles elapsed
+             4276728  peak memory footprint
+
+Operator set-default-branch executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1026,"collection_active":false,"collection_epoch":0,"generation":1033,"operation":"set-default-branch","outcome":"updated","tail_entries":2}
+        0.02 real         0.00 user         0.00 sys
+            11665408  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 932  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  15  messages sent
+                  21  messages received
+                   0  signals received
+                   3  voluntary context switches
+                  64  involuntary context switches
+            58581207  instructions retired
+            21370318  cycles elapsed
+             4260368  peak memory footprint
+
+Operator set-default-branch executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"set-default-branch","outcome":"stale_default"}
+        0.01 real         0.00 user         0.00 sys
+            11714560  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 935  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  14  messages sent
+                  20  messages received
+                   0  signals received
+                   3  voluntary context switches
+                  60  involuntary context switches
+            55320575  instructions retired
+            22252719  cycles elapsed
+             4293136  peak memory footprint
+
+Operator set-default-branch executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1026,"collection_active":false,"collection_epoch":0,"generation":1034,"operation":"set-default-branch","outcome":"updated","tail_entries":3}
+        0.01 real         0.00 user         0.00 sys
+            11599872  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 929  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  23  messages received
+                   0  signals received
+                   3  voluntary context switches
+                  66  involuntary context switches
+            59031753  instructions retired
+            23201640  cycles elapsed
+             4178424  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1030,"collection_active":false,"collection_epoch":0,"generation":1036,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            12075008  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 957  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  22  messages sent
+                  28  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  73  involuntary context switches
+            60647108  instructions retired
+            22042558  cycles elapsed
+             4653560  peak memory footprint
+
+sha1: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master and unborn default passed
+Operator status executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"status","outcome":"invalid_evidence"}
+        0.00 real         0.00 user         0.00 sys
+            10158080  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 840  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  46  involuntary context switches
+            40332157  instructions retired
+            15344330  cycles elapsed
+             2965984  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"checkpoint","outcome":"invalid_evidence"}
+        0.00 real         0.00 user         0.00 sys
+            10158080  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 840  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  46  involuntary context switches
+            40309057  instructions retired
+            15016991  cycles elapsed
+             2982392  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"resume-commit","outcome":"invalid_evidence"}
+        0.00 real         0.00 user         0.00 sys
+            10141696  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 839  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  45  involuntary context switches
+            40482752  instructions retired
+            14558483  cycles elapsed
+             2949600  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":0,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.00 real         0.00 user         0.00 sys
+            10403840  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 855  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  48  involuntary context switches
+            40829795  instructions retired
+            16365936  cycles elapsed
+             2998752  peak memory footprint
+
+Operator status executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":1,"operation":"status","outcome":"observed","tail_entries":1}
+        0.01 real         0.00 user         0.00 sys
+            10371072  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 853  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  47  involuntary context switches
+            40801976  instructions retired
+            16047704  cycles elapsed
+             3031520  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":2,"operation":"resume-commit","outcome":"committed","tail_entries":2}
+        0.01 real         0.00 user         0.00 sys
+            10502144  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 861  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  15  messages sent
+                  15  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  63  involuntary context switches
+            42751645  instructions retired
+            18003118  cycles elapsed
+             3146208  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":2,"operation":"resume-commit","outcome":"committed","tail_entries":2}
+        0.01 real         0.00 user         0.00 sys
+            10567680  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 866  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  14  messages sent
+                  14  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  61  involuntary context switches
+            42518396  instructions retired
+            15782770  cycles elapsed
+             3195360  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":2,"operation":"resume-commit","outcome":"not_committed","tail_entries":2}
+        0.00 real         0.00 user         0.00 sys
+            10354688  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 852  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  48  involuntary context switches
+            41353733  instructions retired
+            15165425  cycles elapsed
+             3015136  peak memory footprint
+
+sha256: shared engine confirms full-tail call limit; unchanged head produces Spin HTTP 400: git ["ls-remote", "http://127.0.0.1:64105/repo"]: error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400
+fatal: expected flush after ref listing
+
+Operator status executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"collection_active":false,"collection_epoch":0,"generation":1024,"operation":"status","outcome":"observed","tail_entries":1024}
+        0.01 real         0.00 user         0.00 sys
+            11321344  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 911  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  16  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  50  involuntary context switches
+            52518434  instructions retired
+            19484312  cycles elapsed
+             3998200  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"checkpoint","outcome":"invalid_git_state_or_limit"}
+        0.01 real         0.00 user         0.00 sys
+            13123584  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1021  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  43  messages sent
+                  18  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  57  involuntary context switches
+            66353334  instructions retired
+            25097613  cycles elapsed
+             5718544  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1023,"collection_active":false,"collection_epoch":0,"generation":1025,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.07 real         0.04 user         0.01 sys
+            14352384  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1096  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2061  messages sent
+                2067  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 348  involuntary context switches
+           738507363  instructions retired
+           231691439  cycles elapsed
+             6947344  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1023,"collection_active":false,"collection_epoch":0,"generation":1025,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11665408  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 932  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  12  messages sent
+                  17  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  52  involuntary context switches
+            53124918  instructions retired
+            21090905  cycles elapsed
+             4260368  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1024,"collection_active":false,"collection_epoch":0,"generation":1027,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11730944  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 931  page reclaims
+                   5  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  21  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  65  involuntary context switches
+            58336340  instructions retired
+            21318336  cycles elapsed
+             4309496  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1025,"collection_active":false,"collection_epoch":0,"generation":1029,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11698176  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 934  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  22  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  68  involuntary context switches
+            57819506  instructions retired
+            20650350  cycles elapsed
+             4293136  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1026,"collection_active":false,"collection_epoch":0,"generation":1031,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11747328  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 937  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  21  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  66  involuntary context switches
+            57865072  instructions retired
+            21133588  cycles elapsed
+             4325880  peak memory footprint
+
+Operator set-default-branch executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1026,"collection_active":false,"collection_epoch":0,"generation":1033,"operation":"set-default-branch","outcome":"updated","tail_entries":2}
+        0.02 real         0.00 user         0.00 sys
+            11436032  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 918  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  15  messages sent
+                  21  messages received
+                   0  signals received
+                   3  voluntary context switches
+                  64  involuntary context switches
+            58442964  instructions retired
+            21937649  cycles elapsed
+             4014584  peak memory footprint
+
+Operator set-default-branch executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"operation":"set-default-branch","outcome":"stale_default"}
+        0.01 real         0.00 user         0.00 sys
+            11616256  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 929  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  14  messages sent
+                  20  messages received
+                   0  signals received
+                   3  voluntary context switches
+                  60  involuntary context switches
+            55193287  instructions retired
+            20513542  cycles elapsed
+             4194808  peak memory footprint
+
+Operator set-default-branch executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1026,"collection_active":false,"collection_epoch":0,"generation":1034,"operation":"set-default-branch","outcome":"updated","tail_entries":3}
+        0.01 real         0.00 user         0.00 sys
+            11649024  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 931  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  22  messages received
+                   0  signals received
+                   3  voluntary context switches
+                  65  involuntary context switches
+            59043276  instructions retired
+            20329197  cycles elapsed
+             4227576  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/.codex/worktrees/fd2d/object-log/target/release/object-log-git-maintain
+Report: {"checkpoint_through":1030,"collection_active":false,"collection_epoch":0,"generation":1036,"operation":"checkpoint","outcome":"checkpointed","tail_entries":0}
+        0.01 real         0.00 user         0.00 sys
+            11927552  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 948  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  22  messages sent
+                  29  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  78  involuntary context switches
+            60600789  instructions retired
+            22743344  cycles elapsed
+             4522512  peak memory footprint
+
+sha256: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master and unborn default passed
+test operator_minio_status_and_exact_resume_preserve_both_hashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 12.75s
+
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running tests/minio.rs (target/debug/deps/minio-9766c9e73f031db5)
+
+running 4 tests
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-64658.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-64767.rss
+test spin_minio_default_git_large_push_probes_then_streams_both_hashes ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-64879.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-64959.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-65080.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-65178.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-65258.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-65378.rss
+test spin_minio_force_with_lease_and_notes_obey_host_policy ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-65476.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-49570.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-49658.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-49699.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-50178.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-50266.rss
+test spin_minio_clients_recover_after_collection ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-50304.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-50528.rss
+test spin_minio_large_fetch_uses_gzip_multi_round_negotiation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 22.30s

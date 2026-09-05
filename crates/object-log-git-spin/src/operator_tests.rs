@@ -6,6 +6,7 @@ use object_store::memory::InMemory;
 use tempfile::TempDir;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+static GIT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // Status/resume tests operate on generic WAL bytes and do not decode Git state.
 async fn execute(log: &Log, action: &Action) -> Report {
@@ -331,6 +332,7 @@ async fn seed_git(log: &Log, name: &str, format: ObjectFormat) -> TestResult {
 
 #[tokio::test]
 async fn checkpoint_faults_preserve_uncertainty_and_fresh_head_convergence() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
     for (name, format) in [
         ("sha1", ObjectFormat::Sha1),
         ("sha256", ObjectFormat::Sha256),
@@ -574,5 +576,319 @@ fn output_errors_and_provider_errors_do_not_leak_secrets() -> TestResult {
             .write(std::io::Cursor::new(&mut [0_u8; 1][..]))
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn default_branch_requires_a_new_private_receipt_before_provider_access() -> TestResult {
+    let root = TempDir::new()?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let config = private_file(
+        &root,
+        "config",
+        config(&format!("http://{}", listener.local_addr()?)).as_bytes(),
+    )?;
+    let existing = private_file(&root, "existing", b"PRIVATE_TOKEN")?;
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&existing, &link)?;
+    let fifo = root.path().join("fifo");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()?
+            .success()
+    );
+    for path in [
+        &existing,
+        &link,
+        &fifo,
+        &fifo.join("token"),
+        root.path(),
+        &root.path().join("missing/receipt"),
+    ] {
+        let report = run(arguments(
+            &config,
+            &[
+                "set-default-branch",
+                "--expected",
+                "refs/heads/main",
+                "--target",
+                "refs/heads/trunk",
+                "--recovery-file",
+                path.to_str().ok_or("non-UTF8 fixture path")?,
+            ],
+        ));
+        assert_eq!(report.exit(), 2);
+        assert_eq!(json(&report)?["outcome"], "recovery_file_unavailable");
+    }
+    assert_eq!(std::fs::read(existing)?, b"PRIVATE_TOKEN");
+    assert_eq!(
+        run(arguments(
+            &config,
+            &[
+                "set-default-branch",
+                "--expected",
+                "refs/heads/main",
+                "--target",
+                "refs/heads/trunk"
+            ]
+        ))
+        .exit(),
+        2
+    );
+    assert_eq!(
+        listener.accept().err().map(|error| error.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
+    let path = root.path().join("new-receipt");
+    let request = parse(arguments(
+        &config,
+        &[
+            "set-default-branch",
+            "--expected",
+            "refs/heads/main",
+            "--target",
+            "refs/heads/trunk",
+            "--recovery-file",
+            path.to_str().ok_or("non-UTF8 fixture path")?,
+        ],
+    ))?;
+    assert!(matches!(request.action, Action::SetDefault { .. }));
+    assert_eq!(
+        std::fs::metadata(&path)?.permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::metadata(path)?.len(), 0);
+    let mut raw_args = arguments(
+        &config,
+        &[
+            "set-default-branch",
+            "--expected",
+            "refs/heads/main",
+            "--target",
+        ],
+    );
+    raw_args.push(std::os::unix::ffi::OsStringExt::from_vec(
+        b"refs/heads/\xff".to_vec(),
+    ));
+    raw_args.extend([
+        OsString::from("--recovery-file"),
+        root.path().join("byte-receipt").into_os_string(),
+    ]);
+    assert!(
+        matches!(parse(raw_args)?.action, Action::SetDefault { target, .. } if target == b"refs/heads/\xff")
+    );
+    Ok(())
+}
+
+fn default_action(
+    root: &Path,
+    name: &str,
+    expected: &[u8],
+    target: &[u8],
+) -> TestResult<(Action, PathBuf)> {
+    let path = root.join(name);
+    let action = Action::SetDefault {
+        expected: expected.to_vec(),
+        target: target.to_vec(),
+        receipt: Receipt::reserve(&path)?,
+    };
+    Ok((action, path))
+}
+
+#[tokio::test]
+async fn default_branch_updates_and_stale_or_invalid_names_preserve_refs() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let root = TempDir::new()?;
+        let (log, faults, _) = fixture("default", Options::default()).await?;
+        let (action, path) = default_action(
+            root.path(),
+            "updated",
+            b"refs/heads/main",
+            b"refs/heads/trunk",
+        )?;
+        let report = super::execute(&log, &action, format).await;
+        assert_eq!(report.exit(), 0);
+        assert_eq!(json(&report)?["outcome"], "updated");
+        assert!(json(&report)?.get("recovery_token").is_none());
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        let repository = Repository::open(&log, format).await?;
+        assert_eq!(repository.default_branch(), b"refs/heads/trunk");
+        assert!(repository.refs().is_empty());
+        drop(repository);
+        let before = log.load().await?;
+        for (name, expected, target, exit) in [
+            (
+                "stale",
+                b"refs/heads/main".as_slice(),
+                b"refs/heads/master".as_slice(),
+                3,
+            ),
+            (
+                "invalid",
+                b"refs/heads/trunk".as_slice(),
+                b"refs/tags/wrong".as_slice(),
+                5,
+            ),
+        ] {
+            let (action, path) = default_action(root.path(), name, expected, target)?;
+            faults.reset();
+            assert_eq!(super::execute(&log, &action, format).await.exit(), exit);
+            assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+            assert!(log.refresh(&before).await?.is_none());
+            assert_eq!(std::fs::metadata(path)?.len(), 0);
+        }
+        let (action, _) = default_action(
+            root.path(),
+            "byte-name",
+            b"refs/heads/trunk",
+            b"refs/heads/\xff",
+        )?;
+        assert_eq!(super::execute(&log, &action, format).await.exit(), 0);
+        assert_eq!(
+            Repository::open(&log, format).await?.default_branch(),
+            b"refs/heads/\xff"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_branch_pending_receipts_resume_the_exact_candidate() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        for phase in [FailurePhase::Before, FailurePhase::After] {
+            let root = TempDir::new()?;
+            let (log, faults, _) = fixture("default-pending", Options::default()).await?;
+            let (action, path) = default_action(
+                root.path(),
+                "receipt",
+                b"refs/heads/main",
+                b"refs/heads/trunk",
+            )?;
+            faults.schedule(object_log::sim::Failure {
+                operation: Operation::Put,
+                occurrence: 2,
+                phase,
+            });
+            let report = super::execute(&log, &action, format).await;
+            assert_eq!(report.exit(), 4);
+            let value = json(&report)?;
+            assert_eq!(value["outcome"], "pending");
+            assert_eq!(value["recovery_token"], "saved");
+            assert!(value.get("generation").is_none());
+            let token = read_file(&path, TOKEN_BYTES)?;
+            assert!(!token.is_empty());
+            for _ in 0..2 {
+                assert_eq!(
+                    json(&execute(&log, &Action::Resume(token.clone())).await)?["outcome"],
+                    "committed"
+                );
+            }
+            assert_eq!(std::fs::read(path)?, token);
+            assert_eq!(log.load().await?.tail().len(), 1);
+            assert_eq!(
+                Repository::open(&log, format).await?.default_branch(),
+                b"refs/heads/trunk"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_branch_receipt_failure_and_cancellation_never_claim_a_saved_token() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let root = TempDir::new()?;
+        let (log, faults, _) = fixture("default-no-receipt", Options::default()).await?;
+        let path = private_file(&root, "unwritable", b"")?;
+        // A read-only descriptor deterministically injects a write failure after CAS.
+        let action = Action::SetDefault {
+            expected: b"refs/heads/main".to_vec(),
+            target: b"refs/heads/trunk".to_vec(),
+            receipt: Receipt {
+                file: File::open(&path)?,
+                directory: File::open(root.path())?,
+            },
+        };
+        faults.schedule(object_log::sim::Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::After,
+        });
+        let report = super::execute(&log, &action, format).await;
+        assert_eq!(report.exit(), 4);
+        assert_eq!(json(&report)?["recovery_token"], "unavailable");
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        assert_eq!(
+            Repository::open(&log, format).await?.default_branch(),
+            b"refs/heads/trunk"
+        );
+
+        let (log, faults, _) = fixture("default-cancel", Options::default()).await?;
+        let (action, path) = default_action(
+            root.path(),
+            "cancelled",
+            b"refs/heads/main",
+            b"refs/heads/master",
+        )?;
+        let mut pause = faults.pause_put_at(2, FailurePhase::After);
+        let work = bounded(
+            action.name(),
+            Duration::from_millis(100),
+            super::execute(&log, &action, format),
+        );
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        let report = work.await;
+        assert_eq!(report.exit(), 4);
+        assert_eq!(json(&report)?["recovery_token"], "unavailable");
+        assert!(json(&report)?.get("generation").is_none());
+        assert!(!pause.release());
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        assert_eq!(
+            Repository::open(&log, format).await?.default_branch(),
+            b"refs/heads/master"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_branch_concurrent_head_change_reports_conflict_without_receipt() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let root = TempDir::new()?;
+        let (log, faults, _) = fixture("default-conflict", Options::default()).await?;
+        let (action, path) = default_action(
+            root.path(),
+            "conflict",
+            b"refs/heads/main",
+            b"refs/heads/trunk",
+        )?;
+        let view = log.load().await?;
+        let mut pause = faults.pause_put_at(2, FailurePhase::Before);
+        let work = super::execute(&log, &action, format);
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        log.retain(&view, object_log::RetentionId::new()).await?;
+        assert!(pause.release());
+        let report = work.await;
+        assert_eq!(report.exit(), 3);
+        assert_eq!(json(&report)?["outcome"], "conflict");
+        assert!(json(&report)?.get("recovery_token").is_none());
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        assert_eq!(
+            Repository::open(&log, format).await?.default_branch(),
+            b"refs/heads/main"
+        );
+    }
     Ok(())
 }

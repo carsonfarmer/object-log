@@ -87,3 +87,13 @@ OBJECT_LOG_OPERATOR_BINARY="$PWD/target/release/object-log-git-maintain" \
   operator_minio_status_and_exact_resume_preserve_both_hashes \
   object-log-git-spin operator
 ```
+
+## Process-shutdown correction and later provider evidence
+
+The original fixture stopped the Spin launcher but left its HTTP trigger idle.
+Thus its stopped-process claim was incomplete. The
+[shutdown correction](spin-fixture-shutdown-2026-09-05.md) now requires the entire
+process group and listener to disappear. The corrected checkpoint lifecycle,
+shared accounting fixes and authentication compatibility passed additional
+[native MinIO qualification](spin-operator-default-branch-2026-09-05.md).
+Docker-image requalification remains pending and distinct.

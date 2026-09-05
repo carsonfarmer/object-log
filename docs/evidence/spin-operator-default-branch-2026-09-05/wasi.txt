@@ -1,0 +1,3 @@
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git)
+    Checking object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.89s

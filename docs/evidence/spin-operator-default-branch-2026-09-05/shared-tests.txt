@@ -1,0 +1,48 @@
+   Compiling smallvec v1.16.0
+   Compiling regex-automata v0.4.18
+   Compiling gix-utils v0.3.6
+   Compiling digest v0.10.7
+   Compiling cpufeatures v0.2.17
+   Compiling cpufeatures v0.3.1
+   Compiling tokio v1.53.1
+   Compiling memmap2 v0.9.11
+   Compiling sha2 v0.11.0
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_normalizer v2.3.0
+   Compiling sha1 v0.10.7
+   Compiling sha1-checked v0.10.0
+   Compiling parking_lot v0.12.5
+   Compiling idna_adapter v1.2.2
+   Compiling prodash v31.0.0
+   Compiling idna v1.1.0
+   Compiling gix-features v0.49.1
+   Compiling url v2.5.8
+   Compiling gix-hash v0.26.2
+   Compiling gix-hashtable v0.16.0
+   Compiling bstr v1.13.1
+   Compiling regex v1.13.1
+   Compiling criterion v0.7.0
+   Compiling gix-validate v0.11.4
+   Compiling gix-error v0.3.2
+   Compiling gix-packetline v0.22.2
+   Compiling gix-path v0.12.6
+   Compiling gix-date v0.16.0
+   Compiling gix-chunk v0.8.0
+   Compiling gix-fs v0.22.1
+   Compiling gix-actor v0.42.0
+   Compiling gix-tempfile v24.0.0
+   Compiling gix-object v0.64.1
+   Compiling object_store v0.14.1
+   Compiling gix-pack v0.74.2
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.58s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7d5666786ede979b)
+
+running 4 tests
+test repository::tests::default_branch_stale_and_concurrent_updates_preserve_one_winner ... ok
+test repository::tests::default_branch_pending_returns_exact_recoverable_candidate ... ok
+test repository::tests::default_branch_update_cannot_clobber_a_concurrent_ref_push ... ok
+test repository::tests::default_branch_survives_unborn_push_checkpoint_delete_and_cold_restore ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.92s
