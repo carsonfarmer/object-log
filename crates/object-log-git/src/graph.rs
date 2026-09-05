@@ -714,15 +714,6 @@ mod tests {
         let graph = repository.graph(&roots).await?;
         assert_eq!(graph.nodes.len(), roots.len());
         drop(graph);
-        repository.store.reset();
-        assert_eq!(
-            repository
-                .store
-                .metrics()
-                .operation(StoreOperation::Get)
-                .requests,
-            0
-        );
         assert!(
             repository.operation.work_bytes()
                 > (pack::MAX_OBJECTS as usize * size_of::<Node>()) as u64
@@ -730,6 +721,7 @@ mod tests {
         // Completed work is retained; a retry never admits a fresh budget.
         let remaining = pack::budget::WORK_BYTES - repository.operation.work_bytes();
         repository.operation.work(remaining)?;
+        repository.store.reset();
         assert!(repository.graph(&roots[..1]).await.is_err());
         assert_eq!(
             repository
