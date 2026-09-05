@@ -21,6 +21,11 @@ The core `object-log` crate remains independent from Git.
 
 ## Current state
 
+The full [review and execution queue](docs/reviews/git-proof-2026-09-05.md)
+records ordinary-workflow gaps and core API lessons. Issue #26 sets minimum
+capacity at 50 MiB files and 1 GiB pushes. The 128 MiB budget applies to serving
+runtime, not builds or component compilation/cache preparation.
+
 Tasks 1–9 were accepted at `b4b05f3`. Tasks 10–12 now pass unchanged-client,
 local-provider, functional, and resource qualification for the shared native
 and Spin adapters. Independent reviews are recorded. The owner subsequently

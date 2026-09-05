@@ -1,6 +1,6 @@
 # object-log handoff
 
-Updated: 2026-09-04, previous native Git removal.
+Updated: 2026-09-05, Git proof review and issue-driven implementation.
 
 ## Intent
 
@@ -27,9 +27,8 @@ publication, corrupt evidence, and expired token tests run in the portable Git
 library. The removed native host's TaskTracker/disconnect/shutdown behavior is
 not a Spin guarantee: Spin awaits publication inline.
 
-Removal work uses exclusive `cf/remove-native-git`, source `4a99384` plus root
-workspace/docs changes. Do not interpret historical evidence as claiming that
-deleted APIs still exist.
+Removal was integrated and pushed at `0368454`; hosted Linux CI 33941521276
+passed. Do not interpret historical evidence as claiming deleted APIs still exist.
 
 ## Removal verification
 
@@ -132,3 +131,33 @@ The pooled HTTP error is now reproduced with a standalone Spin SDK component
 without object-log, object_store or the custom bridge. Pooled GETs fail with
 IncompleteMessage; two unpooled runs pass 1,000 invocations each. Exact fault
 ownership remains unproven. See `docs/evidence/spin-pooling-2026-09-05.md` and #22.
+
+## Current review and execution queue
+
+Read `docs/reviews/git-proof-2026-09-05.md`. GitHub #11 is the queue and #17 the
+Git outcome. New findings #27–#35 cover authenticated read bounds, repeated packs,
+normal refs/default branch, maintenance, client authorization, node sizing,
+proof-preserving traversal and bounded materialization. #26 requires at least
+50 MiB regular files and 1 GiB pushes with working fetch/recovery/maintenance.
+The owner accepts 128 MiB as a serving-runtime budget; builds and Wasmtime
+compilation/cache preparation are outside it. Do not call their OOM under the
+serving cap a product acceptance failure.
+
+The first reviewed queue batch has source revision `5c037c3`: #27/#28 fixes,
+Spin read-only policy/operator instructions, and authenticated range copying
+for fetch. Combined gates pass 327 ordinary tests (12 opt-in ignored), strict
+native/WASIp2 checks, separate Git/Spin MinIO tests, request accounting, and six
+actual-WASI memory fixtures. See the review's accepted-batch section and raw
+`docs/evidence/git-proof-queue-2026-09-05/` logs. Existing capacity limits and
+#23's actual-WASIp2 latency finding remain unchanged.
+
+Root integrates in exclusive `cf/git-proof-queue`. Next subagents own bounded
+materialization (#34) and general ref namespaces (#29); sidebar tasks own
+incremental blob verification (#26) and maintenance design (#32). They deliver
+commits and evidence; only root integrates main. Do not overlap their files.
+
+No upstream reports or external communications without explicit approval of
+the concrete contents. The prior upstream report was withdrawn and its original
+revision removed. Do not restore upstream links or cross-references. Local #22
+remains an investigation. Keep later SQLite, production KV and the owner's
+G-trees-based verifiable KV work out of the present Git tranche.

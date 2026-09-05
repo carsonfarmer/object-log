@@ -1,0 +1,16 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-duplicate-pack/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git-7b162a3d36c9d4b3)
+
+running 1 test
+Error: ReceiveRejected { response: b"000eunpack ok\n0037ng refs/tags/new invalid update or storage failure\n0000", source: InvalidRecord("pack is already present") }
+test repository::tests::common_receive_reuses_retained_pack_for_new_refs_and_restored_history ... FAILED
+
+failures:
+
+failures:
+    repository::tests::common_receive_reuses_retained_pack_for_new_refs_and_restored_history
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 107 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `-p object-log-git --lib`

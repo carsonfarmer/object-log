@@ -228,3 +228,7 @@ remains open. Follow-on acceptance covers [pack compaction and useful scale](htt
 [large-push performance](https://github.com/carsonfarmer/object-log/issues/23),
 [shallow/partial/filtered clones and packfile URIs](https://github.com/carsonfarmer/object-log/issues/24),
 and [simpler integration](https://github.com/carsonfarmer/object-log/issues/25).
+
+The [Git proof review and execution queue](docs/reviews/git-proof-2026-09-05.md)
+tracks the remaining work toward an ordinary, usable service and the generic
+WAL improvements justified by building it.

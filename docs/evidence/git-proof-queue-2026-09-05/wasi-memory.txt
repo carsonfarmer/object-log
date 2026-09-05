@@ -1,0 +1,26 @@
+cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.1.5
+   Compiling semver v1.0.28
+   Compiling serde_json v1.0.151
+   Compiling indexmap v2.14.1
+   Compiling chrono v0.4.45
+   Compiling serde_urlencoded v0.7.1
+   Compiling quick-xml v0.41.0
+   Compiling hashbrown v0.15.5
+   Compiling wasmparser v0.244.0
+   Compiling spin-sdk v5.2.0
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `release` profile [optimized] target(s) in 10.72s
+python3 crates/object-log-git-spin/tests/check_memory.py
+{"hash": "sha1", "fixture": "4kib", "request_bytes": 4866, "response_frame_bytes": [41, 4333, 0, 0, 57, 4333, 47], "elapsed_seconds": 0.0027919999993173406, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha1", "fixture": "8mib", "request_bytes": 8391929, "response_frame_bytes": [41, 8392036, 0, 0, 57, 8392036, 47], "elapsed_seconds": 0.26217158399231266, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha1", "fixture": "history-thin", "request_bytes": 96534, "response_frame_bytes": [41, 95419, 41, 4366, 57, 95677, 47], "elapsed_seconds": 0.05944879200251307, "objects": {"initial": 1152, "recovered": 1155, "incremental": 3}, "gc": "checkpoint and collection passed: 3 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha256", "fixture": "4kib", "request_bytes": 5069, "response_frame_bytes": [41, 4372, 0, 0, 57, 4372, 47], "elapsed_seconds": 0.001720750005915761, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha256", "fixture": "8mib", "request_bytes": 8392133, "response_frame_bytes": [41, 8392076, 0, 0, 57, 8392076, 47], "elapsed_seconds": 0.23647216700192075, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha256", "fixture": "history-thin", "request_bytes": 117995, "response_frame_bytes": [41, 116548, 41, 4422, 57, 116862, 47], "elapsed_seconds": 0.0556387920078123, "objects": {"initial": 1152, "recovered": 1155, "incremental": 3}, "gc": "checkpoint and collection passed: 3 candidates", "instance_limit_bytes": 134217728}

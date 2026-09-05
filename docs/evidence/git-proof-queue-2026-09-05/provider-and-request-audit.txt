@@ -1,0 +1,366 @@
+./scripts/test-minio.sh minio minio_git_push_checkpoint_collection_and_cold_recovery object-log-git aws
+   Compiling hashbrown v0.17.1
+   Compiling crypto-common v0.1.7
+   Compiling chrono v0.4.45
+   Compiling criterion v0.7.0
+   Compiling digest v0.10.7
+   Compiling sha1 v0.10.7
+   Compiling crc-fast v1.10.0
+   Compiling sha1-checked v0.10.0
+   Compiling indexmap v2.14.1
+   Compiling gix-hash v0.26.2
+   Compiling gix-hashtable v0.16.0
+   Compiling gix-object v0.64.1
+   Compiling h2 v0.4.19
+   Compiling gix-pack v0.74.2
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.73s
+     Running tests/minio.rs (target/debug/deps/minio-87747bb799d749c2)
+
+running 1 test
+test minio_git_push_checkpoint_collection_and_cold_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling stable_deref_trait v1.2.1
+   Compiling typenum v1.20.1
+   Compiling memchr v2.8.3
+   Compiling zmij v1.0.23
+   Compiling serde_core v1.0.229
+   Compiling smallvec v1.16.0
+   Compiling itoa v1.0.18
+   Compiling anyhow v1.0.104
+   Compiling subtle v2.6.1
+   Compiling thiserror v2.0.20
+   Compiling autocfg v1.5.1
+   Compiling parking_lot_core v0.9.12
+   Compiling pin-project-lite v0.2.17
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.1.5
+   Compiling generic-array v0.14.7
+   Compiling regex-automata v0.4.18
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling hashbrown v0.15.5
+   Compiling writeable v0.6.4
+   Compiling semver v1.0.28
+   Compiling bitflags v2.13.1
+   Compiling rand_core v0.10.1
+   Compiling getrandom v0.4.3
+   Compiling hybrid-array v0.4.14
+   Compiling litemap v0.8.3
+   Compiling futures-core v0.3.34
+   Compiling parking_lot v0.12.5
+   Compiling serde v1.0.229
+   Compiling bytes v1.12.1
+   Compiling icu_properties_data v2.3.0
+   Compiling byteorder v1.5.0
+   Compiling crc32fast v1.5.1
+   Compiling bstr v1.13.1
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.3.0
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.10.7
+   Compiling futures-sink v0.3.34
+   Compiling serde_json v1.0.151
+   Compiling heapless v0.8.0
+   Compiling futures-channel v0.3.34
+   Compiling hash32 v0.3.1
+   Compiling prettyplease v0.2.37
+   Compiling futures-task v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling digest v0.11.3
+   Compiling slab v0.4.12
+   Compiling gix-trace v0.1.21
+   Compiling http v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling jiff-tzdb v0.1.8
+   Compiling percent-encoding v2.3.2
+   Compiling indexmap v2.14.1
+   Compiling leb128fmt v0.1.0
+   Compiling once_cell v1.21.4
+   Compiling log v0.4.34
+   Compiling unicode-xid v0.2.6
+   Compiling id-arena v2.3.0
+   Compiling faster-hex v0.10.0
+   Compiling form_urlencoded v1.2.2
+   Compiling jiff-tzdb-platform v0.1.3
+   Compiling gix-error v0.3.2
+   Compiling sha1 v0.10.7
+   Compiling prodash v31.0.0
+   Compiling shlex v2.0.1
+   Compiling jiff-core v0.1.0
+   Compiling find-msvc-tools v0.1.11
+   Compiling tinyvec_macros v0.1.1
+   Compiling tinyvec v1.12.0
+   Compiling sha1-checked v0.10.0
+   Compiling wasmparser v0.244.0
+   Compiling cc v1.4.4
+   Compiling sha2 v0.11.0
+   Compiling http-body v1.1.0
+   Compiling gix-features v0.49.1
+   Compiling smartstring v1.0.1
+   Compiling wit-bindgen-rust v0.51.0
+   Compiling jiff v0.2.35
+   Compiling wit-bindgen-rt v0.24.0
+   Compiling heck v0.5.0
+   Compiling unicode-normalization v0.1.25
+   Compiling tracing-core v0.1.36
+   Compiling gix-validate v0.11.4
+   Compiling chacha20 v0.10.2
+   Compiling synstructure v0.13.2
+   Compiling blake3 v1.8.7
+   Compiling fastrand v2.5.0
+   Compiling syn v1.0.109
+   Compiling either v1.18.0
+   Compiling wit-bindgen-rust-macro v0.51.0
+   Compiling ryu v1.0.23
+   Compiling static_assertions v1.1.0
+   Compiling itertools v0.15.0
+   Compiling gix-utils v0.3.6
+   Compiling rand v0.10.2
+   Compiling http-body-util v0.1.5
+   Compiling md-5 v0.11.0
+   Compiling crc-fast v1.10.0
+   Compiling constant_time_eq v0.4.2
+   Compiling base64 v0.22.1
+   Compiling humantime v2.4.0
+   Compiling wit-bindgen v0.51.0
+   Compiling arrayvec v0.7.8
+   Compiling zlib-rs v0.6.7
+   Compiling zerovec-derive v0.11.6
+   Compiling serde_derive v1.0.229
+   Compiling displaydoc v0.2.7
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-macro v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.92
+   Compiling futures-util v0.3.34
+   Compiling tokio v1.53.1
+   Compiling gix-date v0.16.0
+   Compiling zerofrom v0.1.8
+   Compiling gix-actor v0.42.0
+   Compiling gix-hash v0.26.2
+   Compiling minicbor-derive v0.19.5
+   Compiling gix-path v0.12.6
+   Compiling gix-zlib v0.1.0
+   Compiling yoke v0.8.3
+   Compiling gix-hashtable v0.16.0
+   Compiling tracing v0.1.44
+   Compiling gix-object v0.64.1
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling wasi v0.13.1+wasi-0.2.0
+   Compiling wasm-encoder v0.244.0
+   Compiling wit-parser v0.244.0
+   Compiling smartcow v0.2.1
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling gix-chunk v0.8.0
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling futures-executor v0.3.34
+   Compiling chrono v0.4.45
+   Compiling futures v0.3.34
+   Compiling serde_urlencoded v0.7.1
+   Compiling hyper v1.11.1
+   Compiling wasm-metadata v0.244.0
+   Compiling quick-xml v0.41.0
+   Compiling minicbor v2.3.0
+   Compiling uuid v1.26.0
+   Compiling simd-adler32 v0.3.10
+   Compiling memmap2 v0.9.11
+   Compiling icu_provider v2.3.1
+   Compiling hex v0.4.3
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling adler2 v2.0.1
+   Compiling spin-sdk v5.2.0
+   Compiling wit-component v0.244.0
+   Compiling wit-bindgen-core v0.51.0
+   Compiling miniz_oxide v0.9.1
+   Compiling idna_adapter v1.2.2
+   Compiling spin-macro v5.2.0
+   Compiling idna v1.1.0
+   Compiling gix-pack v0.74.2
+   Compiling spin-executor v5.2.0
+   Compiling routefinder v0.5.4
+   Compiling url v2.5.8
+   Compiling gix-packetline v0.22.2
+   Compiling flate2 v1.1.10
+   Compiling hmac v0.12.1
+   Compiling sha2 v0.10.9
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `release` profile [optimized] target(s) in 11.74s
+./scripts/test-minio.sh minio spin_minio object-log-git-spin ""
+   Compiling libc v0.2.189
+   Compiling regex-automata v0.4.18
+   Compiling indexmap v2.14.1
+   Compiling serde_json v1.0.151
+   Compiling num-traits v0.2.19
+   Compiling wasmparser v0.244.0
+   Compiling bstr v1.13.1
+   Compiling jobserver v0.1.35
+   Compiling getrandom v0.4.3
+   Compiling mio v1.2.3
+   Compiling socket2 v0.6.5
+   Compiling parking_lot_core v0.9.12
+   Compiling cpufeatures v0.2.17
+   Compiling cpufeatures v0.3.1
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling gix-utils v0.3.6
+   Compiling cc v1.4.4
+   Compiling sha1 v0.10.7
+   Compiling parking_lot v0.12.5
+   Compiling gix-validate v0.11.4
+   Compiling gix-error v0.3.2
+   Compiling wit-parser v0.244.0
+   Compiling sha1-checked v0.10.0
+   Compiling tokio v1.53.1
+   Compiling prodash v31.0.0
+   Compiling security-framework v3.7.0
+   Compiling sha2 v0.11.0
+   Compiling errno v0.3.14
+   Compiling gix-date v0.16.0
+   Compiling gix-path v0.12.6
+   Compiling chrono v0.4.45
+   Compiling rustix v1.1.4
+   Compiling rand v0.10.2
+   Compiling gix-features v0.49.1
+   Compiling gix-chunk v0.8.0
+   Compiling cmake v0.1.58
+   Compiling gix-hash v0.26.2
+   Compiling gix-fs v0.22.1
+   Compiling gix-actor v0.42.0
+   Compiling gix-hashtable v0.16.0
+   Compiling uuid v1.26.0
+   Compiling memmap2 v0.9.11
+   Compiling gix-packetline v0.22.2
+   Compiling gix-object v0.64.1
+   Compiling sha2 v0.10.9
+   Compiling aws-lc-sys v0.45.0
+   Compiling blake3 v1.8.7
+   Compiling tempfile v3.27.0
+   Compiling gix-tempfile v24.0.0
+   Compiling gix-pack v0.74.2
+   Compiling wit-component v0.244.0
+   Compiling wit-bindgen-core v0.51.0
+   Compiling tokio-util v0.7.19
+   Compiling tower v0.5.3
+   Compiling tower-http v0.6.11
+   Compiling h2 v0.4.19
+   Compiling wit-bindgen-rust v0.51.0
+   Compiling wit-bindgen-rust-macro v0.51.0
+   Compiling hyper v1.11.1
+   Compiling wit-bindgen v0.51.0
+   Compiling hyper-util v0.1.20
+   Compiling spin-sdk v5.2.0
+   Compiling aws-lc-rs v1.18.1
+   Compiling rustls v0.23.43
+   Compiling rustls-webpki v0.103.15
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.31s
+     Running tests/minio.rs (target/debug/deps/minio-62ba51110b6214aa)
+
+running 3 tests
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-55238.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-55474.rss
+test spin_minio_large_fetch_uses_gzip_multi_round_negotiation ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-55700.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-55807.rss
+test spin_minio_default_git_large_push_probes_then_streams_both_hashes ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-55923.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-56398.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-56484.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-56523.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-56999.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-57085.rss
+test spin_minio_clients_recover_after_collection ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.01s
+
+cargo test -p object-log-git --test performance_acceptance git_request_and_byte_accounting -- --ignored --exact --nocapture
+   Compiling smallvec v1.16.0
+   Compiling getrandom v0.4.3
+   Compiling digest v0.10.7
+   Compiling futures-sink v0.3.34
+   Compiling slab v0.4.12
+   Compiling cc v1.4.4
+   Compiling form_urlencoded v1.2.2
+   Compiling tokio v1.53.1
+   Compiling chrono v0.4.45
+   Compiling futures-channel v0.3.34
+   Compiling sha1 v0.10.7
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_normalizer v2.3.0
+   Compiling futures-util v0.3.34
+   Compiling sha1-checked v0.10.0
+   Compiling parking_lot v0.12.5
+   Compiling idna_adapter v1.2.2
+   Compiling prodash v31.0.0
+   Compiling gix-utils v0.3.6
+   Compiling tempfile v3.27.0
+   Compiling uuid v1.26.0
+   Compiling idna v1.1.0
+   Compiling blake3 v1.8.7
+   Compiling gix-features v0.49.1
+   Compiling url v2.5.8
+   Compiling gix-hash v0.26.2
+   Compiling gix-fs v0.22.1
+   Compiling gix-tempfile v24.0.0
+   Compiling gix-hashtable v0.16.0
+   Compiling gix-object v0.64.1
+   Compiling gix-pack v0.74.2
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.40s
+     Running tests/performance_acceptance.rs (target/debug/deps/performance_acceptance-d8a226191fbfd0be)
+
+running 1 test
+small: pack=4311 B, durable=6039 B -> 6394 B, Git receiver=32871 B
+small publication: requests=6 (GET=2, PUT=4), uploaded=6039 B, downloaded=5576 B
+small checkpoint: requests=5 (GET=3, PUT=2), uploaded=580 B, downloaded=5814 B
+small recovery: requests=4 (GET=4, PUT=0), uploaded=0 B, downloaded=6156 B
+large: pack=8391374 B, durable=8395089 B -> 8395447 B, Git receiver=8419934 B
+large publication: requests=70 (GET=34, PUT=36), uploaded=8395089 B, downloaded=8394624 B
+large checkpoint: requests=37 (GET=35, PUT=2), uploaded=583 B, downloaded=8394864 B
+large recovery: requests=69 (GET=69, PUT=0), uploaded=0 B, downloaded=16786581 B
+test git_request_and_byte_accounting ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.72s
+
