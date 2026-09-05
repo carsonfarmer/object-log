@@ -14,6 +14,7 @@ pub(super) const MAX_OBJECTS: u32 = 32_768;
 pub(super) const MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_DELTA_DEPTH: usize = 256;
 pub(super) const INFLATE_BYTES: usize = 48 * 1024;
+const SCAN_WINDOW_BYTES: usize = 32 * 1024;
 pub(super) const COMPRESS_BYTES: usize = 416 * 1024;
 const DEFAULT_LIMITS: Limits = Limits {
     input_bytes: MAX_RECEIVE_PACK_BYTES,
@@ -258,10 +259,9 @@ fn scan(
     let mut memory = operation.reserve(product(count as usize, size_of::<InputEntry>())?)?;
     let _offset_memory = operation.reserve(product(count as usize, size_of::<u64>())?)?;
     let mut offsets = Vec::with_capacity(count as usize);
-    let mut inflated_memory = None;
-    let mut inflated = Vec::new();
-    let _inflate_memory = operation.reserve(INFLATE_BYTES)?;
-    let mut inflate = gix_zlib::Inflate::default();
+    let _inflate_memory = operation.reserve(INFLATE_BYTES + SCAN_WINDOW_BYTES)?;
+    let mut inflated = vec![0; SCAN_WINDOW_BYTES];
+    let mut inflate = gix_zlib::Decompress::new();
     let mut entries = Vec::with_capacity(count as usize);
     let mut stats = Stats::default();
     for position in 0..count {
@@ -285,22 +285,20 @@ fn scan(
         if inflated_size > limits.object_bytes {
             return invalid("entry exceeds object byte limit");
         }
-        operation.work(inflated_size)?;
-        if inflated_size > inflated.capacity() {
-            let memory = operation.reserve(inflated_size)?;
-            inflated = vec![0; inflated_size];
-            drop(inflated_memory.replace(memory));
-        }
-        inflated.resize(inflated_size, 0);
-        let compressed = pack
-            .decompress_entry(&entry, &mut inflate, &mut inflated)
-            .map_err(pack_error)?;
-        let result_size = if entry.header.is_delta() {
-            let (_, position) = delta_integer(&inflated)?;
-            delta_integer(&inflated[position..])?.0
-        } else {
-            inflated_size
-        };
+        // One extra output byte detects a falsely small declared size.
+        operation.work(total([inflated_size, 1])?)?;
+        let start = usize::try_from(entry.data_offset)
+            .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
+        let compressed_input = input
+            .get(start..pack.pack_end())
+            .ok_or_else(|| Error::InvalidPack("pack entry extends beyond the trailer".into()))?;
+        let (compressed, result_size) = scan_inflate(
+            &mut inflate,
+            compressed_input,
+            inflated_size,
+            entry.header.is_delta(),
+            &mut inflated,
+        )?;
         if result_size > limits.object_bytes {
             return invalid("decoded object exceeds byte limit");
         }
@@ -316,8 +314,6 @@ fn scan(
         if end_in_memory > pack.pack_end() {
             return invalid("pack entry extends beyond the trailer");
         }
-        let start = usize::try_from(entry.data_offset)
-            .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
         let pack_offset = usize::try_from(offset)
             .map_err(|_| Error::InvalidPack("pack entry offset does not fit in memory".into()))?;
         operation.work(end_in_memory - pack_offset)?;
@@ -339,6 +335,57 @@ fn scan(
         return invalid("pack object count does not match its entries");
     }
     Ok((entries, stats, memory))
+}
+
+// Stop at the first exact zlib end: remaining input belongs to later entries.
+// Only delta's two size integers need decoded bytes after this scan.
+fn scan_inflate(
+    inflate: &mut gix_zlib::Decompress,
+    input: &[u8],
+    declared: usize,
+    delta: bool,
+    window: &mut [u8],
+) -> Result<(usize, usize), Error> {
+    inflate.reset();
+    let mut prefix = [0_u8; 20]; // Two maximal u64 delta integers, also enough on WASIp2.
+    let mut captured = 0;
+    loop {
+        let written = usize::try_from(inflate.total_out()).map_err(pack_error)?;
+        let consumed = usize::try_from(inflate.total_in()).map_err(pack_error)?;
+        let capacity = window.len().min(declared - written + 1);
+        let status = inflate
+            .decompress(
+                &input[consumed..],
+                &mut window[..capacity],
+                gix_zlib::FlushDecompress::None,
+            )
+            .map_err(pack_error)?;
+        let produced = usize::try_from(inflate.total_out()).map_err(pack_error)?;
+        if produced > declared {
+            return invalid("entry exceeds its declared size");
+        }
+        let keep = (produced - written).min(prefix.len() - captured);
+        prefix[captured..captured + keep].copy_from_slice(&window[..keep]);
+        captured += keep;
+        if status == gix_zlib::Status::StreamEnd {
+            if produced != declared {
+                return invalid("entry decoded size does not match");
+            }
+            let result_size = if delta {
+                let (_, offset) = delta_integer(&prefix[..captured])?;
+                delta_integer(&prefix[offset..captured])?.0
+            } else {
+                declared
+            };
+            return Ok((
+                usize::try_from(inflate.total_in()).map_err(pack_error)?,
+                result_size,
+            ));
+        }
+        if produced == written && inflate.total_in() == consumed as u64 {
+            return invalid("entry zlib stream is truncated or made no progress");
+        }
+    }
 }
 
 pub(super) fn delta_integer(bytes: &[u8]) -> Result<(usize, usize), Error> {
@@ -799,6 +846,118 @@ mod tests {
         assert_delta_error(&[0x80], "delta size is truncated");
     }
 
+    fn compress_for_scan(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        let mut writer =
+            gix_zlib::stream::deflate::Write::new(&mut bytes, gix_zlib::Compression::DEFAULT);
+        writer.write_all(data)?;
+        writer.flush()?;
+        drop(writer);
+        Ok(bytes)
+    }
+
+    #[test]
+    fn scan_inflation_checks_exact_sizes_and_adjacent_streams()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = gix_zlib::Decompress::new();
+        for size in [
+            0,
+            1,
+            SCAN_WINDOW_BYTES - 1,
+            SCAN_WINDOW_BYTES,
+            SCAN_WINDOW_BYTES + 1,
+        ] {
+            let compressed = compress_for_scan(&vec![b'x'; size])?;
+            for width in [1, 17, SCAN_WINDOW_BYTES] {
+                let mut window = vec![0; width];
+                let mut adjacent = compressed.clone();
+                adjacent.extend_from_slice(&compressed);
+                assert_eq!(
+                    scan_inflate(&mut decoder, &adjacent, size, false, &mut window)?,
+                    (compressed.len(), size)
+                );
+                assert!(
+                    scan_inflate(&mut decoder, &compressed, size + 1, false, &mut window).is_err()
+                );
+                if size > 0 {
+                    assert!(
+                        scan_inflate(&mut decoder, &compressed, size - 1, false, &mut window)
+                            .is_err()
+                    );
+                }
+                assert!(
+                    scan_inflate(
+                        &mut decoder,
+                        &compressed[..compressed.len() - 1],
+                        size,
+                        false,
+                        &mut window
+                    )
+                    .is_err()
+                );
+            }
+            let mut corrupt = compressed;
+            let last = corrupt.len() - 1;
+            corrupt[last] ^= 1;
+            assert!(scan_inflate(&mut decoder, &corrupt, size, false, &mut [0; 17]).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_inflation_retains_only_delta_size_prefix() -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = gix_zlib::Decompress::new();
+        let mut data = vec![0x80, 0x01, 0x81, 0x01]; // base 128, result 129
+        data.resize(SCAN_WINDOW_BYTES * 2, 0);
+        let compressed = compress_for_scan(&data)?;
+        assert_eq!(
+            scan_inflate(&mut decoder, &compressed, data.len(), true, &mut [0; 1])?,
+            (compressed.len(), 129)
+        );
+        for data in [vec![], vec![0], vec![0x80; 20], vec![0, 0x80]] {
+            let compressed = compress_for_scan(&data)?;
+            assert!(
+                scan_inflate(&mut decoder, &compressed, data.len(), true, &mut [0; 17]).is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pack_scan_uses_fixed_decode_memory_for_both_hashes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let mut fixture = Fixture::new(format)?;
+            let data = vec![b'x'; 2 * 1024 * 1024];
+            let output = git(fixture.dir.path(), ["hash-object", "-w", "--stdin"], &data)?;
+            let id = ObjectId::parse(format, std::str::from_utf8(&output)?.trim())?;
+            fixture.blobs = vec![(id, data)];
+            let input = fixture.pack(false)?;
+            let operation = budget::Pool::new(128 * 1024).admit()?;
+            let input_memory = operation.reserve(input.len())?;
+            let (entries, stats, memory) =
+                scan(&operation, &input, object_hash(format), DEFAULT_LIMITS)?;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(stats.largest, 2 * 1024 * 1024);
+            assert_eq!(stats.normalized, 2 * 1024 * 1024);
+            assert!(operation.reserve(stats.largest).is_err());
+            drop((entries, memory, input_memory));
+            assert_eq!(operation.live_bytes(), 0);
+            let normalized = normalize(format, &input, &[])?;
+            verify_with_git(&normalized.bytes, format)?;
+
+            let metadata = size_of::<InputEntry>() + size_of::<u64>();
+            let operation =
+                budget::Pool::new(metadata + INFLATE_BYTES + SCAN_WINDOW_BYTES - 1).admit()?;
+            assert!(
+                matches!(scan(&operation, &input, object_hash(format), DEFAULT_LIMITS),
+                Err(Error::InvalidPack(message)) if message == "Git live-memory limit exceeded")
+            );
+            assert_eq!(operation.live_bytes(), 0);
+        }
+        Ok(())
+    }
+
     #[test]
     fn normalizes_base_ofs_and_in_pack_ref_objects() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new(ObjectFormat::Sha1)?;
@@ -930,6 +1089,7 @@ mod tests {
             .map(|(_, range)| range.len())
             .sum::<usize>();
         let expected = thin.len()
+            + stored.len() // One bounded expansion probe per scanned entry.
             + inflated
             + input_crc
             + 2 * data.len()
