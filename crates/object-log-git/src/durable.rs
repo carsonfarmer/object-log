@@ -1599,7 +1599,10 @@ mod tests {
     #[tokio::test]
     async fn many_small_deltas_share_authenticated_chunks_without_refunding_admission() -> TestResult
     {
-        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        for (format, trailer_only) in [ObjectFormat::Sha1, ObjectFormat::Sha256]
+            .into_iter()
+            .flat_map(|format| [false, true].map(|trailer_only| (format, trailer_only)))
+        {
             let store = FaultStore::from_arc(Arc::new(InMemory::new()));
             let backend =
                 ValidatedBackend::new(Arc::new(store.clone()), StorePath::from("shared-deltas"))
@@ -1618,8 +1621,10 @@ mod tests {
                 id: fixture.normalized.id,
                 bytes: normalized_bytes as u64,
             };
+            let entry_end = normalized_bytes - fixture.normalized.id.as_bytes().len();
+            let width = if trailer_only { entry_end } else { 256 };
             let mut chunks = Vec::new();
-            for chunk in fixture.normalized.bytes.chunks(256) {
+            for chunk in fixture.normalized.bytes.chunks(width) {
                 chunks.push(log.put_object(&view, Bytes::copy_from_slice(chunk)).await?);
             }
             let root = log
@@ -1632,6 +1637,16 @@ mod tests {
             let pack = &catalog.packs[0];
             let chunks = pack.node.children().len();
             assert!(chunks > 1);
+            // Git/zlib versions can place the pack checksum in its own chunk.
+            // Verification reads entry extents, not the trailing pack checksum;
+            // identical chunk references also share one authenticated cache slot.
+            let mut expected_chunks = Vec::new();
+            for chunk in &pack.node.children()[..entry_end.div_ceil(width)] {
+                if !expected_chunks.contains(chunk) {
+                    expected_chunks.push(chunk.clone());
+                }
+            }
+            let expected_bytes = expected_chunks.iter().map(ObjectRef::len).sum::<u64>();
             let live = operation.live_bytes();
             let calls = operation.calls();
             store.reset();
@@ -1646,12 +1661,19 @@ mod tests {
             }
             assert!(delta_count >= 48, "fixture must contain many stored deltas");
             let reads = store.metrics().operation(StoreOperation::Get).requests;
-            assert_eq!(reads, chunks as u64);
-            assert_eq!(operation.calls() - calls, chunks);
+            assert_eq!(reads, expected_chunks.len() as u64);
+            assert_eq!(operation.calls() - calls, expected_chunks.len());
+            assert_eq!(
+                store
+                    .metrics()
+                    .operation(StoreOperation::Get)
+                    .downloaded_bytes,
+                expected_bytes
+            );
             assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
             assert_eq!(
                 operation.live_bytes() - live,
-                EncodedCache::allocation_bytes(operation) + normalized_bytes
+                EncodedCache::allocation_bytes(operation) + usize::try_from(expected_bytes)?
             );
             // A retry keeps cumulative work and calls. Even with no I/O permits
             // left, re-verification uses the authenticated cache and charges work.
