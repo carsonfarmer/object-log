@@ -35,6 +35,7 @@ gix-pack = { version = "=0.74.2", default-features = false, features = ["generat
 gix-pack = { version = "=0.74.2", default-features = false, features = ["sha1", "sha256", "streaming-input", "wasm"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 criterion = "0.7"
 object-log = { path = "../..", features = ["test-util"] }
 object_store = "0.14"

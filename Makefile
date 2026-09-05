@@ -42,3 +42,7 @@ git-minio-test:
 
 git-http-minio-test:
 	./scripts/test-minio.sh loopback minio_host_pushes_and_cold_clones object-log-git-http ""
+
+.PHONY: git-shared-performance-acceptance
+git-shared-performance-acceptance:
+	cargo +1.97.1 test --locked --release -p object-log-git --test shared_performance -- --ignored --exact shared_git_performance_acceptance --nocapture

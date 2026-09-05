@@ -2283,6 +2283,7 @@ dependencies = [
 name = "object-log-git"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bstr",
  "bytes",
  "criterion",
