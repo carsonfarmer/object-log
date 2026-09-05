@@ -141,7 +141,8 @@ membership and a traversal frontier without storing every graph edge. Both-hash
 Spin/MinIO tests cover a connected history of 32,770 objects across accepted
 pushes, full and incremental fetch, compaction, checkpointing, collection and
 cold clone. Individual stored packs remain limited to 32,768 objects; shallow,
-filtered and URI fetches retain the earlier bounded graph path. All paths remain
+filtered and URI fetches grow their graph within the existing memory allowance
+and pass the same larger-history client tests. All paths remain
 subject to memory and operation limits. Known blob leaves are
 deferred until selected content needs verification. Exact want/have
 selection, protocol-v2 upload commands, and classic receive preparation and

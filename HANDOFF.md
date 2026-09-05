@@ -38,7 +38,9 @@ Check hosted CI after each push. Verification belongs in tests and commits.
   edge-free closure walker; both-hash connected-history tests cross 32,768
   objects through push, clone, incremental fetch and full maintenance. Adaptive
   catalog node caching stays inside the same 2 MiB allowance. Shallow, filtered
-  and URI fetches still use the bounded graph. Continue #19 for that remaining envelope
+  and URI fetches now grow their graph within the existing memory allowance and
+  pass larger-history Git parity tests. Collection drains stale backlogs in
+  bounded positive batches; repeat until empty. The live graph stays bounded
   and #25 API simplicity; capacity issue #26 is complete.
 - The current 14-case comparison passes functional/resource and timing-review
   checks. Private full-entry scan verification reuse reduces 8 MiB push p50 by

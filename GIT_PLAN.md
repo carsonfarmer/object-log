@@ -30,7 +30,7 @@ history fixture covers incremental updates and compaction/checkpoint/GC with
 cold recovery. Ordinary receive, fetch and maintenance use an edge-free closure
 walker, tested through a connected 32,770-object history and full maintenance for
 both hashes. Stored packs retain their 32,768-object bound; shallow, filtered
-and URI fetches retain the earlier graph path. Memory and operation budgets
+and URI fetches grow their graph within the existing memory allowance. Memory and operation budgets
 still define a finite scale envelope.
 Use ordinary Spin defaults for runtime
 behavior; no host memory cap, pooling override, or one-instance wrapper is required.
