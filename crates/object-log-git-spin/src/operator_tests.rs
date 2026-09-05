@@ -7,6 +7,11 @@ use tempfile::TempDir;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+// Status/resume tests operate on generic WAL bytes and do not decode Git state.
+async fn execute(log: &Log, action: &Action) -> Report {
+    super::execute(log, action, ObjectFormat::Sha1).await
+}
+
 fn private_file(root: &TempDir, name: &str, bytes: &[u8]) -> TestResult<PathBuf> {
     let path = root.path().join(name);
     OpenOptions::new()
@@ -166,6 +171,53 @@ fn argument_errors_and_help_are_bounded_redacted_json() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn checkpoint_requires_explicit_retention_and_accepts_no_destructive_options() -> TestResult {
+    let path = Path::new("unused-private-config");
+    assert!(matches!(
+        parse(arguments(path, &["checkpoint", "--retain-packs"]))?.action,
+        Action::Checkpoint
+    ));
+    for tail in [
+        vec!["checkpoint"],
+        vec!["checkpoint", "--retain-packs=false"],
+        vec!["checkpoint", "--retain-packs", "--collect"],
+        vec![
+            "checkpoint",
+            "--retain-packs",
+            "--token-file",
+            "PRIVATE_TOKEN",
+        ],
+        vec![
+            "checkpoint",
+            "--retain-packs",
+            "--memory-limit",
+            "unlimited",
+        ],
+    ] {
+        let report = run(arguments(path, &tail));
+        assert_eq!(report.exit(), 2);
+        assert_eq!(json(&report)?["outcome"], "invalid_arguments");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_deadline_reports_pending_without_claiming_a_published_view() -> TestResult {
+    let report = bounded(
+        "checkpoint",
+        Duration::from_millis(1),
+        std::future::pending(),
+    )
+    .await;
+    assert_eq!(report.exit(), 4);
+    let value = json(&report)?;
+    assert_eq!(value["outcome"], "pending");
+    assert!(value.get("generation").is_none());
+    assert!(value.get("checkpoint_through").is_none());
+    Ok(())
+}
+
 async fn fixture(name: &str, options: Options) -> TestResult<(Log, FaultStore, ValidatedBackend)> {
     let faults = FaultStore::new(InMemory::new());
     let backend =
@@ -173,6 +225,133 @@ async fn fixture(name: &str, options: Options) -> TestResult<(Log, FaultStore, V
     let log = Log::open(&backend, &LogId::new(name)?, options).await?;
     faults.reset();
     Ok((log, faults, backend))
+}
+
+fn git(root: &Path, args: &[&str]) -> TestResult<Vec<u8>> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "operator test")
+        .env("GIT_AUTHOR_EMAIL", "operator@example.invalid")
+        .env("GIT_COMMITTER_NAME", "operator test")
+        .env("GIT_COMMITTER_EMAIL", "operator@example.invalid")
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err("Git fixture failed".into());
+    }
+    Ok(output.stdout)
+}
+
+async fn seed_git(log: &Log, name: &str, format: ObjectFormat) -> TestResult {
+    let root = TempDir::new()?;
+    git(
+        root.path(),
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            &format!("--object-format={name}"),
+        ],
+    )?;
+    std::fs::write(root.path().join("file"), b"checkpoint survives")?;
+    git(root.path(), &["add", "file"])?;
+    git(root.path(), &["commit", "-q", "-m", "seed"])?;
+    let oid = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"])?)?;
+    let command = format!(
+        "{} {} refs/heads/main\0report-status object-format={name}\n",
+        "0".repeat(oid.trim().len()),
+        oid.trim()
+    );
+    let mut input = format!("{:04x}{command}0000", command.len() + 4).into_bytes();
+    input.extend(git(root.path(), &["pack-objects", "--stdout", "--all"])?);
+    let prepared = Repository::open(log, format)
+        .await?
+        .prepare_receive(TransactionId::new(), Bytes::from(input))
+        .await?;
+    assert!(matches!(
+        prepared.publish().await?,
+        CommitStatus::Committed(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoint_faults_preserve_uncertainty_and_fresh_head_convergence() -> TestResult {
+    for (name, format) in [
+        ("sha1", ObjectFormat::Sha1),
+        ("sha256", ObjectFormat::Sha256),
+    ] {
+        let (log, faults, backend) = fixture("checkpoint", Options::default()).await?;
+        seed_git(&log, name, format).await?;
+        faults.reset();
+        faults.schedule(object_log::sim::Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::After,
+        });
+        let report = super::execute(&log, &Action::Checkpoint, format).await;
+        assert_eq!(report.exit(), 4);
+        assert_eq!(json(&report)?["outcome"], "pending");
+        assert!(json(&report)?.get("generation").is_none());
+        let reopened =
+            Log::open_existing(&backend, &LogId::new("checkpoint")?, Options::default()).await?;
+        faults.reset();
+        let report = super::execute(&reopened, &Action::Checkpoint, format).await;
+        assert_eq!(report.exit(), 0);
+        assert_eq!(json(&report)?["outcome"], "checkpointed");
+        assert_eq!(json(&report)?["tail_entries"], 0);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+
+        let (log, faults, _) = fixture("checkpoint-timeout", Options::default()).await?;
+        seed_git(&log, name, format).await?;
+        faults.reset();
+        let mut pause = faults.pause_put_at(2, FailurePhase::After);
+        let work = bounded(
+            "checkpoint",
+            Duration::from_millis(100),
+            super::execute(&log, &Action::Checkpoint, format),
+        );
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        let report = work.await;
+        assert_eq!(report.exit(), 4);
+        assert_eq!(json(&report)?["outcome"], "pending");
+        assert!(!pause.release());
+        assert_eq!(
+            super::execute(&log, &Action::Checkpoint, format)
+                .await
+                .exit(),
+            0
+        );
+        assert!(log.load().await?.tail().is_empty());
+
+        let (log, faults, _) = fixture("checkpoint-conflict", Options::default()).await?;
+        seed_git(&log, name, format).await?;
+        let view = log.load().await?;
+        faults.reset();
+        let mut pause = faults.pause_put_at(2, FailurePhase::Before);
+        let work = super::execute(&log, &Action::Checkpoint, format);
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        assert!(matches!(
+            log.retain(&view, object_log::RetentionId::new()).await?,
+            object_log::RetentionStatus::Applied(_)
+        ));
+        assert!(pause.release());
+        let report = work.await;
+        assert_eq!(report.exit(), 3);
+        assert_eq!(json(&report)?["outcome"], "conflict");
+        assert_eq!(json(&report)?["tail_entries"], 1);
+        assert!(json(&report)?.get("checkpoint_through").is_none());
+    }
+    Ok(())
 }
 
 fn token(log: &Log, view: &View, value: &'static [u8]) -> TestResult<Vec<u8>> {

@@ -65,6 +65,11 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
     let id = LogId::new("repository")?;
     let missing = operator(&config_path, &["status"])?;
     assert!(!missing.status.success());
+    assert!(
+        !operator(&config_path, &["checkpoint", "--retain-packs"])?
+            .status
+            .success()
+    );
     let absent_token = root.path().join("absent.token");
     private_file(&absent_token, b"no candidate")?;
     assert!(
@@ -80,6 +85,13 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
             .await
             .is_err()
     );
+
+    let empty = Log::open(&backend, &id, Options::default()).await?;
+    let initial = empty.load().await?;
+    let checkpoint = operator(&config_path, &["checkpoint", "--retain-packs"])?;
+    assert!(checkpoint.status.success());
+    assert_eq!(decode(&checkpoint)?["outcome"], "checkpointed");
+    assert!(empty.refresh(&initial).await?.is_none());
 
     let source = root.path().join("source");
     git(
@@ -149,6 +161,53 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
     assert!(loser.status.success());
     assert_eq!(decode(&loser)?["outcome"], "not_committed");
     assert_eq!(log.load().await?.tail().len(), 2);
+    fill_tail(&log, &source, name, format, &new).await?;
+    assert_eq!(log.load().await?.tail().len(), 1024);
+    let (mut blocked, blocked_url) = serve(&config_path, root.path()).await?;
+    let rejected = git(None, &["ls-remote", &blocked_url])
+        .err()
+        .ok_or("full tail unexpectedly served")?;
+    blocked.stop()?;
+    let blocked_port = url::Url::parse(&blocked_url)?
+        .port()
+        .ok_or("missing port")?;
+    assert!(
+        fs::read_to_string(root.path().join(format!("spin-{blocked_port}.log")))?
+            .contains("object-log call limit exceeded")
+    );
+    println!(
+        "{name}: serving full-tail rejection confirmed by component call-limit diagnostic: {rejected}"
+    );
+    let full = operator(&config_path, &["status"])?;
+    assert!(full.status.success());
+    assert_eq!(decode(&full)?["tail_entries"], 1024);
+    let before = log.load().await?;
+    let wrong_name = if name == "sha1" { "sha256" } else { "sha1" };
+    let wrong_config = root.path().join("wrong-format.toml");
+    private_file(
+        &wrong_config,
+        config
+            .replace(
+                &format!("object_format = \"{name}\""),
+                &format!("object_format = \"{wrong_name}\""),
+            )
+            .as_bytes(),
+    )?;
+    assert!(
+        !operator(&wrong_config, &["checkpoint", "--retain-packs"])?
+            .status
+            .success()
+    );
+    assert!(log.refresh(&before).await?.is_none());
+    let checkpoint = operator(&config_path, &["checkpoint", "--retain-packs"])?;
+    assert!(checkpoint.status.success());
+    let checkpoint = decode(&checkpoint)?;
+    assert_eq!(checkpoint["outcome"], "checkpointed");
+    assert_eq!(checkpoint["tail_entries"], 0);
+    assert_eq!(checkpoint["checkpoint_through"], 1023);
+    let duplicate = operator(&config_path, &["checkpoint", "--retain-packs"])?;
+    assert!(duplicate.status.success());
+    assert_eq!(decode(&duplicate)?["generation"], checkpoint["generation"]);
     let (mut cold, url) = serve(&config_path, root.path()).await?;
     let clone = root.path().join("clone");
     git(None, &["clone", "-q", &url, text(&clone)?])?;
@@ -156,9 +215,82 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
     assert_eq!(git(Some(&clone), &["rev-parse", "HEAD"])?, new);
     assert_eq!(fs::read_to_string(clone.join("file"))?, "two");
     cold.stop()?;
+    for cycle in 0..3 {
+        let tag = format!("maintenance-cycle-{cycle}");
+        git(Some(&source), &["tag", &tag])?;
+        let (mut writer, url) = serve(&config_path, root.path()).await?;
+        git(
+            Some(&source),
+            &["push", "-q", &url, &format!("refs/tags/{tag}")],
+        )?;
+        writer.stop()?;
+        let checkpoint = operator(&config_path, &["checkpoint", "--retain-packs"])?;
+        assert!(checkpoint.status.success());
+        assert_eq!(decode(&checkpoint)?["tail_entries"], 0);
+        let (mut reader, url) = serve(&config_path, root.path()).await?;
+        git(Some(&clone), &["fetch", "-q", "--tags", &url])?;
+        git(Some(&clone), &["fsck", "--strict"])?;
+        assert_eq!(git(Some(&clone), &["rev-parse", &tag])?, new);
+        reader.stop()?;
+    }
     println!(
-        "{name}: missing target, status, exact token resume, duplicate/loser and fresh Spin clone/fsck passed"
+        "{name}: missing target, status, exact token resume, duplicate/loser, 1024-tail escape, wrong format, cold clone/fsck and three Spin push/checkpoint/fetch cycles passed"
     );
+    Ok(())
+}
+
+// Produce two valid metadata records through the public Git engine, then replay
+// their alternating tag create/delete operations as a trusted WAL producer.
+// This fills recovery state without claiming 1,024 HTTP pushes or bypassing the
+// serving admission ceiling; no private Git codec is copied into this test.
+async fn fill_tail(
+    log: &Log,
+    source: &Path,
+    name: &str,
+    format: ObjectFormat,
+    oid: &[u8],
+) -> TestResult {
+    let oid = std::str::from_utf8(oid)?.trim();
+    let zero = "0".repeat(oid.len());
+    let empty_pack = git(Some(source), &["pack-objects", "--stdout"])?;
+    let mut records = Vec::new();
+    for (old, new) in [(zero.as_str(), oid), (oid, zero.as_str())] {
+        let command =
+            format!("{old} {new} refs/tags/tail-fixture\0report-status object-format={name}\n");
+        let mut input = format!("{:04x}{command}0000", command.len() + 4).into_bytes();
+        if new != zero {
+            input.extend_from_slice(&empty_pack);
+        }
+        let prepared = Repository::open(log, format)
+            .await?
+            .prepare_receive(TransactionId::new(), Bytes::from(input))
+            .await?;
+        assert!(matches!(
+            prepared.publish().await?,
+            object_log::CommitStatus::Committed(_)
+        ));
+        let view = log.load().await?;
+        let tail = log.read_tail(&view).await?;
+        let record = tail.last().ok_or("missing fixture record")?;
+        assert!(record.objects().is_empty());
+        records.push(record.operation().clone());
+    }
+    let mut view = log.load().await?;
+    let mut index = 0;
+    while view.tail().len() < 1024 {
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            records[index % 2].clone(),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let object_log::CommitStatus::Committed(next) = log.commit(prepared).await? else {
+            return Err("fixture publication uncertain".into());
+        };
+        view = next;
+        index += 1;
+    }
     Ok(())
 }
 
@@ -276,6 +408,7 @@ async fn serve(config: &Path, state: &Path) -> TestResult<(Host, String)> {
             ])
             .arg("--state-dir")
             .arg(state)
+            .args(["--follow", "git"])
             .stdout(log.try_clone()?)
             .stderr(log)
             .spawn()?,

@@ -95,11 +95,11 @@ the token is not written to logs. Confirmed acceptance and rejection retain
 normal Git response framing. Each invocation validates the backend and
 opens the log, so measurements must include that fixed provider work.
 
-The one-shot operator command below supports head status and exact commit-token
-resumption. Checkpointing and collection still require shared-library calls,
-as demonstrated in [`tests/minio.rs`](tests/minio.rs) while Spin is stopped.
-Issue #32 remains open for those commands, retention cleanup and sustained
-service qualification.
+The one-shot operator command below supports head status, exact commit-token
+resumption and metadata checkpoints that retain every pack. Collection still
+requires shared-library calls, as demonstrated in [`tests/minio.rs`](tests/minio.rs)
+while Spin is stopped. Issue #32 remains open for collection commands, retention
+cleanup and broader memory and sustained-service qualification.
 
 ## Local operator command
 
@@ -110,12 +110,13 @@ cargo build --locked -p object-log-git-spin --features operator --bin object-log
 chmod 600 /deployment/repository.toml
 target/release/object-log-git-maintain --config /deployment/repository.toml status
 target/release/object-log-git-maintain --config /deployment/repository.toml resume-commit --token-file /private/push.token
+target/release/object-log-git-maintain --config /deployment/repository.toml checkpoint --retain-packs
 ```
 
 The command opens an existing WAL; a missing or mistyped target never creates
 its head. It has no HTTP listener. It accepts the same private TOML variables as
 the service, including string booleans `read_only` and `allow_non_fast_forward`.
-These serving policies do not restrict privileged operator resumption. The
+These serving policies do not restrict privileged operator mutations. The
 command validates the configured format name, but head-only status and generic
 WAL resumption do not inspect or certify the repository's actual Git format.
 Keep operator execution and S3 credentials within the trusted OS boundary.
@@ -140,6 +141,22 @@ Git service is not an operator authorization boundary. An expired token means
 its historical outcome is unknown, not that the push failed. Ordinary Git
 clients do not guarantee token capture after a lost response.
 
+Stop ingress and drain serving processes before `checkpoint --retain-packs` too.
+Resolve known pending commit tokens first: retaining packs does not preserve
+historical outcome evidence, and a checkpoint can make an old push token expire.
+It calls the shared Git metadata-maintenance helper with the configured object
+format. It validates authenticated metadata and publishes through the existing
+checkpoint head CAS, retaining every pack proof, including unreachable packs.
+It does not inspect pack catalogs, prune packs or collect objects. A confirmed
+`checkpointed` result means the observed head has been checkpointed; an empty
+tail is already complete and does not cause another publication. `conflict`
+reports the competing head. `pending` does not report a confirmed head.
+
+After uncertainty, run status and repeat the checkpoint command against the
+fresh head. This converges maintenance state but cannot establish the exact
+historical outcome of the earlier attempt: this command does not persist an
+exact checkpoint token or run unbounded resolution after the helper returns.
+
 Every normal invocation emits one JSON line of at most 2 KiB. Output contains
 static outcome names and numeric head metadata; it deliberately omits target
 strings, paths, credentials, token bytes and provider diagnostics. Use the
@@ -147,24 +164,31 @@ outcome together with the exit status:
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | `observed`, `committed`, `not_committed`, or requested help. `not_committed` means resolution completed, not a successful push. |
+| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, or requested help. `not_committed` means resolution completed, not a successful push. |
 | 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unsupported platform or incompatible durable options. |
+| 3 | Checkpoint `conflict` or shared-engine `busy`; retry against a fresh head after competing work finishes. |
 | 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |
-| 5 | Invalid/corrupt evidence, a missing head, resource limit, unsupported backend, collection fence, expired view or runtime setup failure. No raw error chain is printed. |
+| 5 | Invalid/corrupt evidence, a missing head, resource limit, unsupported backend, collection fence, expired view or runtime setup failure. `invalid_git_state_or_limit` covers Git validation and budget failures. No raw error chain is printed. |
 
 Native S3 retries are disabled, connect timeout is five seconds, request timeout
 is thirty seconds, and the asynchronous backend operation has a sixty-second
-deadline. Deadline expiry during resume is pending: cancellation cannot prove
-publication failed. A new command may retry the same token. Input file reads
-precede the asynchronous deadline.
+deadline. Deadline expiry during resume or checkpoint is pending: cancellation
+cannot prove publication failed. A new resume command may retry the same token.
+Input file reads precede the asynchronous deadline.
 
 Input caps do not establish decoded-memory limits. Core resumption may verify
 complete immutable dependency graphs and active collection plans; it does not
 use the serving Git operation budgets. This command has no general 128 MiB
 maintenance qualification yet. Build resources remain separate from runtime;
-the service's existing 128 MiB qualification is unchanged. Checkpoint resource
-profiles, GC, retention administration and HTTP authorization remain separate
-work under #32/#35.
+the service's existing 128 MiB qualification is unchanged.
+
+Checkpointing uses the shared maintenance profile: 8,192 charged calls, 88 MiB
+live pool, 24 MiB retained state, 96 MiB transfer and 256 MiB work, with one
+cumulative expired-view retry. Those reservations bound shared-engine work,
+not the whole process; backend setup/probes precede helper admission. Oversized
+metadata can still reject. See the [shared helper evidence](../../docs/evidence/git-metadata-maintenance-2026-09-05.md)
+for accounting and limits. GC, retention administration and HTTP authorization
+remain separate work under #32/#35.
 
 A local signed HTTP fixture tests the transport independently of a provider:
 

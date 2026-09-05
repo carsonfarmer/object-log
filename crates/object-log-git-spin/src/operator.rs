@@ -12,6 +12,7 @@ use std::{
 
 use clap::{Arg, Command};
 use object_log::{Log, LogId, Options, Resolution, ValidatedBackend, View};
+use object_log_git::{ObjectFormat, Repository};
 use object_store::{
     RetryConfig, aws::AmazonS3Builder, client::ClientOptions, path::Path as StorePath,
 };
@@ -21,8 +22,7 @@ const CONFIG_BYTES: usize = 16 * 1024;
 const TOKEN_BYTES: usize = 1024 * 1024;
 const OUTPUT_BYTES: usize = 2048;
 const DEADLINE: Duration = Duration::from_mins(1);
-const USAGE: &str =
-    "object-log-git-maintain --config FILE status | resume-commit --token-file FILE";
+const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs";
 
 #[derive(Clone, Copy, Debug)]
 struct Failure(&'static str, u8);
@@ -135,6 +135,15 @@ fn read_only() -> String {
 }
 
 impl Config {
+    // Config::load rejects every other format before opening storage.
+    fn format(&self) -> ObjectFormat {
+        if self.object_format == "sha256" {
+            ObjectFormat::Sha256
+        } else {
+            ObjectFormat::Sha1
+        }
+    }
+
     fn load(path: &Path) -> Result<Self, Failure> {
         let bytes = read_file(path, CONFIG_BYTES)?;
         let config: Self =
@@ -230,12 +239,14 @@ struct Request {
 enum Action {
     Status,
     Resume(Vec<u8>),
+    Checkpoint,
 }
 impl Action {
     fn name(&self) -> &'static str {
         match self {
             Self::Status => "status",
             Self::Resume(_) => "resume-commit",
+            Self::Checkpoint => "checkpoint",
         }
     }
 }
@@ -250,6 +261,14 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
                 .value_parser(clap::value_parser!(PathBuf)),
         )
         .subcommand(Command::new("status"))
+        .subcommand(
+            Command::new("checkpoint").arg(
+                Arg::new("retain-packs")
+                    .long("retain-packs")
+                    .action(clap::ArgAction::SetTrue)
+                    .required(true),
+            ),
+        )
         .subcommand(
             Command::new("resume-commit").arg(
                 Arg::new("token-file")
@@ -272,6 +291,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
         .ok_or(Failure("invalid_arguments", 2))?;
     let action = match parsed.subcommand() {
         Some(("status", _)) => Action::Status,
+        Some(("checkpoint", _)) => Action::Checkpoint,
         Some(("resume-commit", subcommand)) => {
             let path = subcommand
                 .get_one::<PathBuf>("token-file")
@@ -297,8 +317,25 @@ fn classify(error: &object_log::Error) -> Failure {
     }
 }
 
-async fn execute(log: &Log, action: &Action) -> Report {
+async fn execute(log: &Log, action: &Action, format: ObjectFormat) -> Report {
     match action {
+        Action::Checkpoint => match Repository::checkpoint_retaining_packs(log, format).await {
+            Ok(object_log::CheckpointStatus::Published(view)) => {
+                Report::new(action.name(), "checkpointed", 0).observed(&view)
+            }
+            Ok(object_log::CheckpointStatus::Conflict(view)) => {
+                Report::new(action.name(), "conflict", 3).observed(&view)
+            }
+            // Do not resolve after the shared helper's cumulative budget is dropped.
+            Ok(object_log::CheckpointStatus::Pending(_)) => {
+                Report::new(action.name(), "pending", 4)
+            }
+            Err(object_log_git::Error::ObjectLog(error)) => {
+                Report::failed(action.name(), classify(&error))
+            }
+            Err(object_log_git::Error::Busy) => Report::new(action.name(), "busy", 3),
+            Err(_) => Report::new(action.name(), "invalid_git_state_or_limit", 5),
+        },
         Action::Status => match log.load().await {
             Ok(view) => Report::new(action.name(), "observed", 0).observed(&view),
             Err(error) => Report::failed(action.name(), classify(&error)),
@@ -344,7 +381,7 @@ pub(super) fn run(arguments: impl IntoIterator<Item = OsString>) -> Report {
     runtime.block_on(async {
         let work = async {
             match config.open().await {
-                Ok(log) => execute(&log, &request.action).await,
+                Ok(log) => execute(&log, &request.action, config.format()).await,
                 Err(failure) => Report::failed(operation, failure),
             }
         };
@@ -362,7 +399,7 @@ async fn bounded(
         .unwrap_or_else(|_| {
             Report::new(
                 operation,
-                if operation == "resume-commit" {
+                if matches!(operation, "resume-commit" | "checkpoint") {
                     "pending"
                 } else {
                     "backend_unavailable"
