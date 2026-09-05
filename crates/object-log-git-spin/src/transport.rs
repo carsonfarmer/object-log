@@ -109,6 +109,8 @@ where
     F: FnMut(HttpRequest) -> Fut,
     Fut: std::future::Future<Output = Result<HttpResponse, HttpError>>,
 {
+    // A stalled bodyless read may retry once before any response is exposed.
+    // Each attempt retains the same transport budget and configured deadlines.
     read_retry::retry_read(request, attempt, |error| {
         std::error::Error::source(error)
             .and_then(|source| source.downcast_ref::<spin_sdk::http::ErrorCode>())
@@ -116,6 +118,7 @@ where
                 matches!(
                     code,
                     spin_sdk::http::ErrorCode::ConnectionTerminated
+                        | spin_sdk::http::ErrorCode::ConnectionReadTimeout
                         | spin_sdk::http::ErrorCode::HttpResponseIncomplete
                         | spin_sdk::http::ErrorCode::HttpProtocolError
                 )
@@ -352,7 +355,7 @@ mod tests {
         let result =
             futures::executor::block_on(retry_read(request, |_| {
                 futures::future::ready(budget.call().and_then(|()| {
-                    Err(http_error(spin_sdk::http::ErrorCode::ConnectionTerminated))
+                    Err(http_error(spin_sdk::http::ErrorCode::ConnectionReadTimeout))
                 }))
             }));
         assert!(
@@ -360,6 +363,41 @@ mod tests {
                 .is_some_and(<dyn std::error::Error + 'static>::is::<QuotaExceeded>)
         );
         assert_eq!(budget.calls.load(Ordering::Relaxed), HTTP_CALLS);
+        Ok(())
+    }
+
+    #[test]
+    fn pre_response_read_timeout_retries_once_without_replaying_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (method, failures, expected) in [
+            (http::Method::GET, 1, 2),
+            (http::Method::HEAD, 1, 2),
+            (http::Method::GET, 2, 2),
+            (http::Method::PUT, 1, 1),
+            (http::Method::POST, 1, 1),
+            (http::Method::DELETE, 1, 1),
+        ] {
+            let budget = Budget::default();
+            let mut calls = 0;
+            let request = http::Request::builder()
+                .method(method)
+                .body(HttpRequestBody::empty())?;
+            let result = futures::executor::block_on(retry_read(request, |_| {
+                calls += 1;
+                futures::future::ready(budget.call().and_then(|()| {
+                    if calls <= failures {
+                        Err(http_error(spin_sdk::http::ErrorCode::ConnectionReadTimeout))
+                    } else {
+                        Ok(http::Response::new(HttpResponseBody::new(
+                            http_body_util::Empty::<Bytes>::new().map_err(|never| match never {}),
+                        )))
+                    }
+                }))
+            }));
+            assert_eq!(calls, expected);
+            assert_eq!(budget.calls.load(Ordering::Relaxed), expected);
+            assert_eq!(result.is_ok(), expected > failures);
+        }
         Ok(())
     }
 
