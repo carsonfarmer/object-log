@@ -184,10 +184,8 @@ impl<'a> Reader<'a> {
             };
             packs.slots[slot] = None;
             packs.next = (slot + 1) % SELECTED_PACKS;
-            // Chunk keys include the slot; remove them before any slot can be reused.
-            self.cache
-                .retain(|((cached, _), _)| usize::from(*cached) != slot);
-            self.cache_bytes = self.cache.iter().map(|(_, bytes)| bytes.len()).sum();
+            // Encoded chunks are keyed by immutable ObjectRef, not this reusable
+            // selected-pack slot, and remain within their independent byte bound.
         }
         let slot = packs
             .slots

@@ -1,5 +1,10 @@
 use std::io::{self, Write};
-use std::{collections::VecDeque, mem::size_of, path::PathBuf};
+use std::{
+    collections::VecDeque,
+    mem::size_of,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 #[path = "durable_fetch.rs"]
 mod fetch_writer;
@@ -580,9 +585,7 @@ pub(crate) struct Reader<'a> {
     catalog: &'a Catalog,
     tree_cache: Option<crate::catalog_tree::CatalogCache<'a>>,
     selected_packs: Option<SelectedPacks<'a>>,
-    cache: VecDeque<((u16, u16), Bytes)>,
-    cache_bytes: usize,
-    cache_memory: Option<Reservation>,
+    cache: OnceLock<Arc<EncodedCache<'a>>>,
 }
 
 impl<'a> Reader<'a> {
@@ -593,9 +596,7 @@ impl<'a> Reader<'a> {
             catalog,
             tree_cache: None,
             selected_packs: None,
-            cache: VecDeque::new(),
-            cache_bytes: 0,
-            cache_memory: None,
+            cache: OnceLock::new(),
         }
     }
 
@@ -874,49 +875,119 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
+    fn encoded_cache(&self) -> Result<Arc<EncodedCache<'a>>, Error> {
+        if let Some(cache) = self.cache.get() {
+            return Ok(cache.clone());
+        }
+        let operation = &self.catalog.operation;
+        let memory = operation.reserve(EncodedCache::allocation_bytes(operation))?;
+        let cache = Arc::new(EncodedCache {
+            log: self.log,
+            view: self.view,
+            operation: operation.clone(),
+            state: Mutex::new(EncodedChunks {
+                chunks: VecDeque::with_capacity(operation.call_limit()),
+                bytes: 0,
+            }),
+            _memory: memory,
+        });
+        // Concurrent initializers can lose this race; their reservations release.
+        let _ = self.cache.set(cache);
+        self.cache
+            .get()
+            .cloned()
+            .ok_or_else(|| pack_error("encoded cache initialization failed"))
+    }
+
     async fn chunk(&mut self, pack: u16, index: usize) -> Result<Bytes, Error> {
-        let index = u16::try_from(index)
-            .map_err(|_| Error::InvalidPack("pack chunk index exceeds u16".into()))?;
-        if let Some((_, bytes)) = self.cache.iter().find(|(key, _)| *key == (pack, index)) {
-            return Ok(bytes.clone());
-        }
-        if self.cache_memory.is_none() {
-            // Every inserted entry costs one cumulative I/O call. Reserving the
-            // call limit bounds metadata even with very small stored chunks.
-            let capacity = self.catalog.operation.call_limit();
-            self.cache_memory = Some(
-                self.catalog
-                    .operation
-                    .reserve(capacity * size_of::<((u16, u16), Bytes)>())?,
-            );
-            self.cache = VecDeque::with_capacity(capacity);
-        }
-        let object = self
-            .pack(pack)
+        let selected = self.pack(pack);
+        let object = selected
             .node
             .children()
-            .get(usize::from(index))
-            .ok_or_else(|| Error::InvalidPack("pack chunk is missing".into()))?
-            .clone();
-        let bytes = usize::try_from(object.len())
-            .map_err(|_| Error::InvalidPack("pack chunk exceeds memory".into()))?;
-        while self.cache_bytes + bytes > MAX_CACHE_BYTES {
-            let Some((_, removed)) = self.cache.pop_front() else {
-                break;
-            };
-            self.cache_bytes -= removed.len();
-        }
+            .get(index)
+            .ok_or_else(|| pack_error("pack chunk is missing"))?;
+        self.encoded_cache()?.read(object).await
+    }
+}
 
-        self.catalog.operation.work(bytes)?;
-        let memory = self.catalog.operation.reserve(bytes)?;
-        let value = self.log.read_object(self.view, &object).await?;
+// Only authenticated encoded bytes are shared. The cache belongs to one Reader's
+// exact view and operation, and its Bytes retain their original live reservation.
+pub(crate) struct EncodedCache<'a> {
+    log: &'a Log,
+    view: &'a View,
+    operation: Operation,
+    state: Mutex<EncodedChunks>,
+    _memory: Reservation,
+}
+
+struct EncodedChunks {
+    chunks: VecDeque<(ObjectRef, Bytes)>,
+    bytes: usize,
+}
+
+impl EncodedCache<'_> {
+    fn allocation_bytes(operation: &Operation) -> usize {
+        size_of::<Self>()
+            + 2 * size_of::<usize>()
+            + operation.call_limit() * size_of::<(ObjectRef, Bytes)>()
+    }
+
+    pub(crate) fn matches(&self, operation: &Operation, log: &Log, view: &View) -> bool {
+        self.operation.same_as(operation)
+            && std::ptr::eq(self.log, log)
+            && std::ptr::eq(self.view, view)
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, EncodedChunks>, Error> {
+        self.state
+            .lock()
+            .map_err(|_| pack_error("encoded cache lock poisoned"))
+    }
+
+    pub(crate) async fn read(&self, object: &ObjectRef) -> Result<Bytes, Error> {
+        let bytes = usize::try_from(object.len()).map_err(pack_error)?;
+        if bytes > MAX_CACHE_BYTES {
+            return invalid("encoded chunk exceeds cache bound");
+        }
+        {
+            let mut state = self.lock()?;
+            self.operation
+                .work(state.chunks.len() * size_of::<ObjectRef>())?;
+            if let Some((_, value)) = state.chunks.iter().find(|(key, _)| key == object) {
+                return Ok(value.clone());
+            }
+            // Evict before admitting the replacement, including metadata bounds
+            // even if an internal caller did not attach its operation as a guard.
+            self.evict(&mut state, bytes);
+        }
+        self.operation.work(bytes)?;
+        let memory = self.operation.reserve(bytes)?;
+        let value = self.log.read_object(self.view, object).await?;
         if value.len() != bytes {
             return invalid("pack chunk byte length does not match");
         }
         let value = hold(value, memory);
-        self.cache_bytes += bytes;
-        self.cache.push_back(((pack, index), value.clone()));
+        let mut state = self.lock()?;
+        self.operation
+            .work(state.chunks.len() * size_of::<ObjectRef>())?;
+        if let Some((_, existing)) = state.chunks.iter().find(|(key, _)| key == object) {
+            return Ok(existing.clone());
+        }
+        self.evict(&mut state, bytes);
+        state.bytes += bytes;
+        state.chunks.push_back((object.clone(), value.clone()));
         Ok(value)
+    }
+
+    fn evict(&self, state: &mut EncodedChunks, bytes: usize) {
+        while state.bytes + bytes > MAX_CACHE_BYTES
+            || state.chunks.len() >= self.operation.call_limit()
+        {
+            let Some((_, removed)) = state.chunks.pop_front() else {
+                break;
+            };
+            state.bytes -= removed.len();
+        }
     }
 }
 
@@ -1476,13 +1547,190 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn many_small_deltas_share_authenticated_chunks_without_refunding_admission() -> TestResult
+    {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+            let backend =
+                ValidatedBackend::new(Arc::new(store.clone()), StorePath::from("shared-deltas"))
+                    .await?;
+            let log =
+                Log::open(&backend, &LogId::new("shared-deltas")?, Options::default()).await?;
+            let view = log.load().await?;
+            let fixture = fixture(format, 64, true, false)?;
+            let ids = fixture
+                .objects
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            let normalized_bytes = fixture.normalized.bytes.len();
+            let descriptor = PackDescriptor {
+                id: fixture.normalized.id,
+                bytes: normalized_bytes as u64,
+            };
+            let mut chunks = Vec::new();
+            for chunk in fixture.normalized.bytes.chunks(256) {
+                chunks.push(log.put_object(&view, Bytes::copy_from_slice(chunk)).await?);
+            }
+            let root = log
+                .put_node(&view, Bytes::from(fixture.normalized.index), chunks)
+                .await?;
+            let catalog = load_one(&log, &view, format, descriptor, &root).await?;
+            let operation = &catalog.operation;
+            let guarded = log.with_request_guard(Arc::new(operation.clone()));
+            let mut reader = Reader::new(&guarded, &view, &catalog);
+            let pack = &catalog.packs[0];
+            let chunks = pack.node.children().len();
+            assert!(chunks > 1);
+            let live = operation.live_bytes();
+            let calls = operation.calls();
+            store.reset();
+            let mut delta_count = 0;
+            for id in &ids {
+                let location = reader
+                    .location(*id)
+                    .await?
+                    .ok_or("missing fixture object")?;
+                delta_count += usize::from(reader.entry_header(location).await?.header.is_delta());
+                assert_eq!(reader.verify(*id).await?, Some(gix_object::Kind::Blob));
+            }
+            assert!(delta_count >= 48, "fixture must contain many stored deltas");
+            let reads = store.metrics().operation(StoreOperation::Get).requests;
+            assert_eq!(reads, chunks as u64);
+            assert_eq!(operation.calls() - calls, chunks);
+            assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
+            assert_eq!(
+                operation.live_bytes() - live,
+                EncodedCache::allocation_bytes(operation) + normalized_bytes
+            );
+            // A retry keeps cumulative work and calls. Even with no I/O permits
+            // left, re-verification uses the authenticated cache and charges work.
+            operation.retry()?;
+            while operation.calls() < crate::pack::budget::CALLS {
+                operation.io(0)?;
+            }
+            let work = operation.work_bytes();
+            for id in ids.iter().rev() {
+                assert_eq!(reader.verify(*id).await?, Some(gix_object::Kind::Blob));
+            }
+            assert!(operation.work_bytes() > work);
+            assert!(operation.io(0).is_err());
+            assert_eq!(
+                store.metrics().operation(StoreOperation::Get).requests,
+                reads
+            );
+            assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
+            drop(reader);
+            assert_eq!(operation.live_bytes(), live);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn encoded_cache_is_attempt_scoped_and_input_can_outlive_reader() -> TestResult {
+        use crate::pack::ingest::Input;
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let (log, view) = open(store.clone(), "cache-context").await?;
+        let other_view = log.load().await?;
+        let fixture = fixture(ObjectFormat::Sha1, 4, true, false)?;
+        let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
+        let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
+        let operation = &catalog.operation;
+        let guarded = log.with_request_guard(Arc::new(operation.clone()));
+        let reader = Reader::new(&guarded, &view, &catalog);
+        let pack = &catalog.packs[0];
+        let baseline = operation.live_bytes();
+        let cache = reader.encoded_cache()?;
+        let input = Input::read_only(
+            operation,
+            &guarded,
+            &view,
+            &pack.node,
+            u64::from(pack.bytes),
+            pack.chunk_bytes,
+        )?
+        .with_encoded_cache(cache.clone())?;
+        let foreign = test_operation();
+        store.reset();
+        assert!(
+            Input::read_only(
+                &foreign,
+                &guarded,
+                &view,
+                &pack.node,
+                u64::from(pack.bytes),
+                pack.chunk_bytes
+            )?
+            .with_encoded_cache(cache.clone())
+            .is_err()
+        );
+        assert!(
+            Input::read_only(
+                operation,
+                &guarded,
+                &other_view,
+                &pack.node,
+                u64::from(pack.bytes),
+                pack.chunk_bytes
+            )?
+            .with_encoded_cache(cache.clone())
+            .is_err()
+        );
+        assert!(
+            Input::read_only(
+                operation,
+                &log,
+                &view,
+                &pack.node,
+                u64::from(pack.bytes),
+                pack.chunk_bytes
+            )?
+            .with_encoded_cache(cache.clone())
+            .is_err()
+        );
+        assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
+        let range = pack.entry_range(0);
+        let id = ObjectId::from_bytes(pack.id.format(), pack.oid(0))?;
+        input
+            .indexed_entry(
+                u64::from(range.start),
+                u64::from(range.end),
+                id,
+                pack.crc(0),
+            )
+            .await?;
+        let retained = operation.live_bytes();
+        let reads = store.metrics().operation(StoreOperation::Get).requests;
+        assert!(reads > 0);
+        drop(cache);
+        drop(reader);
+        assert_eq!(operation.live_bytes(), retained);
+        input
+            .indexed_entry(
+                u64::from(range.start),
+                u64::from(range.end),
+                id,
+                pack.crc(0),
+            )
+            .await?;
+        assert_eq!(
+            store.metrics().operation(StoreOperation::Get).requests,
+            reads
+        );
+        assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
+        drop(input);
+        assert_eq!(operation.live_bytes(), baseline);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cache_metadata_is_reserved_before_the_first_chunk_read() -> TestResult {
         let store = FaultStore::from_arc(Arc::new(InMemory::new()));
         let (log, view) = open(store.clone(), "cache-metadata").await?;
         let fixture = fixture(ObjectFormat::Sha1, 1, false, false)?;
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
-        let metadata = crate::pack::budget::CALLS * size_of::<((u16, u16), Bytes)>();
+        let metadata = EncodedCache::allocation_bytes(&catalog.operation);
         let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
         let mut reader = Reader::new(&guarded_log, &view, &catalog);
         let pressure = catalog
@@ -1491,13 +1739,13 @@ mod tests {
         store.reset();
         assert!(reader.read_range(0, 0..1).await.is_err());
         assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
-        assert_eq!(reader.cache.capacity(), 0);
+        assert!(reader.cache.get().is_none());
         drop(pressure);
         let before = catalog.operation.live_bytes();
         drop(reader.read_range(0, 0..1).await?);
         assert_eq!(
             catalog.operation.live_bytes() - before,
-            metadata + reader.cache_bytes
+            metadata + reader.encoded_cache()?.lock()?.bytes
         );
         drop(reader);
         assert_eq!(catalog.operation.live_bytes(), before);
@@ -1793,8 +2041,15 @@ mod tests {
         for index in 1..catalog.packs[0].node.children().len() {
             drop(reader.chunk(0, index).await?);
         }
-        assert!(reader.cache_bytes <= MAX_CACHE_BYTES);
-        assert!(reader.cache.iter().all(|(key, _)| *key != (0, 0)));
+        assert!(reader.encoded_cache()?.lock()?.bytes <= MAX_CACHE_BYTES);
+        assert!(
+            reader
+                .encoded_cache()?
+                .lock()?
+                .chunks
+                .iter()
+                .all(|(key, _)| key != &catalog.packs[0].node.children()[0])
+        );
         let retained = catalog.operation.live_bytes();
         drop(first);
         assert_eq!(retained - catalog.operation.live_bytes(), CHUNK_BYTES);

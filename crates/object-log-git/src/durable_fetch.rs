@@ -130,7 +130,8 @@ impl<'a> Reader<'a> {
             &pack.node,
             u64::from(pack.bytes),
             pack.chunk_bytes,
-        )?;
+        )?
+        .with_encoded_cache(self.encoded_cache()?)?;
         let count = pack.index.num_objects() as usize;
         let capacity = count.min(MAX_DELTA_DEPTH + 1);
         let memory = self

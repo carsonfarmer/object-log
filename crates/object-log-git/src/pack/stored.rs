@@ -43,12 +43,24 @@ impl<'a> Input<'a> {
             chunks: Vec::new(),
             read_refs: Some(node.children().to_vec().into_boxed_slice()),
             inline: None,
+            encoded_cache: None,
             cache: std::sync::Mutex::new(None),
             bytes,
             width,
             maximum: count,
             memory,
         })
+    }
+
+    pub(crate) fn with_encoded_cache(
+        mut self,
+        cache: Arc<crate::durable::EncodedCache<'a>>,
+    ) -> Result<Self, Error> {
+        if !cache.matches(&self.operation, self.log, self.view) {
+            return invalid("encoded cache belongs to another read context");
+        }
+        self.encoded_cache = Some(cache);
+        Ok(self)
     }
 
     pub(crate) fn operation(&self) -> &Operation {
@@ -116,6 +128,7 @@ impl<'a> Input<'a> {
             chunks,
             read_refs: None,
             inline: None,
+            encoded_cache: None,
             cache: std::sync::Mutex::new(None),
             bytes,
             width,

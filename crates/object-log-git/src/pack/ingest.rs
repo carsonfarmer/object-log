@@ -46,6 +46,7 @@ pub(crate) struct Input<'a> {
     chunks: Vec<StagedObject>,
     read_refs: Option<Box<[ObjectRef]>>,
     inline: Option<Bytes>,
+    encoded_cache: Option<Arc<crate::durable::EncodedCache<'a>>>,
     cache: std::sync::Mutex<Option<(usize, Bytes)>>,
     bytes: u64,
     width: usize,
@@ -88,6 +89,7 @@ impl<'a> Input<'a> {
             chunks: Vec::with_capacity(maximum),
             read_refs: None,
             inline: None,
+            encoded_cache: None,
             cache: std::sync::Mutex::new(None),
             bytes: 0,
             width,
@@ -215,10 +217,15 @@ impl<'a, 'log> Cursor<'a, 'log> {
                 let object = self.input.chunk_reference(index)?;
                 let size = usize::try_from(object.len()).map_err(pack_error)?;
 
-                self.input.operation.work(size)?;
-                let memory = self.input.operation.reserve(size)?;
-                let bytes = self.input.log.read_object(self.input.view, object).await?;
-                self.cache = Some((index, hold(bytes, memory)));
+                let bytes = if let Some(cache) = &self.input.encoded_cache {
+                    cache.read(object).await?
+                } else {
+                    self.input.operation.work(size)?;
+                    let memory = self.input.operation.reserve(size)?;
+                    let bytes = self.input.log.read_object(self.input.view, object).await?;
+                    hold(bytes, memory)
+                };
+                self.cache = Some((index, bytes));
                 self.input
                     .cache
                     .lock()
