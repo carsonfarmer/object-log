@@ -73,16 +73,23 @@ Independent correctness/simplification review approved after fixing tag-blob
 reads and nonadjacent duplicate tree names. See
 `docs/evidence/git-graph-2026-09-04.md`.
 
-Linux CI failed Task 3's native loopback test twice with a generic HTTP 500.
-The follow-up flush fix `a4228b6` corrects a proven Tokio file-write ordering
-bug and adds both-hash multi-buffer recovery tests plus better diagnostics.
-Local Linux reproduction did not establish that it caused CI's failure.
-Check the next hosted run before claiming Linux parity.
+Hosted Linux CI run 33935170712 passed at `f210cc7`, including the native
+loopback that previously failed. The flush fix remains a source-proven repair;
+we did not reproduce the earlier hosted failure locally.
+
+## Tasks 5 and 6 acceptance
+
+Exact want-minus-have selection and complete include-tag chains now produce
+both-hash packs checked in fresh receivers containing only accepted-have
+history. Selected leaves verify their declared type; unrelated leaves remain
+unread. Independent correctness review approved after those repairs. The full
+gate passes (313 passed, 9 opt-in tests ignored), including native strict Clippy
+and locked WASIp2 check/Clippy. See `docs/evidence/git-selection-2026-09-04.md`.
 
 ## Next actions
 
-Continue exact want/have selection and fetch wire integration in
-`.object-log-worktrees/git-fetch-commands` on `cf/git-fetch-commands`.
+Continue upload wire integration in `.object-log-worktrees/git-upload-wire`
+on `cf/git-upload-wire`. Tasks 5 and 6 are accepted.
 A separate `cf/git-thin-resolution` worktree is implementing private bounded
 thin-pack resolution for the later receive path. Integrate reviewed tranches
 in order, preserve cumulative budgets, and retain the native oracle.
@@ -102,10 +109,6 @@ common libraries and verify actual component imports as well as compilation.
   only to reduce source lines.
 - Keep all operation counters cumulative across one expired-view retry.
 - Buffer and validate a response before returning bytes.
-- Task 3 currently retains `Catalog` in `Repository`. An earlier review
-  preferred command-local catalogs so `ls-refs` avoids index loads. Review this
-  after the GC blocker is fixed. Do not expand Task 3 for it unless evidence
-  shows a correctness or measured performance defect.
 - Each live Git pack adds one catalog-root GET. Issue #19 tracks compaction.
   This does not block a small trial, but it blocks a scale claim.
 - `sley-protocol` 0.5.2 compiles for Rust 1.97 and WASIp2 and could reduce wire

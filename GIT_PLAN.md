@@ -211,9 +211,9 @@ the response.
    a catalog; move it into object-reading commands in Task 4.
 4. Complete: make catalogs command-local and add iterative commit, tree, and annotated-tag traversal. Enforce graph,
    object, work, call, transfer, and memory budgets in one place.
-5. Validate reachable wants and usable haves against one view. Compute the
+5. Complete: validate reachable wants and usable haves against one view. Compute the
    exact selected object set without reading unrelated blobs.
-6. Build the fetch pack from reused compressed entries and materialized
+6. Complete: build the fetch pack from reused compressed entries and materialized
    fallbacks. Validate it with Git and enforce the raw and framed byte limits.
 7. Connect protocol-v2 discovery, `ls-refs`, negotiation, and fetch to
    `Repository`. Buffer the bounded response and allow one expired-view retry.
@@ -285,8 +285,13 @@ Measure:
 The hard local gates are:
 
 - The fetch pack contains exactly the expected object-ID set.
-- `git index-pack --strict --check-self-contained-and-connected` accepts the
-  fetch pack.
+- Every fetch pack normalizes without external delta bases. Full clone packs
+  pass `git index-pack --strict --check-self-contained-and-connected` in an
+  empty receiver. Incremental packs pass `git index-pack --strict` in a receiver
+  seeded only with accepted-have history, followed by `git fsck --strict` on
+  the fetched target. The connectivity flag returns 1 when graph dependencies
+  come from that history; this is expected for an incremental pack. See the
+  [selection evidence](docs/evidence/git-selection-2026-09-04.md).
 - For the 8 MiB full fetch and 384-commit incremental fetch, candidate pack
   bytes are at most 1.10 times a same-run `git pack-objects --stdout --revs`
   oracle.

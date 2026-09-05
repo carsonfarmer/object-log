@@ -86,7 +86,7 @@ API:
   protocol v2 for upload-pack discovery and fetch. Push remains standard
   receive-pack.
 
-Tasks 1–4 provide the private pack, sparse reader/writer, wire, and budget
+Tasks 1–6 provide the private pack, sparse reader/writer, wire, and budget
 foundations plus one common `Repository::open(&Log, ObjectFormat)` for native
 and `WASIp2`. The repository retains one exact view and exposes its refs without
 local paths. Durable packs use authenticated variable chunk geometry, including
