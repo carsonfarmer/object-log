@@ -4,11 +4,17 @@ use super::{Cursor, IndexedEntry, Input};
 use crate::{
     Error,
     pack::{
-        INFLATE_BYTES, MAX_DELTA_DEPTH, SCAN_WINDOW_BYTES, budget::Reservation, invalid,
-        object_hash, pack_error,
+        INFLATE_BYTES, MAX_DELTA_DEPTH, SCAN_WINDOW_BYTES,
+        budget::{Reservation, hold},
+        invalid, object_hash, pack_error,
     },
 };
+use bytes::Bytes;
 use gix_pack::data::entry::Header;
+
+// Retain only the most recent verified small dependency. Building its parent
+// can temporarily retain a second candidate of the same bounded size.
+const SMALL_RESULT_BYTES: usize = 64 * 1024;
 
 /// The caller admits object sizes and supplies one authenticated pack's chain,
 /// target first and full base last. No selected-base requirement or durable PUT.
@@ -19,6 +25,7 @@ pub(crate) struct ReadOnlyDelta<'a, 'log> {
     chain: &'a [IndexedEntry],
     cursor: Cursor<'a, 'log>,
     layers: Vec<Layer>,
+    decoded: Option<(usize, Bytes)>,
     kind: gix_object::Kind,
     emitted: usize,
     hash: gix_hash::Hasher,
@@ -72,6 +79,7 @@ impl<'a, 'log> ReadOnlyDelta<'a, 'log> {
             chain,
             cursor,
             layers,
+            decoded: None,
             kind,
             emitted: 0,
             hash,
@@ -85,8 +93,23 @@ impl<'a, 'log> ReadOnlyDelta<'a, 'log> {
     async fn verify_dependencies(&mut self) -> Result<(), Error> {
         let _memory = self.input.operation.reserve(SCAN_WINDOW_BYTES)?;
         let mut window = vec![0; SCAN_WINDOW_BYTES];
-        for first in (1..self.chain.len().saturating_sub(1)).rev() {
+        for first in (1..self.chain.len()).rev() {
             let entry = &self.chain[first];
+            // Reuse owns a separate live reservation. If that reservation is
+            // unavailable, retain the original bounded replay path.
+            let mut candidate = if entry.result_size <= SMALL_RESULT_BYTES {
+                self.input
+                    .operation
+                    .reserve(entry.result_size)
+                    .ok()
+                    .map(|memory| (Vec::with_capacity(entry.result_size), memory))
+            } else {
+                None
+            };
+            if first + 1 == self.chain.len() && candidate.is_none() {
+                // The full base was already authenticated by verify_full_base.
+                continue;
+            }
             let expected = entry
                 .id
                 .ok_or_else(|| pack_error("delta dependency ID is missing"))?;
@@ -100,10 +123,17 @@ impl<'a, 'log> ReadOnlyDelta<'a, 'log> {
                 let limit = window.len().min(entry.result_size - offset);
                 let count = self.fill(first, offset, &mut window[..limit]).await?;
                 hash.update(&window[..count]);
+                if let Some((bytes, _)) = &mut candidate {
+                    self.input.operation.work(count)?;
+                    bytes.extend_from_slice(&window[..count]);
+                }
                 offset += count;
             }
             if hash.try_finalize().map_err(pack_error)?.as_slice() != expected.as_bytes() {
                 return invalid("decoded dependency ID does not match");
+            }
+            if let Some((bytes, memory)) = candidate {
+                self.decoded = Some((first, hold(Bytes::from(bytes), memory)));
             }
         }
         Ok(())
@@ -162,7 +192,21 @@ impl<'a, 'log> ReadOnlyDelta<'a, 'log> {
             let mut copied = false;
             // A copy descends exactly one chain level. This explicit stack has
             // no recursive futures and cannot retain one input chunk per layer.
-            for layer in &mut self.layers[first..] {
+            for (position, layer) in self.layers[first..].iter_mut().enumerate() {
+                if let Some((index, bytes)) = &self.decoded
+                    && *index == first + position
+                {
+                    let bytes = bytes
+                        .get(offset..)
+                        .ok_or_else(|| pack_error("cached delta offset exceeds result"))?;
+                    count = count.min(bytes.len());
+                    if count == 0 {
+                        return invalid("cached delta result is truncated");
+                    }
+                    output[written..written + count].copy_from_slice(&bytes[..count]);
+                    copied = true;
+                    break;
+                }
                 layer.seek(offset, &mut self.cursor).await?;
                 layer.command(&mut self.cursor).await?;
                 match layer.pending {
@@ -658,6 +702,137 @@ mod tests {
             output.extend_from_slice(&window[..count]);
         }
         Ok(output)
+    }
+
+    fn small_backward_chain(
+        format: ObjectFormat,
+    ) -> TestResult<(Vec<u8>, Vec<IndexedEntry>, Vec<u8>)> {
+        let mut state = 0x1234_5678_u64;
+        let mut expected = (0..32768)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect::<Vec<_>>();
+        let mut pack = b"PACK\0\0\0\x02\0\0\0\x11".to_vec();
+        let mut id = oid(format, &expected)?;
+        let mut chain = vec![append(
+            &mut pack,
+            Header::Blob,
+            &expected,
+            expected.len(),
+            id,
+        )?];
+        for level in 0..16 {
+            let mut commands = Vec::new();
+            integer(expected.len(), &mut commands);
+            integer(expected.len(), &mut commands);
+            let mut target = Vec::with_capacity(expected.len());
+            for piece in 0..64 {
+                let start = ((63 - piece + level) % 64) * 512;
+                if piece == 0 {
+                    let marker = u8::try_from(128 + level)?;
+                    commands.extend_from_slice(&[1, marker]);
+                    target.push(marker);
+                    copy(u32::try_from(start + 1)?, 511, &mut commands);
+                    target.extend_from_slice(&expected[start + 1..start + 512]);
+                } else {
+                    copy(u32::try_from(start)?, 512, &mut commands);
+                    target.extend_from_slice(&expected[start..start + 512]);
+                }
+            }
+            let target_id = oid(format, &target)?;
+            chain.push(append(
+                &mut pack,
+                Header::RefDelta {
+                    base_id: gix_hash::ObjectId::from_bytes_or_panic(id.as_bytes()),
+                },
+                &commands,
+                target.len(),
+                target_id,
+            )?);
+            id = target_id;
+            expected = target;
+        }
+        seal(&mut pack, format)?;
+        chain.reverse();
+        Ok((pack, chain, expected))
+    }
+
+    #[tokio::test]
+    async fn small_backward_delta_chain_reuses_verified_intermediates_with_bounded_work()
+    -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let (pack, chain, expected) = small_backward_chain(format)?;
+            let (base_log, view, faults) = open().await?;
+            let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = base_log.with_request_guard(Arc::new(operation.clone()));
+            let input = Input::receive(
+                &operation,
+                &log,
+                &view,
+                stream::iter([Ok(Bytes::from(pack))]),
+            )
+            .await?;
+            operation.work(
+                crate::pack::budget::WORK_BYTES - operation.work_bytes() - 64 * 1024 * 1024,
+            )?;
+            let work = operation.work_bytes();
+            let live = operation.live_bytes();
+            faults.reset();
+            let mut reader = ReadOnlyDelta::new(&input, &chain).await?;
+            assert_eq!(read_all(&mut reader).await?, expected);
+            eprintln!(
+                "small delta chain {format:?}: {} charged work bytes",
+                operation.work_bytes() - work
+            );
+            assert!(
+                operation.work_bytes() - work < 8 * 1024 * 1024,
+                "small intermediate chains must not repeatedly inflate their ancestors"
+            );
+            assert!(operation.live_bytes() - live < 2 * 1024 * 1024);
+            assert_eq!(faults.metrics().operation(StoreOperation::Put).requests, 0);
+            drop(reader);
+            drop(input);
+            assert_eq!(operation.live_bytes(), 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn small_delta_reuse_falls_back_when_candidate_memory_is_unavailable() -> TestResult {
+        let format = ObjectFormat::Sha1;
+        let (pack, chain, expected) = small_backward_chain(format)?;
+        let (base_log, view, faults) = open().await?;
+        let operation = Pool::new(LIVE_BYTES).admit()?;
+        let log = base_log.with_request_guard(Arc::new(operation.clone()));
+        let input = Input::receive(
+            &operation,
+            &log,
+            &view,
+            stream::iter([Ok(Bytes::from(pack))]),
+        )
+        .await?;
+        // Warm the input's encoded window before isolating decoder admission.
+        let mut cursor = Cursor::new(&input);
+        drop(cursor.window().await?);
+        drop(cursor);
+        let mandatory = chain.len()
+            * (std::mem::size_of::<Layer>() + INFLATE_BYTES + SCAN_WINDOW_BYTES)
+            + SCAN_WINDOW_BYTES;
+        let pressure = operation.reserve(LIVE_BYTES - operation.live_bytes() - mandatory)?;
+        faults.reset();
+        let mut reader = ReadOnlyDelta::new(&input, &chain).await?;
+        assert!(reader.decoded.is_none());
+        assert_eq!(read_all(&mut reader).await?, expected);
+        assert_eq!(faults.metrics().operation(StoreOperation::Put).requests, 0);
+        drop(reader);
+        drop(pressure);
+        drop(input);
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
     }
 
     #[tokio::test]
