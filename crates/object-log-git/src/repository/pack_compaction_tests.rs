@@ -1,3 +1,74 @@
+async fn prepare_compaction_fixture(
+    log: &Log,
+    format: ObjectFormat,
+    first: &Fixture,
+    second: &Fixture,
+) -> TestResult {
+    publish_durable_pack(log, first, format).await?;
+    let input = receive_input(
+        format,
+        &[RefUpdate::new(
+            "refs/heads/second",
+            None,
+            Some(second.target),
+        )?],
+        &fs::read(&second.pack)?,
+        true,
+    );
+    common_open(log, format)
+        .await?
+        .prepare_receive(TransactionId::new(), input)
+        .await?
+        .publish_receive()
+        .await?;
+    common_open(log, format)
+        .await?
+        .set_default_branch(
+            TransactionId::new(),
+            b"refs/heads/main",
+            b"refs/heads/unborn",
+        )
+        .await?;
+    common_open(log, format)
+        .await?
+        .migrate_catalog_attempt(TransactionId::new())
+        .await?;
+    Ok(())
+}
+
+fn falsely_advertised_blob(
+    operation: &crate::pack::budget::Operation,
+    format: ObjectFormat,
+    blob: ObjectId,
+) -> TestResult<crate::pack::Normalized> {
+    use std::io::Write as _;
+    let mut bytes = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+    gix_pack::data::entry::Header::Blob.write_to(5, &mut bytes)?;
+    let mut compressor =
+        gix_zlib::stream::deflate::Write::new(&mut bytes, gix_zlib::Compression::DEFAULT);
+    compressor.write_all(b"other")?;
+    compressor.flush()?;
+    drop(compressor);
+    let hash = crate::pack::object_hash(format);
+    let mut hasher = gix_hash::hasher(hash);
+    hasher.update(&bytes);
+    bytes.extend_from_slice(hasher.try_finalize()?.as_slice());
+    let mut normalized = crate::pack::normalize(operation, format, &bytes, &[])?;
+    // Keep valid pack bytes, CRC, offsets and checksums but make its sole IDX
+    // entry advertise the old blob OID. The core authenticates this entire
+    // physical object; Git must still reject its false content identity.
+    for slot in 0..256 {
+        normalized.index[8 + slot * 4..12 + slot * 4]
+            .copy_from_slice(&u32::from(slot >= usize::from(blob.as_bytes()[0])).to_be_bytes());
+    }
+    normalized.index[1032..1032 + format.digest_len()].copy_from_slice(blob.as_bytes());
+    let end = normalized.index.len() - format.digest_len();
+    let mut hasher = gix_hash::hasher(hash);
+    hasher.update(&normalized.index[..end]);
+    normalized.index[end..].copy_from_slice(hasher.try_finalize()?.as_slice());
+    Ok(normalized)
+}
+
 #[tokio::test]
 async fn live_pack_compaction_preserves_refs_and_reclaims_old_packs_after_checkpoint() -> TestResult
 {
@@ -5,35 +76,7 @@ async fn live_pack_compaction_preserves_refs_and_reclaims_old_packs_after_checkp
         let first = fixture(format, b"first compact")?;
         let second = fixture(format, b"second compact")?;
         let (log, _, backend) = test_log("pack-compaction").await?;
-        publish_durable_pack(&log, &first, format).await?;
-        let input = receive_input(
-            format,
-            &[RefUpdate::new(
-                "refs/heads/second",
-                None,
-                Some(second.target),
-            )?],
-            &fs::read(&second.pack)?,
-            true,
-        );
-        common_open(&log, format)
-            .await?
-            .prepare_receive(TransactionId::new(), input)
-            .await?
-            .publish_receive()
-            .await?;
-        common_open(&log, format)
-            .await?
-            .set_default_branch(
-                TransactionId::new(),
-                b"refs/heads/main",
-                b"refs/heads/unborn",
-            )
-            .await?;
-        common_open(&log, format)
-            .await?
-            .migrate_catalog_attempt(TransactionId::new())
-            .await?;
+        prepare_compaction_fixture(&log, format, &first, &second).await?;
         let repository = common_open(&log, format).await?;
         let refs = repository.state.refs.clone();
         let catalog = repository.catalog().await?;
@@ -263,7 +306,6 @@ async fn live_pack_compaction_conflicts_without_rebase_and_recovers_pending() ->
 
 #[tokio::test]
 async fn live_pack_compaction_rejects_authenticated_wrong_blob_identity() -> TestResult {
-    use std::io::Write as _;
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let item = fixture(format, b"original blob")?;
         let blob = ObjectId::parse(
@@ -314,30 +356,7 @@ async fn live_pack_compaction_rejects_authenticated_wrong_blob_identity() -> Tes
                 &entries,
             )
             .await?;
-        let mut bytes = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
-        gix_pack::data::entry::Header::Blob.write_to(5, &mut bytes)?;
-        let mut compressor =
-            gix_zlib::stream::deflate::Write::new(&mut bytes, gix_zlib::Compression::DEFAULT);
-        compressor.write_all(b"other")?;
-        compressor.flush()?;
-        drop(compressor);
-        let hash = crate::pack::object_hash(format);
-        let mut hasher = gix_hash::hasher(hash);
-        hasher.update(&bytes);
-        bytes.extend_from_slice(hasher.try_finalize()?.as_slice());
-        let mut normalized = crate::pack::normalize(&repository.operation, format, &bytes, &[])?;
-        // Keep valid pack bytes, CRC, offsets and checksums but make its sole IDX
-        // entry advertise the old blob OID. The core authenticates this entire
-        // physical object; Git must still reject its false content identity.
-        for slot in 0..256 {
-            normalized.index[8 + slot * 4..12 + slot * 4]
-                .copy_from_slice(&u32::from(slot >= usize::from(blob.as_bytes()[0])).to_be_bytes());
-        }
-        normalized.index[1032..1032 + format.digest_len()].copy_from_slice(blob.as_bytes());
-        let end = normalized.index.len() - format.digest_len();
-        let mut hasher = gix_hash::hasher(hash);
-        hasher.update(&normalized.index[..end]);
-        normalized.index[end..].copy_from_slice(hasher.try_finalize()?.as_slice());
+        let normalized = falsely_advertised_blob(&repository.operation, format, blob)?;
         let (descriptor, root) = durable::stage(
             &repository.operation,
             &repository.log,
