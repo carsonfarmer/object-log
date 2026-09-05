@@ -16,7 +16,7 @@ use object_log::{
 };
 use object_log_git::{ObjectFormat, ObjectId, RefUpdate, Repository};
 use object_log_git_http::SharedGitHttpServer;
-use object_store::{memory::InMemory, path::Path as StorePath};
+use object_store::{ObjectStoreExt, memory::InMemory, path::Path as StorePath};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -31,6 +31,7 @@ struct Fixture {
     log: Log,
     backend: ValidatedBackend,
     faults: FaultStore,
+    store: Arc<InMemory>,
     format: ObjectFormat,
     target: ObjectId,
 }
@@ -59,7 +60,8 @@ impl Fixture {
         )?;
         let pack = root.path().join("pack");
         std::fs::write(&pack, git(&source, &["pack-objects", "--all", "--stdout"])?)?;
-        let faults = FaultStore::new(InMemory::new());
+        let store = Arc::new(InMemory::new());
+        let faults = FaultStore::from_arc(store.clone());
         let backend = ValidatedBackend::new(
             Arc::new(faults.clone()),
             StorePath::from("shared-http-faults"),
@@ -84,6 +86,7 @@ impl Fixture {
             log,
             backend,
             faults,
+            store,
             format,
             target,
         })
@@ -438,6 +441,71 @@ async fn real_tcp_disconnect_does_not_cancel_the_head_update() -> TestResult {
         tokio::time::timeout(DEADLINE, server).await???;
         let repository = Repository::open(&fixture.log, format).await?;
         assert!(repository.refs().is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_resolution_evidence_returns_recoverable_token_after_hidden_publication()
+-> TestResult {
+    let _serial = TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let fixture = Fixture::new(format).await?;
+        let host = fixture.host();
+        // Let the actual head PUT succeed, but withhold its reply. Unlike a
+        // normal Store error, malformed resolution evidence makes publish_receive
+        // return Err after this publication may already have happened.
+        fixture.faults.schedule(object_log::sim::Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::After,
+        });
+        let mut gate = fixture.faults.pause_put_at(2, FailurePhase::After);
+        let task = tokio::spawn(
+            host.clone()
+                .router()
+                .oneshot(receive(Body::from(fixture.deletion()))?),
+        );
+        assert!(tokio::time::timeout(DEADLINE, gate.wait_until_entered()).await?);
+        // Earlier head reads supply the exact scoped durable location.
+        let location = fixture
+            .faults
+            .metrics()
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.path.ends_with("/index.cbor"))
+            .map(|event| StorePath::from(event.path.clone()))
+            .ok_or("missing head location")?;
+        let published = fixture.store.get(&location).await?.bytes().await?;
+        fixture
+            .store
+            .put(
+                &location,
+                Bytes::from_static(b"corrupt head evidence").into(),
+            )
+            .await?;
+        assert!(gate.release());
+        let response = tokio::time::timeout(DEADLINE, task).await???;
+        // Restore the authentic candidate after exposing the transient corrupt
+        // evidence. The returned token must classify that exact publication.
+        fixture.store.put(&location, published.into()).await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream"
+        );
+        let token = response.into_body().collect().await?.to_bytes();
+        assert!(!token.is_empty());
+        host.shutdown().await;
+        drop(host);
+        let reopened = Log::open(&fixture.backend, &LogId::new("repository")?, options()).await?;
+        assert!(matches!(
+            reopened.resume(&token).await?,
+            Resolution::Committed(_)
+        ));
+        drop(token);
+        assert!(Repository::open(&reopened, format).await?.refs().is_empty());
     }
     Ok(())
 }
