@@ -2,6 +2,8 @@
 #![deny(missing_docs, unsafe_code)]
 
 mod server;
+mod shared;
+pub use shared::SharedGitHttpServer;
 
 use std::path::{Path, PathBuf};
 

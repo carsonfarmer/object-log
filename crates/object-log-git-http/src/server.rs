@@ -36,7 +36,7 @@ const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 const PRAGMA_NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
 const EXPIRES_PAST: HeaderValue = HeaderValue::from_static("Fri, 01 Jan 1980 00:00:00 GMT");
 
-type RequestReader = Pin<Box<dyn AsyncRead + Send>>;
+pub(super) type RequestReader = Pin<Box<dyn AsyncRead + Send>>;
 
 /// A native HTTP host for one object-log-backed repository at `/repo`.
 ///
@@ -197,7 +197,7 @@ async fn receive_pack(
     ))
 }
 
-fn request_reader(body: Body, encoding: Encoding) -> RequestReader {
+pub(super) fn request_reader(body: Body, encoding: Encoding) -> RequestReader {
     let stream = body.into_data_stream().map_err(body_error);
     let reader = BufReader::new(StreamReader::new(stream));
     match encoding {
@@ -227,7 +227,7 @@ fn body_error(error: axum::Error) -> io::Error {
     io::Error::new(kind, error)
 }
 
-fn parse_service(query: Option<&str>) -> Result<Service, Failure> {
+pub(super) fn parse_service(query: Option<&str>) -> Result<Service, Failure> {
     match query {
         Some("service=git-upload-pack") => Ok(Service::UploadPack),
         Some("service=git-receive-pack") => Ok(Service::ReceivePack),
@@ -235,7 +235,10 @@ fn parse_service(query: Option<&str>) -> Result<Service, Failure> {
     }
 }
 
-fn require_request_headers(headers: &HeaderMap, service: Service) -> Result<Encoding, Failure> {
+pub(super) fn require_request_headers(
+    headers: &HeaderMap,
+    service: Service,
+) -> Result<Encoding, Failure> {
     let expected = match service {
         Service::UploadPack => "application/x-git-upload-pack-request",
         Service::ReceivePack => "application/x-git-receive-pack-request",
@@ -276,12 +279,17 @@ fn require_request_headers(headers: &HeaderMap, service: Service) -> Result<Enco
 }
 
 #[derive(Clone, Copy)]
-enum Encoding {
+pub(super) enum Encoding {
     Identity,
     Gzip,
 }
 
-fn response(service: Service, advertisement: bool, status: StatusCode, body: Body) -> Response {
+pub(super) fn response(
+    service: Service,
+    advertisement: bool,
+    status: StatusCode,
+    body: Body,
+) -> Response {
     let mut response = Response::new(body);
     *response.status_mut() = status;
     let content_type = if advertisement {
@@ -301,17 +309,17 @@ fn response(service: Service, advertisement: bool, status: StatusCode, body: Bod
 }
 
 #[derive(Debug)]
-struct Failure {
+pub(super) struct Failure {
     status: StatusCode,
     message: &'static str,
 }
 
 impl Failure {
-    const fn new(status: StatusCode, message: &'static str) -> Self {
+    pub(super) const fn new(status: StatusCode, message: &'static str) -> Self {
         Self { status, message }
     }
 
-    const fn internal() -> Self {
+    pub(super) const fn internal() -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal Git service error",
@@ -325,7 +333,7 @@ impl Failure {
         )
     }
 
-    const fn busy() -> Self {
+    pub(super) const fn busy() -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "Git service is busy")
     }
 }
@@ -333,6 +341,10 @@ impl Failure {
 impl From<Error> for Failure {
     fn from(error: Error) -> Self {
         match error {
+            Error::Git(object_log_git::Error::Busy) => Self::busy(),
+            Error::Git(object_log_git::Error::InvalidProtocol(_)) => {
+                Self::new(StatusCode::BAD_REQUEST, "invalid Git protocol")
+            }
             Error::Protocol(_) => Self::new(StatusCode::BAD_REQUEST, "invalid Git protocol"),
             Error::RequestTooLarge(_) => {
                 Self::new(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")

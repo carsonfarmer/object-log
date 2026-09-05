@@ -1,7 +1,8 @@
 use std::{env, error::Error, net::SocketAddr, num::NonZeroUsize, path::PathBuf, sync::Arc};
 
 use object_log::{Log, LogId, Options, ValidatedBackend};
-use object_log_git_http::{GitHttpServer, SmartHttp};
+use object_log_git::ObjectFormat;
+use object_log_git_http::{GitHttpServer, SharedGitHttpServer, SmartHttp};
 use object_store::parse_url_opts;
 use tokio::net::TcpListener;
 use url::Url;
@@ -31,15 +32,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (store, prefix) = parse_url_opts(&store_url, env::vars())?;
     let backend = ValidatedBackend::new(Arc::from(store), prefix).await?;
     let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
-    let endpoint = SmartHttp::new(log, &scratch);
-    let host = GitHttpServer::new(endpoint, scratch, concurrency);
-    let app = host.clone().router();
+    let format = match env::var("OBJECT_LOG_GIT_FORMAT")
+        .as_deref()
+        .unwrap_or("sha1")
+    {
+        "sha1" => ObjectFormat::Sha1,
+        "sha256" => ObjectFormat::Sha256,
+        _ => return Err("OBJECT_LOG_GIT_FORMAT must be sha1 or sha256".into()),
+    };
+    let engine = env::var("OBJECT_LOG_GIT_ENGINE").unwrap_or_else(|_| "shared".into());
+    let (shared, oracle) = match engine.as_str() {
+        "shared" => (Some(SharedGitHttpServer::new(log, format)), None),
+        "oracle" if format == ObjectFormat::Sha1 => (
+            None,
+            Some(GitHttpServer::new(
+                SmartHttp::new(log, &scratch),
+                scratch,
+                concurrency,
+            )),
+        ),
+        _ => return Err("OBJECT_LOG_GIT_ENGINE must be shared, or oracle with sha1".into()),
+    };
+    let app = if let Some(host) = &shared {
+        host.clone().router()
+    } else if let Some(host) = &oracle {
+        host.clone().router()
+    } else {
+        return Err("no Git host".into());
+    };
     let listener = TcpListener::bind(listen).await?;
     tracing::info!(address = %listener.local_addr()?, "Git HTTP server listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
         .await?;
-    host.shutdown().await;
+    if let Some(host) = shared {
+        host.shutdown().await;
+    }
+    if let Some(host) = oracle {
+        host.shutdown().await;
+    }
     Ok(())
 }
 

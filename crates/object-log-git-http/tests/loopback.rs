@@ -17,7 +17,8 @@ use axum::{
     response::Response,
 };
 use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
-use object_log_git_http::{GitHttpServer, SmartHttp};
+use object_log_git::ObjectFormat;
+use object_log_git_http::{GitHttpServer, SharedGitHttpServer, SmartHttp};
 use object_store::{
     aws::{AmazonS3, AmazonS3Builder},
     memory::InMemory,
@@ -26,25 +27,68 @@ use object_store::{
 use tempfile::TempDir;
 use tokio::{net::TcpListener, sync::Barrier, task::JoinHandle};
 
+static SHARED_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> TestResult {
+    client_lifecycle(None, Arc::new(InMemory::new())).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_engine_clients_support_both_hashes() -> TestResult {
+    let _serial = SHARED_TEST.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        client_lifecycle(Some(format), Arc::new(InMemory::new())).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local MinIO"]
+async fn shared_minio_clients_recover_after_collection() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        client_lifecycle(Some(format), Arc::new(build_minio()?)).await?;
+    }
+    Ok(())
+}
+
+async fn client_lifecycle(
+    shared: Option<ObjectFormat>,
+    store: Arc<dyn object_store::ObjectStore>,
+) -> TestResult {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let root = TempDir::new()?;
     let backend = ValidatedBackend::new(
-        Arc::new(InMemory::new()),
-        StorePath::from("git-http-loopback"),
+        store,
+        StorePath::from(format!("git-http-loopback-{}", TransactionId::new())),
     )
     .await?;
     let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
     let scratch = root.path().join("scratch");
-    let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?).router();
+    let app = if let Some(format) = shared {
+        SharedGitHttpServer::new(log.clone(), format).router()
+    } else {
+        GitHttpServer::new(
+            SmartHttp::new(log.clone(), &scratch),
+            &scratch,
+            "4".parse()?,
+        )
+        .router()
+    };
     let (url, server) = serve(app).await?;
     assert!(git_output(None, ["ls-remote", &url])?.stdout.is_empty());
 
     let source = root.path().join("source");
-    git(None, ["init", "--quiet", "-b", "main", path(&source)?])?;
+    let format = match shared {
+        Some(ObjectFormat::Sha256) => "--object-format=sha256",
+        _ => "--object-format=sha1",
+    };
+    git(
+        None,
+        ["init", "--quiet", "-b", "main", format, path(&source)?],
+    )?;
     write(&source, "one")?;
     git(Some(&source), ["add", "file"])?;
     git(Some(&source), ["commit", "--quiet", "-m", "one"])?;
@@ -52,7 +96,18 @@ async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> Tes
     git(Some(&source), ["push", "--quiet", "-u", "origin", "main"])?;
 
     let clone = root.path().join("clone");
-    git(None, ["clone", "--quiet", &url, path(&clone)?])?;
+    let trace = git_trace(None, ["clone", "--quiet", &url, path(&clone)?])?;
+    assert!(
+        trace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trace.stderr)
+    );
+    if shared.is_some() {
+        let trace = String::from_utf8_lossy(&trace.stderr);
+        assert!(trace.contains("version 2"), "{trace}");
+        assert!(trace.contains("command=ls-refs"), "{trace}");
+        assert!(trace.contains("command=fetch"), "{trace}");
+    }
     assert_eq!(std::fs::read_to_string(clone.join("file"))?, "one");
 
     write(&source, "two")?;
@@ -108,17 +163,61 @@ async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> Tes
         .status
         .success()
     );
-    assert!(std::fs::read_dir(scratch)?.next().is_none());
+    if shared.is_none() {
+        assert!(std::fs::read_dir(scratch)?.next().is_none());
+    }
     server.abort();
+    if let Some(format) = shared {
+        let repository = object_log_git::Repository::open(&log, format).await?;
+        let object_log::CheckpointStatus::Published(view) = repository.checkpoint().await? else {
+            return Err("checkpoint did not publish".into());
+        };
+        let object_log::CollectionStart::Installed(fenced, _) = log.start_collection(&view).await?
+        else {
+            return Err("collection did not start".into());
+        };
+        assert!(matches!(
+            log.resume_collection(&fenced).await?,
+            object_log::CollectionFinish::Complete(..)
+        ));
+        drop(log);
+        let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
+        let (url, cold_server) = serve(SharedGitHttpServer::new(log, format).router()).await?;
+        let cold = root.path().join("cold");
+        git(None, ["clone", "--quiet", &url, path(&cold)?])?;
+        git(Some(&cold), ["fsck", "--strict"])?;
+        assert_eq!(std::fs::read_to_string(cold.join("file"))?, "winner");
+        cold_server.abort();
+    }
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> TestResult {
+    large_fetch(None).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_large_fetch_uses_gzip_negotiation_and_chunked_output() -> TestResult {
+    let _serial = SHARED_TEST.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        large_fetch(Some(format)).await?;
+    }
+    Ok(())
+}
+
+async fn large_fetch(shared: Option<ObjectFormat>) -> TestResult {
     let root = TempDir::new()?;
-    let (url, scratch, server, _) = repository_server(&root, "git-http-large").await?;
+    let (url, scratch, server, _) = repository_server(&root, "git-http-large", shared).await?;
     let source = root.path().join("large-source");
-    git(None, ["init", "--quiet", "-b", "main", path(&source)?])?;
+    let format = match shared {
+        Some(ObjectFormat::Sha256) => "--object-format=sha256",
+        _ => "--object-format=sha1",
+    };
+    git(
+        None,
+        ["init", "--quiet", "-b", "main", format, path(&source)?],
+    )?;
     write(&source, "base")?;
     git(Some(&source), ["add", "file"])?;
     git(Some(&source), ["commit", "--quiet", "-m", "base"])?;
@@ -147,6 +246,30 @@ async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> Test
     git(Some(&source), ["fsck", "--strict", "--no-dangling"])?;
     git(Some(&source), ["push", "--quiet"])?;
     let expected_tip = git_stdout(Some(&source), ["rev-parse", "HEAD"])?;
+    if shared.is_some() {
+        // A long unshared local history forces negotiation beyond the first
+        // small request; common haves would otherwise finish before gzip.
+        git(
+            Some(&clone),
+            ["config", "fetch.negotiationAlgorithm", "consecutive"],
+        )?;
+        git(
+            Some(&clone),
+            ["update-ref", "-d", "refs/remotes/origin/main"],
+        )?;
+        for revision in 0..384 {
+            git(
+                Some(&clone),
+                [
+                    "commit",
+                    "--quiet",
+                    "--allow-empty",
+                    "-m",
+                    &format!("local-{revision}"),
+                ],
+            )?;
+        }
+    }
     let output = git_trace(Some(&clone), ["fetch", "--quiet"])?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
@@ -163,7 +286,12 @@ async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> Test
         Some(&clone),
         ["cat-file", "-e", &format!("{expected_tip}^{{tree}}")],
     )?;
-    assert!(std::fs::read_dir(scratch)?.next().is_none());
+    if shared.is_none() {
+        assert!(std::fs::read_dir(scratch)?.next().is_none());
+    }
+    if shared.is_some() {
+        assert!(trace.contains("acknowledgments"), "{trace}");
+    }
     server.abort();
     Ok(())
 }
@@ -171,7 +299,8 @@ async fn large_fetch_uses_gzip_multi_round_requests_and_chunked_output() -> Test
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_pushes_report_one_durable_winner() -> TestResult {
     let root = TempDir::new()?;
-    let (url, scratch, server, gate) = repository_server(&root, "git-http-concurrent").await?;
+    let (url, scratch, server, gate) =
+        repository_server(&root, "git-http-concurrent", None).await?;
     let source = root.path().join("concurrent-source");
     git(None, ["init", "--quiet", "-b", "main", path(&source)?])?;
     write(&source, "base")?;
@@ -272,15 +401,19 @@ async fn minio_host_pushes_and_cold_clones() -> TestResult {
 async fn repository_server(
     root: &TempDir,
     namespace: &str,
+    shared: Option<ObjectFormat>,
 ) -> TestResult<(String, std::path::PathBuf, JoinHandle<()>, ReceiveGate)> {
     let backend =
         ValidatedBackend::new(Arc::new(InMemory::new()), StorePath::from(namespace)).await?;
     let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
     let scratch = root.path().join(format!("{namespace}-scratch"));
     let gate = ReceiveGate::new();
-    let app = GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?)
-        .router()
-        .layer(middleware::from_fn_with_state(gate.clone(), gate_receive));
+    let app = if let Some(format) = shared {
+        SharedGitHttpServer::new(log, format).router()
+    } else {
+        GitHttpServer::new(SmartHttp::new(log, &scratch), &scratch, "4".parse()?).router()
+    }
+    .layer(middleware::from_fn_with_state(gate.clone(), gate_receive));
     let (url, server) = serve(app).await?;
     Ok((url, scratch, server, gate))
 }
@@ -362,6 +495,7 @@ fn git_trace<const N: usize>(
 ) -> TestResult<std::process::Output> {
     let mut command = git_command(directory, args);
     command
+        .env("GIT_TRACE_PACKET", "1")
         .env("GIT_TRACE_CURL", "1")
         .env("GIT_TRACE_CURL_NO_DATA", "1");
     Ok(command.output()?)
