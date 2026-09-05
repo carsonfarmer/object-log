@@ -70,12 +70,10 @@ pub(crate) async fn stage(
         .checked_mul(size_of::<StagedObject>() + size_of::<ObjectRef>())
         .ok_or_else(|| Error::InvalidPack("Git staging size overflowed".into()))?;
     let _staging_memory = operation.reserve(staging_bytes)?;
-    let root_bytes = root_bytes(normalized.index.len(), bytes.len(), width);
-    if root_bytes > log.options().max_object_bytes {
-        return Err(Error::ObjectLog(object_log::Error::LimitExceeded(
-            "object bytes",
-        )));
-    }
+    let root_bytes = log.node_size(
+        normalized.index.len(),
+        bytes.chunks(width).map(|chunk| chunk.len() as u64),
+    )?;
     let _root_memory = operation.reserve(root_bytes)?;
     operation.work(root_bytes)?;
     operation.io(root_bytes)?;
@@ -101,24 +99,6 @@ pub(crate) async fn stage(
         },
         root,
     ))
-}
-
-// The object-log node envelope and children use canonical CBOR. Reserve the
-// exact encoded size before any PUT, including the authenticated references.
-fn root_bytes(index: usize, bytes: usize, width: usize) -> usize {
-    fn head(value: usize) -> usize {
-        match value {
-            0..=23 => 1,
-            24..=255 => 2,
-            256..=65_535 => 3,
-            _ => 5,
-        }
-    }
-    let count = bytes.div_ceil(width);
-    let last = bytes - (count - 1) * width;
-    let inner =
-        5 + head(index) + index + head(count) + (count - 1) * (57 + head(width)) + 57 + head(last);
-    37 + head(inner) + inner
 }
 
 pub(crate) struct Catalog {
@@ -1329,16 +1309,13 @@ mod tests {
                 let view = log.load().await?;
                 let fixture = pack_fixture(format, vec![vec![b'x'; width * 2 + 100]], false, true)?;
                 let expected = fixture.normalized.bytes.clone();
+                let root_bytes = log.node_size(
+                    fixture.normalized.index.len(),
+                    expected.chunks(width).map(|chunk| chunk.len() as u64),
+                )?;
                 let (descriptor, root) =
                     stage(&test_operation(), &log, &view, fixture.normalized).await?;
-                assert_eq!(
-                    root.reference().len(),
-                    root_bytes(
-                        1_032 + 2 * format.digest_len() + format.digest_len() + 8,
-                        expected.len(),
-                        width
-                    ) as u64
-                );
+                assert_eq!(root.reference().len(), root_bytes as u64);
                 let catalog = load_one(&log, &view, format, descriptor, &root).await?;
                 assert_eq!(catalog.packs[0].chunk_bytes, width);
                 let mut reader = Reader::new(&log, &view, &catalog);
@@ -1443,10 +1420,11 @@ mod tests {
         let (log, view) = open(store.clone(), "stage-memory").await?;
         let vectors = MAX_PACK_BYTES.div_ceil(CHUNK_BYTES)
             * (size_of::<StagedObject>() + size_of::<ObjectRef>());
-        let required = MAX_PACK_BYTES
-            + MAX_INDEX_BYTES
-            + root_bytes(MAX_INDEX_BYTES, MAX_PACK_BYTES, CHUNK_BYTES)
-            + vectors;
+        let root_bytes = log.node_size(
+            MAX_INDEX_BYTES,
+            std::iter::repeat_n(CHUNK_BYTES as u64, MAX_PACK_BYTES / CHUNK_BYTES),
+        )?;
+        let required = MAX_PACK_BYTES + MAX_INDEX_BYTES + root_bytes + vectors;
         let pool = Pool::new(required);
         let operation = pool.admit()?;
         let normalized = maximal_normalized(&operation)?;
@@ -1463,16 +1441,42 @@ mod tests {
         assert_eq!(operation.live_bytes(), required);
         assert!(pause.release());
         let (_, root) = task.await??;
-        assert_eq!(
-            root.reference().len(),
-            root_bytes(MAX_INDEX_BYTES, MAX_PACK_BYTES, CHUNK_BYTES) as u64
-        );
+        assert_eq!(root.reference().len(), root_bytes as u64);
         assert_eq!(operation.live_bytes(), 0);
 
         let operation = Pool::new(required - 1).admit()?;
         let normalized = maximal_normalized(&operation)?;
         store.reset();
         assert!(stage(&operation, &log, &view, normalized).await.is_err());
+        assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oversized_staged_root_is_rejected_before_any_put() -> TestResult {
+        let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+        let backend =
+            ValidatedBackend::new(Arc::new(store.clone()), StorePath::from("root-limit")).await?;
+        let log = Log::open(
+            &backend,
+            &LogId::new("oversized-root")?,
+            Options {
+                max_object_bytes: MAX_INDEX_BYTES,
+                ..Options::default()
+            },
+        )
+        .await?;
+        let view = log.load().await?;
+        let operation = test_operation();
+        let normalized = maximal_normalized(&operation)?;
+        store.reset();
+        assert!(matches!(
+            stage(&operation, &log, &view, normalized).await,
+            Err(Error::ObjectLog(object_log::Error::LimitExceeded(
+                "object bytes"
+            )))
+        ));
         assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
         assert_eq!(operation.live_bytes(), 0);
         Ok(())
