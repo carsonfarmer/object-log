@@ -1,0 +1,84 @@
+('clone', 'http://127.0.0.1:59767/repo', '/var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-linux-client-u7o38u2o/history-clone')
+Cloning into '/var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-linux-client-u7o38u2o/history-clone'...
+19:28:03.420325 http.c:912              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults
+19:28:03.420497 http.c:912              == Info:   Trying 127.0.0.1:59767...
+19:28:03.420596 http.c:912              == Info: Connected to 127.0.0.1 (127.0.0.1) port 59767
+19:28:03.420614 http.c:859              => Send header, 0000000191 bytes (0x000000bf)
+19:28:03.420617 http.c:871              => Send header: GET /repo/info/refs?service=git-upload-pack HTTP/1.1
+19:28:03.420618 http.c:871              => Send header: Host: 127.0.0.1:59767
+19:28:03.420619 http.c:871              => Send header: User-Agent: git/2.54.0
+19:28:03.420619 http.c:871              => Send header: Accept: */*
+19:28:03.420621 http.c:871              => Send header: Accept-Encoding: deflate, gzip
+19:28:03.420622 http.c:871              => Send header: Pragma: no-cache
+19:28:03.420622 http.c:871              => Send header: Git-Protocol: version=2
+19:28:03.420623 http.c:871              => Send header:
+19:28:03.420626 http.c:912              == Info: Request completely sent off
+19:28:03.421579 http.c:859              <= Recv header, 0000000017 bytes (0x00000011)
+19:28:03.421584 http.c:871              <= Recv header: HTTP/1.1 200 OK
+19:28:03.421587 http.c:859              <= Recv header, 0000000059 bytes (0x0000003b)
+19:28:03.421588 http.c:871              <= Recv header: content-type: application/x-git-upload-pack-advertisement
+19:28:03.421590 http.c:859              <= Recv header, 0000000020 bytes (0x00000014)
+19:28:03.421591 http.c:871              <= Recv header: content-length: 93
+19:28:03.421593 http.c:859              <= Recv header, 0000000025 bytes (0x00000019)
+19:28:03.421593 http.c:871              <= Recv header: cache-control: no-cache
+19:28:03.421594 http.c:859              <= Recv header, 0000000037 bytes (0x00000025)
+19:28:03.421597 http.c:871              <= Recv header: date: Sat, 05 Sep 2026 02:28:03 GMT
+19:28:03.421599 http.c:859              <= Recv header, 0000000002 bytes (0x00000002)
+19:28:03.421601 http.c:871              <= Recv header:
+19:28:03.421604 http.c:912              == Info: Connection #0 to host 127.0.0.1 left intact
+19:28:03.421670 http.c:912              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults
+19:28:03.421673 http.c:912              == Info: Found bundle for host: 0x10595cfd0 [serially]
+19:28:03.421674 http.c:912              == Info: Can not multiplex, even if we wanted to
+19:28:03.421676 http.c:912              == Info: Re-using existing connection with host 127.0.0.1
+19:28:03.421691 http.c:859              => Send header, 0000000263 bytes (0x00000107)
+19:28:03.421694 http.c:871              => Send header: POST /repo/git-upload-pack HTTP/1.1
+19:28:03.421695 http.c:871              => Send header: Host: 127.0.0.1:59767
+19:28:03.421696 http.c:871              => Send header: User-Agent: git/2.54.0
+19:28:03.421697 http.c:871              => Send header: Accept-Encoding: deflate, gzip
+19:28:03.421698 http.c:871              => Send header: Content-Type: application/x-git-upload-pack-request
+19:28:03.421699 http.c:871              => Send header: Accept: application/x-git-upload-pack-result
+19:28:03.421700 http.c:871              => Send header: Git-Protocol: version=2
+19:28:03.421700 http.c:871              => Send header: Content-Length: 184
+19:28:03.421701 http.c:871              => Send header:
+19:28:03.421703 http.c:912              == Info: upload completely sent off: 184 bytes
+19:28:03.434624 http.c:859              <= Recv header, 0000000017 bytes (0x00000011)
+19:28:03.434633 http.c:871              <= Recv header: HTTP/1.1 200 OK
+19:28:03.434637 http.c:859              <= Recv header, 0000000052 bytes (0x00000034)
+19:28:03.434641 http.c:871              <= Recv header: content-type: application/x-git-upload-pack-result
+19:28:03.434643 http.c:859              <= Recv header, 0000000021 bytes (0x00000015)
+19:28:03.434644 http.c:871              <= Recv header: content-length: 193
+19:28:03.434645 http.c:859              <= Recv header, 0000000025 bytes (0x00000019)
+19:28:03.434646 http.c:871              <= Recv header: cache-control: no-cache
+19:28:03.434647 http.c:859              <= Recv header, 0000000037 bytes (0x00000025)
+19:28:03.434650 http.c:871              <= Recv header: date: Sat, 05 Sep 2026 02:28:03 GMT
+19:28:03.434651 http.c:859              <= Recv header, 0000000002 bytes (0x00000002)
+19:28:03.434652 http.c:871              <= Recv header:
+19:28:03.434661 http.c:912              == Info: Connection #0 to host 127.0.0.1 left intact
+19:28:03.435957 http.c:912              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults
+19:28:03.435961 http.c:912              == Info: Found bundle for host: 0x10595cfd0 [serially]
+19:28:03.435962 http.c:912              == Info: Can not multiplex, even if we wanted to
+19:28:03.435965 http.c:912              == Info: Re-using existing connection with host 127.0.0.1
+19:28:03.435984 http.c:859              => Send header, 0000000263 bytes (0x00000107)
+19:28:03.435986 http.c:871              => Send header: POST /repo/git-upload-pack HTTP/1.1
+19:28:03.435987 http.c:871              => Send header: Host: 127.0.0.1:59767
+19:28:03.435988 http.c:871              => Send header: User-Agent: git/2.54.0
+19:28:03.435988 http.c:871              => Send header: Accept-Encoding: deflate, gzip
+19:28:03.435989 http.c:871              => Send header: Content-Type: application/x-git-upload-pack-request
+19:28:03.435990 http.c:871              => Send header: Accept: application/x-git-upload-pack-result
+19:28:03.435991 http.c:871              => Send header: Git-Protocol: version=2
+19:28:03.435991 http.c:871              => Send header: Content-Length: 274
+19:28:03.435992 http.c:871              => Send header:
+19:28:03.435994 http.c:912              == Info: upload completely sent off: 274 bytes
+19:28:03.556278 http.c:859              <= Recv header, 0000000017 bytes (0x00000011)
+19:28:03.556291 http.c:871              <= Recv header: HTTP/1.1 200 OK
+19:28:03.556296 http.c:859              <= Recv header, 0000000052 bytes (0x00000034)
+19:28:03.556298 http.c:871              <= Recv header: content-type: application/x-git-upload-pack-result
+19:28:03.556300 http.c:859              <= Recv header, 0000000025 bytes (0x00000019)
+19:28:03.556301 http.c:871              <= Recv header: content-length: 8602233
+19:28:03.556302 http.c:859              <= Recv header, 0000000025 bytes (0x00000019)
+19:28:03.556303 http.c:871              <= Recv header: cache-control: no-cache
+19:28:03.556304 http.c:859              <= Recv header, 0000000037 bytes (0x00000025)
+19:28:03.556305 http.c:871              <= Recv header: date: Sat, 05 Sep 2026 02:28:03 GMT
+19:28:03.556306 http.c:859              <= Recv header, 0000000002 bytes (0x00000002)
+19:28:03.556307 http.c:871              <= Recv header:
+19:28:03.623905 http.c:912              == Info: Connection #0 to host 127.0.0.1 left intact

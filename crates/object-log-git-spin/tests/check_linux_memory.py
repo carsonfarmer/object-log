@@ -138,7 +138,7 @@ exit "$code"
                             raise RuntimeError(result.stderr)
                         return result
                     git("init", "--object-format=" + object_format, "-b", "main", str(source), cwd=directory)
-                    (source / "small").write_text("first\n")
+                    (source / "small").write_bytes(b"a" * 4096)
                     git("add", "."); git("commit", "-m", "first")
                     url = endpoint + "/repo"
                     git("push", url, "main")
@@ -152,13 +152,43 @@ exit "$code"
                     assert git("rev-parse", "origin/main", cwd=clone).stdout.strip() == expected
                     git("tag", "proof"); git("push", url, "refs/tags/proof")
                     git("push", url, ":refs/tags/proof")
+                    # Keep the large object while exercising full history and external-base deltas.
+                    mutable = bytearray(random.Random(384).randbytes(16 * 1024))
+                    for revision in range(382):
+                        mutable[:4] = revision.to_bytes(4, "little")
+                        (source / "mutable").write_bytes(mutable)
+                        git("add", "mutable"); git("commit", "-m", f"history {revision}")
+                    assert git("rev-list", "--count", "HEAD").stdout.strip() == "384"
+                    git("push", url, "main")
+                    history_clone = pathlib.Path(directory) / "history-clone"
+                    git("clone", url, str(history_clone), cwd=directory)
+                    assert git("rev-list", "--count", "HEAD", cwd=history_clone).stdout.strip() == "384"
+                    git("fsck", "--full", "--strict", cwd=history_clone)
+                    base = git("rev-parse", "HEAD").stdout.strip()
+                    mutable[100] ^= 1
+                    (source / "mutable").write_bytes(mutable)
+                    git("add", "mutable"); git("commit", "-m", "thin update")
+                    # Independent Git fixture proves the intended incremental object set requires
+                    # a base outside its pack. The HTTP push remains an unchanged Git command.
+                    thin = subprocess.run(["git", "pack-objects", "--stdout", "--revs", "--thin"], input=f"HEAD\n^{base}\n".encode(), cwd=source, capture_output=True, check=True, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "0"}).stdout
+                    empty = pathlib.Path(directory) / "empty.git"
+                    git("init", "--bare", "--object-format=" + object_format, str(empty), cwd=directory)
+                    checked = subprocess.run(["git", "index-pack", "--stdin", "--fix-thin"], input=thin, cwd=empty, capture_output=True, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "0"})
+                    assert checked.returncode != 0 and b"unresolved delta" in checked.stderr, checked.stderr
+                    (output / record["label"] / "thin-external-base.log").write_bytes(checked.stderr)
+                    git("push", url, "main")
+                    git("fetch", "origin", cwd=history_clone)
+                    git("fsck", "--full", "--strict", cwd=history_clone)
+                    expected = git("rev-parse", "HEAD").stdout.strip()
+                    assert git("rev-parse", "origin/main", cwd=history_clone).stdout.strip() == expected
+                    assert git("rev-list", "--count", "origin/main", cwd=history_clone).stdout.strip() == "385"
                     # Over-limit object rejection must leave the process and head intact.
                     with (source / "large").open("ab") as file: file.write(b"x")
                     git("add", "."); git("commit", "-m", "over object limit")
                     assert git("push", url, "main", check=False).returncode != 0
                     assert git("ls-remote", url, "refs/heads/main").stdout.split()[0] == expected
                     assert http(endpoint + "/.well-known/spin/health")
-                    record["client_flow"] = "push, clone, 8MiB push, have-aware fetch, fsck, tag create/delete, oversized rejection and head survival passed"
+                    record["client_flow"] = "4KiB push/clone, 8MiB push, have-aware fetch, 384-commit push/clone, externally based thin update/fetch, fsck, tag create/delete, oversized rejection and head survival passed"
             finally:
                 finish(name, record)
             assert record["memory_events"] is not None and record["memory_events"]["oom_kill"] == 0

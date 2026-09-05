@@ -1,0 +1,55 @@
+('push', 'http://127.0.0.1:59767/repo', 'refs/tags/proof')
+19:27:51.677788 http.c:912              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults
+19:27:51.677974 http.c:912              == Info:   Trying 127.0.0.1:59767...
+19:27:51.678086 http.c:912              == Info: Connected to 127.0.0.1 (127.0.0.1) port 59767
+19:27:51.678106 http.c:859              => Send header, 0000000167 bytes (0x000000a7)
+19:27:51.678110 http.c:871              => Send header: GET /repo/info/refs?service=git-receive-pack HTTP/1.1
+19:27:51.678110 http.c:871              => Send header: Host: 127.0.0.1:59767
+19:27:51.678111 http.c:871              => Send header: User-Agent: git/2.54.0
+19:27:51.678112 http.c:871              => Send header: Accept: */*
+19:27:51.678113 http.c:871              => Send header: Accept-Encoding: deflate, gzip
+19:27:51.678113 http.c:871              => Send header: Pragma: no-cache
+19:27:51.678114 http.c:871              => Send header:
+19:27:51.678117 http.c:912              == Info: Request completely sent off
+19:27:51.691223 http.c:859              <= Recv header, 0000000017 bytes (0x00000011)
+19:27:51.691235 http.c:871              <= Recv header: HTTP/1.1 200 OK
+19:27:51.691243 http.c:859              <= Recv header, 0000000060 bytes (0x0000003c)
+19:27:51.691244 http.c:871              <= Recv header: content-type: application/x-git-receive-pack-advertisement
+19:27:51.691246 http.c:859              <= Recv header, 0000000021 bytes (0x00000015)
+19:27:51.691247 http.c:871              <= Recv header: content-length: 205
+19:27:51.691249 http.c:859              <= Recv header, 0000000025 bytes (0x00000019)
+19:27:51.691251 http.c:871              <= Recv header: cache-control: no-cache
+19:27:51.691252 http.c:859              <= Recv header, 0000000037 bytes (0x00000025)
+19:27:51.691253 http.c:871              <= Recv header: date: Sat, 05 Sep 2026 02:27:51 GMT
+19:27:51.691254 http.c:859              <= Recv header, 0000000002 bytes (0x00000002)
+19:27:51.691255 http.c:871              <= Recv header:
+19:27:51.691261 http.c:912              == Info: Connection #0 to host 127.0.0.1 left intact
+19:27:51.700832 http.c:912              == Info: Couldn't find host 127.0.0.1 in the .netrc file; using defaults
+19:27:51.700842 http.c:912              == Info: Found bundle for host: 0x101210ca0 [serially]
+19:27:51.700843 http.c:912              == Info: Can not multiplex, even if we wanted to
+19:27:51.700847 http.c:912              == Info: Re-using existing connection with host 127.0.0.1
+19:27:51.700894 http.c:859              => Send header, 0000000241 bytes (0x000000f1)
+19:27:51.700900 http.c:871              => Send header: POST /repo/git-receive-pack HTTP/1.1
+19:27:51.700902 http.c:871              => Send header: Host: 127.0.0.1:59767
+19:27:51.700903 http.c:871              => Send header: User-Agent: git/2.54.0
+19:27:51.700904 http.c:871              => Send header: Accept-Encoding: deflate, gzip
+19:27:51.700905 http.c:871              => Send header: Content-Type: application/x-git-receive-pack-request
+19:27:51.700906 http.c:871              => Send header: Accept: application/x-git-receive-pack-result
+19:27:51.700906 http.c:871              => Send header: Content-Length: 257
+19:27:51.700907 http.c:871              => Send header:
+19:27:51.700909 http.c:912              == Info: upload completely sent off: 257 bytes
+19:27:51.764648 http.c:859              <= Recv header, 0000000017 bytes (0x00000011)
+19:27:51.764659 http.c:871              <= Recv header: HTTP/1.1 200 OK
+19:27:51.764665 http.c:859              <= Recv header, 0000000053 bytes (0x00000035)
+19:27:51.764666 http.c:871              <= Recv header: content-type: application/x-git-receive-pack-result
+19:27:51.764668 http.c:859              <= Recv header, 0000000020 bytes (0x00000014)
+19:27:51.764669 http.c:871              <= Recv header: content-length: 41
+19:27:51.764671 http.c:859              <= Recv header, 0000000025 bytes (0x00000019)
+19:27:51.764671 http.c:871              <= Recv header: cache-control: no-cache
+19:27:51.764672 http.c:859              <= Recv header, 0000000037 bytes (0x00000025)
+19:27:51.764673 http.c:871              <= Recv header: date: Sat, 05 Sep 2026 02:27:51 GMT
+19:27:51.764674 http.c:859              <= Recv header, 0000000002 bytes (0x00000002)
+19:27:51.764675 http.c:871              <= Recv header:
+19:27:51.764684 http.c:912              == Info: Connection #0 to host 127.0.0.1 left intact
+To http://127.0.0.1:59767/repo
+ * [new tag]         proof -> proof

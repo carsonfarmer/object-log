@@ -1,0 +1,2 @@
+('rev-list', '--count', 'HEAD')
+384

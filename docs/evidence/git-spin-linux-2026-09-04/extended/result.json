@@ -1,0 +1,133 @@
+{
+  "git_version": "git version 2.54.0 (Apple Git-157)",
+  "wasm_sha256": "fe263c5139bb42bf013f818cc823cb74368f6b0903bab058db1fcd2dff08cfa1",
+  "runtime_image": "rust:1.97.1-bookworm",
+  "runtime_image_id": "sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97",
+  "spin_version": "spin 4.0.2 (bfc7543 2026-06-23)",
+  "minio_image": "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+  "limit_bytes": 134217728,
+  "outbound_connection_pooling": false,
+  "runs": [
+    {
+      "label": "empty-cache",
+      "limit_bytes": 134217728,
+      "container": "object-log-linux-e6eddfa4328f-empty-cache",
+      "ready": false,
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": true,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 137,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:27:02.927271555Z",
+        "FinishedAt": "2026-09-05T02:27:34.801372708Z"
+      },
+      "memory_peak_bytes": 134217728,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 667223,
+        "oom": 1,
+        "oom_kill": 1,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    },
+    {
+      "label": "cache-setup",
+      "limit_bytes": 536870912,
+      "container": "object-log-linux-e6eddfa4328f-cache-setup",
+      "ready": true,
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 143,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:27:34.990023917Z",
+        "FinishedAt": "2026-09-05T02:27:35.497024875Z"
+      },
+      "memory_peak_bytes": 227434496,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    },
+    {
+      "label": "sha1-warm",
+      "limit_bytes": 134217728,
+      "container": "object-log-linux-e6eddfa4328f-sha1-warm",
+      "ready": true,
+      "client_flow": "4KiB push/clone, 8MiB push, have-aware fetch, 384-commit push/clone, externally based thin update/fetch, fsck, tag create/delete, oversized rejection and head survival passed",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 143,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:27:35.664166667Z",
+        "FinishedAt": "2026-09-05T02:27:50.069884716Z"
+      },
+      "memory_peak_bytes": 134332416,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 56,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    },
+    {
+      "label": "sha256-warm",
+      "limit_bytes": 134217728,
+      "container": "object-log-linux-e6eddfa4328f-sha256-warm",
+      "ready": true,
+      "client_flow": "4KiB push/clone, 8MiB push, have-aware fetch, 384-commit push/clone, externally based thin update/fetch, fsck, tag create/delete, oversized rejection and head survival passed",
+      "state": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 143,
+        "Error": "",
+        "StartedAt": "2026-09-05T02:27:50.236539341Z",
+        "FinishedAt": "2026-09-05T02:28:04.576610667Z"
+      },
+      "memory_peak_bytes": 134230016,
+      "memory_events": {
+        "low": 0,
+        "high": 0,
+        "max": 61,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0,
+        "sock_throttled": 0
+      }
+    }
+  ],
+  "empty_cache_128m_startup_passed": false,
+  "warm_cache_128m_workloads_passed": true,
+  "cleanup_remaining_resources": []
+}
