@@ -66,7 +66,15 @@ git-spin-operator-minio-test:
 	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
 	./scripts/test-minio.sh operator_minio operator_minio object-log-git-spin operator
 
-.PHONY: git-spin-shallow-test
+.PHONY: git-spin-shallow-test git-spin-partial-test git-spin-auth-minio-test
 git-spin-shallow-test:
 	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	python3 crates/object-log-git-spin/tests/check_shallow.py
+	./scripts/test-minio.sh protocol_minio shallow_minio object-log-git-spin ""
+
+git-spin-partial-test:
+	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+	./scripts/test-minio.sh protocol_minio partial_minio object-log-git-spin ""
+
+git-spin-auth-minio-test:
+	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+	./scripts/test-minio.sh auth_minio auth_minio object-log-git-spin ""

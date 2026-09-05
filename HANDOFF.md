@@ -245,3 +245,22 @@ foundation. #30 owns versioned Git state/format and explicit operator default
 branch changes; catalog migration is coordinated through the same v2 record.
 The chosen first duplicate-pack optimization is bounded OID probing with normal
 staging on inconclusive results, not a second pack-ID index.
+
+## Combined shallow, partial, auth and maintenance qualification
+
+Candidate `c0b9812` now passes 395 workspace tests (21 opt-in ignored), strict
+native/WASIp2 gates, six actual-WASI memory fixtures and the Git request audit.
+All seven shared local-provider targets pass with isolated native Darwin/arm64
+MinIO, including credential rotation, shallow/deepen, partial lazy retrieval,
+checkpoint/GC/cold restart and 1024-tail maintenance. Final process-group
+shutdown fixes are included. Independent combined correctness and runner reviews
+found no blockers. See `docs/evidence/git-proof-wave7-2026-09-05/README.md`.
+This native qualification is explicitly distinct from pending Docker/Linux
+runtime qualification; the pinned Docker default remains available.
+
+Next: reviewed default-branch setter/CLI, additive core request guards and Git
+activation, catalog migration plus actual consumers, bounded streaming receive,
+and authenticated packfile URIs. Preserve partial's `excluded_ref()` when merging
+the default HEAD target. Test-only catalog and streaming foundations are not
+completed product features. Main integration remains root-only; no upstream
+communications or shared Docker restart without owner approval.

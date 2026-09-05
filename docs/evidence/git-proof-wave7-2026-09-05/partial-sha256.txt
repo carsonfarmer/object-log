@@ -1,0 +1,10 @@
+Logging component stdio to "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/.spin/logs/"
+
+Serving http://127.0.0.1:62118
+Available Routes:
+  git: http://127.0.0.1:62118/repo (wildcard)
+Logging component stdio to "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/.spin/logs/"
+
+Serving http://127.0.0.1:62118
+Available Routes:
+  git: http://127.0.0.1:62118/repo (wildcard)

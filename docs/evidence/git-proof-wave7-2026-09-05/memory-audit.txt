@@ -1,0 +1,32 @@
+cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
+   Compiling object_store v0.14.1
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `release` profile [optimized] target(s) in 8.29s
+python3 crates/object-log-git-spin/tests/check_memory.py
+{"hash": "sha1", "fixture": "4kib", "request_bytes": 4866, "response_frame_bytes": [41, 4333, 0, 0, 57, 4333, 47], "elapsed_seconds": 0.0031100000051083043, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha1", "fixture": "8mib", "request_bytes": 8391929, "response_frame_bytes": [41, 8392036, 0, 0, 57, 8392036, 47], "elapsed_seconds": 0.263334292001673, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha1", "fixture": "history-thin", "request_bytes": 96534, "response_frame_bytes": [41, 95419, 41, 4366, 57, 95677, 47], "elapsed_seconds": 0.058443500005523674, "objects": {"initial": 1152, "recovered": 1155, "incremental": 3}, "gc": "checkpoint and collection passed: 3 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha256", "fixture": "4kib", "request_bytes": 5069, "response_frame_bytes": [41, 4372, 0, 0, 57, 4372, 47], "elapsed_seconds": 0.0017402090015821159, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha256", "fixture": "8mib", "request_bytes": 8392133, "response_frame_bytes": [41, 8392076, 0, 0, 57, 8392076, 47], "elapsed_seconds": 0.2480211249931017, "objects": {"initial": 3, "recovered": 3}, "gc": "checkpoint and collection passed: 2 candidates", "instance_limit_bytes": 134217728}
+{"hash": "sha256", "fixture": "history-thin", "request_bytes": 117995, "response_frame_bytes": [41, 116548, 41, 4422, 57, 116862, 47], "elapsed_seconds": 0.057676708995131776, "objects": {"initial": 1152, "recovered": 1155, "incremental": 3}, "gc": "checkpoint and collection passed: 3 candidates", "instance_limit_bytes": 134217728}
+cargo test -p object-log-git --test performance_acceptance git_request_and_byte_accounting -- --ignored --exact --nocapture
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.07s
+     Running tests/performance_acceptance.rs (target/debug/deps/performance_acceptance-f955e359cbd86c26)
+
+running 1 test
+small: pack=4311 B, durable=6039 B -> 6394 B, Git receiver=32871 B
+small publication: requests=6 (GET=2, PUT=4), uploaded=6039 B, downloaded=5576 B
+small checkpoint: requests=5 (GET=3, PUT=2), uploaded=580 B, downloaded=5814 B
+small recovery: requests=4 (GET=4, PUT=0), uploaded=0 B, downloaded=6156 B
+large: pack=8391374 B, durable=8395089 B -> 8395447 B, Git receiver=8419934 B
+large publication: requests=70 (GET=34, PUT=36), uploaded=8395089 B, downloaded=8394624 B
+large checkpoint: requests=37 (GET=35, PUT=2), uploaded=583 B, downloaded=8394864 B
+large recovery: requests=69 (GET=69, PUT=0), uploaded=0 B, downloaded=16786581 B
+test git_request_and_byte_accounting ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.81s
+

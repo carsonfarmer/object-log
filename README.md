@@ -115,6 +115,12 @@ and local-provider qualification. Shallow clone, absolute/relative deepening,
 unshallow, time cutoffs, and ref exclusions work through protocol v2 for both
 hashes; `make git-spin-shallow-test` exercises unchanged clients against local
 Spin and `MinIO`.
+Partial clones support `blob:none` and `blob:limit` filters, with later retrieval
+of reachable objects through ordinary Git promisor requests. The
+`make git-spin-partial-test` gate checks both hashes, lazy checkout, shallow
+interaction, and cold retrieval after checkpoint and collection. Packfile URIs
+remain follow-on work. Spin defaults to authenticated access; see its
+[credential-helper setup](crates/object-log-git-spin/README.md).
 The [Spin performance record](docs/evidence/git-spin-performance-2026-09-04.md)
 retains one latency review finding; removing the old implementation does not
 change that measurement. See the
@@ -221,9 +227,14 @@ make git-spin-performance-acceptance
 make git-spin-minio-test
 ```
 
-The `MinIO` targets start a pinned container on a loopback port. They create an
-empty test bucket and remove the container when the test ends. They
-do not use a cloud account. The single-flow test includes a 1,001-object
+The `MinIO` targets default to a pinned container on a loopback port. To use an
+installed native MinIO executable instead, set `OBJECT_LOG_MINIO_BINARY` to its
+absolute path. Native mode requires Python, `lsof`, and `shasum`; it reports the
+binary version and SHA-256, verifies ownership of the loopback listener, and
+removes its temporary data after stopping the process. Both modes create an empty
+test bucket and run the same assertions without a cloud account. Native results
+qualify that host and binary, not Docker or Linux runtime memory limits.
+The single-flow test includes a 1,001-object
 collection boundary. The large acceptance target collects 100,000
 memory-backed objects and 10,001 objects from local `MinIO`. Each collection
 must complete its timed phase within 30 seconds. See the
