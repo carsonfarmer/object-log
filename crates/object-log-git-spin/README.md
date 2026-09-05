@@ -34,10 +34,11 @@ buffers can coexist (20 MiB); these belong to the runtime allowance until the
 engine charges the command input. Response bytes retain their engine owner
 through the final stream write. Spin's per-instance engine admission does not
 bound aggregate memory across concurrent host instances. The launch command
-limits Spin's pooling allocator to one live component instance. Do not disable
-pooling. Spin can automatically fall back to its on-demand allocator on hosts
-without sufficient virtual address space; run the concurrent fixture on each
-qualification host to verify that a second live instance is rejected. These
+forces Spin's pooling allocator with `SPIN_WASMTIME_POOLING=1` and limits it
+to one live component instance. Do not disable pooling. Unsupported hosts must
+fail startup rather than silently use the on-demand allocator; run the
+concurrent fixture on each qualification host to verify refusal of a second
+live instance. These
 limits follow [Spin 4.0.2's pooling configuration](https://github.com/spinframework/spin/blob/v4.0.2/crates/core/src/lib.rs#L92).
 
 The S3 connector streams request and response bodies. It applies a five-second

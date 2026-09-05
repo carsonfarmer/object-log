@@ -46,3 +46,15 @@ exports `wasi:http/incoming-handler@0.2.0`. There are no socket or WASI P3
 imports. Filesystem interfaces are linked by Rust dependencies; both runtime
 fixtures pass without preopens. The SDK export macro is enabled only on Wasm,
 so native workspace builds do not try to link a WASI ABI export.
+
+Follow-up transport regressions pass with the same local toolchain:
+
+- An 8 MiB signed PUT receives HTTP 307 while the fixture keeps its socket
+  open and never reads the body. The adapter cancels the upload and preserves
+  the redirect error. Restoring the old `< 400` condition makes this test time
+  out, so it exercises actual backpressure rather than only a status branch.
+- Bulk-delete requests must carry `Content-Length` and cannot use chunked
+  encoding. The connector obtains the exact size from the object-store body
+  before converting the request into WASI HTTP resources.
+- The actual application accepts uppercase `GZIP` and mixed-case `Identity`
+  content-encoding tokens on both object formats.

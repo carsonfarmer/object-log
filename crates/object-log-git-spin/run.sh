@@ -7,6 +7,7 @@ for argument in "$@"; do
     esac
 done
 adapter_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export SPIN_WASMTIME_POOLING=1
 export SPIN_MAX_INSTANCE_COUNT=1
 export SPIN_WASMTIME_INSTANCE_COUNT=1
 exec spin up --from "$adapter_dir/spin.toml" --max-instance-memory 134217728 "$@"

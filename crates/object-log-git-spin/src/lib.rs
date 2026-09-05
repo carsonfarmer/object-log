@@ -111,7 +111,8 @@ fn validate_headers(
     anyhow::ensure!(
         encoding
             .as_deref()
-            .is_none_or(|value| value == "identity" || value == "gzip"),
+            .is_none_or(|value| value.eq_ignore_ascii_case("identity")
+                || value.eq_ignore_ascii_case("gzip")),
         "unsupported content encoding"
     );
     if let Some(length) = header(request, "content-length")? {
@@ -158,7 +159,14 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
             repository.receive_advertisement().await?,
         ));
     }
-    let Ok(body) = body(request, encoding.as_deref() == Some("gzip")).await else {
+    let Ok(body) = body(
+        request,
+        encoding
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("gzip")),
+    )
+    .await
+    else {
         return Ok(Reply(
             400,
             "text/plain",

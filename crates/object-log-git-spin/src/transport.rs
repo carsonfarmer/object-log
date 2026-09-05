@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
 use hmac::{Hmac, Mac};
-use http_body::Frame;
+use http_body::{Body as _, Frame};
 use http_body_util::{BodyExt, StreamBody};
 use object_store::client::{
     ClientConfigKey, ClientOptions, CryptoProvider, DigestAlgorithm, DigestContext, HmacContext,
@@ -52,7 +52,16 @@ fn http_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Htt
 #[async_trait]
 impl HttpService for Service {
     async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let (parts, mut body) = request.into_parts();
+        let (mut parts, mut body) = request.into_parts();
+        // Preserve exact framing supplied by object_store's body. In particular,
+        // S3 bulk deletion requires Content-Length rather than chunked encoding.
+        if !parts.headers.contains_key(http::header::CONTENT_LENGTH)
+            && let Some(length) = body.size_hint().exact()
+        {
+            parts
+                .headers
+                .insert(http::header::CONTENT_LENGTH, length.into());
+        }
         let (outgoing, _) = http::Request::from_parts(parts, ())
             .try_into_outgoing_request()
             .map_err(http_error)?;
@@ -119,7 +128,7 @@ impl HttpService for Service {
             futures::future::Either::Right((response, upload)) => {
                 let response = response?;
                 // Early rejections must not wait for the server to consume the upload.
-                if response.status() < 400 {
+                if (200..300).contains(&response.status()) {
                     upload.await?;
                 }
                 response

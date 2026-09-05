@@ -7,6 +7,7 @@ import http.server
 import json
 import pathlib
 import subprocess
+import socket
 import threading
 import time
 import urllib.error
@@ -18,6 +19,7 @@ calls = []
 exists = False
 held = threading.Event()
 release = threading.Event()
+redirect_release = threading.Event()
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -27,7 +29,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def process(self):
         global exists
-        if self.headers.get("Transfer-Encoding") == "chunked":
+        if self.command == "POST":
+            assert self.headers.get("Content-Length") is not None, "S3 bulk deletion requires Content-Length"
+            assert self.headers.get("Transfer-Encoding") is None
+        if self.path == "/probe/redirect":
+            # Verify the expected payload signature without reading the upload.
+            body = bytes(8 * 1024 * 1024)
+        elif self.headers.get("Transfer-Encoding") == "chunked":
             parts = []
             while True:
                 size = int(self.rfile.readline().strip(), 16)
@@ -56,6 +64,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         for value in scope.split("/"):
             key = hmac.new(key, value.encode(), hashlib.sha256).digest()
         assert hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest() == fields["Signature"]
+        if self.path == "/probe/redirect":
+            assert self.command == "PUT" and int(self.headers["Content-Length"]) == 8 * 1024 * 1024
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
+            calls.append((self.command, "307 unread body"))
+            self.send_response(307)
+            self.send_header("Location", "http://127.0.0.1:19171/probe/redirect-target")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            self.wfile.flush()
+            # Keep the socket open without consuming body bytes. The client must
+            # cancel its backpressured upload upon receiving this final response.
+            assert redirect_release.wait(10), "redirect upload did not cancel"
+            self.close_connection = True
+            return
         if self.path == "/probe/held":
             calls.append((self.command, "held"))
             held.set()
@@ -127,7 +149,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 19171), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 with (ROOT / "runtime.log").open("w") as log:
-    process = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", "127.0.0.1:19172", "--max-instance-memory", "134217728"], stdout=log, stderr=subprocess.STDOUT, env={**os.environ, "SPIN_MAX_INSTANCE_COUNT": "1", "SPIN_WASMTIME_INSTANCE_COUNT": "1"})
+    process = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", "127.0.0.1:19172", "--max-instance-memory", "134217728"], stdout=log, stderr=subprocess.STDOUT, env={**os.environ, "SPIN_WASMTIME_POOLING": "1", "SPIN_MAX_INSTANCE_COUNT": "1", "SPIN_WASMTIME_INSTANCE_COUNT": "1"})
     try:
         for attempt in range(100):
             try:
@@ -147,6 +169,12 @@ with (ROOT / "runtime.log").open("w") as log:
         with urllib.request.urlopen("http://127.0.0.1:19172/failure", timeout=10) as response:
             assert response.read() == b"bounded failure passed\n"
         assert calls[-1] == ("GET", "503") and len(calls) == 8, calls
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:19172/redirect", timeout=5) as response:
+                assert response.read() == b"early redirect cancellation passed\n"
+        finally:
+            redirect_release.set()
+        assert calls[-1] == ("PUT", "307 unread body") and len(calls) == 9, calls
         def get_held():
             with urllib.request.urlopen("http://127.0.0.1:19172/held", timeout=15) as response:
                 return response.read()
@@ -159,7 +187,7 @@ with (ROOT / "runtime.log").open("w") as log:
                     raise AssertionError("second live instance was admitted")
                 except urllib.error.HTTPError as error:
                     assert error.code >= 500, error.code
-                assert calls[-1] == ("GET", "held") and len(calls) == 9, calls
+                assert calls[-1] == ("GET", "held") and len(calls) == 10, calls
             finally:
                 release.set()
             assert first.result() == b"held request released\n"

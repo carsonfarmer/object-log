@@ -42,6 +42,19 @@ mod entry {
                 ..RetryConfig::default()
             })
             .build()?;
+        if request.uri().ends_with("/redirect") {
+            let result = store
+                .put(
+                    &Path::from("redirect"),
+                    Bytes::from(vec![0; 8 * 1024 * 1024]).into(),
+                )
+                .await;
+            anyhow::ensure!(
+                result.is_err_and(|error| error.to_string().contains("307")),
+                "early redirect must propagate before upload completion"
+            );
+            return Ok(Response::new(200, "early redirect cancellation passed\n"));
+        }
         if request.uri().ends_with("/held") {
             store.get(&Path::from("held")).await?.bytes().await?;
             return Ok(Response::new(200, "held request released\n"));
