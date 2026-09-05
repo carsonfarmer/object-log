@@ -1,4 +1,4 @@
-//! Explicit migration; activation awaits the complete tree reader/write path.
+//! Explicit legacy-to-tree migration through one conditional publication.
 
 use object_log::{CommitStatus, Log, TransactionId};
 
