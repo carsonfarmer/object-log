@@ -1,6 +1,10 @@
 use std::io::{self, Write};
 use std::{collections::VecDeque, mem::size_of, path::PathBuf};
 
+#[path = "durable_catalog.rs"]
+mod tree_reader;
+use tree_reader::SelectedPacks;
+
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt, stream};
 use object_log::{Log, ObjectKind, ObjectRef, ReferenceNode, StagedObject, View};
@@ -101,6 +105,7 @@ pub(crate) async fn stage(
 }
 
 pub(crate) struct Catalog {
+    tree: Option<crate::catalog_tree::CatalogTree>,
     format: ObjectFormat,
     packs: Box<[Pack]>,
     directory: Vec<Location>,
@@ -143,8 +148,7 @@ impl<'a> SelectedIndex<'a> {
         root: &StagedObject,
     ) -> Result<Self, Error> {
         let format = descriptor.id.format();
-        let roots = [(descriptor.clone(), root.reference().clone())];
-        let memory = operation.reserve_state(catalog_bytes(format, &roots)?)?;
+        let memory = operation.reserve_state(selected_index_bytes(descriptor, root)?)?;
         let bytes = usize::try_from(root.reference().len()).map_err(pack_error)?;
         let entries = (bytes / (format.digest_len() + 8)).min(MAX_OBJECTS as usize);
         operation.work(
@@ -186,6 +190,16 @@ impl<'a> SelectedIndex<'a> {
         }
         Ok(())
     }
+}
+
+// Includes the wrapper and Arc counters even for stack-only migration callers.
+fn selected_index_bytes(descriptor: &PackDescriptor, root: &StagedObject) -> Result<usize, Error> {
+    Ok(catalog_bytes(
+        descriptor.id.format(),
+        &[(descriptor.clone(), root.reference().clone())],
+    )? + size_of::<SelectedIndex<'_>>()
+        - size_of::<Pack>()
+        + 2 * size_of::<usize>())
 }
 
 struct Pack {
@@ -254,6 +268,7 @@ pub(crate) async fn load(
     });
     directory.dedup_by(|a, b| oid(&packs, *a) == oid(&packs, *b));
     Ok(Catalog {
+        tree: None,
         format,
         packs: packs.into_boxed_slice(),
         directory,
@@ -492,6 +507,8 @@ pub(crate) struct Reader<'a> {
     log: &'a Log,
     view: &'a View,
     catalog: &'a Catalog,
+    tree_cache: Option<crate::catalog_tree::CatalogCache<'a>>,
+    selected_packs: Option<SelectedPacks<'a>>,
     cache: VecDeque<((u16, u16), Bytes)>,
     cache_bytes: usize,
     cache_memory: Option<Reservation>,
@@ -503,14 +520,16 @@ impl<'a> Reader<'a> {
             log,
             view,
             catalog,
+            tree_cache: None,
+            selected_packs: None,
             cache: VecDeque::new(),
             cache_bytes: 0,
             cache_memory: None,
         }
     }
 
-    pub(crate) fn contains(&self, id: ObjectId) -> bool {
-        self.catalog.location(id).is_some()
+    pub(crate) async fn contains(&mut self, id: ObjectId) -> Result<bool, Error> {
+        Ok(self.location(id).await?.is_some())
     }
 
     /// Size for filtering only: full blobs use authenticated, canonical pack
@@ -518,7 +537,7 @@ impl<'a> Reader<'a> {
     /// must still pass `verify`. Deltas and structural objects use `find`, so a
     /// delta reports its decoded result size, never its instruction-stream size.
     pub(crate) async fn object_size(&mut self, id: ObjectId) -> Result<Option<usize>, Error> {
-        let Some(location) = self.catalog.location(id) else {
+        let Some(location) = self.location(id).await? else {
             return Ok(None);
         };
         self.catalog.operation.work(42)?;
@@ -534,10 +553,10 @@ impl<'a> Reader<'a> {
     // Verify selected content without retaining decoded full blobs. Delta and
     // structural objects keep the existing bounded materialization path.
     pub(crate) async fn verify(&mut self, id: ObjectId) -> Result<Option<gix_object::Kind>, Error> {
-        let Some(location) = self.catalog.location(id) else {
+        let Some(location) = self.location(id).await? else {
             return Ok(None);
         };
-        let pack = &self.catalog.packs[usize::from(location.pack)];
+        let pack = self.pack(location.pack);
         let range = pack.entry_range(location.index);
         self.catalog
             .operation
@@ -561,7 +580,7 @@ impl<'a> Reader<'a> {
     }
 
     async fn entry_header(&mut self, location: Location) -> Result<PackEntry, Error> {
-        let pack = &self.catalog.packs[usize::from(location.pack)];
+        let pack = self.pack(location.pack);
         let range = pack.entry_range(location.index);
         // A canonical u64 size takes at most ten bytes, followed by at
         // most a SHA-256 base ID. Never gather the compressed entry.
@@ -572,10 +591,10 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) async fn find(&mut self, id: ObjectId) -> Result<Option<Object>, Error> {
-        let Some(location) = self.catalog.location(id) else {
+        let Some(location) = self.location(id).await? else {
             return Ok(None);
         };
-        let pack = &self.catalog.packs[usize::from(location.pack)];
+        let pack = self.pack(location.pack);
         let mut current = location.index;
         let delta_capacity = MAX_DELTA_DEPTH.min(pack.index.num_objects() as usize);
         let _read_memory = self
@@ -627,7 +646,7 @@ impl<'a> Reader<'a> {
             return invalid("fetch selection is invalid");
         }
         let selected_bytes =
-            ids.len() * (size_of::<ObjectId>() + size_of::<(Location, ObjectId, u32)>());
+            ids.len() * (size_of::<ObjectId>() + size_of::<(ObjectId, ObjectId, u32)>());
         let _selected_memory = self.catalog.operation.reserve(selected_bytes)?;
         let mut selected = ids.to_vec();
         selected.sort_unstable();
@@ -635,16 +654,13 @@ impl<'a> Reader<'a> {
         let mut entries = Vec::with_capacity(selected.len());
         for id in &selected {
             let location = self
-                .catalog
                 .location(*id)
+                .await?
                 .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
-            let pack = &self.catalog.packs[usize::from(location.pack)];
-            entries.push((location, *id, pack.offset(location.index)));
+            let pack = self.pack(location.pack);
+            entries.push((pack.id, *id, pack.offset(location.index)));
         }
-        entries.sort_unstable_by_key(|(location, id, offset)| {
-            let pack = self.catalog.packs[usize::from(location.pack)].id;
-            (pack, *offset, *id)
-        });
+        entries.sort_unstable_by_key(|(pack, id, offset)| (*pack, *offset, *id));
 
         let hash = object_hash(format);
         let hash_len = hash.len_in_bytes();
@@ -664,14 +680,19 @@ impl<'a> Reader<'a> {
                 count,
             ))
             .map_err(output_error)?;
-        for (location, id, _) in entries {
-            let stored = &self.catalog.packs[usize::from(location.pack)];
+        for (_, id, _) in entries {
+            // Lookup again: a tree cache slot may have been evicted while planning.
+            let location = self
+                .location(id)
+                .await?
+                .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
+            let stored = self.pack(location.pack);
             let range = stored.entry_range(location.index);
             self.catalog
                 .operation
                 .work((range.end - range.start) as usize)?;
             let entry = self.entry_header(location).await?;
-            let pack = &self.catalog.packs[usize::from(location.pack)];
+            let pack = self.pack(location.pack);
             let base = pack
                 .base(&entry)?
                 .map(|index| ObjectId::from_bytes(format, pack.oid(index)))
@@ -725,7 +746,7 @@ impl<'a> Reader<'a> {
         entry: &PackEntry,
         writer: &mut impl Write,
     ) -> Result<(), Error> {
-        let pack = &self.catalog.packs[usize::from(location.pack)];
+        let pack = self.pack(location.pack);
         let range = pack.entry_range(location.index);
         let mut crc = 0;
         let mut skip = entry.header_size();
@@ -772,7 +793,7 @@ impl<'a> Reader<'a> {
     }
 
     async fn stored_entry(&mut self, pack: u16, index: u32) -> Result<(PackEntry, Bytes), Error> {
-        let stored = &self.catalog.packs[usize::from(pack)];
+        let stored = self.pack(pack);
         let range = stored.entry_range(index);
         let offset = u64::from(range.start);
         self.catalog
@@ -788,7 +809,7 @@ impl<'a> Reader<'a> {
     }
 
     async fn read_range(&mut self, pack: u16, range: std::ops::Range<u32>) -> Result<Bytes, Error> {
-        let stored = &self.catalog.packs[usize::from(pack)];
+        let stored = self.pack(pack);
         if range.start > range.end || range.end > stored.bytes {
             return invalid("pack range is invalid");
         }
@@ -824,7 +845,7 @@ impl<'a> Reader<'a> {
         range: std::ops::Range<u32>,
         mut visit: impl FnMut(&[u8]) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let stored = &self.catalog.packs[usize::from(pack)];
+        let stored = self.pack(pack);
         if range.start > range.end || range.end > stored.bytes {
             return invalid("pack range is invalid");
         }
@@ -857,7 +878,8 @@ impl<'a> Reader<'a> {
             );
             self.cache = VecDeque::with_capacity(capacity);
         }
-        let object = self.catalog.packs[usize::from(pack)]
+        let object = self
+            .pack(pack)
             .node
             .children()
             .get(usize::from(index))
@@ -1111,6 +1133,8 @@ mod tests {
     };
 
     type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
+
+    include!("durable_catalog_tests.rs");
 
     fn test_operation() -> Operation {
         let Ok(operation) = Pool::new(LIVE_BYTES).admit() else {
