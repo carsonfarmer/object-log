@@ -4,7 +4,9 @@ use std::{
     mem::size_of,
 };
 
-use object_log::{Log, ObjectRef, StagedObject, View, materialize};
+use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, StagedObject, View, materialize};
+
+mod receive_command;
 
 use crate::{
     Error, ObjectFormat, ObjectId, RefSnapshot,
@@ -17,7 +19,7 @@ use crate::{
 
 use bytes::Bytes;
 #[cfg(feature = "native-oracle")]
-use object_log::{CheckpointStatus, CommitStatus, PreparedCommit, TransactionId};
+use object_log::{CheckpointStatus, TransactionId};
 #[cfg(feature = "native-oracle")]
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -57,8 +59,8 @@ pub struct Repository {
     view: View,
     state: State,
     operation: Operation,
-    _state_memory: Reservation,
-    _view_memory: Reservation,
+    state_memory: Reservation,
+    view_memory: Reservation,
     #[cfg(feature = "native-oracle")]
     native: Option<Native>,
 }
@@ -71,14 +73,13 @@ struct Native {
     live_packs: BTreeSet<ObjectId>,
 }
 
-#[cfg(feature = "native-oracle")]
-#[derive(Debug)]
-/// One native-oracle update ready for conditional publication.
+/// One atomic ref update ready for conditional publication.
 #[must_use = "publish the update or retain its recovery token"]
 pub struct PreparedPush {
     log: Log,
     prepared: PreparedCommit,
     recovery_token: Bytes,
+    receive: Option<receive_command::Publication>,
 }
 
 impl Repository {
@@ -134,8 +135,8 @@ impl Repository {
             view,
             state,
             operation: operation.clone(),
-            _state_memory: state_memory,
-            _view_memory: view_memory,
+            state_memory,
+            view_memory,
             #[cfg(feature = "native-oracle")]
             native: None,
         })
@@ -540,6 +541,7 @@ impl Repository {
             log: self.log,
             prepared,
             recovery_token,
+            receive: None,
         })
     }
 
@@ -554,7 +556,7 @@ impl Repository {
     /// Returns an error for invalid durable objects, an invalid checkpoint, or
     /// an object-store failure.
     #[cfg(feature = "native-oracle")]
-    pub async fn checkpoint(self) -> Result<CheckpointStatus, Error> {
+    async fn checkpoint_native(self) -> Result<CheckpointStatus, Error> {
         let Some(through) = self.view.tail().last().cloned() else {
             return Ok(CheckpointStatus::Published(self.view));
         };
@@ -655,7 +657,6 @@ fn pack_roots(state: &State) -> Vec<(PackDescriptor, ObjectRef)> {
         .collect()
 }
 
-#[cfg(feature = "native-oracle")]
 impl PreparedPush {
     /// Returns the token that identifies this exact publication attempt.
     #[must_use]
@@ -830,6 +831,14 @@ async fn peel_ref(
     Err(Error::InvalidObjectGraph("tag chain is too long"))
 }
 
+impl fmt::Debug for PreparedPush {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedPush")
+            .field("prepared", &self.prepared)
+            .finish_non_exhaustive()
+    }
+}
 struct UploadBuffer<'a> {
     bytes: Option<Vec<u8>>,
     length: usize,
@@ -902,6 +911,7 @@ mod tests {
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
+    include!("repository/receive_tests.rs");
 
     struct Fixture {
         directory: TempDir,

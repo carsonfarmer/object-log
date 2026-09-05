@@ -375,6 +375,15 @@ impl View {
         self.observed.head.collection_epoch
     }
 
+    /// Returns the authenticated byte length of the active collection plan.
+    ///
+    /// Writers read this plan while checking the collection fence. Adapters can
+    /// use its length to admit the resulting I/O and decoding work in advance.
+    #[must_use]
+    pub fn collection_plan_bytes(&self) -> Option<u64> {
+        self.observed.head.active_plan.as_ref().map(|plan| plan.len)
+    }
+
     pub(crate) fn head(&self) -> &format::Head {
         &self.observed.head
     }

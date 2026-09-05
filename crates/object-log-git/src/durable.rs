@@ -28,6 +28,26 @@ type PackIndex = gix_pack::index::File<Bytes>;
 type PackEntry = gix_pack::data::Entry;
 type EntryHeader = gix_pack::data::entry::Header;
 
+// Core writes decode an authenticated active collection plan. The factor
+// covers candidate structs, decoded byte vectors, and canonical re-encoding,
+// including malformed plans whose short arrays expand into large structs.
+pub(crate) fn publication_plan(
+    operation: &Operation,
+    view: &View,
+) -> Result<crate::pack::budget::Reservation, Error> {
+    let bytes = usize::try_from(view.collection_plan_bytes().unwrap_or(0))
+        .map_err(|_| Error::InvalidPack("collection plan exceeds memory".into()))?;
+    if bytes != 0 {
+        operation.io(bytes)?;
+        operation.work(bytes)?;
+    }
+    operation.reserve(
+        bytes
+            .checked_mul(128)
+            .ok_or_else(|| Error::InvalidPack("collection plan exceeds memory".into()))?,
+    )
+}
+
 pub(crate) async fn stage(
     operation: &Operation,
     log: &Log,
@@ -62,6 +82,7 @@ pub(crate) async fn stage(
     let children = stream::iter((0..count).map(|index| {
         let chunk = bytes.slice(index * width..bytes.len().min((index + 1) * width));
         async move {
+            let _plan_memory = publication_plan(operation, view)?;
             operation.io(chunk.len())?;
             Ok::<_, Error>(log.put_object(view, chunk).await?)
         }
@@ -69,6 +90,7 @@ pub(crate) async fn stage(
     .buffered(MAX_TRANSFERS)
     .try_collect()
     .await?;
+    let _plan_memory = publication_plan(operation, view)?;
     let root = log
         .put_node(view, Bytes::from(normalized.index), children)
         .await?;
@@ -108,6 +130,11 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
+    pub(crate) fn containing_pack(&self, id: ObjectId) -> Option<ObjectId> {
+        self.location(id)
+            .map(|location| self.packs[usize::from(location.pack)].id)
+    }
+
     fn location(&self, id: ObjectId) -> Option<Location> {
         self.directory
             .binary_search_by(|location| oid(&self.packs, *location).cmp(id.as_bytes()))

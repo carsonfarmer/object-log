@@ -33,7 +33,6 @@ mod state;
 #[allow(dead_code, reason = "the next Git engine tranche consumes this module")]
 mod wire;
 
-#[cfg(feature = "native-oracle")]
 pub use repository::PreparedPush;
 pub use repository::Repository;
 
@@ -200,6 +199,14 @@ pub enum Error {
     /// An upload or receive command is malformed or exceeds protocol limits.
     #[error("invalid Git protocol: {0}")]
     InvalidProtocol(&'static str),
+    /// A valid receive command was rejected before publication.
+    #[error("receive command rejected: {source}")]
+    ReceiveRejected {
+        /// Encoded report-status response, empty when not requested.
+        response: bytes::Bytes,
+        /// The validation or storage failure that rejected the command.
+        source: Box<Error>,
+    },
     /// An object ID is invalid.
     #[error("invalid Git object ID")]
     InvalidObjectId,
@@ -295,6 +302,19 @@ fn is_valid_ref_name(value: &[u8]) -> bool {
     (value.starts_with(b"refs/heads/") || value.starts_with(b"refs/tags/"))
         && std::str::from_utf8(value).is_ok()
         && gix_validate::reference::name(bstr::BStr::new(value)).is_ok()
+}
+
+impl From<wire::Error> for Error {
+    fn from(error: wire::Error) -> Self {
+        match error {
+            wire::Error::Protocol(message) | wire::Error::Limit(message) => {
+                Self::InvalidProtocol(message)
+            }
+            wire::Error::Io(error) => error
+                .downcast::<Self>()
+                .unwrap_or_else(|error| Self::PackStorage(error.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
