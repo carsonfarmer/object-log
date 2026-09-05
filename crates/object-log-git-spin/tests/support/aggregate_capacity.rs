@@ -11,8 +11,8 @@ async fn spin_capacity_clone_combines_packs_beyond_old_output_limit() -> TestRes
         let result = std::panic::AssertUnwindSafe(aggregate_capacity_clone(format, &namespace))
             .catch_unwind()
             .await;
-        // The serving group and local TempDirs are gone before provider cleanup,
-        // including on failure. Delete only this case's unique fixture prefix.
+        // The case has dropped its local TempDirs and attempted host shutdown.
+        // Failure-path shutdown is best effort. Delete only this unique prefix.
         let prefix = StorePath::from(namespace);
         let cleanup = store
             .delete_stream(
