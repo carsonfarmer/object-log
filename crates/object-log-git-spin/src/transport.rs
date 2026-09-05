@@ -15,13 +15,14 @@ use spin_sdk::http::conversions::TryIntoOutgoingRequest;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     task::Poll,
 };
 
-const HTTP_CALLS: usize = 512;
-const HTTP_BYTES: usize = 96 * 1024 * 1024;
+// Allow bootstrap and one transport retry per logical bounded pack request.
+const HTTP_CALLS: usize = 1024 + 24 * object_log_git::MAX_STREAM_PACK_BYTES.div_ceil(1024 * 1024);
+const HTTP_BYTES: u64 = 24 * object_log_git::MAX_STREAM_PACK_BYTES as u64 + 8 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct QuotaExceeded;
@@ -38,7 +39,7 @@ impl std::error::Error for QuotaExceeded {}
 #[derive(Debug, Default)]
 struct Budget {
     calls: AtomicUsize,
-    bytes: AtomicUsize,
+    bytes: AtomicU64,
 }
 impl Budget {
     fn charge(counter: &AtomicUsize, amount: usize, limit: usize) -> Result<(), HttpError> {
@@ -52,8 +53,16 @@ impl Budget {
     fn call(&self) -> Result<(), HttpError> {
         Self::charge(&self.calls, 1, HTTP_CALLS)
     }
-    fn transfer(&self, bytes: usize) -> Result<(), HttpError> {
-        Self::charge(&self.bytes, bytes, HTTP_BYTES)
+    fn transfer(&self, bytes: impl TryInto<u64>) -> Result<(), HttpError> {
+        let bytes = bytes.try_into().map_err(|_| http_error(QuotaExceeded))?;
+        self.bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|&next| next <= HTTP_BYTES)
+            })
+            .map(|_| ())
+            .map_err(|_| http_error(QuotaExceeded))
     }
 }
 
@@ -470,6 +479,15 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_transfer_crosses_u32() -> Result<(), HttpError> {
+        let budget = Budget::default();
+        budget.transfer(1_u64 << 31)?;
+        budget.transfer(1_u64 << 31)?;
+        assert_eq!(budget.bytes.load(Ordering::Relaxed), 1_u64 << 32);
+        Ok(())
+    }
+
+    #[test]
     fn connector_clones_share_bootstrap_and_command_quota() -> Result<(), HttpError> {
         let bootstrap = Transport::default();
         let command = bootstrap.clone();
@@ -477,10 +495,10 @@ mod tests {
         command.0.transfer(HTTP_BYTES / 2)?;
         assert!(bootstrap.0.transfer(1).is_err());
         let mut threads = Vec::new();
-        for _ in 0..32 {
+        for worker in 0..32 {
             let retry = command.clone();
             threads.push(std::thread::spawn(move || {
-                for _ in 0..16 {
+                for _ in (worker..HTTP_CALLS).step_by(32) {
                     retry.0.call()?;
                 }
                 Ok::<_, HttpError>(())

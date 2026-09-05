@@ -3,7 +3,7 @@
 use super::{Cursor, Decoded, IndexedEntry, Input, scan, scratch};
 use crate::{
     Error, ObjectId,
-    pack::{MAX_OBJECT_BYTES, budget::Operation, invalid, pack_error},
+    pack::{MAX_STREAM_OBJECT_BYTES, budget::Operation, invalid, pack_error},
 };
 use object_log::{Log, ObjectRef, StagedObject, View};
 use std::{mem::size_of, sync::Arc};
@@ -152,7 +152,7 @@ impl<'a> Input<'a> {
             let mut decoder = scratch::Inflated::new(self, &entry)?;
             decoder.integer().await?;
             entry.result_size = decoder.integer().await?;
-            if entry.result_size > MAX_OBJECT_BYTES {
+            if entry.result_size > MAX_STREAM_OBJECT_BYTES {
                 return invalid("selected delta result exceeds limit");
             }
         }

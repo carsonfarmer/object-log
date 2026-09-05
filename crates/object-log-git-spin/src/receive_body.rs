@@ -17,7 +17,7 @@ fn invalid() -> Error {
     Error::InvalidProtocol("invalid or oversized request body")
 }
 
-fn reader<S>(input: S, gzip: bool) -> impl AsyncRead + Unpin
+fn reader<S>(input: S, gzip: bool, limit: usize) -> impl AsyncRead + Unpin
 where
     S: Stream<Item = io::Result<Vec<u8>>> + Unpin,
 {
@@ -27,10 +27,7 @@ where
     let input = input
         .map(move |chunk| {
             let chunk = chunk?;
-            if chunk.is_empty()
-                || chunk.capacity() > FRAME
-                || chunk.len() > super::BODY_LIMIT - encoded
-            {
+            if chunk.is_empty() || chunk.capacity() > FRAME || chunk.len() > limit - encoded {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid encoded body frame",
@@ -60,7 +57,18 @@ pub(super) async fn frames<S>(
 where
     S: Stream<Item = io::Result<Vec<u8>>> + Unpin,
 {
-    let mut reader = reader(input, gzip);
+    frames_with_limit(input, gzip, super::RECEIVE_BODY_LIMIT).await
+}
+
+async fn frames_with_limit<S>(
+    input: S,
+    gzip: bool,
+    limit: usize,
+) -> Result<Option<impl Stream<Item = Result<Bytes, Error>> + Unpin>, Error>
+where
+    S: Stream<Item = io::Result<Vec<u8>>> + Unpin,
+{
+    let mut reader = reader(input, gzip, limit);
     let mut prefix = vec![0; 5];
     let mut length = 0;
     while length < prefix.len() {
@@ -80,14 +88,14 @@ where
     let reader = Cursor::new(prefix).chain(reader);
     Ok(Some(Box::pin(futures::stream::unfold(
         (reader, 0_usize, false),
-        |(mut reader, total, done)| async move {
+        move |(mut reader, total, done)| async move {
             if done {
                 return None;
             }
             let mut frame = vec![0; FRAME];
             match reader.read(&mut frame).await {
                 Ok(0) => None,
-                Ok(length) if length <= super::BODY_LIMIT - total => {
+                Ok(length) if length <= limit - total => {
                     frame.truncate(length);
                     Some((Ok(Bytes::from(frame)), (reader, total + length, false)))
                 }
@@ -123,8 +131,10 @@ mod tests {
         encoder.finish()
     }
 
+    const TEST_LIMIT: usize = FRAME * 2;
+
     async fn decoded(input: &[u8], gzip: bool) -> Result<Option<Vec<u8>>, Error> {
-        let Some(frames) = frames(chunks(input), gzip).await? else {
+        let Some(frames) = frames_with_limit(chunks(input), gzip, TEST_LIMIT).await? else {
             return Ok(None);
         };
         let chunks = frames.try_collect::<Vec<_>>().await?;
@@ -162,13 +172,9 @@ mod tests {
 
     #[tokio::test]
     async fn checks_both_limits_truncation_and_late_crc() -> anyhow::Result<()> {
+        assert!(decoded(&vec![b'x'; TEST_LIMIT + 1], false).await.is_err());
         assert!(
-            decoded(&vec![b'x'; super::super::BODY_LIMIT + 1], false)
-                .await
-                .is_err()
-        );
-        assert!(
-            decoded(&gzip(&vec![b'x'; super::super::BODY_LIMIT + 1])?, true)
+            decoded(&gzip(&vec![b'x'; TEST_LIMIT + 1])?, true)
                 .await
                 .is_err()
         );

@@ -24,6 +24,10 @@ use std::{collections::BTreeMap, fmt};
 
 use minicbor::{Decode, Decoder, Encode};
 
+/// Maximum encoded Git pack accepted by the streaming receive API.
+/// Buffered convenience APIs retain their smaller allocation limits.
+pub const MAX_STREAM_PACK_BYTES: usize = pack::MAX_STREAM_OBJECT_BYTES + 16 * 1024 * 1024;
+
 /// A Git object identity algorithm.
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[cbor(index_only)]

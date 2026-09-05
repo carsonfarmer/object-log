@@ -527,6 +527,9 @@ async fn real_instruction_and_scratch_boundaries_and_copy_amplification() -> Tes
             .await?;
             let scanned = input.scan(format).await?;
             if amplify {
+                // Spend all but a bounded transfer allowance before this
+                // amplification probe; retries must not reset that allowance.
+                operation.io(crate::pack::budget::TRANSFER_BYTES - 96 * 1024 * 1024)?;
                 let error = scanned
                     .resolve(&mut NoBases)
                     .await

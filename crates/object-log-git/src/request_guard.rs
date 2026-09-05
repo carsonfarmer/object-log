@@ -33,23 +33,25 @@ mod tests {
     #[test]
     fn refusal_preserves_both_counters_and_retry_keeps_admissions() -> Result<(), Error> {
         let operation = Pool::new(0).admit()?;
-        assert!(
-            operation
-                .before_request(Request::Read {
-                    max_bytes: TRANSFER_BYTES + 1
-                })
-                .is_err()
-        );
-        assert_eq!(operation.calls(), 0);
-        operation.io(TRANSFER_BYTES)?;
+        let mut remaining = TRANSFER_BYTES;
+        while remaining > 0 {
+            let bytes = remaining.min(1024 * 1024 * 1024) as usize;
+            assert!(
+                operation
+                    .before_request(Request::Read { max_bytes: bytes })
+                    .is_ok()
+            );
+            remaining -= bytes as u64;
+        }
+        let admitted = operation.calls();
         assert!(
             operation
                 .before_request(Request::Write { bytes: 1 })
                 .is_err()
         );
-        assert_eq!(operation.calls(), 1);
+        assert_eq!(operation.calls(), admitted);
         operation.retry()?;
-        for _ in 1..CALLS {
+        for _ in admitted..CALLS {
             assert!(operation.before_request(Request::List).is_ok());
         }
         assert!(
@@ -65,7 +67,7 @@ mod tests {
     fn concurrent_transfer_admission_is_atomic_and_retains_the_permit() -> Result<(), Error> {
         let pool = Pool::new(0);
         let operation = pool.admit()?;
-        let chunk = TRANSFER_BYTES / 4;
+        let chunk = usize::try_from(TRANSFER_BYTES / 4).map_err(crate::pack::pack_error)?;
         let successes = std::thread::scope(|scope| {
             let handles = (0..32)
                 .map(|_| {

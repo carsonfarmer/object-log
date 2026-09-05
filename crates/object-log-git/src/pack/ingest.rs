@@ -1,5 +1,6 @@
 //! Replayable immutable input for bounded streaming receive.
 
+use crate::MAX_STREAM_PACK_BYTES;
 use std::{mem::size_of, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
@@ -7,7 +8,6 @@ use futures::{Stream, StreamExt};
 use object_log::{Log, ObjectRef, StagedObject, View};
 
 use super::{
-    MAX_RECEIVE_PACK_BYTES,
     budget::{Operation, Reservation, hold},
     invalid, pack_error,
 };
@@ -100,9 +100,19 @@ impl<'a> Input<'a> {
         operation: &Operation,
         log: &'a Log,
         view: &'a View,
-        mut frames: impl Stream<Item = Result<Bytes, Error>> + Unpin,
+        frames: impl Stream<Item = Result<Bytes, Error>> + Unpin,
     ) -> Result<Self, Error> {
-        let mut input = Self::empty(operation, log, view, MAX_RECEIVE_PACK_BYTES)?;
+        Self::receive_with_limit(operation, log, view, frames, MAX_STREAM_PACK_BYTES).await
+    }
+
+    async fn receive_with_limit(
+        operation: &Operation,
+        log: &'a Log,
+        view: &'a View,
+        mut frames: impl Stream<Item = Result<Bytes, Error>> + Unpin,
+        limit: usize,
+    ) -> Result<Self, Error> {
+        let mut input = Self::empty(operation, log, view, limit)?;
         let width = input.width;
         let mut pending_memory = operation.reserve(width)?;
         let mut pending = BytesMut::with_capacity(width);
@@ -115,7 +125,7 @@ impl<'a> Input<'a> {
                 return invalid("input frame exceeds byte limit");
             }
             let _frame_memory = operation.reserve(FRAME_BYTES)?;
-            if frame.len() as u64 > MAX_RECEIVE_PACK_BYTES as u64 - input.bytes {
+            if frame.len() as u64 > limit as u64 - input.bytes {
                 return invalid("input exceeds byte limit");
             }
             operation.work(frame.len())?;

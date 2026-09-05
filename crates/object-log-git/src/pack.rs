@@ -11,6 +11,8 @@ pub(super) mod budget;
 pub(super) const MAX_RECEIVE_PACK_BYTES: usize = 9 * 1024 * 1024;
 pub(super) const MAX_FETCH_PACK_BYTES: usize = 9_437_184;
 pub(super) const MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_STORED_PACK_BYTES: usize = 2 * crate::MAX_STREAM_PACK_BYTES;
+pub(crate) const MAX_STREAM_OBJECT_BYTES: usize = 1024 * 1024 * 1024;
 pub(super) const MAX_INDEX_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const MAX_OBJECTS: u32 = 32_768;
 pub(super) const MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
@@ -1104,11 +1106,11 @@ mod tests {
             + resolved
             + index_bytes
             - hash_bytes;
-        assert_eq!(probe.work_bytes(), expected);
+        assert_eq!(probe.work_bytes(), expected as u64);
         drop(normalized);
 
         let exact = operation();
-        exact.work(budget::WORK_BYTES - expected)?;
+        exact.work(budget::WORK_BYTES - expected as u64)?;
         drop(super::normalize(
             &exact,
             format,
@@ -1118,7 +1120,7 @@ mod tests {
         assert_eq!(exact.work_bytes(), budget::WORK_BYTES);
 
         let over = operation();
-        over.work(budget::WORK_BYTES - expected + 1)?;
+        over.work(budget::WORK_BYTES - expected as u64 + 1)?;
         assert!(matches!(
             super::normalize(&over, format, &thin, std::slice::from_ref(&base)),
             Err(Error::InvalidPack(message)) if message == "Git work limit exceeded"

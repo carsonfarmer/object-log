@@ -82,7 +82,7 @@ impl PackfileUris {
     }
 
     pub(crate) const fn eligible(bytes: usize) -> bool {
-        bytes >= MIN_BLOB_BYTES
+        bytes >= MIN_BLOB_BYTES && bytes <= pack::MAX_OBJECT_BYTES
     }
 }
 
@@ -147,6 +147,14 @@ impl Write for Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_blobs_remain_in_the_streaming_pack() {
+        assert!(PackfileUris::eligible(65536));
+        assert!(PackfileUris::eligible(pack::MAX_OBJECT_BYTES));
+        assert!(!PackfileUris::eligible(pack::MAX_OBJECT_BYTES + 1));
+        assert!(!PackfileUris::eligible(pack::MAX_STREAM_OBJECT_BYTES));
+    }
+
     #[test]
     fn uri_base_is_canonical_and_safe() {
         for base in [

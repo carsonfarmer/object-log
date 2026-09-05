@@ -12,6 +12,14 @@ mod auth;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 mod native_transport;
 
+#[path = "../log_options.rs"]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[allow(
+    dead_code,
+    reason = "the local operator shares durable profiles but never creates logs"
+)]
+mod log_options;
+
 #[path = "../operator.rs"]
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 mod operator;

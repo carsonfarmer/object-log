@@ -642,3 +642,5 @@ fn build_minio() -> TestResult<AmazonS3> {
 fn required_env(name: &'static str) -> TestResult<String> {
     env::var(name).map_err(|_| format!("{name} is not set").into())
 }
+
+include!("support/capacity.rs");

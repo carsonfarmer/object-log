@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use bytes::Bytes;
@@ -12,12 +12,14 @@ mod request_guard;
 
 pub(crate) const LIVE_BYTES: usize = 88 * 1024 * 1024;
 pub(crate) const STATE_BYTES: usize = 24 * 1024 * 1024;
-pub(crate) const CALLS: usize = 512;
+// Fixed metadata allowance plus bounded pack passes, shared by the one retry.
+pub(crate) const CALLS: usize = 512 + 12 * crate::MAX_STREAM_PACK_BYTES.div_ceil(1024 * 1024);
 // Two complete 1,024-entry materialization/publication attempts plus head and
-// collection-plan requests. All byte, work, state, and live limits stay shared.
-const MAINTENANCE_CALLS: usize = 8192;
-pub(crate) const TRANSFER_BYTES: usize = 96 * 1024 * 1024;
-pub(crate) const WORK_BYTES: usize = 256 * 1024 * 1024;
+// collection-plan requests, plus the serving allowance for pack passes.
+// All byte, work, state, and live limits stay shared.
+const MAINTENANCE_CALLS: usize = 8192 + CALLS;
+pub(crate) const TRANSFER_BYTES: u64 = 12 * crate::MAX_STREAM_PACK_BYTES as u64;
+pub(crate) const WORK_BYTES: u64 = 24 * crate::MAX_STREAM_PACK_BYTES as u64;
 pub(crate) const THIN_ROUNDS: usize = 32;
 pub(crate) const RETRIES: usize = 1;
 const MEMORY_LIMIT: &str = "Git live-memory limit exceeded";
@@ -74,7 +76,7 @@ impl Pool {
             pool: self.0.clone(),
             io: Mutex::new(IoUsage::default()),
             call_limit,
-            work: AtomicUsize::new(0),
+            work: AtomicU64::new(0),
             thin_rounds: AtomicUsize::new(0),
             retries: AtomicUsize::new(0),
             state: AtomicUsize::new(0),
@@ -85,14 +87,14 @@ impl Pool {
 #[derive(Default)]
 struct IoUsage {
     calls: usize,
-    transfer: usize,
+    transfer: u64,
 }
 
 struct OperationState {
     pool: Arc<PoolState>,
     io: Mutex<IoUsage>,
     call_limit: usize,
-    work: AtomicUsize,
+    work: AtomicU64,
     thin_rounds: AtomicUsize,
     retries: AtomicUsize,
     state: AtomicUsize,
@@ -107,11 +109,18 @@ impl Drop for OperationState {
 pub(crate) struct Operation(Arc<OperationState>);
 
 impl Operation {
+    pub(crate) fn call_limit(&self) -> usize {
+        self.0.call_limit
+    }
+
     pub(crate) fn same_as(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    pub(crate) fn io(&self, bytes: usize) -> Result<(), Error> {
+    pub(crate) fn io(&self, bytes: impl TryInto<u64>) -> Result<(), Error> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| Error::InvalidPack("transfer amount exceeds u64".into()))?;
         let mut usage = self
             .0
             .io
@@ -133,8 +142,19 @@ impl Operation {
         Ok(())
     }
 
-    pub(crate) fn work(&self, bytes: usize) -> Result<(), Error> {
-        charge(&self.0.work, bytes, WORK_BYTES, "Git work limit exceeded")
+    pub(crate) fn work(&self, bytes: impl TryInto<u64>) -> Result<(), Error> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| Error::InvalidPack("work amount exceeds u64".into()))?;
+        self.0
+            .work
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|&next| next <= WORK_BYTES)
+            })
+            .map(|_| ())
+            .map_err(|_| Error::InvalidPack("Git work limit exceeded".into()))
     }
 
     pub(crate) fn thin_round(&self) -> Result<(), Error> {
@@ -181,13 +201,13 @@ impl Operation {
             .is_some_and(|value| value <= self.0.call_limit)
             && usage
                 .transfer
-                .checked_add(transfer)
+                .checked_add(transfer as u64)
                 .is_some_and(|value| value <= TRANSFER_BYTES)
             && self
                 .0
                 .work
                 .load(Ordering::Relaxed)
-                .checked_add(work)
+                .checked_add(work as u64)
                 .is_some_and(|value| value <= WORK_BYTES)
     }
 
@@ -201,7 +221,7 @@ impl Operation {
     }
 
     #[cfg(test)]
-    pub(crate) fn work_bytes(&self) -> usize {
+    pub(crate) fn work_bytes(&self) -> u64 {
         self.0.work.load(Ordering::Relaxed)
     }
 
@@ -380,6 +400,28 @@ mod tests {
         assert!(operation.retry().is_err());
         let transfer = Pool::new(0).admit()?;
         assert!(transfer.io(TRANSFER_BYTES + 1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cumulative_bytes_cross_u32_without_resetting_on_retry() -> Result<(), Error> {
+        let operation = Pool::new(0).admit()?;
+        for _ in 0..2 {
+            operation.io(1_u64 << 31)?;
+            operation.work(1_u64 << 31)?;
+        }
+        operation.retry()?;
+        assert_eq!(operation.work_bytes(), 1_u64 << 32);
+        assert_eq!(
+            operation
+                .0
+                .io
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .transfer,
+            1_u64 << 32
+        );
+        assert_eq!(operation.calls(), 2);
         Ok(())
     }
 

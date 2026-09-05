@@ -114,7 +114,7 @@ async fn send<S: Sink<Bytes, Error = io::Error> + Unpin>(
 ) -> io::Result<()> {
     let length = total
         .checked_add(bytes.len())
-        .filter(|length| *length <= wire::MAX_FETCH_RESPONSE_BYTES)
+        .filter(|length| *length <= wire::MAX_STREAM_RESPONSE_BYTES)
         .ok_or_else(|| io::Error::other(Error::InvalidProtocol("upload response bytes")))?;
     operation.work(bytes.len()).map_err(io::Error::other)?;
     for chunk in bytes.chunks(65536) {

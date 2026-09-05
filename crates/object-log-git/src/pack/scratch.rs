@@ -7,7 +7,7 @@ use super::{Cursor, Input};
 use crate::{
     Error, ObjectId,
     pack::{
-        INFLATE_BYTES, MAX_OBJECT_BYTES, SCAN_WINDOW_BYTES,
+        INFLATE_BYTES, MAX_STREAM_OBJECT_BYTES, SCAN_WINDOW_BYTES,
         budget::{Operation, Reservation},
         invalid, object_hash, pack_error,
     },
@@ -140,7 +140,9 @@ impl<'a> ObjectSink<'a> {
         size: usize,
         format: crate::ObjectFormat,
     ) -> Result<Self, Error> {
-        if size > MAX_OBJECT_BYTES {
+        if size > MAX_STREAM_OBJECT_BYTES
+            || (kind != gix_object::Kind::Blob && size > crate::pack::MAX_OBJECT_BYTES)
+        {
             return invalid("decoded scratch exceeds object limit");
         }
         // Tiny decoded objects are transient computation, not publication

@@ -37,8 +37,8 @@ async fn conservative_checkpoint_recovers_1024_transaction_tail_for_both_hashes(
         assert!(
             matches!(common_open(&log.with_request_guard(caller.clone()), format).await, Err(Error::ObjectLog(object_log::Error::RequestDenied)))
         );
-        assert_eq!(caller.calls(), 513, "operation denial does not refund caller admission");
-        assert_eq!(faults.metrics().operation(Operation::Get).requests, 512);
+        assert_eq!(caller.calls(), 1024, "caller quota remains attached to the larger stream budget");
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1024);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
         faults.reset();
         let operation = Pool::new(crate::pack::budget::LIVE_BYTES).admit_maintenance()?;

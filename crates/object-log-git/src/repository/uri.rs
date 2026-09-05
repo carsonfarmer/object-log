@@ -81,6 +81,14 @@ impl Repository {
         if graph.nodes[index as usize].kind != Some(gix_object::Kind::Blob) {
             return Err(Error::InvalidReference);
         }
+        if reader
+            .object_size(blob)
+            .await?
+            .ok_or(Error::InvalidReference)?
+            > crate::pack::MAX_OBJECT_BYTES
+        {
+            return Err(Error::InvalidProtocol("URI blob bytes"));
+        }
         let object = reader.find(blob).await?.ok_or(Error::InvalidReference)?;
         if object.kind != gix_object::Kind::Blob {
             return Err(Error::InvalidReference);

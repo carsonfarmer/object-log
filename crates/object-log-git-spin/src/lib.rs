@@ -8,6 +8,7 @@
 )]
 
 mod auth;
+mod log_options;
 mod packfiles;
 mod receive_body;
 mod transport;
@@ -16,7 +17,7 @@ use std::{io::Read, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::StreamExt;
-use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
+use object_log::{LogId, TransactionId, ValidatedBackend};
 use object_log_git::{Error, ObjectFormat, ReceivePolicy, Repository};
 use object_store::{RetryConfig, aws::AmazonS3Builder, client::ClientOptions, path::Path};
 use spin_sdk::http::{
@@ -24,6 +25,7 @@ use spin_sdk::http::{
 };
 
 const BODY_LIMIT: usize = 10 * 1024 * 1024;
+const RECEIVE_BODY_LIMIT: usize = object_log_git::MAX_STREAM_PACK_BYTES + 1024 * 1024;
 const UPLOAD_RESULT: &str = "application/x-git-upload-pack-result";
 const RECEIVE_RESULT: &str = "application/x-git-receive-pack-result";
 
@@ -60,12 +62,7 @@ async fn repository(format: ObjectFormat) -> anyhow::Result<Repository> {
         })
         .build()?;
     let backend = ValidatedBackend::new(Arc::new(store), Path::from(variable("prefix")?)).await?;
-    let log = Log::open(
-        &backend,
-        &LogId::new(variable("log_id")?)?,
-        Options::default(),
-    )
-    .await?;
+    let log = log_options::open(&backend, &LogId::new(variable("log_id")?)?).await?;
     Ok(Repository::open(&log, format).await?)
 }
 
@@ -123,7 +120,12 @@ fn validate_headers(
     );
     if let Some(length) = header(request, "content-length")? {
         anyhow::ensure!(
-            length.parse::<usize>()? <= BODY_LIMIT,
+            length.parse::<usize>()?
+                <= if upload {
+                    BODY_LIMIT
+                } else {
+                    RECEIVE_BODY_LIMIT
+                },
             "request exceeds byte limit"
         );
     }

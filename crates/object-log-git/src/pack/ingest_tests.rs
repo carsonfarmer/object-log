@@ -265,11 +265,12 @@ async fn input_reblocks_tiny_frames_and_checks_frame_and_total_bounds() -> TestR
     );
     assert_eq!(store.metrics().operation(StoreOperation::Put).requests, 0);
     assert!(
-        Input::receive(
+        Input::receive_with_limit(
             &operation,
             &log,
             &view,
-            stream::iter((0..10).map(|_| Ok(Bytes::from(vec![0; FRAME_BYTES]))))
+            stream::iter((0..10).map(|_| Ok(Bytes::from(vec![0; FRAME_BYTES])))),
+            9 * FRAME_BYTES,
         )
         .await
         .is_err()

@@ -1,10 +1,10 @@
 //! Completed immutable input retained across a repository-view retry.
 
 use super::{FRAME_BYTES, Input};
+use crate::MAX_STREAM_PACK_BYTES;
 use crate::{
     Error,
     pack::{
-        MAX_RECEIVE_PACK_BYTES,
         budget::{Operation, Reservation},
         invalid,
     },
@@ -45,7 +45,7 @@ impl Replay {
         if !operation.same_as(&self.operation) {
             return invalid("replayed input belongs to another operation");
         }
-        let mut input = Input::empty(operation, log, view, MAX_RECEIVE_PACK_BYTES)?;
+        let mut input = Input::empty(operation, log, view, MAX_STREAM_PACK_BYTES)?;
         if input.width != self.width || self.chunks.len() > input.maximum {
             return invalid("replayed input chunk geometry differs");
         }

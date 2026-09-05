@@ -426,7 +426,9 @@ fn validate_pack_ref(
         return invalid("pack root exceeds byte limit");
     }
     let hash_len = descriptor.id.as_bytes().len() as u64;
-    if descriptor.bytes > MAX_PACK_BYTES as u64 || descriptor.bytes < 12 + hash_len {
+    if descriptor.bytes > crate::pack::MAX_STORED_PACK_BYTES as u64
+        || descriptor.bytes < 12 + hash_len
+    {
         return invalid("pack byte length is out of range");
     }
     Ok(())
@@ -881,7 +883,7 @@ impl<'a> Reader<'a> {
         if self.cache_memory.is_none() {
             // Every inserted entry costs one cumulative I/O call. Reserving the
             // call limit bounds metadata even with very small stored chunks.
-            let capacity = crate::pack::budget::CALLS;
+            let capacity = self.catalog.operation.call_limit();
             self.cache_memory = Some(
                 self.catalog
                     .operation
@@ -1020,7 +1022,13 @@ fn parse_entry(bytes: &[u8], offset: u64, format: ObjectFormat) -> Result<PackEn
     if entry.header_size() != entry.header.size(entry.decompressed_size) {
         return invalid("pack entry header is not canonical");
     }
-    if entry.decompressed_size > MAX_OBJECT_BYTES as u64 {
+    if entry.decompressed_size > crate::pack::MAX_STREAM_OBJECT_BYTES as u64
+        || (entry
+            .header
+            .as_kind()
+            .is_some_and(|kind| kind != gix_object::Kind::Blob)
+            && entry.decompressed_size > MAX_OBJECT_BYTES as u64)
+    {
         return invalid("pack entry exceeds object byte limit");
     }
     Ok(entry)
@@ -1353,7 +1361,7 @@ mod tests {
         store.reset();
         let blocked = test_operation();
         let root_bytes = usize::try_from(root.reference().len())?;
-        blocked.work(crate::pack::budget::WORK_BYTES - root_bytes + 1)?;
+        blocked.work(crate::pack::budget::WORK_BYTES - root_bytes as u64 + 1)?;
         assert!(
             load(
                 &blocked,
@@ -2574,7 +2582,7 @@ mod tests {
         let used = catalog.operation.work_bytes();
         catalog
             .operation
-            .work(crate::pack::budget::WORK_BYTES - used - required + 1)?;
+            .work(crate::pack::budget::WORK_BYTES - used - required as u64 + 1)?;
         assert!(matches!(reader.verify(id).await,
             Err(Error::InvalidPack(message)) if message == "Git work limit exceeded"));
         assert_eq!(catalog.operation.live_bytes(), baseline);
@@ -2797,7 +2805,7 @@ mod tests {
         let range = catalog.packs[0].entry_range(0);
         let entry_work = usize::try_from(range.end - range.start)?;
         let used = operation.work_bytes();
-        operation.work(crate::pack::budget::WORK_BYTES - used - entry_work - 23)?;
+        operation.work(crate::pack::budget::WORK_BYTES - used - entry_work as u64 - 23)?;
         store.reset();
         assert!(matches!(
             reader.fetch_pack(&[id]).await,
@@ -2938,7 +2946,7 @@ mod tests {
         let used = catalog.operation.work_bytes();
         catalog
             .operation
-            .work(crate::pack::budget::WORK_BYTES - used - required + 1)?;
+            .work(crate::pack::budget::WORK_BYTES - used - required as u64 + 1)?;
         store.reset();
         assert!(matches!(
             reader.find(id).await,

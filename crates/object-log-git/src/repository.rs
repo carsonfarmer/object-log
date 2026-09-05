@@ -1460,7 +1460,7 @@ mod tests {
     async fn head_transfer_is_charged_before_read_and_after_retry() -> TestResult {
         let (log, faults, _) = test_log("head-budget").await?;
         let operation = Pool::new(crate::pack::budget::LIVE_BYTES).admit()?;
-        operation.io(crate::pack::budget::TRANSFER_BYTES - log.options().max_head_bytes)?;
+        operation.io(crate::pack::budget::TRANSFER_BYTES - log.options().max_head_bytes as u64)?;
         let log = log.with_request_guard(std::sync::Arc::new(operation.clone()));
         faults.reset();
         let repository = Repository::open_attempt(&log, ObjectFormat::Sha1, &operation).await?;

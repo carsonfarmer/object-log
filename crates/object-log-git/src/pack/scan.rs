@@ -9,7 +9,7 @@ use crate::{
     durable::publication_plan,
     format::PackDescriptor,
     pack::{
-        INFLATE_BYTES, MAX_INDEX_BYTES, MAX_OBJECT_BYTES, MAX_OBJECTS, SCAN_WINDOW_BYTES,
+        INFLATE_BYTES, MAX_INDEX_BYTES, MAX_OBJECTS, MAX_STREAM_OBJECT_BYTES, SCAN_WINDOW_BYTES,
         budget::{Reservation, hold},
         delta_integer, invalid, object_hash, pack_error,
     },
@@ -20,7 +20,7 @@ pub(crate) struct Entry {
     pub(super) end: u64,
     pub(super) crc: u32,
     pub(super) id: Option<ObjectId>,
-    pub(super) result_size: usize,
+    pub(crate) result_size: usize,
 }
 
 pub(crate) struct Scanned<'a, 'log> {
@@ -182,7 +182,7 @@ impl Scanner {
         } else {
             size
         };
-        if result_size > MAX_OBJECT_BYTES {
+        if result_size > MAX_STREAM_OBJECT_BYTES {
             return invalid("delta result exceeds object byte limit");
         }
         let id = object_hash
@@ -219,7 +219,12 @@ pub(super) async fn read_header(
         match gix_pack::data::Entry::from_bytes(&encoded[..=position], start, object_hash(format)) {
             Ok(entry) => {
                 if entry.header_size() != entry.header.size(entry.decompressed_size)
-                    || entry.decompressed_size > MAX_OBJECT_BYTES as u64
+                    || entry.decompressed_size > MAX_STREAM_OBJECT_BYTES as u64
+                    || (entry
+                        .header
+                        .as_kind()
+                        .is_some_and(|kind| kind != gix_object::Kind::Blob)
+                        && entry.decompressed_size > crate::pack::MAX_OBJECT_BYTES as u64)
                 {
                     return invalid("pack entry header is noncanonical or oversized");
                 }

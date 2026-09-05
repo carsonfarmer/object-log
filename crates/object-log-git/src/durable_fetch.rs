@@ -1,9 +1,9 @@
 //! Backpressured pack output; the final digest is emitted only after every CRC.
 
 use super::{
-    Bytes, COMPRESS_BYTES, EntryHeader, Error, Location, MAX_DELTA_DEPTH, MAX_FETCH_PACK_BYTES,
-    MAX_OBJECTS, ObjectId, Operation, Reader, Reservation, hold, invalid, io, object_hash,
-    output_error, pack_error, size_of,
+    Bytes, COMPRESS_BYTES, EntryHeader, Error, Location, MAX_DELTA_DEPTH, MAX_OBJECTS, ObjectId,
+    Operation, Reader, Reservation, hold, invalid, io, object_hash, output_error, pack_error,
+    size_of,
 };
 use futures::{Sink, SinkExt};
 use gix_zlib::stream::deflate::{Compress, FlushCompress};
@@ -168,6 +168,14 @@ impl<'a> Reader<'a> {
             }
             current = base;
         }
+        if chain.last().and_then(|entry| entry.header.header.as_kind())
+            != Some(gix_object::Kind::Blob)
+            && chain
+                .iter()
+                .any(|entry| entry.result_size > crate::pack::MAX_OBJECT_BYTES)
+        {
+            return invalid("structural delta exceeds object byte limit");
+        }
         Ok(DecodedPlan {
             input,
             chain,
@@ -213,7 +221,7 @@ impl<'a> Reader<'a> {
             operation: &self.catalog.operation,
             hash: gix_hash::hasher(hash),
             bytes: 0,
-            limit: MAX_FETCH_PACK_BYTES - hash_len,
+            limit: crate::pack::MAX_STORED_PACK_BYTES - hash_len,
         };
         output
             .write(&gix_pack::data::header::encode(

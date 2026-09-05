@@ -11,7 +11,9 @@ use std::{
 };
 
 use clap::{Arg, Command};
-use object_log::{Log, LogId, Options, Resolution, ValidatedBackend, View};
+#[cfg(test)]
+use object_log::Options;
+use object_log::{Log, LogId, Resolution, ValidatedBackend, View};
 use object_log_git::{ObjectFormat, Repository};
 use object_store::{
     RetryConfig, aws::AmazonS3Builder, client::ClientOptions, path::Path as StorePath,
@@ -277,7 +279,7 @@ impl Config {
             .await
             .map_err(|error| classify(&error))?;
         let id = LogId::new(&self.log_id).map_err(|error| classify(&error))?;
-        Log::open_existing(&backend, &id, Options::default())
+        crate::log_options::open_existing(&backend, &id)
             .await
             .map_err(|error| classify(&error))
     }

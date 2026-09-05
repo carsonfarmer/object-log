@@ -8,7 +8,9 @@ use super::{
 use crate::{
     Error,
     format::PackDescriptor,
-    pack::{COMPRESS_BYTES, MAX_PACK_BYTES, SCAN_WINDOW_BYTES, invalid, object_hash, pack_error},
+    pack::{
+        COMPRESS_BYTES, MAX_STORED_PACK_BYTES, SCAN_WINDOW_BYTES, invalid, object_hash, pack_error,
+    },
 };
 use gix_pack::data::entry::Header;
 use object_log::StagedObject;
@@ -24,7 +26,12 @@ struct Output<'a> {
 impl<'a> Output<'a> {
     fn new(input: &Input<'a>, format: crate::ObjectFormat) -> Result<Self, Error> {
         Ok(Self {
-            sink: Sink::new(&input.operation, input.log, input.view, MAX_PACK_BYTES)?,
+            sink: Sink::new(
+                &input.operation,
+                input.log,
+                input.view,
+                MAX_STORED_PACK_BYTES,
+            )?,
             operation: input.operation.clone(),
             hash: gix_hash::hasher(object_hash(format)),
             crc: 0,

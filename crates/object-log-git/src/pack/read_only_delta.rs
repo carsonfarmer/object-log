@@ -948,6 +948,10 @@ mod tests {
         let chain = [delta, base_entry];
         faults.reset();
         let mut reader = ReadOnlyDelta::new(&input, &chain).await?;
+        // Leave a fixed replay allowance; supported payload size must not change
+        // whether each backward seek is charged cumulatively.
+        operation
+            .work(crate::pack::budget::WORK_BYTES - operation.work_bytes() - 256 * 1024 * 1024)?;
         let error = reader
             .next_into(&mut [0; 512])
             .await

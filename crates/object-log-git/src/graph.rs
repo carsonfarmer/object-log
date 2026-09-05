@@ -627,7 +627,7 @@ mod tests {
                 .requests,
             0
         );
-        assert!(repository.operation.work_bytes() > OBJECTS * size_of::<Node>());
+        assert!(repository.operation.work_bytes() > (OBJECTS * size_of::<Node>()) as u64);
         // The failed attempt's work is retained; a retry never admits a fresh budget.
         let remaining = pack::budget::WORK_BYTES - repository.operation.work_bytes();
         repository.operation.work(remaining)?;
