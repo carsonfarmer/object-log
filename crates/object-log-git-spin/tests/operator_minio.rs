@@ -1,0 +1,295 @@
+//! Opt-in command-process tests against the same WAL served by real Spin.
+#![cfg(all(feature = "operator", unix, not(target_arch = "wasm32")))]
+
+use bytes::Bytes;
+use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
+use object_log_git::{ObjectFormat, Repository};
+use object_store::{aws::AmazonS3Builder, path::Path as StorePath};
+use serde_json::Value;
+use std::{
+    env,
+    fmt::Write as _,
+    fs,
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    path::Path,
+    process::{Child, Command, Output},
+    sync::Arc,
+    time::Duration,
+};
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+#[tokio::test]
+#[ignore = "requires local MinIO, Spin 4 and a release WASIp2 component"]
+async fn operator_minio_status_and_exact_resume_preserve_both_hashes() -> TestResult {
+    for (name, format) in [
+        ("sha1", ObjectFormat::Sha1),
+        ("sha256", ObjectFormat::Sha256),
+    ] {
+        lifecycle(name, format).await?;
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one both-hash operator-process and cold Spin lifecycle"
+)]
+async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let prefix = format!("operator-{}", TransactionId::new());
+    let mut config = String::new();
+    for (key, value) in [
+        ("endpoint", env::var("OBJECT_LOG_MINIO_ENDPOINT")?),
+        ("bucket", env::var("OBJECT_LOG_MINIO_BUCKET")?),
+        ("access_key", env::var("OBJECT_LOG_MINIO_ACCESS_KEY")?),
+        ("secret_key", env::var("OBJECT_LOG_MINIO_SECRET_KEY")?),
+        ("prefix", prefix.clone()),
+        ("object_format", name.into()),
+    ] {
+        writeln!(config, "{key} = {}", serde_json::to_string(&value)?)?;
+    }
+    let config_path = root.path().join("repository.toml");
+    private_file(&config_path, config.as_bytes())?;
+    let store = AmazonS3Builder::new()
+        .with_endpoint(env::var("OBJECT_LOG_MINIO_ENDPOINT")?)
+        .with_bucket_name(env::var("OBJECT_LOG_MINIO_BUCKET")?)
+        .with_access_key_id(env::var("OBJECT_LOG_MINIO_ACCESS_KEY")?)
+        .with_secret_access_key(env::var("OBJECT_LOG_MINIO_SECRET_KEY")?)
+        .with_region("us-east-1")
+        .with_allow_http(true)
+        .with_virtual_hosted_style_request(false)
+        .build()?;
+    let backend = ValidatedBackend::new(Arc::new(store), StorePath::from(prefix)).await?;
+    let id = LogId::new("repository")?;
+    let missing = operator(&config_path, &["status"])?;
+    assert!(!missing.status.success());
+    let absent_token = root.path().join("absent.token");
+    private_file(&absent_token, b"no candidate")?;
+    assert!(
+        !operator(
+            &config_path,
+            &["resume-commit", "--token-file", text(&absent_token)?]
+        )?
+        .status
+        .success()
+    );
+    assert!(
+        Log::open_existing(&backend, &id, Options::default())
+            .await
+            .is_err()
+    );
+
+    let source = root.path().join("source");
+    git(
+        None,
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            &format!("--object-format={name}"),
+            text(&source)?,
+        ],
+    )?;
+    fs::write(source.join("file"), "one")?;
+    git(Some(&source), &["add", "file"])?;
+    git(Some(&source), &["commit", "-q", "-m", "one"])?;
+    let (mut host, url) = serve(&config_path, root.path()).await?;
+    git(Some(&source), &["push", "-q", &url, "main"])?;
+    host.stop()?;
+    let status = operator(&config_path, &["status"])?;
+    assert!(status.status.success());
+    assert_eq!(decode(&status)?["tail_entries"], 1);
+    let old = git(Some(&source), &["rev-parse", "HEAD"])?;
+    fs::write(source.join("file"), "two")?;
+    git(Some(&source), &["commit", "-q", "-am", "two"])?;
+    let new = git(Some(&source), &["rev-parse", "HEAD"])?;
+    let pack = git(Some(&source), &["pack-objects", "--stdout", "--all"])?;
+    let command = format!(
+        "{} {} refs/heads/main\0report-status object-format={name}\n",
+        String::from_utf8(old)?.trim(),
+        String::from_utf8(new.clone())?.trim()
+    );
+    let mut input = format!("{:04x}{command}0000", command.len() + 4).into_bytes();
+    input.extend(pack);
+    let log = Log::open_existing(&backend, &id, Options::default()).await?;
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let prepared = Repository::open(&log, format)
+            .await?
+            .prepare_receive(TransactionId::new(), Bytes::from(input.clone()))
+            .await?;
+        // A receipt copy must not retain the engine's Bytes allocation owner.
+        tokens.push(prepared.recovery_token().to_vec());
+        // Drop without publication; a fresh CLI process must use only the token/WAL.
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        private_file(&root.path().join(format!("{index}.token")), token)?;
+    }
+    let winner = root.path().join("0.token");
+    for _ in 0..2 {
+        let resumed = operator(
+            &config_path,
+            &["resume-commit", "--token-file", text(&winner)?],
+        )?;
+        assert!(resumed.status.success());
+        assert_eq!(decode(&resumed)?["outcome"], "committed");
+        assert_eq!(fs::read(&winner)?, tokens[0]);
+    }
+    let loser = operator(
+        &config_path,
+        &[
+            "resume-commit",
+            "--token-file",
+            text(&root.path().join("1.token"))?,
+        ],
+    )?;
+    assert!(loser.status.success());
+    assert_eq!(decode(&loser)?["outcome"], "not_committed");
+    assert_eq!(log.load().await?.tail().len(), 2);
+    let (mut cold, url) = serve(&config_path, root.path()).await?;
+    let clone = root.path().join("clone");
+    git(None, &["clone", "-q", &url, text(&clone)?])?;
+    git(Some(&clone), &["fsck", "--strict"])?;
+    assert_eq!(git(Some(&clone), &["rev-parse", "HEAD"])?, new);
+    assert_eq!(fs::read_to_string(clone.join("file"))?, "two");
+    cold.stop()?;
+    println!(
+        "{name}: missing target, status, exact token resume, duplicate/loser and fresh Spin clone/fsck passed"
+    );
+    Ok(())
+}
+
+fn private_file(path: &Path, bytes: &[u8]) -> TestResult {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)?;
+    Ok(())
+}
+
+fn decode(output: &Output) -> TestResult<Value> {
+    assert!(output.stdout.len() <= 2048);
+    assert!(
+        output.stderr.is_empty(),
+        "operator stderr must not contain provider diagnostics"
+    );
+    for name in ["OBJECT_LOG_MINIO_ACCESS_KEY", "OBJECT_LOG_MINIO_SECRET_KEY"] {
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&env::var(name)?));
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn operator(config: &Path, args: &[&str]) -> TestResult<Output> {
+    let binary = env::var_os("OBJECT_LOG_OPERATOR_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_object-log-git-maintain").into());
+    let metrics = config.with_file_name(format!("operator-{}.rss", TransactionId::new()));
+    let output = Command::new("/usr/bin/time")
+        .arg(if cfg!(target_os = "macos") {
+            "-l"
+        } else {
+            "-v"
+        })
+        .arg("-o")
+        .arg(&metrics)
+        .arg(&binary)
+        .arg("--config")
+        .arg(config)
+        .args(args)
+        .output()?;
+    decode(&output)?;
+    println!(
+        "Operator {} executable: {}\n{}",
+        args.first().copied().unwrap_or("unknown"),
+        Path::new(&binary).display(),
+        fs::read_to_string(metrics)?
+    );
+    Ok(output)
+}
+
+fn text(path: &Path) -> TestResult<&str> {
+    path.to_str().ok_or_else(|| "non-UTF8 test path".into())
+}
+
+fn git(directory: Option<&Path>, args: &[&str]) -> TestResult<Vec<u8>> {
+    let mut command = Command::new("git");
+    command
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+        ])
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Operator test")
+        .env("GIT_AUTHOR_EMAIL", "operator@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Operator test")
+        .env("GIT_COMMITTER_EMAIL", "operator@example.invalid")
+        .env("GIT_PROTOCOL", "version=2");
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into());
+    }
+    Ok(output.stdout)
+}
+
+struct Host(Option<Child>);
+impl Host {
+    fn stop(&mut self) -> TestResult {
+        if let Some(mut child) = self.0.take() {
+            child.kill()?;
+            child.wait()?;
+        }
+        Ok(())
+    }
+}
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+async fn serve(config: &Path, state: &Path) -> TestResult<(Host, String)> {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
+    let address = format!("127.0.0.1:{port}");
+    let log = fs::File::create(state.join(format!("spin-{port}.log")))?;
+    let mut host = Host(Some(
+        Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("run.sh"))
+            .args([
+                "--listen",
+                &address,
+                "--variable",
+                &format!("@{}", config.display()),
+            ])
+            .arg("--state-dir")
+            .arg(state)
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .spawn()?,
+    ));
+    for _ in 0..100 {
+        if let Some(child) = &mut host.0
+            && child.try_wait()?.is_some()
+        {
+            return Err("Spin exited before readiness".into());
+        }
+        if std::net::TcpStream::connect(&address).is_ok() {
+            return Ok((host, format!("http://{address}/repo")));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("Spin startup timed out".into())
+}

@@ -95,11 +95,76 @@ the token is not written to logs. Confirmed acceptance and rejection retain
 normal Git response framing. Each invocation validates the backend and
 opens the log, so measurements must include that fixed provider work.
 
-There is currently no operator CLI or maintenance HTTP endpoint for token
-resolution, checkpointing, or collection. The provider lifecycle in
-[`tests/minio.rs`](tests/minio.rs) demonstrates maintenance through the shared
-library while Spin is stopped. A deployable maintenance command remains a
-single-repository usability gap; the Git HTTP service alone does not provide it.
+The one-shot operator command below supports head status and exact commit-token
+resumption. Checkpointing and collection still require shared-library calls,
+as demonstrated in [`tests/minio.rs`](tests/minio.rs) while Spin is stopped.
+Issue #32 remains open for those commands, retention cleanup and sustained
+service qualification.
+
+## Local operator command
+
+On Linux or macOS, build the native command separately from the WASIp2 service:
+
+```sh
+cargo build --locked -p object-log-git-spin --features operator --bin object-log-git-maintain --release
+chmod 600 /deployment/repository.toml
+target/release/object-log-git-maintain --config /deployment/repository.toml status
+target/release/object-log-git-maintain --config /deployment/repository.toml resume-commit --token-file /private/push.token
+```
+
+The command opens an existing WAL; a missing or mistyped target never creates
+its head. It has no HTTP listener. It accepts the same private TOML variables as
+the service, including string booleans `read_only` and `allow_non_fast_forward`.
+These serving policies do not restrict privileged operator resumption. The
+command validates the configured format name, but head-only status and generic
+WAL resumption do not inspect or certify the repository's actual Git format.
+Keep operator execution and S3 credentials within the trusted OS boundary.
+
+Use regular files with no group/other permissions (`chmod 600`) for config and
+token inputs; final-path symlinks, directories and FIFOs are rejected. Config
+is limited to 16 KiB and tokens to 1 MiB. The token bound covers ordinary
+default-options S3 tokens, but is a supported input cap, not a universal token
+schema maximum: provider version strings have no schema bound. Preserve the
+exact token file until resolution is confirmed. The command never changes it.
+
+`status` reads the head without materializing Git state or loading pack
+catalogs. It reports generation, tail count, checkpoint-through sequence when
+present, collection epoch and active-plan presence. Missing heads, corrupt
+heads and unsupported durable options produce bounded failure outcomes.
+Backend capability checks still write/delete disposable probe objects.
+
+Stop ingress and drain all serving processes before `resume-commit`. This is
+a mutation command: `Log::resume` can stage data and publish the original
+conditional update. It never rebases or submits a new transaction. A read-only
+Git service is not an operator authorization boundary. An expired token means
+its historical outcome is unknown, not that the push failed. Ordinary Git
+clients do not guarantee token capture after a lost response.
+
+Every normal invocation emits one JSON line of at most 2 KiB. Output contains
+static outcome names and numeric head metadata; it deliberately omits target
+strings, paths, credentials, token bytes and provider diagnostics. Use the
+outcome together with the exit status:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | `observed`, `committed`, `not_committed`, or requested help. `not_committed` means resolution completed, not a successful push. |
+| 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unsupported platform or incompatible durable options. |
+| 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |
+| 5 | Invalid/corrupt evidence, a missing head, resource limit, unsupported backend, collection fence, expired view or runtime setup failure. No raw error chain is printed. |
+
+Native S3 retries are disabled, connect timeout is five seconds, request timeout
+is thirty seconds, and the asynchronous backend operation has a sixty-second
+deadline. Deadline expiry during resume is pending: cancellation cannot prove
+publication failed. A new command may retry the same token. Input file reads
+precede the asynchronous deadline.
+
+Input caps do not establish decoded-memory limits. Core resumption may verify
+complete immutable dependency graphs and active collection plans; it does not
+use the serving Git operation budgets. This command has no general 128 MiB
+maintenance qualification yet. Build resources remain separate from runtime;
+the service's existing 128 MiB qualification is unchanged. Checkpoint resource
+profiles, GC, retention administration and HTTP authorization remain separate
+work under #32/#35.
 
 A local signed HTTP fixture tests the transport independently of a provider:
 
