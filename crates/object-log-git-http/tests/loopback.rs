@@ -33,14 +33,14 @@ type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmodified_git_pushes_clones_fetches_and_rejects_stale_updates() -> TestResult {
-    client_lifecycle(None, Arc::new(InMemory::new())).await
+    client_lifecycle(None, Arc::new(InMemory::new()), false).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_engine_clients_support_both_hashes() -> TestResult {
     let _serial = SHARED_TEST.lock().await;
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
-        client_lifecycle(Some(format), Arc::new(InMemory::new())).await?;
+        client_lifecycle(Some(format), Arc::new(InMemory::new()), false).await?;
     }
     Ok(())
 }
@@ -49,7 +49,16 @@ async fn shared_engine_clients_support_both_hashes() -> TestResult {
 #[ignore = "requires local MinIO"]
 async fn shared_minio_clients_recover_after_collection() -> TestResult {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
-        client_lifecycle(Some(format), Arc::new(build_minio()?)).await?;
+        client_lifecycle(Some(format), Arc::new(build_minio()?), false).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires local MinIO, Spin 4, and a release WASIp2 component build"]
+async fn spin_minio_clients_recover_after_collection() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        client_lifecycle(Some(format), Arc::new(build_minio()?), true).await?;
     }
     Ok(())
 }
@@ -61,14 +70,12 @@ async fn shared_minio_clients_recover_after_collection() -> TestResult {
 async fn client_lifecycle(
     shared: Option<ObjectFormat>,
     store: Arc<dyn object_store::ObjectStore>,
+    spin: bool,
 ) -> TestResult {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let root = TempDir::new()?;
-    let backend = ValidatedBackend::new(
-        store,
-        StorePath::from(format!("git-http-loopback-{}", TransactionId::new())),
-    )
-    .await?;
+    let namespace = format!("git-http-loopback-{}", TransactionId::new());
+    let backend = ValidatedBackend::new(store, StorePath::from(namespace.clone())).await?;
     let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
     let scratch = root.path().join("scratch");
     let app = if let Some(format) = shared {
@@ -81,7 +88,12 @@ async fn client_lifecycle(
         )
         .router()
     };
-    let (url, server) = serve(app).await?;
+    let (url, mut server) = if spin {
+        serve_spin(shared.ok_or("missing Spin format")?, &namespace).await?
+    } else {
+        let (url, server) = serve(app).await?;
+        (url, RunningHost::Native(server))
+    };
     assert!(git_output(None, ["ls-remote", &url])?.stdout.is_empty());
 
     let source = root.path().join("source");
@@ -170,7 +182,7 @@ async fn client_lifecycle(
     if shared.is_none() {
         assert!(std::fs::read_dir(scratch)?.next().is_none());
     }
-    server.abort();
+    server.stop();
     if let Some(format) = shared {
         let repository = object_log_git::Repository::open(&log, format).await?;
         let object_log::CheckpointStatus::Published(view) = repository.checkpoint().await? else {
@@ -186,12 +198,17 @@ async fn client_lifecycle(
         ));
         drop(log);
         let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
-        let (url, cold_server) = serve(SharedGitHttpServer::new(log, format).router()).await?;
+        let (url, mut cold_server) = if spin {
+            serve_spin(format, &namespace).await?
+        } else {
+            let (url, server) = serve(SharedGitHttpServer::new(log, format).router()).await?;
+            (url, RunningHost::Native(server))
+        };
         let cold = root.path().join("cold");
         git(None, ["clone", "--quiet", &url, path(&cold)?])?;
         git(Some(&cold), ["fsck", "--strict"])?;
         assert_eq!(std::fs::read_to_string(cold.join("file"))?, "winner");
-        cold_server.abort();
+        cold_server.stop();
     }
     Ok(())
 }
@@ -400,6 +417,92 @@ async fn minio_host_pushes_and_cold_clones() -> TestResult {
     assert!(std::fs::read_dir(second_scratch)?.next().is_none());
     second_server.abort();
     Ok(())
+}
+
+enum RunningHost {
+    Native(JoinHandle<()>),
+    Spin(Option<(std::process::Child, String)>),
+}
+
+impl RunningHost {
+    fn stop(&mut self) {
+        match self {
+            Self::Native(task) => task.abort(),
+            Self::Spin(child) => {
+                if let Some((mut child, pid)) = child.take() {
+                    let _ = Command::new("kill").args(["-TERM", &pid]).status();
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+}
+impl Drop for RunningHost {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, RunningHost)> {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
+    let address = format!("127.0.0.1:{port}");
+    let format = match format {
+        ObjectFormat::Sha1 => "sha1",
+        ObjectFormat::Sha256 => "sha256",
+    };
+    let artifact = std::env::temp_dir().join(format!("object-log-spin-{format}-{port}"));
+    let log = std::fs::File::create(artifact.with_extension("log"))?;
+    let rss = artifact.with_extension("rss");
+    let run = Path::new(env!("CARGO_MANIFEST_DIR")).join("../object-log-git-spin/run.sh");
+    let mut process = Command::new("/usr/bin/time");
+    process
+        .args(["-l", "-o"])
+        .arg(&rss)
+        .arg(run)
+        .args(["--listen", &address]);
+    for (variable, name) in [
+        ("endpoint", "OBJECT_LOG_MINIO_ENDPOINT"),
+        ("bucket", "OBJECT_LOG_MINIO_BUCKET"),
+        ("access_key", "OBJECT_LOG_MINIO_ACCESS_KEY"),
+        ("secret_key", "OBJECT_LOG_MINIO_SECRET_KEY"),
+    ] {
+        process
+            .arg("--variable")
+            .arg(format!("{variable}={}", required_env(name)?));
+    }
+    process.args([
+        "--variable",
+        &format!("prefix={prefix}"),
+        "--variable",
+        &format!("object_format={format}"),
+    ]);
+    let child = process.stdout(log.try_clone()?).stderr(log).spawn()?;
+    let mut host = RunningHost::Spin(Some((child, String::new())));
+    for _ in 0..100 {
+        if let RunningHost::Spin(Some((child, pid))) = &mut host {
+            if let Some(status) = child.try_wait()? {
+                return Err(format!(
+                    "Spin exited {status}: {}",
+                    std::fs::read_to_string(artifact.with_extension("log"))?
+                )
+                .into());
+            }
+            if pid.is_empty() {
+                let found = Command::new("pgrep")
+                    .args(["-P", &child.id().to_string()])
+                    .output()?;
+                String::from_utf8(found.stdout)?.trim().clone_into(pid);
+            }
+        }
+        if std::net::TcpStream::connect(&address).is_ok() {
+            println!("Spin {format} RSS report: {}", rss.display());
+            return Ok((format!("http://{address}/repo"), host));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err("Spin startup timed out".into())
 }
 
 async fn repository_server(
