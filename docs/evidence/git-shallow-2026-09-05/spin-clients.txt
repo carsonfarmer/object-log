@@ -1,0 +1,4 @@
+Command: cargo build -p object-log-git-spin --target wasm32-wasip2 --release --locked && python3 crates/object-log-git-spin/tests/check_shallow.py
+Exit status: 0
+sha1: depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge strict client acceptance passed
+sha256: depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge strict client acceptance passed

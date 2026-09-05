@@ -123,7 +123,7 @@ impl Repository {
         haves: &[ObjectId],
         include_tag: bool,
     ) -> Result<Bytes, Error> {
-        self.fetch_pack_or_ack(wants, haves, include_tag, true)
+        self.fetch_pack_or_ack(wants, haves, include_tag, true, None)
             .await
     }
 
@@ -133,6 +133,7 @@ impl Repository {
         haves: &[ObjectId],
         include_tag: bool,
         done: bool,
+        shallow: Option<&wire::ShallowRequest<'_>>,
     ) -> Result<Bytes, Error> {
         let catalog = self.catalog().await?;
         let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
@@ -150,8 +151,45 @@ impl Repository {
                 return Err(Error::InvalidReference);
             }
         }
-        let selected =
-            crate::selection::select(&self.operation, &graph, wants, haves, include_tag)?;
+        let raw_pack = shallow.is_none();
+        let default = wire::ShallowRequest::default();
+        let shallow = shallow.unwrap_or(&default);
+        let _exclusion_memory = self
+            .operation
+            .reserve_state(shallow.exclude.len() * size_of::<ObjectId>())?;
+        let mut exclusions = Vec::with_capacity(shallow.exclude.len());
+        for name in &shallow.exclude {
+            // Match unique Git ref expansion, including the advertised HEAD.
+            for candidate in self.state.refs.keys() {
+                self.operation.work((candidate.len() + name.len()) * 6)?;
+            }
+            let mut matches = self.state.refs.iter().filter(|(candidate, _)| {
+                (*name == b"HEAD" && candidate.as_slice() == b"refs/heads/main")
+                    || candidate.as_slice() == *name
+                    || candidate.strip_prefix(b"refs/") == Some(*name)
+                    || candidate.strip_prefix(b"refs/heads/") == Some(*name)
+                    || candidate.strip_prefix(b"refs/tags/") == Some(*name)
+                    || candidate.strip_prefix(b"refs/remotes/") == Some(*name)
+                    || candidate
+                        .strip_prefix(b"refs/remotes/")
+                        .and_then(|reference| reference.strip_suffix(b"/HEAD"))
+                        == Some(*name)
+            });
+            let (_, id) = matches.next().ok_or(Error::InvalidReference)?;
+            if matches.next().is_some() {
+                return Err(Error::InvalidReference);
+            }
+            exclusions.push(*id);
+        }
+        let selected = crate::selection::select(
+            &self.operation,
+            &graph,
+            wants,
+            haves,
+            include_tag,
+            shallow,
+            &exclusions,
+        )?;
         if !done {
             return wire_response(&self.operation, |output| {
                 wire::write_fetch(
@@ -170,7 +208,21 @@ impl Repository {
                 }
             }
         }
-        reader.fetch_pack(&selected.ids).await
+        let pack = reader.fetch_pack(&selected.ids).await?;
+        if raw_pack {
+            return Ok(pack);
+        }
+        wire_response(&self.operation, |output| {
+            wire::write_fetch(
+                output,
+                self.format,
+                FetchReply::ShallowPack {
+                    pack: &pack,
+                    shallow: &selected.shallow,
+                    unshallow: &selected.unshallow,
+                },
+            )
+        })
     }
 
     /// Returns protocol-v2 upload-pack discovery bytes for this object format.
@@ -193,7 +245,8 @@ impl Repository {
         let operation = self.operation.clone();
         let _input_memory = operation.reserve(input.len())?;
         // Vec growth plus into_boxed_slice can temporarily retain three copies.
-        let maximum = 3 * ((1024 + 32768) * size_of::<ObjectId>() + 1024 * size_of::<&[u8]>());
+        let maximum =
+            3 * ((1024 + 2 * 32768) * size_of::<ObjectId>() + 2 * 1024 * size_of::<&[u8]>());
         let _parse_memory = operation.reserve((input.len() * 4 + 128).min(maximum))?;
         operation.work(input.len())?;
         let request = wire::parse_upload(&input, self.format)?;
@@ -224,18 +277,11 @@ impl Repository {
                 haves,
                 done,
                 include_tag,
+                shallow,
                 ..
             } => {
-                let reply = self
-                    .fetch_pack_or_ack(wants, haves, *include_tag, *done)
-                    .await?;
-                if *done {
-                    wire_response(&self.operation, |output| {
-                        wire::write_fetch(output, self.format, FetchReply::Pack(&reply))
-                    })
-                } else {
-                    Ok(reply)
-                }
+                self.fetch_pack_or_ack(wants, haves, *include_tag, *done, Some(shallow))
+                    .await
             }
         }
     }
@@ -518,6 +564,7 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
     include!("repository/receive_tests.rs");
+    include!("repository/shallow_tests.rs");
 
     struct Fixture {
         directory: TempDir,

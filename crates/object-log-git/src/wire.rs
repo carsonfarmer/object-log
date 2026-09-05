@@ -11,8 +11,8 @@ pub(crate) const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
 const MAX_COMMANDS: usize = 1_024;
 const MAX_ITEMS: usize = 32_768;
 const MAX_PACKET_PAYLOAD: usize = 65_515;
-const UPLOAD_SHA1: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n000afetch\n0017object-format=sha1\n0000";
-const UPLOAD_SHA256: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n000afetch\n0019object-format=sha256\n0000";
+const UPLOAD_SHA1: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0012fetch=shallow\n0017object-format=sha1\n0000";
+const UPLOAD_SHA256: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0012fetch=shallow\n0019object-format=sha256\n0000";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -34,6 +34,7 @@ pub(crate) enum UploadRequest<'a> {
     Fetch {
         wants: Box<[ObjectId]>,
         haves: Box<[ObjectId]>,
+        shallow: ShallowRequest<'a>,
         done: bool,
         #[allow(
             dead_code,
@@ -47,6 +48,21 @@ pub(crate) enum UploadRequest<'a> {
         ofs_delta: bool,
         include_tag: bool,
     },
+}
+
+#[derive(Default)]
+pub(crate) struct ShallowRequest<'a> {
+    pub(crate) ids: Box<[ObjectId]>,
+    pub(crate) depth: Option<u32>,
+    pub(crate) relative: bool,
+    pub(crate) since: Option<i64>,
+    pub(crate) exclude: Box<[&'a [u8]]>,
+}
+
+impl ShallowRequest<'_> {
+    pub(crate) fn deepens(&self) -> bool {
+        self.depth.is_some() || self.since.is_some() || !self.exclude.is_empty()
+    }
 }
 
 pub(crate) struct ReceiveRequest<'a> {
@@ -65,7 +81,11 @@ pub(crate) struct AdvertisedRef<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum FetchReply<'a> {
     Acknowledgments(&'a [ObjectId]),
-    Pack(&'a [u8]),
+    ShallowPack {
+        pack: &'a [u8],
+        shallow: &'a [ObjectId],
+        unshallow: &'a [ObjectId],
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -159,6 +179,8 @@ fn parse_fetch<'a>(
     format: ObjectFormat,
 ) -> Result<UploadRequest<'a>, Error> {
     let (mut wants, mut haves) = (Vec::new(), Vec::new());
+    let mut shallow = ShallowRequest::default();
+    let (mut boundaries, mut exclude) = (Vec::new(), Vec::new());
     let (mut done, mut options) = (false, 0_u8);
     while let Some(line) = data_until(packets, PacketLineRef::Flush)? {
         let line = text(line);
@@ -170,6 +192,7 @@ fn parse_fetch<'a>(
             b"ofs-delta" => Some(2),
             b"include-tag" => Some(4),
             b"no-progress" => Some(8),
+            b"deepen-relative" => Some(16),
             _ => None,
         };
         if let Some(bit) = option {
@@ -177,6 +200,35 @@ fn parse_fetch<'a>(
                 return Err(Error::Protocol("duplicate fetch option"));
             }
             options |= bit;
+        } else if let Some(id) = line.strip_prefix(b"shallow ") {
+            within(boundaries.len() + 1, MAX_ITEMS, "shallow boundaries")?;
+            boundaries.push(parse_id(id, format)?);
+        } else if let Some(depth) = line.strip_prefix(b"deepen ") {
+            if shallow.depth.is_some() {
+                return Err(Error::Protocol("duplicate deepen"));
+            }
+            let depth = decimal(depth)?;
+            shallow.depth = Some(
+                u32::try_from(depth)
+                    .ok()
+                    .filter(|depth| *depth > 0 && i32::try_from(*depth).is_ok())
+                    .ok_or(Error::Protocol("invalid depth"))?,
+            );
+        } else if let Some(since) = line.strip_prefix(b"deepen-since ") {
+            if shallow.since.is_some() {
+                return Err(Error::Protocol("duplicate deepen-since"));
+            }
+            shallow.since = Some(decimal(since)?);
+        } else if let Some(name) = line.strip_prefix(b"deepen-not ") {
+            within(exclude.len() + 1, MAX_COMMANDS, "shallow exclusions")?;
+            if name.is_empty()
+                || name
+                    .iter()
+                    .any(|byte| byte.is_ascii_whitespace() || *byte == 0)
+            {
+                return Err(Error::Protocol("invalid shallow exclusion"));
+            }
+            exclude.push(name);
         } else if line == b"done" && !wants.is_empty() {
             done = true;
         } else if let Some(id) = line.strip_prefix(b"want ") {
@@ -192,6 +244,18 @@ fn parse_fetch<'a>(
     if wants.is_empty() {
         return Err(Error::Protocol("fetch has no wants"));
     }
+    shallow.relative = options & 16 != 0;
+    if (shallow.depth.is_some() && (shallow.since.is_some() || !exclude.is_empty()))
+        || (shallow.relative && shallow.depth.is_none())
+    {
+        return Err(Error::Protocol("incompatible deepen arguments"));
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    exclude.sort_unstable();
+    exclude.dedup();
+    shallow.ids = boundaries.into_boxed_slice();
+    shallow.exclude = exclude.into_boxed_slice();
     wants.sort_unstable();
     wants.dedup();
     haves.sort_unstable();
@@ -199,10 +263,23 @@ fn parse_fetch<'a>(
     Ok(UploadRequest::Fetch {
         wants: wants.into_boxed_slice(),
         haves: haves.into_boxed_slice(),
+        shallow,
         done,
         thin_pack: options & 1 != 0,
         ofs_delta: options & 2 != 0,
         include_tag: options & 4 != 0,
+    })
+}
+
+fn decimal(bytes: &[u8]) -> Result<i64, Error> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(Error::Protocol("invalid deepen number"));
+    }
+    bytes.iter().try_fold(0_i64, |value, digit| {
+        value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(i64::from(*digit - b'0')))
+            .ok_or(Error::Protocol("deepen number overflow"))
     })
 }
 
@@ -266,13 +343,45 @@ pub(crate) fn write_fetch(
                 }
             }
         }
-        FetchReply::Pack(pack) => {
+        FetchReply::ShallowPack {
+            pack,
+            shallow,
+            unshallow,
+        } => {
+            within(shallow.len(), MAX_ITEMS, "shallow boundaries")?;
+            within(unshallow.len(), MAX_ITEMS, "unshallow boundaries")?;
+            for id in shallow.iter().chain(unshallow) {
+                validate_id(*id, format)?;
+            }
             within(pack.len(), MAX_FETCH_PACK_BYTES, "pack bytes")?;
+            let overhead = if shallow.is_empty() && unshallow.is_empty() {
+                0
+            } else {
+                21 + shallow.len() * (13 + format.digest_len() * 2)
+                    + unshallow.len() * (15 + format.digest_len() * 2)
+            };
             within(
-                fetch_response_len(pack.len())?,
+                fetch_response_len(pack.len())?
+                    .checked_add(overhead)
+                    .ok_or(Error::Limit("fetch response bytes"))?,
                 MAX_FETCH_RESPONSE_BYTES,
                 "fetch response bytes",
             )?;
+            if overhead != 0 {
+                encode::text_to_write(b"shallow-info", &mut *output)?;
+                let mut line = Vec::with_capacity(80);
+                for (prefix, ids) in [
+                    (b"shallow ".as_slice(), shallow),
+                    (b"unshallow ".as_slice(), unshallow),
+                ] {
+                    for id in ids {
+                        line.extend_from_slice(prefix);
+                        push_id(&mut line, *id);
+                        write_text(output, &mut line)?;
+                    }
+                }
+                encode::delim_to_write(&mut *output)?;
+            }
             write_pack(output, pack)?;
         }
     }
@@ -714,6 +823,7 @@ mod tests {
             thin_pack,
             ofs_delta,
             include_tag,
+            ..
         } = parse_upload(input, ObjectFormat::Sha1)?
         else {
             return Err("expected fetch".into());
@@ -940,7 +1050,15 @@ mod tests {
             format!("0014acknowledgments\n0031ACK {SHA1_A}\n0000").as_bytes()
         );
         output.clear();
-        write_fetch(&mut output, ObjectFormat::Sha1, FetchReply::Pack(&pack))?;
+        write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::ShallowPack {
+                pack: &pack,
+                shallow: &[],
+                unshallow: &[],
+            },
+        )?;
         assert!(output.starts_with(b"000dpackfile\n"));
         let mut packets = output.as_slice();
         assert_eq!(text(data(packet(&mut packets)?)?), b"packfile");
@@ -976,13 +1094,21 @@ mod tests {
         write_fetch(
             &mut io::sink(),
             ObjectFormat::Sha1,
-            FetchReply::Pack(&pack[..MAX_FETCH_PACK_BYTES]),
+            FetchReply::ShallowPack {
+                pack: &pack[..MAX_FETCH_PACK_BYTES],
+                shallow: &[],
+                unshallow: &[],
+            },
         )?;
         output.clear();
         limit(write_fetch(
             &mut output,
             ObjectFormat::Sha1,
-            FetchReply::Pack(&pack),
+            FetchReply::ShallowPack {
+                pack: &pack,
+                shallow: &[],
+                unshallow: &[],
+            },
         ));
         assert!(output.is_empty());
         Ok(())
@@ -1516,7 +1642,15 @@ mod tests {
     fn sideband_chunks(bytes: usize) -> TestResult<usize> {
         let pack = vec![0; bytes];
         let mut output = Vec::new();
-        write_fetch(&mut output, ObjectFormat::Sha1, FetchReply::Pack(&pack))?;
+        write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::ShallowPack {
+                pack: &pack,
+                shallow: &[],
+                unshallow: &[],
+            },
+        )?;
         let mut packets = output.as_slice();
         packet(&mut packets)?;
         let mut chunks = 0;
@@ -1585,5 +1719,78 @@ mod tests {
 
     fn limit<T>(result: Result<T, Error>) {
         assert!(matches!(result.err(), Some(Error::Limit(_))));
+    }
+    #[test]
+    fn shallow_arguments_and_response_limits_are_validated_before_output() -> TestResult {
+        for (format, oid) in [
+            (ObjectFormat::Sha1, SHA1_A),
+            (ObjectFormat::Sha256, SHA256_A),
+        ] {
+            let want = format!("want {oid}");
+            let boundary = format!("shallow {oid}");
+            let input = upload(
+                b"fetch",
+                format,
+                &[
+                    want.as_bytes(),
+                    boundary.as_bytes(),
+                    boundary.as_bytes(),
+                    b"deepen 2147483647",
+                    b"deepen-relative",
+                    b"done",
+                ],
+            )?;
+            let UploadRequest::Fetch { shallow, .. } = parse_upload(&input, format)? else {
+                return Err("fetch".into());
+            };
+            assert_eq!(shallow.ids.as_ref(), [id(format, oid)?]);
+            assert_eq!(shallow.depth, Some(i32::MAX as u32));
+            assert!(shallow.relative);
+            for args in [
+                vec![b"deepen 0".as_slice()],
+                vec![b"deepen -1"],
+                vec![b"deepen +1"],
+                vec![b"deepen 2147483648"],
+                vec![b"deepen 1", b"deepen 2"],
+                vec![b"deepen 1", b"deepen-since 1"],
+                vec![b"deepen 1", b"deepen-not main"],
+                vec![b"deepen-relative"],
+                vec![b"deepen 1", b"deepen-relative", b"deepen-relative"],
+                vec![b"deepen-since 99999999999999999999999999"],
+                vec![b"deepen-since -1"],
+                vec![b"deepen-since 1", b"deepen-since 2"],
+                vec![b"deepen-not "],
+                vec![b"shallow 00"],
+                vec![b"filter blob:none"],
+                vec![b"packfile-uris https"],
+            ] {
+                let mut options = vec![want.as_bytes()];
+                options.extend(args);
+                protocol(parse_upload(&upload(b"fetch", format, &options)?, format));
+            }
+        }
+        let pack = vec![0; MAX_FETCH_PACK_BYTES];
+        let mut output = Vec::new();
+        limit(write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::ShallowPack {
+                pack: &pack,
+                shallow: &[id(ObjectFormat::Sha1, SHA1_A)?],
+                unshallow: &[],
+            },
+        ));
+        assert!(output.is_empty());
+        protocol(write_fetch(
+            &mut output,
+            ObjectFormat::Sha1,
+            FetchReply::ShallowPack {
+                pack: EMPTY_SHA1_PACK,
+                shallow: &[id(ObjectFormat::Sha256, SHA256_A)?],
+                unshallow: &[],
+            },
+        ));
+        assert!(output.is_empty());
+        Ok(())
     }
 }

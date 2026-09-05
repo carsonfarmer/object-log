@@ -41,6 +41,7 @@ pub(crate) struct Node {
     pub(crate) kind: Option<Kind>,
     // True only after Reader authenticates the content and we parse metadata.
     pub(crate) verified: bool,
+    pub(crate) commit_time: i64,
     pub(crate) edges: Range<usize>,
     queued: bool,
 }
@@ -101,6 +102,10 @@ impl Graph {
                             }
                             Token::Parent { id: target } => {
                                 graph.link(reader, id, target.as_slice(), Kind::Commit, true)?;
+                            }
+                            Token::Committer { signature } => {
+                                graph.nodes[index].commit_time =
+                                    signature.time().map_err(pack_error)?.seconds;
                             }
                             Token::Message(_) => complete = true,
                             _ => {}
@@ -208,6 +213,7 @@ impl Graph {
                 id,
                 kind,
                 verified: false,
+                commit_time: 0,
                 edges: 0..0,
                 queued: false,
             });
