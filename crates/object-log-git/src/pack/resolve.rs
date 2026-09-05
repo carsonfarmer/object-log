@@ -27,9 +27,7 @@ pub(crate) trait BaseProvider {
     ) -> impl std::future::Future<Output = Result<Option<Decoded<'a>>, Error>> + Send;
 }
 
-#[cfg(test)]
-pub(super) struct NoBases;
-#[cfg(test)]
+pub(crate) struct NoBases;
 impl BaseProvider for NoBases {
     async fn provide<'a>(
         &mut self,

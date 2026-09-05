@@ -561,3 +561,148 @@ async fn live_pack_compaction_repeated_push_cycles_bound_cold_reads() -> TestRes
     }
     Ok(())
 }
+
+async fn interrupt_stream_compaction(
+    repository: &Repository,
+    ids: &[ObjectId],
+    faults: &FaultStore,
+    mode: u8,
+) -> TestResult {
+    let catalog = repository.catalog().await?;
+    let mut reader = durable::Reader::new(&repository.log, &repository.view, &catalog);
+    let tree = crate::catalog_tree::CatalogTree::empty(repository.format);
+    faults.reset();
+    let mut pause = faults.pause_put_at(1, FailurePhase::After);
+    let mut running = Box::pin(repository.compact_group(&mut reader, &tree, ids));
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut running => false }
+    }).await?);
+    assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);
+    match mode {
+        0 => faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::Before,
+        }),
+        1 => faults.schedule(Failure {
+            operation: Operation::Get,
+            occurrence: faults.metrics().operation(Operation::Get).requests + 1,
+            phase: FailurePhase::Before,
+        }),
+        _ => {
+            drop(running);
+            assert!(!pause.release());
+            return Ok(());
+        }
+    }
+    assert!(pause.release());
+    assert!(running.await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_compaction_failure_and_cancel_preserve_authority_and_release_memory()
+-> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let mut seed = 13_u64;
+        let data = (0..4 * 1024 * 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed.to_le_bytes()[0]
+            })
+            .collect::<Vec<_>>();
+        let item = fixture(format, &data)?;
+        drop(data);
+        let mut ids = output(
+            Some(&item.directory.path().join("source")),
+            &["rev-list", "--objects", "--all"],
+        )?
+        .lines()
+        .map(|line| ObjectId::parse(format, line.split_whitespace().next().unwrap_or("")))
+        .collect::<Result<Vec<_>, _>>()?;
+        ids.sort_unstable();
+        for mode in 0..3 {
+            let (log, faults, _) = test_log("stream-compaction-failure").await?;
+            publish_durable_pack(&log, &item, format).await?;
+            common_open(&log, format)
+                .await?
+                .migrate_catalog_attempt(TransactionId::new())
+                .await?;
+            let repository = common_open(&log, format).await?;
+            let refs = repository.refs().clone();
+            let generation = repository.view.generation();
+            let root = repository
+                .state
+                .catalog_tree(format)
+                .and_then(|tree| tree.root().map(|root| root.reference().clone()));
+            let operation = repository.operation.clone();
+            interrupt_stream_compaction(&repository, &ids, &faults, mode).await?;
+            drop(repository);
+            assert_eq!(operation.live_bytes(), 0);
+            let recovered = common_open(&log, format).await?;
+            assert_eq!(recovered.refs(), &refs);
+            assert_eq!(recovered.view.generation(), generation);
+            assert_eq!(
+                recovered
+                    .state
+                    .catalog_tree(format)
+                    .and_then(|tree| tree.root().map(|root| root.reference().clone())),
+                root
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_compaction_handles_fifty_mib_with_thirty_two_mib_admission() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let item = fixture(format, &vec![b'x'; 50 * 1024 * 1024])?;
+        let (log, _, _) = test_log("stream-compaction-memory").await?;
+        let input = receive_input(
+            format,
+            &[RefUpdate::new("refs/heads/main", None, Some(item.target))?],
+            &fs::read(&item.pack)?,
+            true,
+        );
+        assert!(input.len() < 1024 * 1024);
+        common_open(&log, format)
+            .await?
+            .prepare_receive_stream(TransactionId::new(), futures::stream::iter([Ok(input)]))
+            .await?
+            .publish_receive()
+            .await?;
+        common_open(&log, format)
+            .await?
+            .migrate_catalog_attempt(TransactionId::new())
+            .await?;
+        let operation = Pool::new(32 * 1024 * 1024).admit_maintenance()?;
+        let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+        let repository = Repository::open_attempt(&guarded, format, &operation).await?;
+        let (prepared, memory) = repository
+            .prepare_pack_compaction(TransactionId::new())
+            .await?;
+        assert!(matches!(
+            repository.log.commit(prepared).await?,
+            CommitStatus::Committed(_)
+        ));
+        drop(memory);
+        drop(repository);
+        assert_eq!(operation.live_bytes(), 0);
+        let recovered = common_open(&log, format).await?;
+        assert_eq!(
+            recovered.refs().get(b"refs/heads/main".as_slice()),
+            Some(&item.target)
+        );
+        let pack = recovered.fetch_pack(&[item.target], &[], false).await?;
+        let path = item.directory.path().join("compacted-large.pack");
+        fs::write(&path, pack)?;
+        command(
+            Some(&item.directory.path().join("source")),
+            &["index-pack", "--strict", path.to_str().ok_or("path")?],
+        )?;
+    }
+    Ok(())
+}

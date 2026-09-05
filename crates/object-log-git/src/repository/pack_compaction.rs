@@ -1,5 +1,6 @@
 //! Bounded live-object repacking with one replacement-root publication.
 
+use futures::{SinkExt, StreamExt};
 use object_log::{CommitStatus, Log, PreparedCommit, TransactionId};
 
 use super::{HEAD_DECODE_FACTOR, Repository, memory_bound};
@@ -98,9 +99,10 @@ impl Repository {
         )?)?;
         ids.sort_unstable();
         let mut tree = CatalogTree::empty(self.format);
-        let limit = pack::MAX_FETCH_PACK_BYTES
-            .min(pack::MAX_RECEIVE_PACK_BYTES)
-            .min(pack::MAX_PACK_BYTES);
+        let limit = crate::MAX_STREAM_PACK_BYTES.min(pack::MAX_STORED_PACK_BYTES);
+        // Keep ordinary groups small; one larger admitted object gets its own
+        // pack instead of making every compaction output approach the wire cap.
+        let preferred = pack::MAX_FETCH_PACK_BYTES.min(limit);
         let envelope = 12 + self.format.digest_len();
         let mut start = 0;
         let mut used = envelope;
@@ -111,7 +113,7 @@ impl Repository {
                     "object exceeds bounded compaction pack".into(),
                 ));
             }
-            if bound > limit - used {
+            if used > envelope && bound > preferred.saturating_sub(used) {
                 tree = self
                     .compact_group(&mut reader, &tree, &ids[start..position])
                     .await?;
@@ -148,52 +150,66 @@ impl Repository {
         Ok((prepared, memory))
     }
 
-    async fn compact_group(
+    pub(super) async fn compact_group(
         &self,
         reader: &mut durable::Reader<'_>,
         tree: &CatalogTree,
         ids: &[ObjectId],
     ) -> Result<CatalogTree, Error> {
-        let bytes = reader.fetch_pack(ids).await?;
-        // Normalization validates the complete emitted pack and every object,
-        // including reused delta streams, before immutable staging begins.
-        let normalized = pack::normalize_attempt(&self.operation, self.format, &bytes, &[])
-            .map_err(|error| match error {
-                pack::NormalizeError::Invalid(error) => error,
-                pack::NormalizeError::MissingBase { message, .. } => Error::InvalidPack(message),
-                pack::NormalizeError::DuplicateObject(_) => {
-                    Error::InvalidPack("duplicate compaction object".into())
-                }
-            })?;
-        let index = gix_pack::index::File::from_data(
-            normalized.index.as_slice(),
-            std::path::PathBuf::new(),
-            pack::object_hash(self.format),
+        // A single sender admits at most one queued frame. Both futures share
+        // the operation; either error drops its peer and leaves only unpublished
+        // immutable staging. EOF is sent only after the writer's final digest.
+        let (sender, receiver) = futures::channel::mpsc::channel(0);
+        let produce = async {
+            let mut sink = sender.sink_map_err(std::io::Error::other);
+            reader.write_fetch(ids, &mut sink).await?;
+            sink.close().await.map_err(pack::pack_error)
+        };
+        let receive =
+            pack::ingest::Input::receive(&self.operation, &self.log, &self.view, receiver.map(Ok));
+        let ((), input) = futures::try_join!(produce, receive)?;
+        let scanned = input.scan(self.format).await?;
+        let (descriptor, root) = scanned.normalize(&mut pack::ingest::NoBases).await?;
+        drop(input);
+        let index = durable::SelectedIndex::load(
+            &self.operation,
+            &self.log,
+            &self.view,
+            &descriptor,
+            &root,
         )
-        .map_err(pack::pack_error)?;
-        self.operation
-            .work(memory_bound(ids.len(), self.format.digest_len())?)?;
-        if index.num_objects() as usize != ids.len()
-            || ids
-                .iter()
-                .zip(0..index.num_objects())
-                .any(|(id, position)| index.oid_at_index(position).as_bytes() != id.as_bytes())
-        {
+        .await?;
+        if index.num_objects() as usize != ids.len() {
             return Err(Error::InvalidPack(
                 "compaction changed selected object IDs".into(),
             ));
         }
+        let _entries_memory = self
+            .operation
+            .reserve_state(memory_bound(ids.len(), size_of::<(ObjectId, u32)>())?)?;
+        // SelectedIndex charges OID decoding; charge comparison and tuple copies.
+        self.operation.work(memory_bound(
+            ids.len(),
+            size_of::<(ObjectId, u32)>() + self.format.digest_len(),
+        )?)?;
+        let mut entries = Vec::with_capacity(ids.len());
+        for (expected, entry) in ids.iter().zip(index.entries()) {
+            let (id, position) = entry?;
+            if id != *expected {
+                return Err(Error::InvalidPack(
+                    "compaction changed selected object IDs".into(),
+                ));
+            }
+            entries.push((id, position));
+        }
         drop(index);
-        drop(bytes);
-        let (descriptor, root) =
-            durable::stage(&self.operation, &self.log, &self.view, normalized).await?;
-        super::catalog_migration::insert_pack(
-            tree,
+        tree.insert_pack(
             &self.log,
             &self.view,
             &self.operation,
             descriptor,
             root,
+            &entries,
         )
         .await
     }
@@ -208,8 +224,8 @@ async fn entry_bound(reader: &mut durable::Reader<'_>, id: ObjectId) -> Result<u
         .object_size(id)
         .await?
         .ok_or(Error::InvalidReference)?;
-    // The current decoded-object limit is 8 MiB. One percent plus 64 bytes
-    // conservatively covers zlib expansion and Git entry framing. Retained delta
+    // One percent plus 64 bytes conservatively covers zlib expansion and Git
+    // entry framing for admitted objects. Retained delta
     // instructions may exceed their result size, so also bound the stored extent
     // plus the maximum extra base-ID/header representation.
     decoded

@@ -29,7 +29,7 @@ mod scan;
 mod scratch;
 #[path = "stored.rs"]
 mod stored;
-pub(crate) use resolve::BaseProvider;
+pub(crate) use resolve::{BaseProvider, NoBases};
 pub(crate) use scan::{Entry as IndexedEntry, Scanned};
 pub(crate) use scratch::Decoded;
 
