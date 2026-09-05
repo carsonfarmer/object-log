@@ -266,6 +266,7 @@ impl Config {
                     .with_connect_timeout(Duration::from_secs(5))
                     .with_timeout(Duration::from_secs(30)),
             )
+            .with_http_connector(super::native_transport::Connector)
             .with_retry(RetryConfig {
                 max_retries: 0,
                 ..RetryConfig::default()

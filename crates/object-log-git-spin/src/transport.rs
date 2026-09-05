@@ -6,8 +6,8 @@ use http_body::{Body as _, Frame};
 use http_body_util::{BodyExt, StreamBody};
 use object_store::client::{
     ClientConfigKey, ClientOptions, CryptoProvider, DigestAlgorithm, DigestContext, HmacContext,
-    HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpRequestBody,
-    HttpResponse, HttpResponseBody, HttpService, Signer, SigningAlgorithm,
+    HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
+    HttpResponseBody, HttpService, Signer, SigningAlgorithm,
 };
 use sha2::{Digest, Sha256};
 use spin_executor::CancelOnDropToken;
@@ -101,22 +101,16 @@ impl HttpService for Service {
     }
 }
 
-// A pooled connection can close before a response arrives. Retry only a bodyless
-// read, once, before exposing response bytes. Writes and streaming-body failures
-// retain their uncertain-result semantics; every attempt shares the same budget.
-async fn retry_read<F, Fut>(request: HttpRequest, mut attempt: F) -> Result<HttpResponse, HttpError>
+#[path = "read_retry.rs"]
+mod read_retry;
+
+async fn retry_read<F, Fut>(request: HttpRequest, attempt: F) -> Result<HttpResponse, HttpError>
 where
     F: FnMut(HttpRequest) -> Fut,
     Fut: std::future::Future<Output = Result<HttpResponse, HttpError>>,
 {
-    let retryable = matches!(*request.method(), http::Method::GET | http::Method::HEAD)
-        && request.body().content_length() == 0;
-    let (parts, body) = request.into_parts();
-    let retry =
-        retryable.then(|| http::Request::from_parts(parts.clone(), HttpRequestBody::empty()));
-    let result = attempt(http::Request::from_parts(parts, body)).await;
-    if let (Some(request), Err(error)) = (retry, &result)
-        && std::error::Error::source(error)
+    read_retry::retry_read(request, attempt, |error| {
+        std::error::Error::source(error)
             .and_then(|source| source.downcast_ref::<spin_sdk::http::ErrorCode>())
             .is_some_and(|code| {
                 matches!(
@@ -126,10 +120,8 @@ where
                         | spin_sdk::http::ErrorCode::HttpProtocolError
                 )
             })
-    {
-        return attempt(request).await;
-    }
-    result
+    })
+    .await
 }
 
 impl Service {
@@ -321,6 +313,7 @@ impl CryptoProvider for Crypto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object_store::client::HttpRequestBody;
 
     #[test]
     fn safe_read_retry_is_bounded_and_preserves_request_and_budget()
