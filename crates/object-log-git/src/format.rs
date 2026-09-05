@@ -3,7 +3,7 @@ use minicbor::{Decode, Encode};
 
 use crate::{Error, ObjectFormat, ObjectId, RefSnapshot, RefUpdate};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_UPDATES: usize = 1_024;
 const MAX_STATE_ITEMS: usize = 100_000;
 
@@ -14,6 +14,63 @@ pub(crate) struct PackDescriptor {
     pub(crate) id: ObjectId,
     #[n(1)]
     pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, PartialEq)]
+#[cbor(index_only)]
+pub(crate) enum CatalogOperation {
+    #[n(0)]
+    LegacySnapshot,
+    #[n(2)]
+    Unchanged,
+}
+
+#[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
+#[cbor(array)]
+pub(crate) enum Metadata {
+    #[n(0)]
+    Unchanged,
+    #[n(1)]
+    Snapshot(#[cbor(n(0), with = "minicbor::bytes")] Vec<u8>),
+    #[n(2)]
+    Update {
+        #[cbor(n(0), with = "minicbor::bytes")]
+        expected: Vec<u8>,
+        #[cbor(n(1), with = "minicbor::bytes")]
+        target: Vec<u8>,
+    },
+}
+
+impl Metadata {
+    pub(crate) fn target(&self) -> Option<&[u8]> {
+        match self {
+            Self::Unchanged => None,
+            Self::Snapshot(target) | Self::Update { target, .. } => Some(target),
+        }
+    }
+}
+
+pub(crate) fn validate_default_branch(name: &[u8]) -> Result<(), Error> {
+    if !name.starts_with(b"refs/heads/") || !crate::is_valid_ref_name(name) {
+        return Err(Error::InvalidReference);
+    }
+    Ok(())
+}
+
+// Borrowed legacy wire shape preserves v1 bytes without cloning record vectors.
+#[derive(Encode)]
+#[cbor(map)]
+struct LegacyRecord<'a> {
+    #[n(0)]
+    version: u32,
+    #[n(1)]
+    checkpoint: bool,
+    #[n(2)]
+    format: ObjectFormat,
+    #[n(3)]
+    refs: &'a [RefUpdate],
+    #[n(4)]
+    packs: &'a [PackDescriptor],
 }
 
 #[derive(Clone, Debug, Decode, Encode)]
@@ -29,6 +86,10 @@ pub(crate) struct Record {
     pub(crate) refs: Vec<RefUpdate>,
     #[n(4)]
     pub(crate) packs: Vec<PackDescriptor>,
+    #[n(5)]
+    catalog: Option<CatalogOperation>,
+    #[n(6)]
+    pub(crate) metadata: Option<Metadata>,
 }
 
 impl Record {
@@ -58,7 +119,18 @@ impl Record {
     }
 
     pub(crate) fn encode(&self) -> Result<Bytes, Error> {
-        minicbor::to_vec(self)
+        let encoded = if self.version == 1 {
+            minicbor::to_vec(LegacyRecord {
+                version: self.version,
+                checkpoint: self.checkpoint,
+                format: self.format,
+                refs: &self.refs,
+                packs: &self.packs,
+            })
+        } else {
+            minicbor::to_vec(self)
+        };
+        encoded
             .map(Bytes::from)
             .map_err(|_| Error::InvalidRecord("record cannot be encoded"))
     }
@@ -75,7 +147,7 @@ impl Record {
         if decoder.position() != bytes.len() || record.encode().ok().as_deref() != Some(bytes) {
             return Err(Error::InvalidRecord("record is not canonical CBOR"));
         }
-        if record.version != VERSION || record.format != format {
+        if !matches!(record.version, 1 | VERSION) || record.format != format {
             return Err(Error::InvalidRecord(
                 "version or object format does not match",
             ));
@@ -107,23 +179,82 @@ impl Record {
         packs: Vec<PackDescriptor>,
     ) -> Result<Self, Error> {
         let record = Self {
-            version: VERSION,
+            version: 1,
             checkpoint,
             format,
             refs,
             packs,
+            catalog: None,
+            metadata: None,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub(crate) fn with_metadata(mut self, metadata: Metadata) -> Result<Self, Error> {
+        self.version = VERSION;
+        self.catalog = Some(if self.checkpoint {
+            CatalogOperation::LegacySnapshot
+        } else {
+            CatalogOperation::Unchanged
+        });
+        self.metadata = Some(metadata);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn metadata_update(
+        format: ObjectFormat,
+        expected: Vec<u8>,
+        target: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let record = Self {
+            version: VERSION,
+            checkpoint: false,
+            format,
+            refs: Vec::new(),
+            packs: Vec::new(),
+            catalog: Some(CatalogOperation::Unchanged),
+            metadata: Some(Metadata::Update { expected, target }),
         };
         record.validate()?;
         Ok(record)
     }
 
     fn validate(&self) -> Result<(), Error> {
+        let valid_metadata = match (&self.metadata, self.checkpoint) {
+            (None, _) => self.version == 1 && self.catalog.is_none(),
+            (Some(Metadata::Unchanged), false) => self.version == VERSION,
+            (Some(Metadata::Snapshot(target)), true) => {
+                self.version == VERSION && validate_default_branch(target).is_ok()
+            }
+            (Some(Metadata::Update { expected, target }), false) => {
+                self.version == VERSION
+                    && validate_default_branch(expected).is_ok()
+                    && validate_default_branch(target).is_ok()
+            }
+            _ => false,
+        };
+        let catalog = if self.checkpoint {
+            CatalogOperation::LegacySnapshot
+        } else {
+            CatalogOperation::Unchanged
+        };
+        if !valid_metadata || self.version == VERSION && self.catalog != Some(catalog) {
+            return Err(Error::InvalidRecord(
+                "invalid metadata or catalog operation",
+            ));
+        }
         let limit = if self.checkpoint {
             MAX_STATE_ITEMS
         } else {
             MAX_UPDATES
         };
-        if self.refs.len() > limit || (!self.checkpoint && self.refs.is_empty()) {
+        if self.refs.len() > limit
+            || (!self.checkpoint
+                && self.refs.is_empty()
+                && !matches!(self.metadata, Some(Metadata::Update { .. })))
+        {
             return Err(Error::InvalidRecord("invalid ref count"));
         }
         if self.refs.iter().any(|item| {
@@ -169,6 +300,61 @@ mod tests {
     }
 
     #[test]
+    fn versioned_metadata_requires_complete_canonical_operations() -> Result<(), Error> {
+        let record = Record::metadata_update(
+            ObjectFormat::Sha1,
+            b"refs/heads/main".to_vec(),
+            b"refs/heads/trunk".to_vec(),
+        )?;
+        let encoded = record.encode()?;
+        assert_eq!(
+            Record::decode(&encoded, ObjectFormat::Sha1, 0)?.encode()?,
+            encoded
+        );
+        let mut reserved_catalog = encoded.to_vec();
+        let mut decoder = minicbor::Decoder::new(&encoded);
+        decoder
+            .map()
+            .map_err(|_| Error::InvalidRecord("test map"))?;
+        for _ in 0..7 {
+            let key = decoder.u8().map_err(|_| Error::InvalidRecord("test key"))?;
+            if key == 5 {
+                reserved_catalog[decoder.position()] = 1;
+                break;
+            }
+            decoder
+                .skip()
+                .map_err(|_| Error::InvalidRecord("test value"))?;
+        }
+        assert!(Record::decode(&reserved_catalog, ObjectFormat::Sha1, 0).is_err());
+        let mut malformed = record.clone();
+        malformed.catalog = None;
+        assert!(Record::decode(&malformed.encode()?, ObjectFormat::Sha1, 0).is_err());
+        let mut malformed = record.clone();
+        malformed.metadata = None;
+        assert!(Record::decode(&malformed.encode()?, ObjectFormat::Sha1, 0).is_err());
+        let mut malformed = record;
+        malformed.checkpoint = true;
+        assert!(Record::decode(&malformed.encode()?, ObjectFormat::Sha1, 0).is_err());
+        for target in [b"HEAD".as_slice(), b"refs/tags/v1", b"refs/heads/a..b"] {
+            assert!(
+                Record::metadata_update(
+                    ObjectFormat::Sha1,
+                    b"refs/heads/main".to_vec(),
+                    target.to_vec()
+                )
+                .is_err()
+            );
+        }
+        Record::metadata_update(
+            ObjectFormat::Sha256,
+            b"refs/heads/main".to_vec(),
+            b"refs/heads/non-utf8-\xff".to_vec(),
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn records_have_one_strict_encoding() -> Result<(), Error> {
         let record = Record::transaction(
             ObjectFormat::Sha1,
@@ -209,7 +395,7 @@ mod tests {
             .is_err()
         );
         let unordered = Record {
-            version: VERSION,
+            version: 1,
             checkpoint: true,
             format: ObjectFormat::Sha1,
             refs: vec![
@@ -217,6 +403,8 @@ mod tests {
                 RefUpdate::new("refs/tags/a", None, Some(id(2)))?,
             ],
             packs: vec![],
+            catalog: None,
+            metadata: None,
         }
         .encode()?;
         assert!(Record::decode(&unordered, ObjectFormat::Sha1, 0).is_err());

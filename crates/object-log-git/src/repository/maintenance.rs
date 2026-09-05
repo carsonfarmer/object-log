@@ -5,7 +5,7 @@ use object_log::{CheckpointStatus, Log, StagedObject};
 use super::{Repository, memory_bound, preflight_view};
 use crate::{
     Error, ObjectFormat, ObjectId, durable,
-    format::{PackDescriptor, Record},
+    format::{Metadata, PackDescriptor, Record},
     pack::budget::{Operation, Pool},
 };
 
@@ -64,6 +64,7 @@ impl Repository {
             return Ok(CheckpointStatus::Published(self.view));
         };
         let count = self.state.packs.len();
+        let metadata_bytes = self.state.default_branch().len();
         let _vectors_memory = self.operation.reserve(memory_bound(
             count,
             size_of::<PackDescriptor>() + size_of::<StagedObject>(),
@@ -81,7 +82,7 @@ impl Repository {
             .state
             .refs
             .keys()
-            .try_fold(128_usize, |sum, name| {
+            .try_fold(128_usize + metadata_bytes, |sum, name| {
                 sum.checked_add(name.len())?.checked_add(128)
             })
             .and_then(|sum| sum.checked_add(packs.len().checked_mul(128)?))
@@ -90,7 +91,13 @@ impl Repository {
         // head alongside its decoder window; this reservation covers snapshot
         // construction and the core checkpoint envelope.
         let _publication_memory = self.operation.reserve(memory_bound(snapshot_bound, 4)?)?;
-        let snapshot = Record::snapshot(self.format, self.state.refs, packs)?.encode()?;
+        let snapshot = Record::snapshot(self.format, self.state.refs, packs)?;
+        let snapshot = if let Some(target) = self.state.default_branch {
+            snapshot.with_metadata(Metadata::Snapshot(target))?
+        } else {
+            snapshot
+        }
+        .encode()?;
         self.operation.work(snapshot.len())?;
         // publish_checkpoint validates the tail again before its first PUT.
         let _tail_memory = preflight_view(&self.operation, &self.log, &self.view)?;

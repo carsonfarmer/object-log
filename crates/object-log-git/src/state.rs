@@ -6,19 +6,42 @@ use object_log::{Materializer, ObjectRef, StagedObject};
 use crate::pack::budget::{Operation, Reservation};
 
 use crate::RefUpdate;
-use crate::format::{PackDescriptor, Record};
+use crate::format::{Metadata, PackDescriptor, Record};
 use crate::{Error, ObjectFormat, ObjectId, RefSnapshot};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct State {
     pub(crate) refs: RefSnapshot,
+    pub(crate) default_branch: Option<Vec<u8>>,
     pub(crate) packs: BTreeMap<ObjectId, (u64, StagedObject)>,
+}
+
+impl State {
+    pub(crate) fn default_branch(&self) -> &[u8] {
+        self.default_branch.as_deref().unwrap_or(b"refs/heads/main")
+    }
+
+    pub(crate) fn transaction(
+        &self,
+        format: ObjectFormat,
+        updates: Vec<RefUpdate>,
+        packs: Vec<PackDescriptor>,
+    ) -> Result<Bytes, Error> {
+        let record = Record::transaction(format, updates, packs)?;
+        let record = if self.default_branch.is_some() {
+            record.with_metadata(Metadata::Unchanged)?
+        } else {
+            record
+        };
+        record.encode()
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct Machine<'a>(ObjectFormat, Option<&'a StateBudget>);
 
 impl<'a> Machine<'a> {
+    #[cfg(test)]
     pub(crate) const fn new(format: ObjectFormat) -> Self {
         Self(format, None)
     }
@@ -27,6 +50,7 @@ impl<'a> Machine<'a> {
         Self(format, Some(budget))
     }
 
+    #[cfg(test)]
     pub(crate) fn transaction(
         self,
         updates: Vec<RefUpdate>,
@@ -49,7 +73,7 @@ impl Materializer for Machine<'_> {
         checkpoint: &[u8],
         objects: &[StagedObject],
     ) -> Result<Self::State, Self::Error> {
-        let record = Record::decode(checkpoint, self.0, objects.len())?;
+        let mut record = Record::decode(checkpoint, self.0, objects.len())?;
         if !record.checkpoint {
             return Err(Error::InvalidRecord("checkpoint is a transaction"));
         }
@@ -57,9 +81,14 @@ impl Materializer for Machine<'_> {
             .1
             .map(|budget| budget.prepare(&State::default(), &record))
             .transpose()?;
+        let default_branch = match record.metadata.take() {
+            Some(Metadata::Snapshot(target)) => Some(target),
+            _ => None,
+        };
         let (refs, packs) = record.into_snapshot()?;
         let state = State {
             refs,
+            default_branch,
             packs: zip(packs, objects),
         };
         if let Some((budget, retained)) = self.1.zip(retained) {
@@ -77,6 +106,16 @@ impl Materializer for Machine<'_> {
         let record = Record::decode(operation, self.0, objects.len())?;
         if record.checkpoint {
             return Err(Error::InvalidRecord("operation is a checkpoint"));
+        }
+        if state.default_branch.is_some() && record.metadata.is_none() {
+            return Err(Error::InvalidRecord("Git state version downgrade"));
+        }
+        if let Some(Metadata::Update { expected, .. }) = &record.metadata {
+            if expected.as_slice() != state.default_branch() {
+                return Err(Error::StateDiverged);
+            }
+        } else if state.default_branch.is_none() && record.metadata.is_some() {
+            return Err(Error::InvalidRecord("Git upgrade lacks complete metadata"));
         }
         if record
             .refs
@@ -107,6 +146,9 @@ impl Materializer for Machine<'_> {
         // before releasing the empty map's leaf allowance.
         if state.refs.is_empty() {
             state.refs = BTreeMap::new();
+        }
+        if let Some(Metadata::Update { target, .. }) = record.metadata {
+            state.default_branch = Some(target);
         }
         state.packs.extend(zip(record.packs, objects));
         if let Some((budget, retained)) = self.1.zip(retained) {
@@ -142,6 +184,17 @@ impl StateBudget {
             .checked_mul(PACK_MEMORY)
             .ok_or_else(memory_error)?;
         let mut removed = 0_usize;
+        if let Some(target) = record.metadata.as_ref().and_then(Metadata::target) {
+            added = added
+                .checked_add(target.len().checked_mul(4).ok_or_else(memory_error)?)
+                .ok_or_else(memory_error)?;
+            removed = state
+                .default_branch
+                .as_ref()
+                .map_or(0, Vec::len)
+                .checked_mul(4)
+                .ok_or_else(memory_error)?;
+        }
         let (mut creates, mut deletes) = (0, 0);
         for update in &record.refs {
             let present = state.refs.contains_key(&update.name);
@@ -232,6 +285,71 @@ mod tests {
             .map(|(&id, (bytes, _))| PackDescriptor { id, bytes: *bytes })
             .collect();
         Record::snapshot(machine.0, state.refs.clone(), packs)?.encode()
+    }
+
+    #[test]
+    fn metadata_upgrades_preserve_refs_and_reject_downgrades() -> Result<(), Error> {
+        let machine = Machine::new(ObjectFormat::Sha1);
+        let mut state = machine.empty();
+        let create = machine.transaction(
+            vec![RefUpdate::new("refs/heads/master", None, Some(id(1)))?],
+            vec![],
+        )?;
+        machine.apply(&mut state, &create, &[])?;
+        let upgrade = Record::metadata_update(
+            ObjectFormat::Sha1,
+            b"refs/heads/main".to_vec(),
+            b"refs/heads/master".to_vec(),
+        )?
+        .encode()?;
+        machine.apply(&mut state, &upgrade, &[])?;
+        assert_eq!(state.default_branch(), b"refs/heads/master");
+        assert_eq!(state.refs.len(), 1);
+        assert!(matches!(
+            machine.apply(&mut state, &upgrade, &[]),
+            Err(Error::StateDiverged)
+        ));
+        let delete = machine.transaction(
+            vec![RefUpdate::new("refs/heads/master", Some(id(1)), None)?],
+            vec![],
+        )?;
+        assert!(machine.apply(&mut state, &delete, &[]).is_err());
+        assert_eq!(state.refs.len(), 1);
+        let delete = state.transaction(
+            ObjectFormat::Sha1,
+            vec![RefUpdate::new("refs/heads/master", Some(id(1)), None)?],
+            vec![],
+        )?;
+        machine.apply(&mut state, &delete, &[])?;
+        assert!(state.refs.is_empty());
+        assert_eq!(state.default_branch(), b"refs/heads/master");
+        let snapshot = Record::snapshot(ObjectFormat::Sha1, state.refs, vec![])?
+            .with_metadata(Metadata::Snapshot(b"refs/heads/master".to_vec()))?
+            .encode()?;
+        let restored = machine.restore(&snapshot, &[])?;
+        assert_eq!(restored.default_branch(), b"refs/heads/master");
+        assert!(restored.refs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_retention_is_precharged_before_upgrade() -> Result<(), Error> {
+        use crate::pack::budget::Pool;
+        let target = b"refs/heads/trunk";
+        let update = Record::metadata_update(
+            ObjectFormat::Sha1,
+            b"refs/heads/main".to_vec(),
+            target.to_vec(),
+        )?
+        .encode()?;
+        let operation = Pool::new(target.len() * 4 - 1).admit()?;
+        let budget = StateBudget::new(&operation)?;
+        let machine = Machine::budgeted(ObjectFormat::Sha1, &budget);
+        let mut state = machine.empty();
+        assert!(machine.apply(&mut state, &update, &[]).is_err());
+        assert!(state.default_branch.is_none());
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::{
 
 use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, View, materialize};
 
+mod default_branch;
 mod maintenance;
 mod receive_command;
 
@@ -225,7 +226,7 @@ impl Repository {
             self.operation.work((candidate.len() + name.len()) * 6)?;
         }
         let mut matches = self.state.refs.iter().filter(|(candidate, _)| {
-            (name == b"HEAD" && candidate.as_slice() == b"refs/heads/main")
+            (name == b"HEAD" && candidate.as_slice() == self.state.default_branch())
                 || candidate.as_slice() == name
                 || candidate.strip_prefix(b"refs/") == Some(name)
                 || candidate.strip_prefix(b"refs/heads/") == Some(name)
@@ -316,13 +317,13 @@ impl Repository {
             .operation
             .reserve_state((self.state.refs.len() + 1) * size_of::<AdvertisedRef<'_>>())?;
         let mut refs = Vec::with_capacity(self.state.refs.len() + 1);
-        let main = self.state.refs.get(&b"refs/heads/main"[..]).copied();
-        if matches_prefix(&self.operation, b"HEAD", prefixes)? && (main.is_some() || unborn) {
+        let target = self.state.refs.get(self.state.default_branch()).copied();
+        if matches_prefix(&self.operation, b"HEAD", prefixes)? && (target.is_some() || unborn) {
             refs.push(AdvertisedRef {
                 name: b"HEAD",
-                target: main,
+                target,
                 peeled: None,
-                symref_target: symrefs.then_some(b"refs/heads/main".as_slice()),
+                symref_target: symrefs.then_some(self.state.default_branch()),
             });
         }
         for (name, &target) in &self.state.refs {
@@ -571,6 +572,7 @@ mod tests {
     include!("repository/shallow_tests.rs");
     include!("repository/maintenance_tests.rs");
     include!("repository/partial_tests.rs");
+    include!("repository/default_branch_tests.rs");
 
     struct Fixture {
         directory: TempDir,

@@ -9,7 +9,6 @@ use crate::{
     Error, ObjectId, ReceivePolicy, RefUpdate, durable,
     graph::Graph,
     pack::budget::{Operation, Reservation, hold},
-    state::Machine,
     wire::{self, ReceiveRequest, ReceiveStatus},
 };
 
@@ -252,8 +251,9 @@ impl Repository {
             self.log.options(),
             super::VIEW_RETAIN_FACTOR,
         )?)?;
-        let record =
-            Machine::new(self.format).transaction(request.updates.to_vec(), descriptors)?;
+        let record = self
+            .state
+            .transaction(self.format, request.updates.to_vec(), descriptors)?;
         self.operation.work(record.len())?;
         let prepared =
             self.log
