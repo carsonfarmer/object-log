@@ -304,19 +304,6 @@ fn is_valid_ref_name(value: &[u8]) -> bool {
         && gix_validate::reference::name(bstr::BStr::new(value)).is_ok()
 }
 
-impl From<wire::Error> for Error {
-    fn from(error: wire::Error) -> Self {
-        match error {
-            wire::Error::Protocol(message) | wire::Error::Limit(message) => {
-                Self::InvalidProtocol(message)
-            }
-            wire::Error::Io(error) => error
-                .downcast::<Self>()
-                .unwrap_or_else(|error| Self::PackStorage(error.to_string())),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
