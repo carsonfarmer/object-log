@@ -14,7 +14,7 @@ async fn streaming_receive_publishes_both_hashes_and_preserves_tree_catalogs() -
             let fixture = fixture(format, b"streamed receive")?;
             let (log, faults, _) = test_log("streamed-receive").await?;
             if tree {
-                assert!(matches!(Repository::migrate_catalog(&log, format, TransactionId::new()).await?, Some(object_log::CommitStatus::Committed(_))));
+                assert!(matches!(common_open(&log, format).await?.migrate_catalog_attempt(TransactionId::new()).await?, Some(object_log::CommitStatus::Committed(_))));
             }
             let update = RefUpdate::new("refs/heads/main", None, Some(fixture.target))?;
             let input = receive_input(format, &[update], &fs::read(&fixture.pack)?, true);
@@ -86,7 +86,7 @@ async fn streaming_receive_true_thin_uses_verified_selected_bases() -> TestResul
         let fixture = fixture(format, contents.as_bytes())?;
         let (log, _, _) = test_log("common-receive-thin").await?;
         publish_durable_pack(&log, &fixture, format).await?;
-        if tree { Repository::migrate_catalog(&log, format, TransactionId::new()).await?; }
+        if tree { common_open(&log, format).await?.migrate_catalog_attempt(TransactionId::new()).await?; }
         let source = fixture.directory.path().join("source");
         let contents = contents.replacen("row 00002000", "row changed!", 1);
         fs::write(source.join("file"), contents)?;

@@ -6,7 +6,7 @@ async fn prepared_upload_matches_buffered_controls_and_pack_for_both_catalogs() 
             let (log, faults, _) = test_log("prepared-upload").await?;
             publish_durable_pack(&log, &fixture, format).await?;
             if tree {
-                assert!(matches!(Repository::migrate_catalog(&log, format, TransactionId::new()).await?, Some(object_log::CommitStatus::Committed(_))));
+                assert!(matches!(common_open(&log, format).await?.migrate_catalog_attempt(TransactionId::new()).await?, Some(object_log::CommitStatus::Committed(_))));
             }
             for (command, args) in [
                 ("ls-refs", vec!["symrefs".into()]),
