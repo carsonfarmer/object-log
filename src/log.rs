@@ -1683,10 +1683,16 @@ impl Log {
         {
             return Err(Error::LimitExceeded("encoded commit bytes"));
         }
+        let declared_len = usize::try_from(reference.len)
+            .map_err(|_| Error::LimitExceeded("commit byte length"))?;
         let Some(stored) = self
             .store
-            .read(self.commit_key(&reference), self.options.max_commit_bytes)
-            .await?
+            .read(self.commit_key(&reference), declared_len)
+            .await
+            .map_err(|error| match error {
+                Error::LimitExceeded("read bytes") => Error::CorruptObject,
+                error => error,
+            })?
         else {
             return Ok(None);
         };
@@ -2171,6 +2177,129 @@ mod tests {
         assert_eq!(
             log.read_commit(published).await?.reference().len(),
             encoded_len
+        );
+        Ok(())
+    }
+
+    #[derive(Debug, Default)]
+    struct OversizedCommitStore {
+        inner: InMemory,
+        body_polls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for OversizedCommitStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("oversized commit store")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for OversizedCommitStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            options: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let mut result = self.inner.get_opts(location, options).await?;
+            if location.as_ref().contains("/commits/") {
+                result.meta.size += 1;
+                result.range.end += 1;
+                let polls = Arc::clone(&self.body_polls);
+                let payload = std::mem::replace(
+                    &mut result.payload,
+                    object_store::GetResultPayload::Stream(stream::empty().boxed()),
+                );
+                let object_store::GetResultPayload::Stream(body) = payload else {
+                    return Err(object_store::Error::Generic {
+                        store: "oversized commit test",
+                        source: "memory store did not return a stream".into(),
+                    });
+                };
+                result.payload = object_store::GetResultPayload::Stream(
+                    body.chain(stream::once(async { Ok(Bytes::from_static(b"x")) }))
+                        .inspect(move |_| {
+                            polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        })
+                        .boxed(),
+                );
+            }
+            Ok(result)
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_commit_is_rejected_without_polling_its_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(OversizedCommitStore::default());
+        let backend = ValidatedBackend::new(store.clone(), Path::from("read-bound")).await?;
+        let log = Log::open(&backend, &LogId::new("commit")?, Options::default()).await?;
+        let view = log.load().await?;
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(b"operation"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(view) = log.commit(prepared).await? else {
+            return Err("commit lost its uncontended publication".into());
+        };
+        assert!(view.tail()[0].len() + 1 < log.options.max_commit_bytes as u64);
+        assert!(matches!(
+            log.read_tail(&view).await,
+            Err(Error::CorruptObject)
+        ));
+        assert_eq!(
+            store.body_polls.load(std::sync::atomic::Ordering::Relaxed),
+            0
         );
         Ok(())
     }
