@@ -4,6 +4,8 @@ import contextlib
 import http.client
 import http.server
 import json
+import os
+import signal
 import pathlib
 import secrets
 import socket
@@ -65,7 +67,7 @@ def host(variables, directory):
     config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
     address = port()
     with (pathlib.Path(directory) / "runtime.log").open("w") as log:
-        process = subprocess.Popen([str(ROOT / "run.sh"), "--listen", f"127.0.0.1:{address}", "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen([str(ROOT / "run.sh"), "--listen", f"127.0.0.1:{address}", "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             for _ in range(200):
                 if process.poll() is not None:
@@ -79,8 +81,18 @@ def host(variables, directory):
                 raise RuntimeError("Spin auth fixture startup timeout")
             yield address
         finally:
-            process.terminate()
+            # spin up starts an HTTP child; stopping only its parent leaks a host.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=10)
+            for _ in range(100):
+                try:
+                    with socket.create_connection(("127.0.0.1", address), timeout=.1):
+                        time.sleep(.05)
+                except OSError:
+                    break
+            else:
+                raise RuntimeError("Spin listener survived process-group shutdown")
     output = (pathlib.Path(directory) / "runtime.log").read_text()
     for key in ["auth_read_token", "auth_write_token", "secret_key"]:
         value = variables.get(key)
