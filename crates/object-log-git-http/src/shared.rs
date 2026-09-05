@@ -154,17 +154,19 @@ async fn receive(
                 Err(error) => return Err(error.into()),
             };
             let token = prepared.recovery_token().clone();
-            let (resolution, output) = prepared.publish_receive().await?;
-            let status = match resolution {
-                Resolution::Committed(_) | Resolution::NotCommitted(_) => StatusCode::OK,
-                Resolution::StillPending(_) | Resolution::Expired(_) => {
+            match prepared.publish_receive().await {
+                Ok((Resolution::Committed(_) | Resolution::NotCommitted(_), output)) => {
+                    Ok((StatusCode::OK, output))
+                }
+                Ok((Resolution::StillPending(_) | Resolution::Expired(_), _)) | Err(_) => {
+                    // Once prepared, even invalid resolution evidence can hide a
+                    // successful head write. Preserve the exact recovery token.
                     tracing::warn!(
                         "Git publication remains uncertain; a connected caller receives the recovery token, otherwise refresh refs"
                     );
-                    return Ok((StatusCode::SERVICE_UNAVAILABLE, token));
+                    Ok((StatusCode::SERVICE_UNAVAILABLE, token))
                 }
-            };
-            Ok((status, output))
+            }
         })
         .await
         .map_err(|_| Failure::internal())??;
