@@ -74,9 +74,7 @@ async fn run(
         &backend,
         &id,
         Options {
-            max_collection_objects: candidate_count
-                .checked_add(100)
-                .ok_or("candidate count overflow")?,
+            max_collection_objects: candidate_count / 2,
             ..Options::default()
         },
     )
@@ -101,20 +99,34 @@ async fn run(
     put_unreachable(&log, candidate_count, concurrency).await?;
 
     let started = Instant::now();
-    let (current, start_report, finish_report) =
-        tokio::time::timeout(DEADLINE, collect_once(&log, &view))
-            .await
-            .map_err(|_| format!("GC did not complete within {DEADLINE:?}"))??;
+    let (current, batches) = tokio::time::timeout(DEADLINE, async {
+        let mut current = view.clone();
+        let mut remaining = candidate_count;
+        let mut batches = 0;
+        while remaining > 0 {
+            let (next, start, finish) = collect_once(&log, &current).await?;
+            let count = start.candidate_count();
+            assert!(count > 0 && count <= candidate_count / 2);
+            assert!(count <= remaining);
+            assert_eq!(start.candidate_bytes(), u64::try_from(count)?);
+            assert_eq!(start.delete_attempts(), 0);
+            assert_eq!(finish.candidate_count(), count);
+            assert_eq!(finish.candidate_bytes(), start.candidate_bytes());
+            assert_eq!(finish.delete_attempts(), count);
+            remaining -= count;
+            batches += 1;
+            current = next;
+        }
+        TestResult::Ok((current, batches))
+    })
+    .await
+    .map_err(|_| format!("GC did not complete within {DEADLINE:?}"))??;
     let elapsed = started.elapsed();
-
-    let candidate_bytes = u64::try_from(candidate_count)?;
-    assert_eq!(start_report.candidate_count(), candidate_count);
-    assert_eq!(start_report.candidate_bytes(), candidate_bytes);
-    assert_eq!(start_report.delete_attempts(), 0);
-    assert_eq!(finish_report.candidate_count(), candidate_count);
-    assert_eq!(finish_report.candidate_bytes(), candidate_bytes);
-    assert_eq!(finish_report.delete_attempts(), candidate_count);
-    assert_eq!(current.collection_epoch(), view.collection_epoch() + 1);
+    assert!(batches >= 2);
+    assert_eq!(
+        current.collection_epoch(),
+        view.collection_epoch() + batches
+    );
 
     assert_eq!(log.read_tail(&current).await?.len(), 1);
     assert_eq!(

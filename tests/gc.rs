@@ -887,7 +887,7 @@ async fn resume_propagates_a_read_failure_before_any_delete() -> TestResult {
 }
 
 #[tokio::test]
-async fn unknown_entries_count_toward_the_scan_bound_and_survive() -> TestResult {
+async fn unknown_entry_flood_exhausts_the_scan_bound_and_survives() -> TestResult {
     let fixture = Fixture::new(
         "unknown-scan",
         Options {
@@ -901,6 +901,13 @@ async fn unknown_entries_count_toward_the_scan_bound_and_survive() -> TestResult
     fixture
         .raw
         .put(&unknown, Bytes::from_static(b"keep").into())
+        .await?;
+    fixture
+        .raw
+        .put(
+            &fixture.scope().join("another-unknown"),
+            Bytes::from_static(b"keep").into(),
+        )
         .await?;
     fixture.store.reset();
 
@@ -1289,6 +1296,128 @@ async fn per_record_reference_limit_is_not_a_whole_graph_limit() -> TestResult {
     assert!(matches!(
         fixture.log.start_collection(&second).await?,
         CollectionStart::Empty(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_drains_a_backlog_larger_than_its_plan_bound() -> TestResult {
+    let fixture = Fixture::new(
+        "batch-backlog",
+        Options {
+            max_collection_objects: 2,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let mut view = fixture.log.load().await?;
+    let live = fixture
+        .log
+        .put_object(&view, Bytes::from_static(b"live"))
+        .await?;
+    let prepared = fixture.log.prepare(
+        &view,
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![live.clone()],
+    )?;
+    view = match fixture.log.commit(prepared).await? {
+        CommitStatus::Committed(view) => view,
+        _ => return Err("live publication failed".into()),
+    };
+    for value in 0..9_u8 {
+        fixture
+            .log
+            .put_object(&view, Bytes::from(vec![value]))
+            .await?;
+    }
+    let unknown = fixture.scope().join("unknown");
+    fixture
+        .raw
+        .put(&unknown, Bytes::from_static(b"keep").into())
+        .await?;
+    let mut collected = 0;
+    let mut batches = 0;
+    loop {
+        match fixture.log.start_collection(&view).await? {
+            CollectionStart::Installed(fenced, report) => {
+                assert!(report.candidate_count() <= 2);
+                collected += report.candidate_count();
+                batches += 1;
+                let CollectionFinish::Complete(current, _) =
+                    fixture.log.resume_collection(&fenced).await?
+                else {
+                    return Err("batch did not finish".into());
+                };
+                view = current;
+                assert!(batches <= 9);
+            }
+            CollectionStart::Empty(_) => break,
+            _ => return Err("batch did not start".into()),
+        }
+    }
+    assert_eq!(collected, 9);
+    assert_eq!(batches, 5);
+    assert_eq!(
+        fixture.log.read_object(&view, live.reference()).await?,
+        Bytes::from_static(b"live")
+    );
+    assert_eq!(
+        fixture.raw.get(&unknown).await?.bytes().await?,
+        Bytes::from_static(b"keep")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_installs_a_partial_plan_at_the_scan_bound() -> TestResult {
+    let fixture = Fixture::new(
+        "partial-prefix",
+        Options {
+            max_collection_objects: 2,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let view = fixture.log.load().await?;
+    fixture
+        .log
+        .put_object(&view, Bytes::from_static(b"dead"))
+        .await?;
+    // Canonical data sorts before these unknown entries in the memory store.
+    for index in 0..5 {
+        fixture
+            .raw
+            .put(
+                &fixture.scope().join(format!("zzz-{index}")),
+                Bytes::from_static(b"keep").into(),
+            )
+            .await?;
+    }
+    let CollectionStart::Installed(fenced, report) = fixture.log.start_collection(&view).await?
+    else {
+        return Err("partial positive plan was not installed".into());
+    };
+    assert_eq!(report.candidate_count(), 1);
+    let CollectionFinish::Complete(current, _) = fixture.log.resume_collection(&fenced).await?
+    else {
+        return Err("partial plan did not finish".into());
+    };
+    for index in 0..5 {
+        assert_eq!(
+            fixture
+                .raw
+                .get(&fixture.scope().join(format!("zzz-{index}")))
+                .await?
+                .bytes()
+                .await?,
+            Bytes::from_static(b"keep")
+        );
+    }
+    assert!(matches!(
+        fixture.log.start_collection(&current).await,
+        Err(Error::LimitExceeded("collection scan objects"))
     ));
     Ok(())
 }

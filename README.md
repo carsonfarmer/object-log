@@ -101,7 +101,10 @@ existing-WAL status, exact commit-token recovery, and conservative metadata
 checkpointing with `checkpoint --retain-packs` under a bounded metadata profile.
 It clears a qualifying WAL tail while retaining every pack. The command also
 starts or resumes collection with `collect`; `collect --resume-only` restricts
-it to an already installed plan. Existing retentions block fresh planning.
+it to an already installed plan. Repeat collection until it reports empty to
+drain a large backlog: each plan contains a bounded positive deletion set.
+The live graph remains bounded, and excessive unknown namespace entries can
+exhaust a scan without a plan. Existing retentions block fresh planning.
 It migrates the legacy pack catalog with `migrate-catalog --recovery-file`. Migration publishes
 an authenticated lookup tree through the same conditional WAL head; cold object
 reads load only the indexes for selected packs. After migration,

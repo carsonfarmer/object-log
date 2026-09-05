@@ -177,6 +177,10 @@ fresh head. This converges maintenance state but cannot establish the exact
 historical outcome of the earlier attempt: this command does not persist an
 exact checkpoint token or run unbounded resolution after the helper returns.
 
+Collection completes one bounded deletion batch. Repeat `collect` until it
+reports empty to drain a larger backlog. The live-graph bound remains; excessive
+unknown namespace entries can still exhaust the scan limit.
+
 `collect` reloads the head and resumes its authenticated positive deletion plan
 if one is active. Otherwise it makes one attempt to plan and install a fresh
 collection, then runs only the installed plan. It does not checkpoint, release

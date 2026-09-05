@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt, stream};
 use object_store::UpdateVersion;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 use crate::format::{self, CollectionCandidate, CollectionPlan, CollectionPlanRef, Head};
@@ -43,7 +43,8 @@ pub struct Options {
     pub max_checkpoint_bytes: usize,
     /// Maximum concurrent retention identities in the head.
     pub max_retention_ids: usize,
-    /// Maximum objects in one collection scan, live graph, or deletion plan.
+    /// Maximum objects in a live graph or one deletion plan.
+    /// Collection scans examine at most the live count plus this limit plus one.
     pub max_collection_objects: usize,
     /// Maximum encoded bytes in one collection plan.
     pub max_collection_plan_bytes: usize,
@@ -546,8 +547,10 @@ impl Log {
 
     /// Creates a positive deletion plan and installs its head fence.
     ///
-    /// The method verifies the complete live graph and bounded namespace before
-    /// it creates a plan. It does not delete an object.
+    /// Verifies the complete live graph, then scans a bounded namespace prefix
+    /// for a positive deletion set. Repeat after completing each plan to reclaim
+    /// a larger backlog. Unknown entries survive; an unknown-entry flood can
+    /// exhaust the scan bound without finding candidates. No objects are deleted.
     ///
     /// # Errors
     ///
@@ -563,25 +566,44 @@ impl Log {
         }
 
         let live = self.mark_live(view).await?;
-        let mut candidates = Vec::new();
-        let mut scanned = 0_usize;
+        if self.options.max_collection_objects == 0 {
+            return Err(Error::LimitExceeded("collection scan objects"));
+        }
+        let scan_limit = live
+            .len()
+            .checked_add(self.options.max_collection_objects)
+            .and_then(|limit| limit.checked_add(1))
+            .ok_or(Error::LimitExceeded("collection scan objects"))?;
+        let mut candidates = BTreeMap::new();
+        let mut complete = false;
         let mut listed = self.store.list_scoped();
-        while let Some(item) = listed.next().await {
-            if scanned == self.options.max_collection_objects {
-                return Err(Error::LimitExceeded("collection scan objects"));
-            }
-            scanned += 1;
+        for _ in 0..scan_limit {
+            let Some(item) = listed.next().await else {
+                complete = true;
+                break;
+            };
             let item = item?;
             if let Some(key) = item.immutable_key
                 && !live.contains_key(&key)
             {
-                candidates.push(CollectionCandidate {
-                    key,
-                    bytes: item.size,
-                });
+                if candidates
+                    .insert(key, item.size)
+                    .is_some_and(|size| size != item.size)
+                {
+                    return Err(Error::CorruptObject);
+                }
+                if candidates.len() == self.options.max_collection_objects {
+                    break;
+                }
             }
         }
-        candidates.sort_unstable_by_key(|candidate| candidate.key);
+        if candidates.is_empty() && !complete {
+            return Err(Error::LimitExceeded("collection scan objects"));
+        }
+        let candidates = candidates
+            .into_iter()
+            .map(|(key, bytes)| CollectionCandidate { key, bytes })
+            .collect::<Vec<_>>();
         let candidate_bytes = candidates.iter().try_fold(0_u64, |total, candidate| {
             total
                 .checked_add(candidate.bytes)
