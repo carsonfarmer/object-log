@@ -30,7 +30,9 @@ impl HttpService for Service {
         // requests as Request, and broken pipes/resets/EOF as Interrupted.
         // Request also covers other pre-response request failures: the shared
         // policy restricts replay to a bodyless GET/HEAD and one extra attempt.
-        // Logical core requests and backend HTTP attempts remain distinct.
+        // This bounds HttpClient executions, not wire transmissions: reqwest
+        // retains its own safe protocol-NACK retry behavior. Logical core
+        // requests and backend HTTP attempts remain distinct.
         read_retry::retry_read(
             request,
             |request| self.0.execute(request),
