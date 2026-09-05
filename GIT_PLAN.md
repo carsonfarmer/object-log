@@ -33,8 +33,10 @@ authorized removal of the previous native implementation. That implementation
 and the entire native HTTP crate are removed. Useful client coverage runs
 through actual Spin; publication/recovery faults run in the portable library.
 Installed Git remains the
-benchmark reference. The measured WASIp2 SHA-1 8 MiB push performance finding
-is unchanged; see the [Spin measurements](docs/evidence/git-spin-performance-2026-09-04.md).
+benchmark reference. The earlier WASIp2 SHA-1 8 MiB push measurement used the
+buffered receive path. The benchmark now exercises streaming receive; repeat
+the paired comparison before attributing that earlier ratio to current serving
+behavior. Performance review remains open in issue #23.
 The historical foundation counts below describe their stated revision, not current size.
 
 Revision `b322985c616d948e7365739e3286baeaeb460acc` completes tasks 1 and 2 with
