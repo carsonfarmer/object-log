@@ -1,0 +1,18 @@
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+    Checking equivalent v1.0.2
+    Checking foldhash v0.1.5
+    Checking semver v1.0.28
+    Checking serde_json v1.0.151
+    Checking indexmap v2.14.1
+    Checking chrono v0.4.45
+    Checking serde_urlencoded v0.7.1
+    Checking quick-xml v0.41.0
+    Checking hashbrown v0.15.5
+    Checking wasmparser v0.244.0
+    Checking spin-sdk v5.2.0
+    Checking object_store v0.14.1
+    Checking object-log v0.1.0 (/Users/carsonfarmer/.codex/worktrees/shallow-linux-correction)
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/shallow-linux-correction/crates/object-log-git)
+    Checking object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/shallow-linux-correction/crates/object-log-git-spin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.78s

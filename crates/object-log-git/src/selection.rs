@@ -107,13 +107,11 @@ pub(crate) fn select(
     shallow_ids.sort_unstable();
     unshallow.sort_unstable();
     let mut ids = Vec::with_capacity(count);
-    ids.extend(
-        graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| (wanted[index] && !present[index]).then_some(node.id)),
-    );
+    ids.extend(graph.nodes.iter().enumerate().filter_map(|(index, node)| {
+        // Unshallow acknowledges a commit the client already owns; its
+        // newly exposed parents/content may still need transmission.
+        (wanted[index] && !present[index] && (!old[index] || boundary[index])).then_some(node.id)
+    }));
     ids.sort_unstable();
     Ok(Selection {
         ids,
@@ -335,6 +333,12 @@ fn boundaries(
             .map(|(index, _)| distance[index])
             .min()
             .unwrap_or(0);
+        // Relative deepening cannot create a boundary in already-complete
+        // wanted history. Unrelated client boundaries remain unchanged. Git
+        // 2.55 fixed this case; infinite depth still unshallows every boundary.
+        if current == 0 && depth != i32::MAX as u32 {
+            return Ok(old.to_vec());
+        }
         depth = depth.saturating_add(current).min(i32::MAX as u32);
     }
     let included = |index: usize| {

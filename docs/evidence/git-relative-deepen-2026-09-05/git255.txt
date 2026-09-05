@@ -1,0 +1,9 @@
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/.codex/worktrees/shallow-linux-correction/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.67s
+     Running tests/shallow.rs (/Users/carsonfarmer/.codex/worktrees/e3fe/object-log/target/debug/deps/shallow-dcebe63201bbacbf)
+
+running 1 test
+test shallow_depth_merge_deepen_unshallow_and_exclusion_match_git ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.15s
+
