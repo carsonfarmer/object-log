@@ -1054,8 +1054,8 @@ impl Log {
             .await
     }
 
-    // Keep ordered decoding bounded independently of the tail length. Both
-    // callers consume the stream to completion before returning durable state.
+    // Keep ordered decoding bounded independently of the tail length. Callers
+    // consume the stream to completion before returning or publishing state.
     pub(crate) fn tail_records<'a>(
         &'a self,
         view: &'a View,
@@ -1065,13 +1065,14 @@ impl Log {
             .checkpoint()
             .map(|checkpoint| checkpoint.through_commit);
         Ok(stream::iter(view.tail().iter().cloned())
-            .map(move |reference| async move {
-                match self.read_commit_optional(reference).await? {
+            .map(move |reference| self.read_commit_optional(reference))
+            .buffered(MAX_CONCURRENT_READS)
+            .then(move |record| async move {
+                match record? {
                     Some(record) => Ok(record),
                     None => Err(self.missing_read_error(view).await?),
                 }
             })
-            .buffered(MAX_CONCURRENT_READS)
             .map(move |record| {
                 let record = record?;
                 if record.expected_tip != expected_tip {
@@ -1107,7 +1108,9 @@ impl Log {
         snapshot: Bytes,
         objects: Vec<StagedObject>,
     ) -> Result<CheckpointStatus, Error> {
-        self.read_tail(view).await?;
+        self.tail_records(view)?
+            .try_for_each(|_| futures::future::ready(Ok(())))
+            .await?;
         self.validate_staged_objects(view, &objects)?;
         let objects = objects
             .into_iter()
@@ -2197,19 +2200,22 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct OversizedCommitStore {
+    struct ReadProbeStore {
         inner: InMemory,
         body_polls: Arc<std::sync::atomic::AtomicUsize>,
+        oversize_commits: bool,
+        delay_heads: std::sync::atomic::AtomicBool,
+        head_reads: std::sync::atomic::AtomicUsize,
     }
 
-    impl std::fmt::Display for OversizedCommitStore {
+    impl std::fmt::Display for ReadProbeStore {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("oversized commit store")
+            formatter.write_str("read probe store")
         }
     }
 
     #[async_trait::async_trait]
-    impl object_store::ObjectStore for OversizedCommitStore {
+    impl object_store::ObjectStore for ReadProbeStore {
         async fn put_opts(
             &self,
             location: &Path,
@@ -2232,8 +2238,15 @@ mod tests {
             location: &Path,
             options: object_store::GetOptions,
         ) -> object_store::Result<object_store::GetResult> {
+            if location.as_ref().ends_with("/index.cbor")
+                && self.delay_heads.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                self.head_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
             let mut result = self.inner.get_opts(location, options).await?;
-            if location.as_ref().contains("/commits/") {
+            if self.oversize_commits && location.as_ref().contains("/commits/") {
                 result.meta.size += 1;
                 result.range.end += 1;
                 let polls = Arc::clone(&self.body_polls);
@@ -2293,7 +2306,10 @@ mod tests {
     #[tokio::test]
     async fn oversized_commit_is_rejected_without_polling_its_body()
     -> Result<(), Box<dyn std::error::Error>> {
-        let store = Arc::new(OversizedCommitStore::default());
+        let store = Arc::new(ReadProbeStore {
+            oversize_commits: true,
+            ..ReadProbeStore::default()
+        });
         let backend = ValidatedBackend::new(store.clone(), Path::from("read-bound")).await?;
         let log = Log::open(&backend, &LogId::new("commit")?, Options::default()).await?;
         let view = log.load().await?;
@@ -2905,6 +2921,50 @@ mod tests {
             faults.metrics().operation(Operation::Get).requests,
             u64::try_from(count)?
         );
+        faults.reset();
+        let through = state.view().tail().last().ok_or("tail is empty")?;
+        assert!(matches!(
+            log.publish_checkpoint(state.view(), through, Bytes::from_static(&[96]), Vec::new())
+                .await?,
+            CheckpointStatus::Published(_)
+        ));
+        assert_eq!(
+            faults.metrics().operation(Operation::Get).requests,
+            u64::try_from(count)?
+        );
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialization_classifies_multiple_missing_commits_with_one_head_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(ReadProbeStore::default());
+        let backend = ValidatedBackend::new(store.clone(), Path::from("missing-tail")).await?;
+        let log = Log::open(&backend, &LogId::new("commits")?, Options::default()).await?;
+        let mut view = log.load().await?;
+        for _ in 0..8 {
+            view = fold_append(&log, &view, Bytes::from_static(&[1])).await?;
+        }
+        log.store
+            .delete_immutable_batch(
+                view.tail()
+                    .iter()
+                    .map(|record| log.commit_immutable_key(record)),
+            )
+            .await?;
+        store
+            .delay_heads
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = crate::materialize(&log, view, &FoldProbe::default()).await;
+        assert!(matches!(
+            result,
+            Err(crate::MaterializeError::Log(Error::CorruptObject))
+        ));
+        assert_eq!(
+            store.head_reads.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         Ok(())
     }
 
@@ -2912,7 +2972,10 @@ mod tests {
     async fn materialization_drops_partial_state_on_late_errors()
     -> Result<(), Box<dyn std::error::Error>> {
         for failure in ["body", "parent", "domain"] {
-            let log = test_log(failure, Options::default()).await?;
+            let faults = FaultStore::new(InMemory::new());
+            let backend =
+                ValidatedBackend::new(Arc::new(faults.clone()), Path::from("late-failure")).await?;
+            let log = Log::open(&backend, &LogId::new(failure)?, Options::default()).await?;
             let mut view = log.load().await?;
             for position in 0..3 {
                 let byte = if failure == "domain" && position == 2 {
@@ -2984,6 +3047,20 @@ mod tests {
             }
             assert_eq!(probe.applied.get(), 2);
             assert!(probe.dropped.get(), "partial state escaped after {failure}");
+            if failure != "domain" {
+                faults.reset();
+                assert!(
+                    log.publish_checkpoint(
+                        &view,
+                        &view.tail()[2],
+                        Bytes::from_static(&[3]),
+                        Vec::new()
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+            }
         }
         Ok(())
     }
