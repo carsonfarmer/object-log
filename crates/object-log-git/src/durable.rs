@@ -179,7 +179,7 @@ pub(crate) async fn load(
     if roots.len() > usize::from(u16::MAX) {
         return invalid("catalog has too many packs");
     }
-    let memory = operation.reserve(catalog_bytes(format, roots)?)?;
+    let memory = operation.reserve_state(catalog_bytes(format, roots)?)?;
     for (_, root) in roots {
         let root_bytes = usize::try_from(root.len())
             .map_err(|_| Error::InvalidPack("pack root exceeds memory".into()))?;

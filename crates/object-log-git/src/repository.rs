@@ -3,7 +3,7 @@ use std::{fmt, mem::size_of};
 use object_log::{Log, ObjectRef, StagedObject, View, materialize};
 
 use crate::{
-    Error, ObjectFormat, RefSnapshot,
+    Error, ObjectFormat, ObjectId, RefSnapshot,
     durable::{self, Catalog},
     format::PackDescriptor,
     pack::budget::{Operation, Pool, Reservation},
@@ -28,7 +28,16 @@ use tokio::{
 };
 
 #[cfg(feature = "native-oracle")]
-use crate::{ObjectId, RefUpdate, format::Record, git};
+use crate::{RefUpdate, format::Record, git};
+
+// Admission bounds include decoder Vec capacity and simultaneous canonical
+// re-encoding. Head retention IDs can encode one byte into a 24-byte Vec;
+// malformed Git ref arrays can encode two bytes into a 96-byte RefUpdate.
+// The factors cover doubling capacity, the encoded buffers, and fixed headers.
+const HEAD_DECODE_FACTOR: usize = 64;
+const RECORD_DECODE_FACTOR: usize = 128;
+const VIEW_RETAIN_FACTOR: usize = 8;
+const STATE_RETAIN_FACTOR: usize = 4;
 
 /// One exact Git repository view backed by an object log.
 #[cfg_attr(
@@ -46,6 +55,7 @@ pub struct Repository {
     catalog: Catalog,
     operation: Operation,
     _state_memory: Reservation,
+    _view_memory: Reservation,
     #[cfg(feature = "native-oracle")]
     native: Option<Native>,
 }
@@ -95,9 +105,15 @@ impl Repository {
         format: ObjectFormat,
         operation: &Operation,
     ) -> Result<Self, Error> {
-        operation.io(0)?;
+        // The core loads and decodes the head before returning its exact view.
+        let head = log.options().max_head_bytes;
+        let head_memory = operation.reserve(memory_bound(head, HEAD_DECODE_FACTOR)?)?;
+        operation.io(head)?;
+        operation.work(head)?;
         let view = log.load().await?;
-        preflight_view(operation, &view)?;
+        let view_memory = operation.reserve_state(memory_bound(head, VIEW_RETAIN_FACTOR)?)?;
+        drop(head_memory);
+        let materialization_memory = preflight_view(operation, &view)?;
         let materialized = materialize(log, view, &Machine::new(format))
             .await
             .map_err(|error| match error {
@@ -105,7 +121,8 @@ impl Repository {
                 object_log::MaterializeError::State(error) => error,
             })?;
         let (view, state) = materialized.into_parts();
-        let state_memory = operation.reserve(state_bytes(&state)?)?;
+        let state_memory = operation.reserve_state(state_bytes(&state)?)?;
+        drop(materialization_memory);
         let roots = pack_roots(&state);
         let catalog = durable::load(operation, log, &view, format, &roots).await?;
 
@@ -117,6 +134,7 @@ impl Repository {
             catalog,
             operation: operation.clone(),
             _state_memory: state_memory,
+            _view_memory: view_memory,
             #[cfg(feature = "native-oracle")]
             native: None,
         })
@@ -302,21 +320,12 @@ impl Repository {
             if self.state.packs.contains_key(&id) {
                 return Err(Error::InvalidRecord("pack is already present"));
             }
-            let _input_memory = self
-                .operation
-                .reserve(crate::pack::MAX_RECEIVE_PACK_BYTES)?;
+            let _input_memory = self.operation.reserve(crate::pack::MAX_PACK_BYTES)?;
             let file = File::open(&pack.path)
                 .await
                 .map_err(|error| Error::PackStorage(error.to_string()))?;
-            let mut bytes = Vec::with_capacity(crate::pack::MAX_RECEIVE_PACK_BYTES);
-            file.take((crate::pack::MAX_RECEIVE_PACK_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-                .await
-                .map_err(|error| Error::PackStorage(error.to_string()))?;
-            if bytes.len() > crate::pack::MAX_RECEIVE_PACK_BYTES {
-                return Err(Error::InvalidPack("native pack exceeds byte limit".into()));
-            }
-            let normalized = crate::pack::normalize(&self.operation, self.format, &bytes, &[])?;
+            let bytes = read_native_pack(file).await?;
+            let normalized = crate::pack::normalize_stored(&self.operation, self.format, &bytes)?;
             if normalized.id != id {
                 return Err(Error::InvalidPack("native pack ID changed".into()));
             }
@@ -390,33 +399,52 @@ impl fmt::Debug for Repository {
     }
 }
 
-fn preflight_view(operation: &Operation, view: &View) -> Result<(), Error> {
+fn memory_bound(bytes: usize, factor: usize) -> Result<usize, Error> {
+    bytes
+        .checked_mul(factor)
+        .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))
+}
+
+fn preflight_view(operation: &Operation, view: &View) -> Result<Reservation, Error> {
     let records = view
         .checkpoint()
         .into_iter()
         .map(|checkpoint| checkpoint.object().len())
         .chain(view.tail().iter().map(object_log::CommitRef::len));
+    let mut total = 0_usize;
     for bytes in records {
         let bytes = usize::try_from(bytes)
             .map_err(|_| Error::InvalidPack("Git state exceeds memory".into()))?;
+        total = total
+            .checked_add(bytes)
+            .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))?;
         operation.io(bytes)?;
         operation.work(bytes)?;
     }
-    Ok(())
+    // Includes decoded Vec capacity, BTree nodes, proofs, and canonical re-encoding.
+    // Even malformed short ref records can expand substantially during decoding.
+    operation.reserve(memory_bound(total, RECORD_DECODE_FACTOR)?)
 }
 
 fn state_bytes(state: &State) -> Result<usize, Error> {
     let refs = state.refs.iter().try_fold(0_usize, |total, (name, _)| {
         total.checked_add(size_of::<(Vec<u8>, crate::ObjectId)>() + name.len())
     });
-    refs.and_then(|bytes| {
-        bytes.checked_add(
-            state.packs.len()
-                * (size_of::<(crate::ObjectId, (u64, StagedObject))>()
-                    + size_of::<(PackDescriptor, ObjectRef)>()),
-        )
-    })
-    .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))
+    let bytes = refs
+        .and_then(|bytes| {
+            bytes.checked_add(
+                state.packs.len()
+                    * (size_of::<(crate::ObjectId, (u64, StagedObject))>()
+                        + size_of::<(PackDescriptor, ObjectRef)>()),
+            )
+        })
+        .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))?;
+    // A nonempty BTreeMap allocates a full root leaf even for one entry.
+    let leaves = usize::from(!state.refs.is_empty()) * 12 * size_of::<(Vec<u8>, ObjectId)>()
+        + usize::from(!state.packs.is_empty()) * 12 * size_of::<(ObjectId, (u64, StagedObject))>();
+    memory_bound(bytes, STATE_RETAIN_FACTOR)?
+        .checked_add(leaves)
+        .ok_or_else(|| Error::InvalidPack("Git state exceeds memory".into()))
 }
 
 fn pack_roots(state: &State) -> Vec<(PackDescriptor, ObjectRef)> {
@@ -449,6 +477,35 @@ impl PreparedPush {
     pub async fn publish(self) -> Result<CommitStatus, Error> {
         Ok(self.log.commit(self.prepared).await?)
     }
+}
+
+#[cfg(feature = "native-oracle")]
+async fn read_native_pack(mut file: File) -> Result<Vec<u8>, Error> {
+    let length = file
+        .metadata()
+        .await
+        .map_err(|e| Error::PackStorage(e.to_string()))?
+        .len();
+    let length = usize::try_from(length)
+        .ok()
+        .filter(|&n| n <= crate::pack::MAX_PACK_BYTES)
+        .ok_or_else(|| Error::InvalidPack("native pack exceeds byte limit".into()))?;
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes)
+        .await
+        .map_err(|e| Error::PackStorage(e.to_string()))?;
+    let mut extra = [0];
+    if file
+        .read(&mut extra)
+        .await
+        .map_err(|e| Error::PackStorage(e.to_string()))?
+        != 0
+    {
+        return Err(Error::InvalidPack(
+            "native pack changed while reading".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(feature = "native-oracle")]
@@ -631,6 +688,124 @@ mod tests {
         Ok(descriptor)
     }
 
+    #[test]
+    fn decode_admission_covers_dense_malformed_ref_vectors() -> TestResult {
+        // A missing optional pair makes [h''] the shortest decodable RefUpdate.
+        assert!(2 * size_of::<RefUpdate>() + 16 <= 2 * RECORD_DECODE_FACTOR);
+        assert!(2 * size_of::<Vec<u8>>() + 8 <= HEAD_DECODE_FACTOR);
+        let mut bytes = minicbor::Encoder::new(Vec::new());
+        bytes
+            .map(5)?
+            .u8(0)?
+            .u32(1)?
+            .u8(1)?
+            .bool(true)?
+            .u8(2)?
+            .u8(1)?
+            .u8(3)?
+            .array(4096)?;
+        for _ in 0..4096 {
+            bytes.array(1)?.bytes(&[])?;
+        }
+        bytes.u8(4)?.array(0)?;
+        let bytes = bytes.into_writer();
+        assert!(Record::decode(&bytes, ObjectFormat::Sha1, 0).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn common_open_accepts_384_transaction_history() -> TestResult {
+        let fixture = fixture(ObjectFormat::Sha1, b"history")?;
+        let (log, _, _) = test_log("history-384").await?;
+        publish_durable_pack(&log, &fixture, ObjectFormat::Sha1).await?;
+        for index in 0..383 {
+            let view = log.load().await?;
+            let (expected, target) = if index % 2 == 0 {
+                (None, Some(fixture.target))
+            } else {
+                (Some(fixture.target), None)
+            };
+            let bytes = Machine::new(ObjectFormat::Sha1).transaction(
+                vec![RefUpdate::new("refs/tags/changing", expected, target)?],
+                vec![],
+            )?;
+            let prepared = log.prepare(&view, TransactionId::new(), bytes, Bytes::new(), vec![])?;
+            assert!(matches!(
+                log.commit(prepared).await?,
+                CommitStatus::Committed(_)
+            ));
+        }
+        let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+        let repository = Repository::open_with_pool(&log, ObjectFormat::Sha1, &pool).await?;
+        assert_eq!(repository.view.tail().len(), 384);
+        assert_eq!(
+            repository.refs().get(&b"refs/heads/main"[..]),
+            Some(&fixture.target)
+        );
+        drop(repository);
+        assert!(pool.admit().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialization_rejects_before_tail_reads_without_resetting_budget() -> TestResult {
+        let fixture = fixture(ObjectFormat::Sha1, b"preflight")?;
+        let (log, faults, _) = test_log("materialize-preflight").await?;
+        publish_durable_pack(&log, &fixture, ObjectFormat::Sha1).await?;
+        let view = log.load().await?;
+        faults.reset();
+        let operation = Pool::new(0).admit()?;
+        assert!(preflight_view(&operation, &view).is_err());
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+        assert_eq!(operation.calls(), view.tail().len());
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn head_transfer_is_charged_before_read_and_after_retry() -> TestResult {
+        let (log, faults, _) = test_log("head-budget").await?;
+        let operation = Pool::new(crate::pack::budget::LIVE_BYTES).admit()?;
+        operation.io(crate::pack::budget::TRANSFER_BYTES - log.options().max_head_bytes)?;
+        faults.reset();
+        let repository = Repository::open_attempt(&log, ObjectFormat::Sha1, &operation).await?;
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        drop(repository);
+        operation.retry()?;
+        faults.reset();
+        assert!(
+            Repository::open_attempt(&log, ObjectFormat::Sha1, &operation)
+                .await
+                .is_err()
+        );
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+        assert_eq!(operation.live_bytes(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_stored_read_accepts_exact_limit_and_rejects_next_byte() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("pack");
+        let file = File::create(&path).await?;
+        file.set_len(crate::pack::MAX_PACK_BYTES as u64).await?;
+        drop(file);
+        assert_eq!(
+            read_native_pack(File::open(&path).await?).await?.len(),
+            crate::pack::MAX_PACK_BYTES
+        );
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .await?;
+        file.set_len(crate::pack::MAX_PACK_BYTES as u64 + 1).await?;
+        assert!(matches!(
+            read_native_pack(File::open(&path).await?).await,
+            Err(Error::InvalidPack(_))
+        ));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn common_repository_retains_one_authenticated_exact_view() -> TestResult {
         let fixture = fixture(ObjectFormat::Sha1, b"common repository")?;
@@ -685,11 +860,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(
-            faults.metrics().events.iter().all(|event| {
-                event.operation != Operation::Get || !event.path.contains("/nodes/")
-            })
-        );
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
         assert!(bounded.admit().is_ok());
 
         faults.reset();

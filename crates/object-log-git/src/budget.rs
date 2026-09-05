@@ -8,6 +8,7 @@ use bytes::Bytes;
 use crate::Error;
 
 pub(crate) const LIVE_BYTES: usize = 88 * 1024 * 1024;
+pub(crate) const STATE_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const CALLS: usize = 512;
 pub(crate) const TRANSFER_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const WORK_BYTES: usize = 256 * 1024 * 1024;
@@ -61,6 +62,7 @@ impl Pool {
             work: AtomicUsize::new(0),
             thin_rounds: AtomicUsize::new(0),
             retries: AtomicUsize::new(0),
+            state: AtomicUsize::new(0),
         })))
     }
 }
@@ -72,6 +74,7 @@ struct OperationState {
     work: AtomicUsize,
     thin_rounds: AtomicUsize,
     retries: AtomicUsize,
+    state: AtomicUsize,
 }
 impl Drop for OperationState {
     fn drop(&mut self) {
@@ -115,7 +118,20 @@ impl Operation {
         Ok(Reservation {
             operation: self.0.clone(),
             bytes,
+            state: false,
         })
+    }
+
+    pub(crate) fn reserve_state(&self, bytes: usize) -> Result<Reservation, Error> {
+        let mut reservation = self.reserve(bytes)?;
+        charge(
+            &self.0.state,
+            bytes,
+            STATE_BYTES,
+            "Git state-memory limit exceeded",
+        )?;
+        reservation.state = true;
+        Ok(reservation)
     }
 
     #[cfg(test)]
@@ -151,10 +167,16 @@ fn charge(
 pub(crate) struct Reservation {
     operation: Arc<OperationState>,
     bytes: usize,
+    state: bool,
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
+        if self.state {
+            self.operation
+                .state
+                .fetch_sub(self.bytes, Ordering::Relaxed);
+        }
         self.operation
             .pool
             .live
@@ -170,6 +192,17 @@ impl Reservation {
             .ok_or_else(|| Error::InvalidPack("Git live-memory size overflowed".into()))?;
         let pool = &self.operation.pool;
         charge(&pool.live, bytes, pool.limit, MEMORY_LIMIT)?;
+        if self.state
+            && let Err(error) = charge(
+                &self.operation.state,
+                bytes,
+                STATE_BYTES,
+                "Git state-memory limit exceeded",
+            )
+        {
+            pool.live.fetch_sub(bytes, Ordering::Relaxed);
+            return Err(error);
+        }
         self.bytes = next;
         Ok(())
     }
@@ -180,6 +213,9 @@ impl Reservation {
             .checked_sub(bytes)
             .ok_or_else(|| Error::InvalidPack("Git live-memory size underflowed".into()))?;
         self.operation.pool.live.fetch_sub(bytes, Ordering::Relaxed);
+        if self.state {
+            self.operation.state.fetch_sub(bytes, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
@@ -205,6 +241,24 @@ pub(crate) fn hold(bytes: Bytes, reservation: Reservation) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_phase_is_shared_and_failed_growth_rolls_back() -> Result<(), Error> {
+        let operation = Pool::new(LIVE_BYTES).admit()?;
+        let mut first = operation.reserve_state(STATE_BYTES - 1)?;
+        let last = operation.reserve_state(1)?;
+        assert!(operation.reserve_state(1).is_err());
+        assert!(first.grow(1).is_err());
+        assert_eq!(operation.live_bytes(), STATE_BYTES);
+        drop(last);
+        first.grow(1)?;
+        first.shrink(1)?;
+        assert_eq!(operation.live_bytes(), STATE_BYTES - 1);
+        drop(first);
+        assert_eq!(operation.live_bytes(), 0);
+        assert!(operation.reserve_state(STATE_BYTES).is_ok());
+        Ok(())
+    }
 
     #[test]
     fn admission_reservations_and_slices_release_on_last_drop() -> Result<(), Error> {

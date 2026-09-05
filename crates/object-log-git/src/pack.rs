@@ -89,6 +89,23 @@ pub(crate) fn normalize(
 ) -> Result<Normalized, Error> {
     normalize_with(operation, format, input, external_bases, DEFAULT_LIMITS)
 }
+#[cfg(feature = "native-oracle")]
+pub(crate) fn normalize_stored(
+    operation: &budget::Operation,
+    format: ObjectFormat,
+    input: &[u8],
+) -> Result<Normalized, Error> {
+    normalize_with(
+        operation,
+        format,
+        input,
+        &[],
+        Limits {
+            input_bytes: MAX_PACK_BYTES,
+            ..DEFAULT_LIMITS
+        },
+    )
+}
 fn normalize_with(
     operation: &budget::Operation,
     format: ObjectFormat,
@@ -696,6 +713,39 @@ mod tests {
             delta_integer(bytes),
             Err(Error::InvalidPack(message)) if message == expected
         ));
+    }
+
+    #[cfg(feature = "native-oracle")]
+    #[test]
+    fn normalized_storage_can_exceed_the_network_input_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new(ObjectFormat::Sha1)?;
+        let mut ids = Vec::new();
+        let mut seed = 7_u64;
+        for _ in 0..2 {
+            let mut data = vec![0; 5 * 1024 * 1024];
+            for byte in &mut data {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                *byte = seed.to_le_bytes()[0];
+            }
+            ids.extend(git(
+                fixture.dir.path(),
+                ["hash-object", "-w", "--stdin"],
+                &data,
+            )?);
+        }
+        let bytes = git(
+            fixture.dir.path(),
+            ["pack-objects", "--stdout", "--window=0"],
+            &ids,
+        )?;
+        assert!(bytes.len() > MAX_RECEIVE_PACK_BYTES && bytes.len() <= MAX_PACK_BYTES);
+        assert!(normalize(ObjectFormat::Sha1, &bytes, &[]).is_err());
+        let stored = super::normalize_stored(&operation(), ObjectFormat::Sha1, &bytes)?;
+        assert_eq!(stored.bytes, bytes);
+        Ok(())
     }
 
     #[test]

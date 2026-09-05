@@ -808,6 +808,9 @@ fn decode_node_payload(
     if child_count > options.max_object_refs {
         return Err(Error::LimitExceeded("object references"));
     }
+    // A canonical child reference needs at least 58 bytes. Reject impossible
+    // counts before allocating, even when the configured reference limit is large.
+    valid(child_count <= (bytes.len() - decoder.position()) / 58)?;
     let mut children = Vec::new();
     children
         .try_reserve_exact(child_count)
@@ -1377,6 +1380,29 @@ mod tests {
             active_plan: None,
             retention_ids: Vec::new(),
         }
+    }
+
+    #[test]
+    fn node_rejects_impossible_child_count_before_reserving()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder
+            .map(3)?
+            .u8(1)?
+            .u32(super::FORMAT_VERSION)?
+            .u8(2)?
+            .bytes(&[])?
+            .u8(3)?
+            .array(u64::MAX)?;
+        let options = Options {
+            max_object_refs: usize::MAX,
+            ..Options::default()
+        };
+        assert!(matches!(
+            super::decode_node_payload(&encoder.into_writer(), options),
+            Err(crate::Error::InvalidFormat(_))
+        ));
+        Ok(())
     }
 
     #[test]
