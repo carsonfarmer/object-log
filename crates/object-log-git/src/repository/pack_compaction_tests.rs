@@ -405,3 +405,159 @@ async fn live_pack_compaction_rejects_authenticated_wrong_blob_identity() -> Tes
     }
     Ok(())
 }
+
+async fn compacted_fetch_read_count(
+    backend: &ValidatedBackend,
+    log: &Log,
+    faults: &FaultStore,
+    format: ObjectFormat,
+    ids: &[ObjectId],
+    oracle: &Fixture,
+) -> TestResult<u64> {
+    faults.reset();
+    let cold =
+        Log::open_existing(backend, &LogId::new("compaction-cycles")?, log.options()).await?;
+    let repository = common_open(&cold, format).await?;
+    let pack = repository.fetch_pack(ids, &[], false).await?;
+    let reads = faults.metrics().operation(Operation::Get).requests;
+    let path = oracle.directory.path().join("cycle.pack");
+    fs::write(&path, pack)?;
+    command(
+        Some(&oracle.directory.path().join("source")),
+        &["index-pack", "--strict", path.to_str().ok_or("path")?],
+    )?;
+    let listing = output(
+        Some(&oracle.directory.path().join("source")),
+        &[
+            "verify-pack",
+            "-v",
+            path.with_extension("idx").to_str().ok_or("index path")?,
+        ],
+    )?;
+    for id in ids {
+        let expected = id.to_string();
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(expected.as_str())),
+            "fetched pack omitted requested target {id}"
+        );
+    }
+    Ok(reads)
+}
+
+async fn checkpoint_and_collect_compacted(log: &Log, format: ObjectFormat) -> TestResult {
+    let operation = Pool::new(crate::pack::budget::LIVE_BYTES).admit_maintenance()?;
+    assert!(matches!(
+        Repository::retain_packs(log, format, &operation).await?,
+        CheckpointStatus::Published(_)
+    ));
+    let view = log.load().await?;
+    assert!(matches!(
+        log.start_collection(&view).await?,
+        object_log::CollectionStart::Installed(..)
+    ));
+    let view = log.load().await?;
+    assert!(matches!(
+        log.resume_collection(&view).await?,
+        object_log::CollectionFinish::Complete(..)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_pack_compaction_repeated_push_cycles_bound_cold_reads() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let (log, faults, backend) = test_log("compaction-cycles").await?;
+        common_open(&log, format)
+            .await?
+            .migrate_catalog_attempt(TransactionId::new())
+            .await?;
+        let mut fixtures = Vec::new();
+        let mut first_cycle_reads = None;
+        for cycle in 0..3 {
+            let mut selected = Vec::new();
+            for push in 0..3 {
+                let item = fixture(format, format!("cycle {cycle}, push {push}").as_bytes())?;
+                let input = receive_input(
+                    format,
+                    &[RefUpdate::new(
+                        format!("refs/heads/cycle-{cycle}-{push}"),
+                        None,
+                        Some(item.target),
+                    )?],
+                    &fs::read(&item.pack)?,
+                    true,
+                );
+                common_open(&log, format)
+                    .await?
+                    .prepare_receive(TransactionId::new(), input)
+                    .await?
+                    .publish_receive()
+                    .await?;
+                selected.push(item.target);
+                fixtures.push(item);
+            }
+            let before = compacted_fetch_read_count(
+                &backend,
+                &log,
+                &faults,
+                format,
+                &selected,
+                &fixtures[0],
+            )
+            .await?;
+            // Unrelated retained history must not add pack-index reads to
+            // this same three-target, nine-object cold lookup workload.
+            if let Some(first) = first_cycle_reads {
+                assert!(before <= first + 2);
+            } else {
+                first_cycle_reads = Some(before);
+            }
+            let repository = common_open(&log, format).await?;
+            let (prepared, memory) = repository
+                .prepare_pack_compaction(TransactionId::new())
+                .await?;
+            assert!(matches!(
+                repository.log.commit(prepared).await?,
+                CommitStatus::Committed(_)
+            ));
+            let compaction_work = repository.operation.work_bytes();
+            drop(memory);
+            drop(repository);
+            checkpoint_and_collect_compacted(&log, format).await?;
+            let after = compacted_fetch_read_count(
+                &backend,
+                &log,
+                &faults,
+                format,
+                &selected,
+                &fixtures[0],
+            )
+            .await?;
+            assert!(
+                after < before,
+                "cold reads did not fall: {before} -> {after}"
+            );
+            let repository = common_open(&log, format).await?;
+            let expected = fixtures
+                .iter()
+                .enumerate()
+                .map(|(ordinal, item)| {
+                    (
+                        format!("refs/heads/cycle-{}-{}", ordinal / 3, ordinal % 3).into_bytes(),
+                        item.target,
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(repository.refs(), &expected);
+            let all = fixtures.iter().map(|item| item.target).collect::<Vec<_>>();
+            compacted_fetch_read_count(&backend, &log, &faults, format, &all, &fixtures[0]).await?;
+            eprintln!(
+                "compaction memory format={format:?} cycle={cycle}: cold reads {before} -> {after}; compaction work={compaction_work}; live refs={}",
+                fixtures.len()
+            );
+        }
+    }
+    Ok(())
+}
