@@ -620,6 +620,30 @@ impl<'a> Reader<'a> {
         ))
     }
 
+    /// Authenticated pack-header kind, following only bounded delta headers.
+    /// This is selection metadata, not verification of the claimed object ID.
+    /// Any retained object still needs `verify` or `find` before it is emitted.
+    pub(crate) async fn object_kind(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<Option<gix_object::Kind>, Error> {
+        let Some(mut location) = self.location(id).await? else {
+            return Ok(None);
+        };
+        for _ in 0..=MAX_DELTA_DEPTH {
+            self.catalog.operation.work(42)?;
+            let entry = self.entry_header(location).await?;
+            if let Some(kind) = entry.header.as_kind() {
+                return Ok(Some(kind));
+            }
+            location.index = self
+                .pack(location.pack)
+                .base(&entry)?
+                .ok_or_else(|| Error::InvalidPack("delta base is missing".into()))?;
+        }
+        invalid("delta graph is too deep")
+    }
+
     /// Size for filtering only: full blobs use authenticated, canonical pack
     /// metadata without checking the decoded size or object ID. Selected content
     /// must still pass `verify`. Deltas are verified through bounded replay, so
@@ -2611,9 +2635,11 @@ mod tests {
                 let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
                 let mut reader = Reader::new(&guarded_log, &view, &catalog);
                 for (id, data) in fixture.objects {
+                    assert_eq!(reader.object_kind(id).await?, Some(gix_object::Kind::Blob));
                     assert_eq!(reader.object_size(id).await?, Some(data.len()));
                 }
                 let missing = ObjectId::from_bytes(format, &vec![0x42; format.digest_len()])?;
+                assert_eq!(reader.object_kind(missing).await?, None);
                 assert_eq!(reader.object_size(missing).await?, None);
             }
             for size in [0, 15, 16, 127, 128, 2 * CHUNK_BYTES] {
@@ -2634,6 +2660,7 @@ mod tests {
                     .operation
                     .reserve(LIVE_BYTES - catalog.operation.live_bytes() - 42)?;
                 store.reset();
+                assert_eq!(reader.object_kind(id).await?, Some(gix_object::Kind::Blob));
                 assert_eq!(reader.object_size(id).await?, Some(size));
                 assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
                 assert!(reader.verify(id).await.is_err());

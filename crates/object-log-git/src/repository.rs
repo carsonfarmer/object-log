@@ -10,6 +10,7 @@ mod catalog_maintenance;
 mod catalog_migration;
 mod catalog_reuse;
 mod default_branch;
+mod fetch_graph;
 mod maintenance;
 mod pack_compaction;
 mod receive_command;
@@ -207,25 +208,17 @@ impl Repository {
             filter,
             uris,
         } = options;
-        let catalog = self.catalog().await?;
-        let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
-        let _roots_memory = self
-            .operation
-            .reserve_state(self.state.refs.len() * size_of::<ObjectId>())?;
-        let roots = self.state.refs.values().copied().collect::<Vec<_>>();
-        let graph = crate::graph::Graph::load(&self.operation, &mut reader, &roots).await?;
-        for (name, id) in &self.state.refs {
-            if name.starts_with(b"refs/heads/")
-                && graph.location(*id).is_none_or(|index| {
-                    graph.nodes[index as usize].kind != Some(gix_object::Kind::Commit)
-                })
-            {
-                return Err(Error::InvalidReference);
-            }
+        if wants.is_empty() || wants.len() > 1024 || haves.len() > 32768 {
+            return Err(Error::InvalidReference);
         }
         let raw_pack = shallow.is_none();
         let default = wire::ShallowRequest::default();
         let shallow = shallow.unwrap_or(&default);
+        let catalog = self.catalog().await?;
+        let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
+        let graph = self
+            .fetch_graph(&mut reader, wants, haves, include_tag, shallow)
+            .await?;
         let _exclusion_memory = self
             .operation
             .reserve_state(shallow.exclude.len() * size_of::<ObjectId>())?;
@@ -422,6 +415,7 @@ impl Repository {
                         &self.operation,
                         &mut reader,
                         reference.target.ok_or(Error::InvalidReference)?,
+                        None,
                     )
                     .await?;
                 }
@@ -526,32 +520,61 @@ fn matches_prefix(operation: &Operation, name: &[u8], prefixes: &[&[u8]]) -> Res
     Ok(false)
 }
 
+// `wanted` limits include-tag discovery to chains whose terminal object is
+// already in the fetch graph. Discovery uses kind metadata to skip unrelated
+// blobs; ls-refs retains its full verification path without a graph gate.
 async fn peel_ref(
     operation: &Operation,
     reader: &mut durable::Reader<'_>,
     id: ObjectId,
+    wanted: Option<&crate::graph::Graph>,
 ) -> Result<Option<ObjectId>, Error> {
-    if reader.verify(id).await?.ok_or(Error::InvalidReference)? != gix_object::Kind::Tag {
+    let kind = if wanted.is_some() {
+        reader.object_kind(id).await?
+    } else {
+        reader.verify(id).await?
+    }
+    .ok_or(Error::InvalidReference)?;
+    if kind != gix_object::Kind::Tag {
         return Ok(None);
     }
     let mut object = reader.find(id).await?.ok_or(Error::InvalidReference)?;
     for _ in 0..crate::pack::MAX_OBJECTS {
+        if object.kind != gix_object::Kind::Tag {
+            return Err(Error::InvalidReference);
+        }
         operation.work(object.data.len())?;
         let tag =
             gix_object::TagRef::from_bytes(&object.data, crate::pack::object_hash(id.format()))
                 .map_err(crate::pack::pack_error)?;
         let target = ObjectId::from_bytes(id.format(), tag.target().as_slice())?;
         let expected = tag.target_kind;
-        if reader
-            .verify(target)
-            .await?
-            .ok_or(Error::InvalidReference)?
-            != expected
+        if expected != gix_object::Kind::Tag
+            && let Some(graph) = wanted
+        {
+            let Some(index) = graph.location(target) else {
+                return Ok(None);
+            };
+            if graph.nodes[index as usize].kind != Some(expected) {
+                return Err(Error::InvalidReference);
+            }
+            // The graph's retained leaves are fully verified before output.
+            return Ok(Some(target));
+        }
+        if wanted.is_none()
+            && reader
+                .verify(target)
+                .await?
+                .ok_or(Error::InvalidReference)?
+                != expected
         {
             return Err(Error::InvalidReference);
         }
         if expected != gix_object::Kind::Tag {
             return Ok(Some(target));
+        }
+        if wanted.is_some() && reader.object_kind(target).await? != Some(gix_object::Kind::Tag) {
+            return Err(Error::InvalidReference);
         }
         object = reader.find(target).await?.ok_or(Error::InvalidReference)?;
     }
@@ -644,6 +667,7 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
     include!("repository/receive_tests.rs");
+    include!("repository/fetch_roots_tests.rs");
     include!("repository/shallow_tests.rs");
     include!("repository/maintenance_tests.rs");
     include!("repository/partial_tests.rs");

@@ -62,10 +62,20 @@ impl Graph {
             _memory: memory,
             edge_memory: operation.reserve_state(0)?,
         };
+        graph.extend(reader, roots).await?;
+        Ok(graph)
+    }
+
+    pub(crate) async fn extend(
+        &mut self,
+        reader: &mut Reader<'_>,
+        roots: &[ObjectId],
+    ) -> Result<(), Error> {
+        let graph = self;
+        let mut cursor = graph.queue.len();
         for &id in roots {
             graph.schedule(reader, id, None, true).await?;
         }
-        let mut cursor = 0;
         while cursor < graph.queue.len() {
             let index = graph.queue[cursor] as usize;
             cursor += 1;
@@ -147,7 +157,7 @@ impl Graph {
             }
             graph.nodes[index].edges = start..graph.edges.len();
         }
-        Ok(graph)
+        Ok(())
     }
 
     async fn tree(

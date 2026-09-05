@@ -961,3 +961,6 @@ async fn sustained_cold_check(
 
 #[path = "support/self_host.rs"]
 mod self_host;
+
+#[path = "support/fetch_roots.rs"]
+mod fetch_roots;
