@@ -302,47 +302,66 @@ async fn common_receive_conflict_and_lost_response_keep_exact_candidate() -> Tes
 #[tokio::test]
 async fn common_receive_pending_never_reports_success() -> TestResult {
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
-        let fixture = fixture(format, b"pending")?;
-        let (log, faults, _) = test_log("common-receive-pending").await?;
-        let input = receive_input(
-            format,
-            &[RefUpdate::new(
-                "refs/heads/main",
-                None,
-                Some(fixture.target),
-            )?],
-            &fs::read(&fixture.pack)?,
-            true,
-        );
-        let push = common_open(&log, format)
-            .await?
-            .prepare_receive(TransactionId::new(), input)
+        for phase in [FailurePhase::Before, FailurePhase::After] {
+            let fixture = fixture(format, b"pending")?;
+            let (log, faults, backend) = test_log("common-receive-pending").await?;
+            let input = receive_input(
+                format,
+                &[RefUpdate::new(
+                    "refs/heads/main",
+                    None,
+                    Some(fixture.target),
+                )?],
+                &fs::read(&fixture.pack)?,
+                true,
+            );
+            let push = common_open(&log, format)
+                .await?
+                .prepare_receive(TransactionId::new(), input)
+                .await?;
+            let token = push.recovery_token().clone();
+            faults.reset();
+            faults.schedule(Failure {
+                operation: Operation::Put,
+                occurrence: 2,
+                phase,
+            });
+            faults.schedule(Failure {
+                operation: Operation::Get,
+                occurrence: 1,
+                phase: FailurePhase::Before,
+            });
+            let (resolution, response) = push.publish_receive().await?;
+            assert!(matches!(
+                resolution,
+                object_log::Resolution::StillPending(_)
+            ));
+            assert!(
+                String::from_utf8_lossy(&response)
+                    .contains("ng refs/heads/main publication pending")
+            );
+            assert!(!String::from_utf8_lossy(&response).contains("ok refs/heads/main"));
+            drop(response);
+            drop(resolution);
+            drop(log);
+            let reopened = Log::open(
+                &backend,
+                &LogId::new("common-receive-pending")?,
+                Options::default(),
+            )
             .await?;
-        let token = push.recovery_token().clone();
-        faults.reset();
-        faults.schedule(Failure {
-            operation: Operation::Put,
-            occurrence: 2,
-            phase: FailurePhase::Before,
-        });
-        faults.schedule(Failure {
-            operation: Operation::Get,
-            occurrence: 1,
-            phase: FailurePhase::Before,
-        });
-        let (resolution, response) = push.publish_receive().await?;
-        assert!(matches!(
-            resolution,
-            object_log::Resolution::StillPending(_)
-        ));
-        assert!(
-            String::from_utf8_lossy(&response).contains("ng refs/heads/main publication pending")
-        );
-        assert!(!String::from_utf8_lossy(&response).contains("ok refs/heads/main"));
-        assert!(matches!(
-            log.resume(&token).await?,
-            object_log::Resolution::Committed(_)
-        ));
+            assert!(matches!(
+                reopened.resume(&token).await?,
+                object_log::Resolution::Committed(_)
+            ));
+            assert_eq!(
+                common_open(&reopened, format)
+                    .await?
+                    .refs()
+                    .get(b"refs/heads/main".as_slice()),
+                Some(&fixture.target)
+            );
+        }
     }
     Ok(())
 }
@@ -869,6 +888,169 @@ async fn oversized_publication_options_return_a_bounded_error() -> TestResult {
                 Err(Error::ReceiveRejected { source, .. }) if matches!(*source, Error::InvalidPack(_)))
             );
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn common_receive_token_survives_invalid_resolution_evidence() -> TestResult {
+    use object_store::ObjectStoreExt;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let fixture = fixture(format, b"hidden publication")?;
+        let store = std::sync::Arc::new(InMemory::new());
+        let faults = FaultStore::from_arc(store.clone());
+        let backend = ValidatedBackend::new(
+            std::sync::Arc::new(faults.clone()),
+            StorePath::from("invalid-resolution"),
+        )
+        .await?;
+        let log = Log::open(&backend, &LogId::new("repo")?, Options::default()).await?;
+        let prepared = common_open(&log, format)
+            .await?
+            .prepare_receive(
+                TransactionId::new(),
+                receive_input(
+                    format,
+                    &[RefUpdate::new(
+                        "refs/heads/main",
+                        None,
+                        Some(fixture.target),
+                    )?],
+                    &fs::read(&fixture.pack)?,
+                    true,
+                ),
+            )
+            .await?;
+        let token = prepared.recovery_token().clone();
+        let location = faults
+            .metrics()
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.path.ends_with("/index.cbor"))
+            .map(|event| StorePath::from(event.path.clone()))
+            .ok_or("missing head path")?;
+        faults.reset();
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::After,
+        });
+        let mut gate = faults.pause_put_at(2, FailurePhase::After);
+        let publishing = prepared.publish_receive();
+        tokio::pin!(publishing);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    entered = gate.wait_until_entered() => entered,
+                    _ = &mut publishing => false,
+                }
+            })
+            .await?
+        );
+        let authentic = store.get(&location).await?.bytes().await?;
+        store
+            .put(&location, Bytes::from_static(b"corrupt evidence").into())
+            .await?;
+        assert!(gate.release());
+        assert!(publishing.await.is_err());
+        store.put(&location, authentic.into()).await?;
+        drop(log);
+        let reopened = Log::open(&backend, &LogId::new("repo")?, Options::default()).await?;
+        assert!(matches!(
+            reopened.resume(&token).await?,
+            object_log::Resolution::Committed(_)
+        ));
+        assert_eq!(
+            common_open(&reopened, format)
+                .await?
+                .refs()
+                .get(b"refs/heads/main".as_slice()),
+            Some(&fixture.target)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn common_receive_expired_candidate_never_reports_success() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let fixture = fixture(format, b"expiration")?;
+        let faults = FaultStore::new(InMemory::new());
+        let backend = ValidatedBackend::new(
+            std::sync::Arc::new(faults.clone()),
+            StorePath::from("expired-receive"),
+        )
+        .await?;
+        let log = Log::open(
+            &backend,
+            &LogId::new("repo")?,
+            Options {
+                resolution_window: 1,
+                ..Options::default()
+            },
+        )
+        .await?;
+        publish_durable_pack(&log, &fixture, format).await?;
+        let candidate = common_open(&log, format)
+            .await?
+            .prepare_receive(
+                TransactionId::new(),
+                receive_input(
+                    format,
+                    &[RefUpdate::new(
+                        "refs/heads/main",
+                        Some(fixture.target),
+                        None,
+                    )?],
+                    &[],
+                    true,
+                ),
+            )
+            .await?;
+        let token = candidate.recovery_token().clone();
+        // Independent test pools model separate processes; the production API
+        // continues to admit only one command in each process or WASI instance.
+        for name in ["refs/tags/one", "refs/tags/two"] {
+            let prepared = common_open(&log, format)
+                .await?
+                .prepare_receive(
+                    TransactionId::new(),
+                    receive_input(
+                        format,
+                        &[RefUpdate::new(name, None, Some(fixture.target))?],
+                        &empty_pack(format)?,
+                        true,
+                    ),
+                )
+                .await?;
+            assert!(matches!(
+                prepared.publish_receive().await?.0,
+                object_log::Resolution::Committed(_)
+            ));
+        }
+        assert!(matches!(
+            common_open(&log, format).await?.checkpoint().await?,
+            CheckpointStatus::Published(_)
+        ));
+        let (resolution, response) = candidate.publish_receive().await?;
+        assert!(matches!(resolution, object_log::Resolution::Expired(_)));
+        assert!(
+            String::from_utf8_lossy(&response)
+                .contains("ng refs/heads/main publication evidence expired")
+        );
+        assert!(!String::from_utf8_lossy(&response).contains("ok refs/"));
+        assert!(matches!(
+            log.resume(&token).await?,
+            object_log::Resolution::Expired(_)
+        ));
+        assert_eq!(
+            common_open(&log, format)
+                .await?
+                .refs()
+                .get(b"refs/heads/main".as_slice()),
+            Some(&fixture.target)
+        );
     }
     Ok(())
 }
