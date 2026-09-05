@@ -86,13 +86,23 @@ unread. Independent correctness review approved after those repairs. The full
 gate passes (313 passed, 9 opt-in tests ignored), including native strict Clippy
 and locked WASIp2 check/Clippy. See `docs/evidence/git-selection-2026-09-04.md`.
 
+## Task 7 acceptance
+
+Protocol-v2 discovery, ls-refs, ACK-only negotiation, and done-fetch use the
+common repository. Responses retain memory reservations through transmission;
+one expired-view retry shares counters with open. Matching tag refs are fully
+peeled with actual-kind checks. Independent review found and repaired the final
+target-kind gap. The full workspace gate passes (318 passed, 9 ignored), with
+strict native and WASIp2 checks. See `docs/evidence/git-upload-2026-09-04.md`.
+
 ## Next actions
 
-Continue upload wire integration in `.object-log-worktrees/git-upload-wire`
-on `cf/git-upload-wire`. Tasks 5 and 6 are accepted.
-A separate `cf/git-thin-resolution` worktree is implementing private bounded
-thin-pack resolution for the later receive path. Integrate reviewed tranches
-in order, preserve cumulative budgets, and retain the native oracle.
+Tasks 8–10 are assembled for integration in `.object-log-worktrees/git-native-shared`.
+The common receive/checkpoint path and native adapter are passing focused real
+Git client tests for both hashes. Full gates, fault tests, performance evidence,
+and replacement MinIO acceptance are running before integration. Thin helper
+and receive branches remain preserved. Spin adapter work is isolated in
+`.object-log-worktrees/git-spin-adapter`.
 
 The owner reaffirmed Spin serverless compatibility as a design constraint.
 A separate `cf/spin-transport-probe` worktree is testing Spin SDK 5.2 with the
