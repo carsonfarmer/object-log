@@ -104,12 +104,20 @@ test reference. Its loopback tests use an unchanged client for clone, fetch,
 push, branch and tag changes, and non-fast-forward rejection.
 
 Issue [#17](https://github.com/carsonfarmer/object-log/issues/17) replaces the
-native-only Git core. At revision `8d28839`, the private pack, durable-reader,
-wire, and operation budget foundations are accepted. They contain 2,048 product
-lines and compile for `wasm32-wasip2` without default features.
+native-only Git core. At revision `b322985`, the private pack, durable-reader
+and writer, wire, and operation-budget foundations are accepted. They contain
+2,189 product lines and compile for `wasm32-wasip2` without default features.
+The crate also passes a standalone native all-feature check because its
+manifest declares the Tokio runtime support used by the native oracle.
 
-Task 2 adds compressed-entry reuse. Later tasks connect those foundations
-through the existing public `Repository` and `PreparedPush` surface.
+Task 3 replaces the native-only signatures with one common public `Repository`
+for native and WASIp2. It opens with `Repository::open(&Log, ObjectFormat)` and
+exposes refs through `refs(&self)`. The shared API has no work directory or path
+output. It owns the exact `View`, refs, authenticated pack roots and sizes,
+`Operation`, and retained-state reservation. Each later object-reading command
+creates one private `Catalog` and `Reader`. This keeps pack-index loads out of
+`ls-refs` and avoids a self-reference. This is a pre-release API correction.
+Receive-pack remains later.
 Protocol-v2 fetch accepts reachable wants and subtracts valid client haves.
 Fetch pack creation first reuses safe compressed entries, then materializes
 objects when reuse cannot produce a self-contained pack. Classic receive-pack
@@ -124,7 +132,13 @@ conditional compare-and-swap and is rejected. A filesystem case needs an
 adapter that supplies that operation. The native oracle remains until unchanged
 Git clients and the storage lifecycle reach parity. See the current
 [`GIT_PLAN.md`](../GIT_PLAN.md) for the exact tasks, limits, performance gates,
-and source-size stop gates.
+and source-size stop gates. The replacement path has not run a real Git
+protocol-v2 client trial because the private modules are not connected through
+`Repository`.
+
+Each live pack currently adds one catalog-root GET when a repository opens.
+Compaction must bound the live-pack count before any scale claim. This limit
+does not block a small local trial.
 
 ## 2. WASI filesystem storage
 

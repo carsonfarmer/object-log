@@ -4,8 +4,9 @@ Date: 2026-09-04
 
 Plan revision reviewed: `bd04a725b73baa416b1beb1d7de1db49df924920`
 
-This record defines the design gate for task 2. It does not record implemented
-behavior, passing product tests, or WASIp2 execution.
+This record defines the design gate for task 2. The separate
+[implementation record](git-fetch-pack-2026-09-04.md) contains the accepted
+behavior, checks, and line counts at `b322985`.
 
 ## Accepted design
 
