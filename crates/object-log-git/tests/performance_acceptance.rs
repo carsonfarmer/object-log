@@ -7,7 +7,7 @@ use object_log::sim::{FaultStore, Metrics, Operation};
 use object_log::{CheckpointStatus, Log, LogId, Options, ValidatedBackend};
 use object_log_git::{ObjectFormat, Repository};
 use object_store::{ObjectStore, memory::InMemory, path::Path};
-use support::{TestResult, assert_repository, fixture, publish};
+use support::{TestResult, fixture, publish};
 
 const KIB: usize = 1_024;
 const MIB: usize = KIB * KIB;
@@ -31,7 +31,7 @@ async fn git_request_and_byte_accounting() -> TestResult {
     assert!(large.publication.uploaded_bytes() > 1_000 * small.publication.uploaded_bytes());
     assert!(large.recovery.total_requests() > small.recovery.total_requests());
     assert!(large.recovery.downloaded_bytes() > 1_000 * small.recovery.downloaded_bytes());
-    assert!(large.cache_bytes > small.cache_bytes);
+    assert!(large.receiver_bytes > small.receiver_bytes);
     Ok(())
 }
 
@@ -39,7 +39,7 @@ struct Measurement {
     pack_bytes: u64,
     publication: Metrics,
     recovery: Metrics,
-    cache_bytes: u64,
+    receiver_bytes: u64,
 }
 
 async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestResult<Measurement> {
@@ -52,8 +52,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     let source = fixture("source", payload_bytes, u64::try_from(payload_bytes)?)?;
     let pack_bytes = source.pack_bytes;
 
-    let active = directory.path().join("active");
-    let repository = Repository::open_native(&log, &active, ObjectFormat::Sha1).await?;
+    let repository = Repository::open(&log, ObjectFormat::Sha1).await?;
     faults.reset();
     publish(
         repository,
@@ -70,15 +69,16 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
         .filter(|event| event.operation == Operation::Put && event.path.contains("/blobs/"))
         .count();
     let chunks = u64::try_from(chunks)?;
-    assert_eq!(publication.operation(Operation::Get).requests, 0);
-    assert_eq!(publication.downloaded_bytes(), 0);
-    // Chunk blobs, one pack node, one commit, and the mutable head.
+    // The common engine verifies the staged index and selected object ranges
+    // before publishing. The native reference previously verified local files.
+    assert_eq!(publication.operation(Operation::Get).requests, chunks + 1);
+    assert!(publication.downloaded_bytes() >= pack_bytes);
+    // Chunk blobs, one authenticated geometry node, commit, and mutable head.
     assert_eq!(publication.operation(Operation::Put).requests, chunks + 3);
-    assert_eq!(publication.total_requests(), chunks + 3);
+    assert_eq!(publication.total_requests(), 2 * chunks + 4);
     let durable_after_publication = stored_bytes(&inner, &root).await?;
 
-    let checkpoint_cache = directory.path().join("checkpoint");
-    let repository = Repository::open_native(&log, &checkpoint_cache, ObjectFormat::Sha1).await?;
+    let repository = Repository::open(&log, ObjectFormat::Sha1).await?;
     faults.reset();
     let CheckpointStatus::Published(checkpoint_view) = repository.checkpoint().await? else {
         return Err("Git checkpoint did not publish".into());
@@ -86,32 +86,38 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
     assert!(checkpoint_view.tail().is_empty());
     let checkpoint = faults.metrics();
     assert_eq!(checkpoint.operation(Operation::Put).requests, 2);
-    // The tail commit. Its authenticated pack proof avoids node and blob reads.
-    assert_eq!(checkpoint.operation(Operation::Get).requests, 1);
-    assert_eq!(checkpoint.total_requests(), 3);
+    // Tail commit, index, and the reachable graph's object ranges.
+    assert_eq!(checkpoint.operation(Operation::Get).requests, chunks + 2);
+    assert_eq!(checkpoint.total_requests(), chunks + 4);
     let durable_after_checkpoint = stored_bytes(&inner, &root).await?;
     assert!(durable_after_checkpoint > durable_after_publication);
 
-    let recovered_cache = directory.path().join("recovered");
+    let receiver_path = directory.path().join("recovered");
     faults.reset();
-    let recovered = Repository::open_native(&log, &recovered_cache, ObjectFormat::Sha1).await?;
+    let recovered = Repository::open(&log, ObjectFormat::Sha1).await?;
     assert_eq!(
         recovered.refs().get(&b"refs/heads/main"[..]),
         Some(&source.target)
     );
+    let pack = support::fetch(recovered, source.target).await?;
     let recovery = faults.metrics();
     assert_eq!(recovery.operation(Operation::Put).requests, 0);
-    // The head, checkpoint, pack node, and chunk blobs.
-    assert_eq!(recovery.operation(Operation::Get).requests, chunks + 3);
-    assert_eq!(recovery.total_requests(), chunks + 3);
+    // Cold fetch reads head/checkpoint, index and reachable ranges. The 8 MiB
+    // object exceeds the decoder cache, so pack emission rereads its chunks;
+    // the small fixture stays cached. These exact fixture counts guard drift.
+    let expected_gets = if payload_bytes == 4 * KIB { 4 } else { 69 };
+    assert_eq!(recovery.operation(Operation::Get).requests, expected_gets);
+    assert_eq!(recovery.total_requests(), expected_gets);
     assert_eq!(recovery.uploaded_bytes(), 0);
     assert!(recovery.downloaded_bytes() >= pack_bytes);
-    assert_repository(&recovered_cache, &source)?;
-    let cache_bytes = directory_bytes(&recovered_cache)?;
-    assert!(cache_bytes >= pack_bytes);
+    let recovered = Repository::open(&log, ObjectFormat::Sha1).await?;
+    support::recover(recovered, &receiver_path, &source).await?;
+    assert!(pack.starts_with(b"PACK"));
+    let receiver_bytes = directory_bytes(&receiver_path)?;
+    assert!(receiver_bytes >= pack_bytes);
 
     println!(
-        "{label}: pack={pack_bytes} B, durable={durable_after_publication} B -> {durable_after_checkpoint} B, recovered cache={cache_bytes} B"
+        "{label}: pack={pack_bytes} B, durable={durable_after_publication} B -> {durable_after_checkpoint} B, Git receiver={receiver_bytes} B"
     );
     report(label, "publication", &publication);
     report(label, "checkpoint", &checkpoint);
@@ -120,7 +126,7 @@ async fn measure(label: &str, payload_bytes: usize, options: Options) -> TestRes
         pack_bytes,
         publication,
         recovery,
-        cache_bytes,
+        receiver_bytes,
     })
 }
 

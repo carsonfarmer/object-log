@@ -1,12 +1,14 @@
 use std::{
     error::Error as StdError,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
-use object_log::{CommitStatus, TransactionId, View};
-use object_log_git::{ObjectFormat, ObjectId, RefUpdate, Repository};
+use bytes::Bytes;
+use object_log::{Resolution, TransactionId, View};
+use object_log_git::{ObjectFormat, ObjectId, Repository};
 use tempfile::TempDir;
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
@@ -64,15 +66,144 @@ pub(crate) async fn publish(
     target: Option<ObjectId>,
     pack: Option<&Path>,
 ) -> TestResult<View> {
-    let update = RefUpdate::new(name, expected, target)?;
     let prepared = repository
-        .prepare_push(TransactionId::new(), vec![update], pack)
+        .prepare_receive(
+            TransactionId::new(),
+            receive(&[(name, expected, target)], pack)?,
+        )
         .await?;
-    match prepared.publish().await? {
-        CommitStatus::Committed(view) => Ok(view),
-        CommitStatus::Conflict(_) => Err("Git publication conflicted".into()),
-        CommitStatus::Pending(_) => Err("Git publication remained pending".into()),
+    let (resolution, response) = prepared.publish_receive().await?;
+    assert!(
+        response
+            .windows(b"unpack ok".len())
+            .any(|w| w == b"unpack ok")
+    );
+    match resolution {
+        Resolution::Committed(view) => Ok(view),
+        _ => Err("Git publication did not commit".into()),
     }
+}
+
+pub(crate) fn receive(
+    updates: &[(&str, Option<ObjectId>, Option<ObjectId>)],
+    pack: Option<&Path>,
+) -> TestResult<Bytes> {
+    let mut request = Vec::new();
+    let zero = "0".repeat(40);
+    for (index, (name, expected, target)) in updates.iter().enumerate() {
+        let capabilities = if index == 0 {
+            "\0report-status object-format=sha1"
+        } else {
+            ""
+        };
+        packet(
+            &mut request,
+            format!(
+                "{} {} {name}{capabilities}\n",
+                expected.map_or_else(|| zero.clone(), |id| id.to_string()),
+                target.map_or_else(|| zero.clone(), |id| id.to_string())
+            )
+            .as_bytes(),
+        )?;
+    }
+    request.extend_from_slice(b"0000");
+    if let Some(pack) = pack {
+        request.extend_from_slice(&fs::read(pack)?);
+    } else if updates.iter().any(|(_, _, target)| target.is_some()) {
+        let empty = b"PACK\0\0\0\x02\0\0\0\0";
+        let mut hasher = gix_hash::hasher(gix_hash::Kind::Sha1);
+        hasher.update(empty);
+        request.extend_from_slice(empty);
+        request.extend_from_slice(hasher.try_finalize()?.as_slice());
+    }
+    Ok(request.into())
+}
+
+fn packet(output: &mut Vec<u8>, line: &[u8]) -> TestResult {
+    write!(output, "{:04x}", line.len() + 4)?;
+    output.extend_from_slice(line);
+    Ok(())
+}
+
+pub(crate) async fn fetch(repository: Repository, target: ObjectId) -> TestResult<Vec<u8>> {
+    let mut request = Vec::new();
+    packet(&mut request, b"command=fetch\n")?;
+    packet(&mut request, b"object-format=sha1\n")?;
+    request.extend_from_slice(b"0001");
+    packet(&mut request, format!("want {target}\n").as_bytes())?;
+    packet(&mut request, b"done\n")?;
+    request.extend_from_slice(b"0000");
+    let response = repository.upload_pack(request.into()).await?;
+    let mut remaining = response.as_ref();
+    let mut raw = Vec::new();
+    let mut pack_section = false;
+    while !remaining.is_empty() {
+        let header = remaining.get(..4).ok_or("truncated packet")?;
+        let length = usize::from_str_radix(std::str::from_utf8(header)?, 16)?;
+        remaining = &remaining[4..];
+        if length <= 2 {
+            continue;
+        }
+        let payload = remaining.get(..length - 4).ok_or("truncated payload")?;
+        remaining = &remaining[length - 4..];
+        if payload == b"packfile\n" {
+            pack_section = true;
+            continue;
+        }
+        if pack_section {
+            assert_eq!(payload.first(), Some(&1));
+            raw.extend_from_slice(&payload[1..]);
+        }
+    }
+    assert!(raw.starts_with(b"PACK"));
+    Ok(raw)
+}
+
+pub(crate) async fn recover(repository: Repository, path: &Path, fixture: &Fixture) -> TestResult {
+    let refs = repository.refs().clone();
+    let pack = fetch(repository, fixture.target).await?;
+    command(
+        None,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--object-format=sha1",
+            path.to_str().ok_or("non-UTF8 path")?,
+        ],
+    )?;
+    let pack_path = path.join("incoming.pack");
+    fs::write(&pack_path, pack)?;
+    command(
+        Some(path),
+        &[
+            "index-pack",
+            "--strict",
+            "--check-self-contained-and-connected",
+            pack_path.to_str().ok_or("non-UTF8 path")?,
+        ],
+    )?;
+    // Import into the receiver ODB, then verify refs and complete graph with Git.
+    let mut child = Command::new("git")
+        .current_dir(path)
+        .args(["index-pack", "--stdin", "--strict"])
+        .stdin(std::process::Stdio::from(fs::File::open(&pack_path)?))
+        .stdout(std::process::Stdio::null())
+        .spawn()?;
+    assert!(child.wait()?.success());
+    fs::remove_file(pack_path.with_extension("idx"))?;
+    fs::remove_file(pack_path)?;
+    for (name, target) in refs {
+        command(
+            Some(path),
+            &[
+                "update-ref",
+                std::str::from_utf8(&name)?,
+                &target.to_string(),
+            ],
+        )?;
+    }
+    assert_repository(path, fixture)
 }
 
 pub(crate) fn assert_repository(path: &Path, fixture: &Fixture) -> TestResult {

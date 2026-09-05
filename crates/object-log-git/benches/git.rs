@@ -5,7 +5,6 @@ use object_log::{CheckpointStatus, Log, LogId, Options, ValidatedBackend};
 use object_log_git::{ObjectFormat, Repository};
 use object_store::{memory::InMemory, path::Path as StorePath};
 use support::Fixture;
-use tempfile::TempDir;
 use tokio::runtime::{Builder, Runtime};
 
 #[path = "../tests/support/mod.rs"]
@@ -14,7 +13,7 @@ mod support;
 const KIB: usize = 1_024;
 const MIB: usize = KIB * KIB;
 
-type RepositoryState = (Log, TempDir, Repository);
+type RepositoryState = (Log, Repository);
 
 fn publication_benchmarks(criterion: &mut Criterion) {
     let runtime = runtime();
@@ -28,7 +27,7 @@ fn publication_benchmarks(criterion: &mut Criterion) {
             |bencher, &options| {
                 bencher.iter_batched(
                     || runtime.block_on(fresh_repository(options)),
-                    |(log, directory, repository)| {
+                    |(log, repository)| {
                         let view = require(runtime.block_on(support::publish(
                             repository,
                             "refs/heads/main",
@@ -36,9 +35,9 @@ fn publication_benchmarks(criterion: &mut Criterion) {
                             Some(fixture.target),
                             Some(&fixture.pack),
                         )));
-                        black_box((log, directory, view))
+                        black_box((log, view))
                     },
-                    BatchSize::LargeInput,
+                    BatchSize::PerIteration,
                 );
             },
         );
@@ -58,15 +57,15 @@ fn checkpoint_benchmarks(criterion: &mut Criterion) {
             |bencher, &options| {
                 bencher.iter_batched(
                     || runtime.block_on(published_repository(options, &fixture)),
-                    |(log, directory, repository)| {
+                    |(log, repository)| {
                         let CheckpointStatus::Published(view) =
                             require(runtime.block_on(repository.checkpoint()))
                         else {
                             std::process::abort();
                         };
-                        black_box((log, directory, view))
+                        black_box((log, view))
                     },
-                    BatchSize::LargeInput,
+                    BatchSize::PerIteration,
                 );
             },
         );
@@ -82,18 +81,13 @@ fn recovery_benchmarks(criterion: &mut Criterion) {
         let log = runtime.block_on(checkpointed_log(options, &fixture));
         group.throughput(Throughput::Bytes(fixture.pack_bytes));
         group.bench_with_input(BenchmarkId::new("pack", name), &log, |bencher, log| {
-            bencher.iter_batched(
-                || require(tempfile::tempdir()),
-                |directory| {
-                    let repository = require(runtime.block_on(Repository::open_native(
-                        log,
-                        directory.path().join("cache"),
-                        ObjectFormat::Sha1,
-                    )));
-                    black_box((repository, directory))
-                },
-                BatchSize::LargeInput,
-            );
+            bencher.iter(|| {
+                let pack = require(runtime.block_on(async {
+                    let repository = Repository::open(log, ObjectFormat::Sha1).await?;
+                    support::fetch(repository, fixture.target).await
+                }));
+                black_box(pack)
+            });
         });
     }
     group.finish();
@@ -119,15 +113,12 @@ async fn fresh_repository(options: Options) -> RepositoryState {
     );
     let id = require(LogId::new("repository"));
     let log = require(Log::open(&backend, &id, options).await);
-    let directory = require(tempfile::tempdir());
-    let repository = require(
-        Repository::open_native(&log, directory.path().join("cache"), ObjectFormat::Sha1).await,
-    );
-    (log, directory, repository)
+    let repository = require(Repository::open(&log, ObjectFormat::Sha1).await);
+    (log, repository)
 }
 
 async fn published_repository(options: Options, fixture: &Fixture) -> RepositoryState {
-    let (log, directory, repository) = fresh_repository(options).await;
+    let (log, repository) = fresh_repository(options).await;
     require(
         support::publish(
             repository,
@@ -138,29 +129,21 @@ async fn published_repository(options: Options, fixture: &Fixture) -> Repository
         )
         .await,
     );
-    let repository = require(
-        Repository::open_native(
-            &log,
-            directory.path().join("checkpoint-cache"),
-            ObjectFormat::Sha1,
-        )
-        .await,
-    );
-    (log, directory, repository)
+    let repository = require(Repository::open(&log, ObjectFormat::Sha1).await);
+    (log, repository)
 }
 
 async fn checkpointed_log(options: Options, fixture: &Fixture) -> Log {
-    let (log, directory, repository) = published_repository(options, fixture).await;
-    require(support::assert_repository(
-        &directory.path().join("checkpoint-cache"),
-        fixture,
-    ));
+    let (log, repository) = published_repository(options, fixture).await;
     if !matches!(
         require(repository.checkpoint().await),
         CheckpointStatus::Published(_)
     ) {
         std::process::abort();
     }
+    let directory = require(tempfile::tempdir());
+    let repository = require(Repository::open(&log, ObjectFormat::Sha1).await);
+    require(support::recover(repository, &directory.path().join("receiver"), fixture).await);
     log
 }
 
