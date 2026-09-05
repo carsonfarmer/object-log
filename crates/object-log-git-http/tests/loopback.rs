@@ -54,6 +54,10 @@ async fn shared_minio_clients_recover_after_collection() -> TestResult {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one unchanged-client lifecycle is shared by oracle and both hashes"
+)]
 async fn client_lifecycle(
     shared: Option<ObjectFormat>,
     store: Arc<dyn object_store::ObjectStore>,
