@@ -115,10 +115,15 @@ impl Repository {
         // publish_checkpoint validates the tail again before its first PUT.
         let _tail_memory = preflight_view(&self.operation, &self.log, &self.view)?;
         let _plan_memory = durable::publication_plan(&self.operation, &self.view)?;
-        let (_, uploaded) = self
-            .log
-            .checkpoint_write_bound(snapshot.len(), objects.len())?;
-        self.operation.work(uploaded)?;
+        // Bound inner encoding/hash and outer encoding/hash once. Each core
+        // reference fits 128 encoded bytes; the head allowance covers the
+        // shared log identity and fixed envelope. Identity-collision retries
+        // reuse the bytes and digest; request guards charge their actual I/O.
+        let checkpoint_work = snapshot_bound
+            .checked_add(memory_bound(objects.len(), 128)?)
+            .and_then(|bytes| bytes.checked_add(options.max_head_bytes))
+            .ok_or_else(|| Error::InvalidPack("Git checkpoint work exceeds limit".into()))?;
+        self.operation.work(memory_bound(checkpoint_work, 4)?)?;
         for _ in 0..2 {
             self.operation.work(options.max_head_bytes)?;
         }
