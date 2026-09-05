@@ -116,3 +116,36 @@ async fn prepared_legacy_ref_push_conflicts_with_metadata_upgrade() -> TestResul
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn deepen_not_head_uses_persisted_default_with_partial_fetch() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let mut fixture = fixture(format, b"default HEAD exclusion")?;
+        let trunk = fixture.target;
+        let source = fixture.directory.path().join("source");
+        command(Some(&source), &["commit", "--quiet", "--allow-empty", "-m", "main tip"])?;
+        fixture.target = ObjectId::parse(format, output(Some(&source), &["rev-parse", "HEAD"])?.trim())?;
+        fs::write(&fixture.pack, command_output(Some(&source), &["pack-objects", "--all", "--stdout"])?.stdout)?;
+        let (log, _, _) = test_log("default-head-exclusion").await?;
+        publish_durable_pack(&log, &fixture, format).await?;
+        let push = common_open(&log, format).await?.prepare_receive(TransactionId::new(), receive_input(format,
+            &[RefUpdate::new("refs/heads/trunk", None, Some(trunk))?], &empty_pack(format)?, true)).await?;
+        assert!(matches!(push.publish_receive().await?.0, object_log::Resolution::Committed(_)));
+        common_open(&log, format).await?.set_default_branch(TransactionId::new(), b"refs/heads/main", b"refs/heads/trunk").await?;
+        assert!(matches!(common_open(&log, format).await?.checkpoint().await?, object_log::CheckpointStatus::Published(_)));
+        for filtered in [false, true] {
+            let mut arguments = vec![format!("want {}", fixture.target), "deepen-not HEAD".into()];
+            if filtered { arguments.push("filter blob:none".into()); }
+            arguments.push("done".into());
+            let cold = common_open(&log, format).await?;
+            assert_eq!(cold.excluded_ref(b"HEAD")?, trunk);
+            assert_ne!(trunk, fixture.target);
+            let head_reply = cold.upload_pack(upload_request(format, "fetch", &arguments)?).await?;
+            arguments[1] = "deepen-not refs/heads/trunk".into();
+            let explicit_reply = common_open(&log, format).await?.upload_pack(upload_request(format, "fetch", &arguments)?).await?;
+            assert_eq!(head_reply, explicit_reply);
+            assert!(String::from_utf8_lossy(&head_reply).contains(&format!("shallow {}", fixture.target)));
+        }
+    }
+    Ok(())
+}
