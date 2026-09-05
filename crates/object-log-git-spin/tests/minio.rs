@@ -650,3 +650,5 @@ fn required_env(name: &'static str) -> TestResult<String> {
 }
 
 include!("support/capacity.rs");
+
+include!("support/aggregate_capacity.rs");
