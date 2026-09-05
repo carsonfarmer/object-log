@@ -82,9 +82,10 @@ permissions, or prevent separate processes with storage access from publishing.
 
 The adapter validates request headers before backend access and acquires a
 repository operation before reading a command body. Both transmitted and
-gzip-expanded bodies are limited to 10 MiB. During decompression the two host
-buffers can coexist (20 MiB); these belong to the runtime allowance until the
-engine charges the command input. Response bytes retain their engine owner
+gzip-expanded bodies are limited to 10 MiB. Receive decodes bounded frames into
+replayable input; small decoded scratch objects use charged request memory and
+larger objects use immutable storage. Upload-pack command bodies still use
+bounded collection. Response bytes retain their engine owner
 through the final stream write. Spin's per-instance engine admission does not
 bound aggregate memory across concurrent host instances. Run ordinary Spin
 with its default allocator, connection pooling, instance count, and memory

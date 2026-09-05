@@ -24,8 +24,9 @@ Check hosted CI after each push. Verification belongs in tests and commits.
 - Live-pack compaction and its operator command preserve refs and symbolic HEAD;
   repeated push/checkpoint/GC cycles and cold Git recovery are tested. Extend
   this to larger sustained workloads; compaction still traverses the live graph.
-- Finish bounded streaming receive AND fetch/clone for the capacity target:
-  at least 50 MiB files and 1 GiB pushes. Do not accept an unusable push-only cap.
+- Bounded streaming receive is implemented with shared input reads and charged
+  small-object scratch. Finish streamed fetch/clone, then qualify at least
+  50 MiB files and 1 GiB pushes; current capacity limits remain unchanged.
 - Continue the GitHub queue, especially #19, #23, #25, #26 and #32.
 
 Use exclusive implementation worktrees; root alone integrates main. Keep useful

@@ -114,6 +114,12 @@ The same command can explicitly change the persisted default branch with
 Unborn targets are supported; cloning follows the persisted symbolic `HEAD`.
 Pending publication still requires its exact recovery evidence.
 
+Spin receive consumes bounded frames and stages replayable input before
+publication. Small decoded scratch objects use charged request memory, and
+larger objects use immutable storage. Interrupted input cannot publish refs;
+reopening an expired view retains the same operation counters. The current
+file and pack limits remain unchanged while streamed fetch is being completed.
+
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves
 are deferred until selected content needs verification. Exact want/have
