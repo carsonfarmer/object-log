@@ -46,8 +46,8 @@ no-default-feature WASIp2 target pass standalone checks. The manifest declares
 the Tokio runtime support used by the native oracle.
 
 Task 3 connects durable state through the common `Repository`. Graph selection
-and wire command integration remain before a real Git v2 client trial. Task 3
-currently retains a catalog; Task 4 moves it into object-reading commands.
+and wire command integration remain before a real Git v2 client trial. Task 4 makes catalogs command-local and supplies bounded iterative graph
+traversal. Exact selection and protocol integration remain.
 
 The native proof remains the client and storage oracle. It uses a disposable
 bare repository and high-level `gix` APIs. It supports atomic ref transactions,
@@ -87,9 +87,8 @@ public type for native and WASIp2. Its shared entry points are
 `Repository::open(&Log, ObjectFormat)` and `refs(&self)`. The shared API has no
 work directory or path output. `Repository` owns the exact `View`, refs,
 authenticated pack roots and sizes, `Operation`, and retained-state
-reservation. Task 3 retains a catalog; Task 4 removes its standard indexes
-from retained repository state. Each object-reading command will create one
-private `Catalog` and `Reader`. This lets
+reservation. Standard indexes are command-local. Each object-reading command
+creates one private `Catalog` and `Reader`. This lets
 `ls-refs` avoid pack-index loads and avoids a self-reference. This is a
 pre-release API correction.
 
@@ -210,7 +209,7 @@ the response.
    authenticated pack roots and sizes, `Operation`, and retained-state
    reservation. Return no work directory or path. The accepted bridge retains
    a catalog; move it into object-reading commands in Task 4.
-4. Make catalogs command-local, then add iterative commit, tree, and annotated-tag traversal. Enforce graph,
+4. Complete: make catalogs command-local and add iterative commit, tree, and annotated-tag traversal. Enforce graph,
    object, work, call, transfer, and memory budgets in one place.
 5. Validate reachable wants and usable haves against one view. Compute the
    exact selected object set without reading unrelated blobs.
