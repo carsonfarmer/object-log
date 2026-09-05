@@ -1108,6 +1108,43 @@ impl Log {
         .await
     }
 
+    /// Bounds encoded history bytes buffered by materialization or checkpoint validation.
+    ///
+    /// This is the larger of the checkpoint length and the largest concurrently
+    /// buffered tail window, including one record held by the consumer. It uses
+    /// authenticated view lengths and performs no I/O. Successful evaluation
+    /// uses a fixed stack buffer without heap allocation.
+    ///
+    /// This is not a heap bound: callers must separately budget decoder
+    /// allocations, application state, publication proofs, and other work. It
+    /// does not bound [`Self::read_tail`] or [`Self::resolve_checkpoint`], which
+    /// may retain the complete tail, or missing-read head classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view or unrepresentable lengths or sums.
+    pub fn materialization_read_bound(&self, view: &View) -> Result<usize, Error> {
+        self.validate_view(view)?;
+        let checkpoint = usize::try_from(view.checkpoint().map_or(0, |value| value.object().len()))
+            .map_err(|_| Error::LimitExceeded("materialization encoded bytes"))?;
+        let mut largest = [0_usize; MAX_CONCURRENT_READS + 1];
+        for record in view.tail() {
+            let mut length = usize::try_from(record.len())
+                .map_err(|_| Error::LimitExceeded("materialization encoded bytes"))?;
+            for retained in &mut largest {
+                if length > *retained {
+                    std::mem::swap(retained, &mut length);
+                }
+            }
+        }
+        let tail = largest.into_iter().try_fold(0_usize, |total, length| {
+            total
+                .checked_add(length)
+                .ok_or(Error::LimitExceeded("materialization encoded bytes"))
+        })?;
+        Ok(checkpoint.max(tail))
+    }
+
     /// Reads and verifies every commit in the active tail.
     ///
     /// Commit reads run concurrently. The returned records remain in sequence
@@ -3420,6 +3457,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn materialization_read_bound_tracks_largest_lengths_and_checkpoint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, _) = staged_read_log("history-bound", Options::default()).await?;
+        let mut view = log.load().await?;
+        assert_eq!(log.materialization_read_bound(&view)?, 0);
+        let window = MAX_CONCURRENT_READS + 1;
+        for size in 1..=2 * window {
+            view = fold_append(&log, &view, Bytes::from(vec![1; size * 100])).await?;
+        }
+        assert!(
+            view.tail()
+                .windows(2)
+                .all(|pair| pair[0].len() < pair[1].len())
+        );
+        let expected: u64 = view.tail()[window..].iter().map(CommitRef::len).sum();
+        faults.reset();
+        assert_eq!(
+            log.materialization_read_bound(&view)?,
+            usize::try_from(expected)?
+        );
+        assert_eq!(faults.metrics().total_requests(), 0);
+        let through = view.tail()[window - 1].clone();
+        let CheckpointStatus::Published(view) = log
+            .publish_checkpoint(
+                &view,
+                &through,
+                Bytes::from(vec![1; 256 * 1024]),
+                Vec::new(),
+            )
+            .await?
+        else {
+            return Err("checkpoint did not publish".into());
+        };
+        let checkpoint = view
+            .checkpoint()
+            .ok_or("checkpoint is missing")?
+            .object()
+            .len();
+        assert!(checkpoint > expected);
+        faults.reset();
+        assert_eq!(
+            log.materialization_read_bound(&view)?,
+            usize::try_from(checkpoint)?
+        );
+        assert_eq!(faults.metrics().total_requests(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn materialization_read_bound_rejects_foreign_views_and_overflow_without_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, backend) = staged_read_log("bound-errors", Options::default()).await?;
+        let mut view = log.load().await?;
+        for _ in 0..2 {
+            view = fold_append(&log, &view, Bytes::from_static(&[1])).await?;
+        }
+        let foreign = Log::open(&backend, &LogId::new("foreign")?, Options::default())
+            .await?
+            .load()
+            .await?;
+        let mut head = view.head().clone();
+        // Synthetic authenticated-length extremes exercise checked arithmetic
+        // without creating or allocating impossible-sized storage objects.
+        head.tail[0].len = u64::MAX;
+        head.tail[1].len = 1;
+        let overflow = Log::view(head, view.storage_version().clone());
+        faults.reset();
+        assert!(matches!(
+            log.materialization_read_bound(&foreign),
+            Err(Error::InvalidFormat(_))
+        ));
+        assert!(matches!(
+            log.materialization_read_bound(&overflow),
+            Err(Error::LimitExceeded("materialization encoded bytes"))
+        ));
+        assert_eq!(faults.metrics().total_requests(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn materialization_bounds_completed_records_ahead_of_application()
     -> Result<(), Box<dyn std::error::Error>> {
         let faults = FaultStore::new(InMemory::new());
@@ -3431,6 +3548,15 @@ mod tests {
         for _ in 0..count {
             view = fold_append(&log, &view, Bytes::from(vec![1; 32 * 1024])).await?;
         }
+        let encoded_bound = log.materialization_read_bound(&view)?;
+        let maximum_record = view
+            .tail()
+            .iter()
+            .map(CommitRef::len)
+            .max()
+            .ok_or("tail is empty")?;
+        let total_encoded: u64 = view.tail().iter().map(CommitRef::len).sum();
+        assert!(u64::try_from(encoded_bound)? < total_encoded);
         faults.reset();
         let probe = FoldProbe {
             reads: Some(faults.clone()),
@@ -3439,6 +3565,10 @@ mod tests {
         let state = crate::materialize(&log, view, &probe).await?;
         assert_eq!(state.state().total, count);
         assert_eq!(probe.applied.get(), count);
+        assert!(
+            u64::try_from(encoded_bound)?
+                >= u64::try_from(probe.maximum_ahead.get())? * maximum_record
+        );
         // The store completes each GET before its record can be decoded. The
         // completed-but-unapplied count therefore bounds retained records.
         assert!(
