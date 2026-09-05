@@ -49,7 +49,9 @@ contract.
 handle or one of its clones can publish without reading the object graph back.
 `materialize` accepts one loaded `View` and creates proofs for references in
 its authenticated checkpoint and tail records. An adapter can retain those
-proofs and publish them with that exact view. `stage_objects` fully verifies
+proofs and publish them with that exact view. `read_staged_node` authenticates
+a proven parent and derives child proofs for unchanged-subtree reuse.
+`stage_objects` fully verifies
 arbitrary durable references before it creates proofs. Recovery tokens do not
 contain a proof. `resume` and publication from a separately opened handle fully
 verify the referenced graph. A collection-epoch change rejects an older proof.
@@ -93,7 +95,9 @@ logs with 8,240-byte object limits. Head transfer, recovery scratch, retained
 state, and catalog allocations are budgeted before allocation. The previous
 filesystem-backed Git implementation, `open_native` API, and entire native HTTP
 host have been removed. Installed Git remains the independent test and benchmark
-reference. Spin is the Git HTTP host.
+reference. Spin is the Git HTTP host. The optional local
+[`object-log-git-maintain` command](crates/object-log-git-spin/README.md) provides
+existing-WAL status and exact commit-token recovery.
 
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves

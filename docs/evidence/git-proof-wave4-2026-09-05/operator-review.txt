@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/bin/object-log-git-maintain.rs (target/debug/deps/object_log_git_maintain-7919581231bfe080)
+
+running 9 tests
+test operator::tests::output_errors_and_provider_errors_do_not_leak_secrets ... ok
+test operator::tests::argument_errors_and_help_are_bounded_redacted_json ... ok
+test operator::tests::private_file_limits_check_exact_boundary_and_reject_special_files ... ok
+test operator::tests::config_is_strict_and_invalid_inputs_do_not_contact_a_provider ... ok
+test operator::tests::invalid_token_and_huge_nested_length_never_mutate_the_head ... ok
+test operator::tests::resume_exact_token_is_idempotent_and_losers_do_not_rebase ... ok
+test operator::tests::pending_and_expired_are_not_reported_as_rejections ... ok
+test operator::tests::deadline_after_head_cas_preserves_uncertainty_and_same_token_recovery ... ok
+test operator::tests::status_survives_a_full_tail_without_git_admission ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+

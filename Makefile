@@ -51,7 +51,7 @@ git-spin-memory-acceptance:
 
 .PHONY: git-spin-wasi-check git-spin-minio-test
 git-spin-wasi-check:
-	cargo +1.97.1 clippy --locked -p object-log-git-spin --target wasm32-wasip2 -- -D warnings
+	cargo +1.97.1 clippy --locked -p object-log-git-spin --all-targets --all-features --target wasm32-wasip2 -- -D warnings
 
 git-spin-minio-test:
 	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
@@ -60,3 +60,8 @@ git-spin-minio-test:
 git-spin-performance-acceptance:
 	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
 	python3 crates/object-log-git-spin/tests/check_performance.py
+
+.PHONY: git-spin-operator-minio-test
+git-spin-operator-minio-test:
+	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+	./scripts/test-minio.sh operator_minio operator_minio object-log-git-spin operator

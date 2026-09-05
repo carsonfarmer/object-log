@@ -1,0 +1,14 @@
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/staged-node-children)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.80s
+     Running unittests src/lib.rs (target/debug/deps/object_log-25fc1b3460b999a6)
+
+running 6 tests
+test log::tests::staged_node_allows_empty_nodes_with_zero_reference_limit ... ok
+test log::tests::staged_node_missing_and_corrupt_parent_never_grants_children ... ok
+test log::tests::staged_node_reads_only_parent_independent_of_subtree_size ... ok
+test log::tests::staged_node_epoch_fence_accepts_only_fresh_live_parent_proofs ... ok
+test log::tests::staged_node_rejects_foreign_proofs_and_non_nodes_before_io ... ok
+test log::tests::staged_node_cow_reuses_siblings_through_cold_resolution_and_collection ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+

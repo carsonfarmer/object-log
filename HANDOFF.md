@@ -186,3 +186,13 @@ streaming; operator sidebar owns native maintenance command; protocol sidebar
 owns wire/graph/selection shallow support and has temporarily yielded
 repository.rs to maintenance. Catalog worker builds the private tree foundation.
 Only root integrates. No upstream communications are authorized.
+
+Fourth batch source `86db1c2` accepts child-proof traversal (#33), the encoded
+materialization read bound, and optional native operator status/exact resume.
+Combined gates pass 365 tests (14 opt-in ignored), strict native/all-feature
+WASIp2, Git/Spin/operator MinIO, request accounting and six actual-WASI fixtures.
+`make git-spin-operator-minio-test` runs the new opt-in process lifecycle.
+General cold-resume graph memory is not qualified by the small <10 MiB RSS
+fixtures; #32 remains open. Shallow support is a reviewed worker candidate, not
+yet integrated; partial/filter/URI work remains required. See the fourth-batch
+review and raw evidence. Third-batch Linux CI 33945165604 passed.
