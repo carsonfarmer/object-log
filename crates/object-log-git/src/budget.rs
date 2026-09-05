@@ -1,11 +1,14 @@
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use bytes::Bytes;
 
 use crate::Error;
+
+#[path = "request_guard.rs"]
+mod request_guard;
 
 pub(crate) const LIVE_BYTES: usize = 88 * 1024 * 1024;
 pub(crate) const STATE_BYTES: usize = 24 * 1024 * 1024;
@@ -69,9 +72,8 @@ impl Pool {
         }
         Ok(Operation(Arc::new(OperationState {
             pool: self.0.clone(),
-            calls: AtomicUsize::new(0),
+            io: Mutex::new(IoUsage::default()),
             call_limit,
-            transfer: AtomicUsize::new(0),
             work: AtomicUsize::new(0),
             thin_rounds: AtomicUsize::new(0),
             retries: AtomicUsize::new(0),
@@ -80,11 +82,16 @@ impl Pool {
     }
 }
 
+#[derive(Default)]
+struct IoUsage {
+    calls: usize,
+    transfer: usize,
+}
+
 struct OperationState {
     pool: Arc<PoolState>,
-    calls: AtomicUsize,
+    io: Mutex<IoUsage>,
     call_limit: usize,
-    transfer: AtomicUsize,
     work: AtomicUsize,
     thin_rounds: AtomicUsize,
     retries: AtomicUsize,
@@ -101,18 +108,25 @@ pub(crate) struct Operation(Arc<OperationState>);
 
 impl Operation {
     pub(crate) fn io(&self, bytes: usize) -> Result<(), Error> {
-        charge(
-            &self.0.calls,
-            1,
-            self.0.call_limit,
-            "object-log call limit exceeded",
-        )?;
-        charge(
-            &self.0.transfer,
-            bytes,
-            TRANSFER_BYTES,
-            "object-log transfer limit exceeded",
-        )
+        let mut usage = self
+            .0
+            .io
+            .lock()
+            .map_err(|_| Error::InvalidPack("object-log admission lock poisoned".into()))?;
+        let calls = usage
+            .calls
+            .checked_add(1)
+            .filter(|calls| *calls <= self.0.call_limit)
+            .ok_or_else(|| Error::InvalidPack("object-log call limit exceeded".into()))?;
+        let transfer = usage
+            .transfer
+            .checked_add(bytes)
+            .filter(|transfer| *transfer <= TRANSFER_BYTES)
+            .ok_or_else(|| Error::InvalidPack("object-log transfer limit exceeded".into()))?;
+        // Commit both cumulative counters together. A refusal consumes neither;
+        // cancellation after successful admission refunds neither.
+        *usage = IoUsage { calls, transfer };
+        Ok(())
     }
 
     pub(crate) fn work(&self, bytes: usize) -> Result<(), Error> {
@@ -155,7 +169,11 @@ impl Operation {
 
     #[cfg(test)]
     pub(crate) fn calls(&self) -> usize {
-        self.0.calls.load(Ordering::Relaxed)
+        self.0
+            .io
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .calls
     }
 
     #[cfg(test)]
