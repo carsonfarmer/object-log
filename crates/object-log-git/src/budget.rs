@@ -53,7 +53,7 @@ impl Pool {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            return Err(Error::InvalidPack("another Git operation is active".into()));
+            return Err(Error::Busy);
         }
         Ok(Operation(Arc::new(OperationState {
             pool: self.0.clone(),

@@ -1,4 +1,8 @@
-use std::{fmt, mem::size_of};
+use std::{
+    fmt,
+    io::{self, Write},
+    mem::size_of,
+};
 
 use object_log::{Log, ObjectRef, StagedObject, View, materialize};
 
@@ -8,6 +12,7 @@ use crate::{
     format::PackDescriptor,
     pack::budget::{Operation, Pool, Reservation},
     state::{Machine, State},
+    wire::{self, AdvertisedRef, FetchReply, UploadRequest},
 };
 
 use bytes::Bytes;
@@ -151,15 +156,23 @@ impl Repository {
         .await
     }
 
-    #[allow(
-        dead_code,
-        reason = "wire command integration follows selected fetch packs"
-    )]
+    #[cfg(test)]
     async fn fetch_pack(
         &self,
         wants: &[ObjectId],
         haves: &[ObjectId],
         include_tag: bool,
+    ) -> Result<Bytes, Error> {
+        self.fetch_pack_or_ack(wants, haves, include_tag, true)
+            .await
+    }
+
+    async fn fetch_pack_or_ack(
+        &self,
+        wants: &[ObjectId],
+        haves: &[ObjectId],
+        include_tag: bool,
+        done: bool,
     ) -> Result<Bytes, Error> {
         let catalog = self.catalog().await?;
         let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
@@ -179,6 +192,15 @@ impl Repository {
         }
         let selected =
             crate::selection::select(&self.operation, &graph, wants, haves, include_tag)?;
+        if !done {
+            return wire_response(&self.operation, |output| {
+                wire::write_fetch(
+                    output,
+                    self.format,
+                    FetchReply::Acknowledgments(&selected.common),
+                )
+            });
+        }
         for id in &selected.ids {
             let node = &graph.nodes[graph.location(*id).ok_or(Error::InvalidReference)? as usize];
             if !node.verified {
@@ -189,6 +211,127 @@ impl Repository {
             }
         }
         reader.fetch_pack(&selected.ids).await
+    }
+
+    /// Returns protocol-v2 upload-pack discovery bytes for this object format.
+    #[must_use]
+    pub fn upload_advertisement(format: ObjectFormat) -> Bytes {
+        Bytes::from_static(wire::upload_advertisement(format))
+    }
+
+    /// Serves one protocol-v2 ls-refs or fetch command from this exact view.
+    /// The response is fully validated and buffered before it is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input, resource exhaustion, or storage
+    /// failure. One expired-view retry shares all counters with repository open.
+    pub async fn upload_pack(self, input: Bytes) -> Result<Bytes, Error> {
+        if input.len() > wire::MAX_UPLOAD_BYTES {
+            return Err(Error::InvalidProtocol("upload control bytes"));
+        }
+        let operation = self.operation.clone();
+        let _input_memory = operation.reserve(input.len())?;
+        // Vec growth plus into_boxed_slice can temporarily retain three copies.
+        let maximum = 3 * ((1024 + 32768) * size_of::<ObjectId>() + 1024 * size_of::<&[u8]>());
+        let _parse_memory = operation.reserve((input.len() * 4 + 128).min(maximum))?;
+        operation.work(input.len())?;
+        let request = wire::parse_upload(&input, self.format)?;
+        match self.upload_attempt(&request).await {
+            Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
+                let (log, format) = (self.log.clone(), self.format);
+                drop(self);
+                operation.retry()?;
+                Self::open_attempt(&log, format, &operation)
+                    .await?
+                    .upload_attempt(&request)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn upload_attempt(&self, request: &UploadRequest<'_>) -> Result<Bytes, Error> {
+        match request {
+            UploadRequest::LsRefs {
+                peel,
+                symrefs,
+                unborn,
+                prefixes,
+            } => self.ls_refs(*peel, *symrefs, *unborn, prefixes).await,
+            UploadRequest::Fetch {
+                wants,
+                haves,
+                done,
+                include_tag,
+                ..
+            } => {
+                let reply = self
+                    .fetch_pack_or_ack(wants, haves, *include_tag, *done)
+                    .await?;
+                if *done {
+                    wire_response(&self.operation, |output| {
+                        wire::write_fetch(output, self.format, FetchReply::Pack(&reply))
+                    })
+                } else {
+                    Ok(reply)
+                }
+            }
+        }
+    }
+
+    async fn ls_refs(
+        &self,
+        peel: bool,
+        symrefs: bool,
+        unborn: bool,
+        prefixes: &[&[u8]],
+    ) -> Result<Bytes, Error> {
+        let _memory = self
+            .operation
+            .reserve_state((self.state.refs.len() + 1) * size_of::<AdvertisedRef<'_>>())?;
+        let mut refs = Vec::with_capacity(self.state.refs.len() + 1);
+        let main = self.state.refs.get(&b"refs/heads/main"[..]).copied();
+        if matches_prefix(&self.operation, b"HEAD", prefixes)? && (main.is_some() || unborn) {
+            refs.push(AdvertisedRef {
+                name: b"HEAD",
+                target: main,
+                peeled: None,
+                symref_target: symrefs.then_some(b"refs/heads/main".as_slice()),
+            });
+        }
+        for (name, &target) in &self.state.refs {
+            self.operation.work(name.len())?;
+            if matches_prefix(&self.operation, name, prefixes)? {
+                refs.push(AdvertisedRef {
+                    name,
+                    target: Some(target),
+                    peeled: None,
+                    symref_target: None,
+                });
+            }
+        }
+        if peel
+            && refs
+                .iter()
+                .any(|reference| reference.name.starts_with(b"refs/tags/"))
+        {
+            let catalog = self.catalog().await?;
+            let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
+            for reference in &mut refs {
+                if reference.name.starts_with(b"refs/tags/") {
+                    reference.peeled = peel_ref(
+                        &self.operation,
+                        &mut reader,
+                        reference.target.ok_or(Error::InvalidReference)?,
+                    )
+                    .await?;
+                }
+            }
+        }
+        wire_response(&self.operation, |output| {
+            wire::write_ls_refs(output, self.format, &refs)
+        })
     }
 
     /// Returns the refs from the exact durable view.
@@ -647,6 +790,104 @@ fn clear_partial_cache(path: &Path) -> Result<(), Error> {
     }
 }
 
+fn matches_prefix(operation: &Operation, name: &[u8], prefixes: &[&[u8]]) -> Result<bool, Error> {
+    if prefixes.is_empty() {
+        return Ok(true);
+    }
+    for prefix in prefixes {
+        operation.work(prefix.len().min(name.len()))?;
+        if name.starts_with(prefix) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn peel_ref(
+    operation: &Operation,
+    reader: &mut durable::Reader<'_>,
+    id: ObjectId,
+) -> Result<Option<ObjectId>, Error> {
+    let mut object = reader.find(id).await?.ok_or(Error::InvalidReference)?;
+    if object.kind != gix_object::Kind::Tag {
+        return Ok(None);
+    }
+    for _ in 0..crate::pack::MAX_OBJECTS {
+        operation.work(object.data.len())?;
+        let tag =
+            gix_object::TagRef::from_bytes(&object.data, crate::pack::object_hash(id.format()))
+                .map_err(crate::pack::pack_error)?;
+        let target = ObjectId::from_bytes(id.format(), tag.target().as_slice())?;
+        if !reader.contains(target) {
+            return Err(Error::InvalidReference);
+        }
+        if tag.target_kind != gix_object::Kind::Tag {
+            return Ok(Some(target));
+        }
+        object = reader.find(target).await?.ok_or(Error::InvalidReference)?;
+        if object.kind != gix_object::Kind::Tag {
+            return Err(Error::InvalidReference);
+        }
+    }
+    Err(Error::InvalidObjectGraph("tag chain is too long"))
+}
+
+struct UploadBuffer<'a> {
+    bytes: Option<Vec<u8>>,
+    length: usize,
+    operation: &'a Operation,
+}
+
+impl Write for UploadBuffer<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let length = self
+            .length
+            .checked_add(bytes.len())
+            .filter(|length| *length <= wire::MAX_FETCH_RESPONSE_BYTES)
+            .ok_or_else(|| io::Error::other(Error::InvalidProtocol("upload response bytes")))?;
+        self.operation.work(bytes.len()).map_err(io::Error::other)?;
+        if let Some(output) = &mut self.bytes {
+            if length > output.capacity() {
+                return Err(io::Error::other(Error::InvalidProtocol(
+                    "response changed during encoding",
+                )));
+            }
+            output.extend_from_slice(bytes);
+        }
+        self.length = length;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn wire_response(
+    operation: &Operation,
+    write: impl Fn(&mut UploadBuffer<'_>) -> Result<(), wire::Error>,
+) -> Result<Bytes, Error> {
+    // Wire encoders build one packet line at a time, including Vec growth.
+    let _scratch = operation.reserve(2 * 65536 + 256)?;
+    let mut output = UploadBuffer {
+        bytes: None,
+        length: 0,
+        operation,
+    };
+    write(&mut output)?;
+    let memory = operation.reserve(output.length)?;
+    output.bytes = Some(Vec::with_capacity(output.length));
+    output.length = 0;
+    write(&mut output)?;
+    Ok(crate::pack::budget::hold(
+        Bytes::from(
+            output
+                .bytes
+                .ok_or(Error::InvalidProtocol("missing response buffer"))?,
+        ),
+        memory,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -977,6 +1218,288 @@ mod tests {
                 assert!(matches!(repository.fetch_pack(&[want], &[], false).await,
                     Err(Error::InvalidPack(message)) if message == "selected graph object has the wrong kind"));
             }
+        }
+        Ok(())
+    }
+
+    fn upload_request(format: ObjectFormat, command: &str, args: &[String]) -> TestResult<Bytes> {
+        let mut bytes = Vec::new();
+        for line in [
+            format!("command={command}"),
+            format!(
+                "object-format={}",
+                if format == ObjectFormat::Sha1 {
+                    "sha1"
+                } else {
+                    "sha256"
+                }
+            ),
+        ] {
+            gix_packetline::blocking_io::encode::text_to_write(line.as_bytes(), &mut bytes)?;
+        }
+        bytes.extend_from_slice(b"0001");
+        for line in args {
+            gix_packetline::blocking_io::encode::text_to_write(line.as_bytes(), &mut bytes)?;
+        }
+        bytes.extend_from_slice(b"0000");
+        Ok(bytes.into())
+    }
+
+    fn response_pack(mut bytes: &[u8]) -> TestResult<Vec<u8>> {
+        let mut pack = Vec::new();
+        while !bytes.is_empty() {
+            let line = gix_packetline::decode::all_at_once(bytes)?;
+            let length = match line {
+                gix_packetline::PacketLineRef::Data(data) => {
+                    if data.first() == Some(&1) {
+                        pack.extend_from_slice(&data[1..]);
+                    }
+                    data.len() + 4
+                }
+                _ => 4,
+            };
+            bytes = &bytes[length..];
+        }
+        Ok(pack)
+    }
+
+    #[tokio::test]
+    async fn upload_v2_discovers_refs_negotiates_and_frames_both_hashes() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let advertisement = Repository::upload_advertisement(format);
+            assert!(advertisement.starts_with(b"000eversion 2\n"));
+            assert!(!advertisement.windows(9).any(|part| part == b"# service"));
+            let fixture = fixture(format, b"upload v2")?;
+            let (log, faults, _) = test_log("upload-v2").await?;
+            let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+            let empty = Repository::open_with_pool(&log, format, &pool).await?;
+            let request = upload_request(format, "ls-refs", &["unborn".into(), "symrefs".into()])?;
+            let reply = empty.upload_pack(request).await?;
+            assert!(
+                String::from_utf8_lossy(&reply)
+                    .contains("unborn HEAD symref-target:refs/heads/main")
+            );
+            drop(reply);
+            publish_durable_pack(&log, &fixture, format).await?;
+            let repository = Repository::open_with_pool(&log, format, &pool).await?;
+            faults.reset();
+            let reply = repository
+                .upload_pack(upload_request(
+                    format,
+                    "ls-refs",
+                    &["peel".into(), "symrefs".into(), "ref-prefix HEAD".into()],
+                )?)
+                .await?;
+            assert!(String::from_utf8_lossy(&reply).contains(&format!(
+                "{} HEAD symref-target:refs/heads/main",
+                fixture.target
+            )));
+            assert!(!String::from_utf8_lossy(&reply).contains(" refs/heads/main\n"));
+            assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+            drop(reply);
+            let repository = Repository::open_with_pool(&log, format, &pool).await?;
+            let reply = repository
+                .upload_pack(upload_request(
+                    format,
+                    "fetch",
+                    &[
+                        format!("want {}", fixture.target),
+                        format!("have {}", fixture.target),
+                    ],
+                )?)
+                .await?;
+            assert!(String::from_utf8_lossy(&reply).contains(&format!("ACK {}", fixture.target)));
+            assert!(!reply.windows(8).any(|part| part == b"packfile"));
+            drop(reply);
+            for have in [false, true] {
+                let repository = Repository::open_with_pool(&log, format, &pool).await?;
+                let mut args = vec![
+                    format!("want {}", fixture.target),
+                    "thin-pack".into(),
+                    "ofs-delta".into(),
+                    "include-tag".into(),
+                ];
+                if have {
+                    args.push(format!("have {}", fixture.target));
+                }
+                args.push("done".into());
+                let reply = repository
+                    .upload_pack(upload_request(format, "fetch", &args)?)
+                    .await?;
+                let bytes = response_pack(&reply)?;
+                let pack = gix_pack::data::File::from_data(
+                    bytes.as_slice(),
+                    PathBuf::new(),
+                    crate::pack::object_hash(format),
+                )?;
+                assert_eq!(pack.num_objects(), if have { 0 } else { 3 });
+                let check = Pool::new(crate::pack::budget::LIVE_BYTES).admit()?;
+                crate::pack::normalize(&check, format, &bytes, &[])?;
+                drop(reply);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_ls_refs_peels_full_filtered_tag_chains() -> TestResult {
+        for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+            let fixture = fixture(format, b"tags")?;
+            let source = fixture.directory.path().join("source");
+            command(Some(&source), &["tag", "-a", "inner", "-m", "inner"])?;
+            command(
+                Some(&source),
+                &["tag", "-a", "outer", "inner", "-m", "outer"],
+            )?;
+            let inner = ObjectId::parse(
+                format,
+                output(Some(&source), &["rev-parse", "inner"])?.trim(),
+            )?;
+            let outer = ObjectId::parse(
+                format,
+                output(Some(&source), &["rev-parse", "outer"])?.trim(),
+            )?;
+            fs::write(
+                &fixture.pack,
+                command_output(Some(&source), &["pack-objects", "--all", "--stdout"])?.stdout,
+            )?;
+            let (log, faults, _) = test_log("upload-tags").await?;
+            publish_durable_pack(&log, &fixture, format).await?;
+            let view = log.load().await?;
+            let record = Machine::new(format).transaction(
+                vec![
+                    RefUpdate::new("refs/tags/inner", None, Some(inner))?,
+                    RefUpdate::new("refs/tags/outer", None, Some(outer))?,
+                ],
+                vec![],
+            )?;
+            let prepared =
+                log.prepare(&view, TransactionId::new(), record, Bytes::new(), vec![])?;
+            assert!(matches!(
+                log.commit(prepared).await?,
+                CommitStatus::Committed(_)
+            ));
+            let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+            let repository = Repository::open_with_pool(&log, format, &pool).await?;
+            faults.reset();
+            let reply = repository
+                .upload_pack(upload_request(
+                    format,
+                    "ls-refs",
+                    &["peel".into(), "ref-prefix refs/tags/outer".into()],
+                )?)
+                .await?;
+            let text = String::from_utf8_lossy(&reply);
+            assert!(text.contains(&format!(
+                "{outer} refs/tags/outer peeled:{}",
+                fixture.target
+            )));
+            assert!(!text.contains("refs/tags/inner"));
+            assert_eq!(faults.metrics().operation(Operation::Get).requests, 2);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_limits_fail_before_io_and_response_retains_its_memory() -> TestResult {
+        let (log, faults, _) = test_log("upload-limits").await?;
+        let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+        let repository = Repository::open_with_pool(&log, ObjectFormat::Sha1, &pool).await?;
+        faults.reset();
+        assert!(matches!(
+            repository
+                .upload_pack(Bytes::from(vec![0; wire::MAX_UPLOAD_BYTES + 1]))
+                .await,
+            Err(Error::InvalidProtocol("upload control bytes"))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+        let repository = Repository::open_with_pool(&log, ObjectFormat::Sha1, &pool).await?;
+        let operation = repository.operation.clone();
+        let reply = repository
+            .upload_pack(upload_request(ObjectFormat::Sha1, "ls-refs", &[])?)
+            .await?;
+        assert_eq!(&reply[..], b"0000");
+        assert_eq!(operation.live_bytes(), reply.len());
+        drop(operation);
+        assert!(matches!(pool.admit(), Err(Error::Busy)));
+        drop(reply);
+        assert!(pool.admit().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_expired_view_reopens_once_with_the_original_budget() -> TestResult {
+        for spent in [false, true] {
+            let old = fixture(ObjectFormat::Sha1, b"old")?;
+            let new = fixture(ObjectFormat::Sha1, b"new")?;
+            let (log, _, _) = test_log("upload-expiry").await?;
+            publish_durable_pack(&log, &old, ObjectFormat::Sha1).await?;
+            let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
+            let repository = Repository::open_with_pool(&log, ObjectFormat::Sha1, &pool).await?;
+            let operation = repository.operation.clone();
+            if spent {
+                operation.retry()?;
+            }
+            let before = operation.calls();
+            let view = log.load().await?;
+            let staging = Pool::new(crate::pack::budget::LIVE_BYTES).admit()?;
+            let normalized =
+                crate::pack::normalize(&staging, ObjectFormat::Sha1, &fs::read(&new.pack)?, &[])?;
+            let (descriptor, root) = durable::stage(&staging, &log, &view, normalized).await?;
+            let record = Machine::new(ObjectFormat::Sha1).transaction(
+                vec![RefUpdate::new(
+                    "refs/heads/main",
+                    Some(old.target),
+                    Some(new.target),
+                )?],
+                vec![descriptor],
+            )?;
+            let prepared = log.prepare(
+                &view,
+                TransactionId::new(),
+                record,
+                Bytes::new(),
+                vec![root],
+            )?;
+            assert!(matches!(
+                log.commit(prepared).await?,
+                CommitStatus::Committed(_)
+            ));
+            let checkpoint = Repository::open_native(
+                &log,
+                new.directory.path().join("checkpoint"),
+                ObjectFormat::Sha1,
+            )
+            .await?;
+            let CheckpointStatus::Published(view) = checkpoint.checkpoint().await? else {
+                return Err("checkpoint failed".into());
+            };
+            let object_log::CollectionStart::Installed(view, _) =
+                log.start_collection(&view).await?
+            else {
+                return Err("collection failed".into());
+            };
+            assert!(matches!(
+                log.resume_collection(&view).await?,
+                object_log::CollectionFinish::Complete(_, _)
+            ));
+            let result = repository
+                .upload_pack(upload_request(
+                    ObjectFormat::Sha1,
+                    "fetch",
+                    &[format!("want {}", new.target), "done".into()],
+                )?)
+                .await;
+            if spent {
+                assert!(
+                    matches!(result, Err(Error::InvalidPack(message)) if message == "Git retry limit exceeded")
+                );
+            } else {
+                let reply = result?;
+                assert!(response_pack(&reply)?.starts_with(b"PACK"));
+            }
+            assert!(operation.calls() > before);
+            assert!(operation.retry().is_err());
         }
         Ok(())
     }
