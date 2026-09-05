@@ -215,11 +215,11 @@ the response.
    exact selected object set without reading unrelated blobs.
 6. Complete: build the fetch pack from reused compressed entries and materialized
    fallbacks. Validate it with Git and enforce the raw and framed byte limits.
-7. Connect protocol-v2 discovery, `ls-refs`, negotiation, and fetch to
+7. Complete: connect protocol-v2 discovery, `ls-refs`, negotiation, and fetch to
    `Repository`. Buffer the bounded response and allow one expired-view retry.
-8. Resolve receive-pack thin bases in at most 32 rounds. Normalize the pack,
+8. Complete: resolve receive-pack thin bases in at most 32 rounds. Normalize the pack,
    check connectivity and ref rules, and keep all counters cumulative.
-9. Prepare and publish the ordered receive ref transaction. Preserve current
+9. Complete: prepare and publish the ordered receive ref transaction. Preserve current
    conflict, pending-result, lost-response, and per-ref status behavior.
 10. Change the native Axum host into a thin adapter and run unchanged-client
     parity against the native oracle. Keep the oracle available for comparison.
