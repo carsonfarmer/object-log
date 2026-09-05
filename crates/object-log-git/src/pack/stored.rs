@@ -72,6 +72,8 @@ impl<'a> Input<'a> {
             operation: self.operation.clone(),
             context: Arc::new(()),
             chunks,
+            inline: None,
+            cache: std::sync::Mutex::new(None),
             bytes,
             width,
             maximum: count,

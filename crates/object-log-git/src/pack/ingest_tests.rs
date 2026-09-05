@@ -520,3 +520,55 @@ async fn scanning_crosses_small_storage_chunks_and_rejects_damaged_chunks() -> T
 
 #[path = "delta_tests.rs"]
 mod delta_tests;
+
+#[tokio::test]
+async fn inline_scratch_spans_tiny_storage_geometry_without_puts() -> TestResult {
+    let store = FaultStore::from_arc(Arc::new(InMemory::new()));
+    let backend = ValidatedBackend::new(Arc::new(store.clone()), StorePath::from("inline")).await?;
+    let base_log = Log::open(
+        &backend,
+        &LogId::new("tiny-inline")?,
+        Options {
+            max_object_bytes: 7,
+            max_object_refs: 1024,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let view = base_log.load().await?;
+    for size in [0, 1, 128, crate::pack::SCAN_WINDOW_BYTES] {
+        let operation = Pool::new(4 * FRAME_BYTES).admit()?;
+        let log = base_log.with_request_guard(Arc::new(operation.clone()));
+        let source = Input::empty(&operation, &log, &view, 0)?;
+        let bytes = Bytes::from(vec![b'x'; size]);
+        let id = crate::ObjectId::from_bytes(
+            ObjectFormat::Sha1,
+            gix_object::compute_hash(
+                crate::pack::object_hash(ObjectFormat::Sha1),
+                gix_object::Kind::Blob,
+                &bytes,
+            )?
+            .as_slice(),
+        )?;
+        store.reset();
+        let frames = if bytes.is_empty() {
+            Vec::new()
+        } else {
+            vec![Ok(bytes.clone())]
+        };
+        let decoded = source
+            .stage_base(id, gix_object::Kind::Blob, size, stream::iter(frames))
+            .await?;
+        assert_eq!(decoded.id(), id);
+        assert_eq!(decoded.len(), size as u64);
+        let mut cursor = Cursor::new(&decoded.input);
+        let mut actual = vec![0; size];
+        cursor.read_exact(&mut actual).await?;
+        assert_eq!(actual, bytes);
+        assert_eq!(store.metrics().total_requests(), 0);
+        drop(decoded);
+        drop(source);
+        assert_eq!(operation.live_bytes(), 0);
+    }
+    Ok(())
+}

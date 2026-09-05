@@ -42,6 +42,8 @@ pub(crate) struct Input<'a> {
     operation: Operation,
     context: Arc<()>,
     chunks: Vec<StagedObject>,
+    inline: Option<Bytes>,
+    cache: std::sync::Mutex<Option<(usize, Bytes)>>,
     bytes: u64,
     width: usize,
     maximum: usize,
@@ -69,6 +71,8 @@ impl<'a> Input<'a> {
             operation: operation.clone(),
             context: Arc::new(()),
             chunks: Vec::with_capacity(maximum),
+            inline: None,
+            cache: std::sync::Mutex::new(None),
             bytes: 0,
             width,
             maximum,
@@ -155,6 +159,9 @@ impl<'a, 'log> Cursor<'a, 'log> {
             return Ok(Bytes::new());
         }
         let position = usize::try_from(self.position).map_err(pack_error)?;
+        if let Some(bytes) = &self.input.inline {
+            return Ok(bytes.slice(position..));
+        }
         let index = position / self.input.width;
         if self
             .cache
@@ -162,18 +169,41 @@ impl<'a, 'log> Cursor<'a, 'log> {
             .is_none_or(|(cached, _)| *cached != index)
         {
             self.cache = None;
-            let object = self
+            let shared = self
                 .input
-                .chunks
-                .get(index)
-                .ok_or_else(|| pack_error("input chunk is missing"))?
-                .reference();
-            let size = usize::try_from(object.len()).map_err(pack_error)?;
+                .cache
+                .lock()
+                .map_err(|_| pack_error("input cache lock poisoned"))?
+                .as_ref()
+                .filter(|(cached, _)| *cached == index)
+                .cloned();
+            if let Some(cached) = shared {
+                self.cache = Some(cached);
+            } else {
+                // Remove the previous shared window before admitting its replacement.
+                *self
+                    .input
+                    .cache
+                    .lock()
+                    .map_err(|_| pack_error("input cache lock poisoned"))? = None;
+                let object = self
+                    .input
+                    .chunks
+                    .get(index)
+                    .ok_or_else(|| pack_error("input chunk is missing"))?
+                    .reference();
+                let size = usize::try_from(object.len()).map_err(pack_error)?;
 
-            self.input.operation.work(size)?;
-            let memory = self.input.operation.reserve(size)?;
-            let bytes = self.input.log.read_object(self.input.view, object).await?;
-            self.cache = Some((index, hold(bytes, memory)));
+                self.input.operation.work(size)?;
+                let memory = self.input.operation.reserve(size)?;
+                let bytes = self.input.log.read_object(self.input.view, object).await?;
+                self.cache = Some((index, hold(bytes, memory)));
+                self.input
+                    .cache
+                    .lock()
+                    .map_err(|_| pack_error("input cache lock poisoned"))?
+                    .clone_from(&self.cache);
+            }
         }
         let (_, bytes) = self
             .cache

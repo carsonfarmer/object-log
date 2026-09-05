@@ -18,6 +18,7 @@ pub(super) struct Sink<'a> {
     pending: BytesMut,
     memory: Reservation,
     limit: usize,
+    inline: bool,
 }
 
 impl<'a> Sink<'a> {
@@ -27,14 +28,26 @@ impl<'a> Sink<'a> {
         view: &'a View,
         limit: usize,
     ) -> Result<Self, Error> {
+        Self::with_inline(operation, log, view, limit, false)
+    }
+
+    fn with_inline(
+        operation: &Operation,
+        log: &'a Log,
+        view: &'a View,
+        limit: usize,
+        inline: bool,
+    ) -> Result<Self, Error> {
         let input = Input::empty(operation, log, view, limit)?;
-        let memory = operation.reserve(input.width)?;
-        let pending = BytesMut::with_capacity(input.width);
+        let capacity = if inline { limit } else { input.width };
+        let memory = operation.reserve(capacity)?;
+        let pending = BytesMut::with_capacity(capacity);
         Ok(Self {
             input,
             pending,
             memory,
             limit,
+            inline,
         })
     }
 
@@ -49,10 +62,15 @@ impl<'a> Sink<'a> {
         self.input.operation.work(bytes.len())?;
         self.input.bytes += bytes.len() as u64;
         while !bytes.is_empty() {
-            let count = bytes.len().min(self.input.width - self.pending.len());
+            let width = if self.inline {
+                self.limit
+            } else {
+                self.input.width
+            };
+            let count = bytes.len().min(width - self.pending.len());
             self.pending.extend_from_slice(&bytes[..count]);
             bytes = &bytes[count..];
-            if self.pending.len() == self.input.width {
+            if !self.inline && self.pending.len() == self.input.width {
                 self.flush(true).await?;
             }
         }
@@ -73,7 +91,12 @@ impl<'a> Sink<'a> {
     }
 
     pub(super) async fn finish(mut self) -> Result<Input<'a>, Error> {
-        if !self.pending.is_empty() {
+        if self.inline {
+            self.input.inline = Some(crate::pack::budget::hold(
+                self.pending.freeze(),
+                self.memory,
+            ));
+        } else if !self.pending.is_empty() {
             self.flush(false).await?;
         }
         Ok(self.input)
@@ -120,7 +143,16 @@ impl<'a> ObjectSink<'a> {
         if size > MAX_OBJECT_BYTES {
             return invalid("decoded scratch exceeds object limit");
         }
-        let sink = Sink::new(&source.operation, source.log, source.view, size)?;
+        // Tiny decoded objects are transient computation, not publication
+        // roots. Keep them charged to this request; the durable encoded input
+        // can reconstruct them after a retry. Larger objects spill in chunks.
+        let sink = Sink::with_inline(
+            &source.operation,
+            source.log,
+            source.view,
+            size,
+            size <= SCAN_WINDOW_BYTES,
+        )?;
         let mut hash = gix_hash::hasher(object_hash(format));
         hash.update(&gix_object::encode::loose_header(kind, size as u64));
         Ok(Self {
