@@ -84,10 +84,9 @@ were unchanged between those runs. Raw timed Spin reports are retained.
 Forty fresh release CLI processes were measured with /usr/bin/time -l. RSS ranged
 from 10,125,312 to 14,303,232 bytes (maximum 13.640625 MiB). These small fixtures
 include the 1,024-tail checkpoint and metadata setter; they do not establish a
-general 128 MiB whole-process bound. Builds, native MinIO and the Spin host are
-separate processes. Spin still uses run.sh's single pooled instance and 128 MiB
-instance-memory cap. No remote-store performance or indefinite sustained-service
-claim is made. The prior disk-pressure failures remain preserved in
+general whole-process bound. Builds, native MinIO and the Spin host are
+separate processes. Current fixtures use ordinary Spin defaults. No remote-store
+performance or indefinite sustained-service claim is made. The prior disk-pressure failures remain preserved in
 [auth-config evidence](spin-operator-auth-config-2026-09-05.md).
 
 The adjacent native-provider.sh reproduces the fixture with the verified binary

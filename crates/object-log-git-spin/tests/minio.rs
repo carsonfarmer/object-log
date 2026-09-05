@@ -495,7 +495,7 @@ async fn serve_spin_with_policy(
     let artifact = std::env::temp_dir().join(format!("object-log-spin-{format}-{port}"));
     let log = std::fs::File::create(artifact.with_extension("log"))?;
     let rss = artifact.with_extension("rss");
-    let run = Path::new(env!("CARGO_MANIFEST_DIR")).join("run.sh");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("spin.toml");
     let mut process = Command::new("/usr/bin/time");
     let time_report = if cfg!(target_os = "macos") {
         "-l"
@@ -506,7 +506,8 @@ async fn serve_spin_with_policy(
         .process_group(0)
         .args([time_report, "-o"])
         .arg(&rss)
-        .arg(run)
+        .args(["spin", "up", "--from"])
+        .arg(manifest)
         .args(["--listen", &address]);
     for (variable, name) in [
         ("endpoint", "OBJECT_LOG_MINIO_ENDPOINT"),

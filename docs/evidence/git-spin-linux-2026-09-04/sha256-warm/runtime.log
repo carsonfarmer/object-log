@@ -1,5 +1,0 @@
-
-Serving http://0.0.0.0:3000
-Available Routes:
-  git: http://0.0.0.0:3000/repo (wildcard)
-Logging component stdio to "/state/logs/"

@@ -49,7 +49,7 @@ Start a local service using the file (this avoids putting credentials in the
 process argument list):
 
 ```sh
-crates/object-log-git-spin/run.sh --listen 127.0.0.1:3000 --variable @/deployment/repository.toml
+spin up --from crates/object-log-git-spin/spin.toml --listen 127.0.0.1:3000 --variable @/deployment/repository.toml
 ```
 
 The repository URL is `http://localhost:3000/repo`. Upload uses protocol v2;
@@ -86,13 +86,9 @@ gzip-expanded bodies are limited to 10 MiB. During decompression the two host
 buffers can coexist (20 MiB); these belong to the runtime allowance until the
 engine charges the command input. Response bytes retain their engine owner
 through the final stream write. Spin's per-instance engine admission does not
-bound aggregate memory across concurrent host instances. The launch command
-forces Spin's pooling allocator with `SPIN_WASMTIME_POOLING=1` and limits it
-to one live component instance. Do not disable pooling. Unsupported hosts must
-fail startup rather than silently use the on-demand allocator; run the
-concurrent fixture on each qualification host to verify refusal of a second
-live instance. These
-limits follow [Spin 4.0.2's pooling configuration](https://github.com/spinframework/spin/blob/v4.0.2/crates/core/src/lib.rs#L92).
+bound aggregate memory across concurrent host instances. Run ordinary Spin
+with its default allocator, connection pooling, instance count, and memory
+settings. The library budgets do not require a host memory cap or Spin patch.
 
 The S3 connector streams request and response bodies. It applies a five-second
 connect timeout and thirty-second first-byte and between-byte timeouts. It
@@ -221,9 +217,8 @@ Input file reads precede the asynchronous deadline.
 
 Input caps do not establish decoded-memory limits. Core resumption may verify
 complete immutable dependency graphs and active collection plans; it does not
-use the serving Git operation budgets. This command has no general 128 MiB
-maintenance qualification yet. Build resources remain separate from runtime;
-the service's existing 128 MiB qualification is unchanged.
+use the serving Git operation budgets. Resource measurements should use normal
+runtime settings; there is no imposed Spin host-memory acceptance cap.
 
 Checkpointing uses the shared maintenance profile: 8,192 charged calls, 88 MiB
 live pool, 24 MiB retained state, 96 MiB transfer and 256 MiB work, with one
@@ -247,30 +242,8 @@ It is not MinIO qualification or evidence of unchanged-client parity; those
 belong to the workspace's provider and Git acceptance gates.
 The HTTP fixture also checks both hashes with the default write policy,
 read-only rejection, and invalid policy configuration without a provider.
-These policy checks use an explicit 50 ms inter-request gap: with one Spin
-instance, response delivery can precede slot release, causing a subsequent
-request to receive a host-generated 500. Run `check_http.py --back-to-back`
-to probe this unresolved admission race tracked in #21; the spaced checks do
-not qualify back-to-back or concurrent request admission.
+These checks use ordinary requests without a host-slot timing workaround.
 
-See [initial adapter evidence](EVIDENCE.md) for exact local gates and their limits.
-
-The supported runtime configuration disables outbound HTTP connection pooling.
-A pooled provider run produced a transient protocol error; the unpooled
-configuration passed the recorded Linux workload. The cause is not proven.
-`run.sh` rejects competing `--runtime-config-file` and `RUNTIME_CONFIG_FILE`
-settings instead of silently discarding them.
-
-Linux serving under a hard 128 MiB process limit requires an executable cache
-prepared with the same Spin version, platform, and component. Cold compilation
-was OOM-killed under that limit; cache setup peaked at 228–231 MB across two runs. Prepare
-the cache outside the serving cgroup, then retain it for fresh serving processes:
-
-```sh
-python3 crates/object-log-git-spin/prewarm_cache.py --directory /deployment/wasmtime-cache
-crates/object-log-git-spin/run.sh --listen 127.0.0.1:3000 --variable @/deployment/repository.toml --cache /deployment/wasmtime-cache/wasmtime-cache.toml
-```
-
-This is a compiler cache, not repository state. See the
-[Linux qualification evidence](../../../docs/evidence/git-spin-linux-2026-09-04.md)
-for exact limits, raw counters, provider conditions, and the cold-start failure.
+The functional fixtures exercise real Spin with its defaults. The previous
+constrained-runtime launcher and diagnostics are removed. Verification results
+belong in commits and the issue tracker; Git history retains prior reports.

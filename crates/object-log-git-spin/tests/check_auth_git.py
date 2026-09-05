@@ -54,7 +54,6 @@ if sys.argv[1] == "get":
                     assert result.returncode != 0 and expected in result.stderr, "unexpected Git denial"
                 elif result.returncode:
                     raise RuntimeError("Git fixture command failed: " + args[0] + ": " + result.stderr.decode(errors="replace"))
-                time.sleep(.05)
                 return result.stdout.strip()
 
             variables = {key: env["OBJECT_LOG_MINIO_" + suffix] for key, suffix in [("endpoint", "ENDPOINT"), ("bucket", "BUCKET"), ("access_key", "ACCESS_KEY"), ("secret_key", "SECRET_KEY")]}

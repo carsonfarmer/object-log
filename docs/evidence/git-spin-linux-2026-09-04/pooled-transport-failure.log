@@ -1,6 +1,0 @@
-
-Serving http://0.0.0.0:3000
-Available Routes:
-  git: http://0.0.0.0:3000/repo (wildcard)
-Logging component stdio to "/state/logs/"
-Git request failed: object store: Generic S3 error: Error performing GET http://minio:9000/object-log-test/sha1/v1/logs/repository/index.cbor in 100.25µs - HTTP error: ErrorCode::HttpProtocolError: Generic S3 error: Error performing GET http://minio:9000/object-log-test/sha1/v1/logs/repository/index.cbor in 100.25µs - HTTP error: ErrorCode::HttpProtocolError: Error performing GET http://minio:9000/object-log-test/sha1/v1/logs/repository/index.cbor in 100.25µs - HTTP error: ErrorCode::HttpProtocolError: HTTP error: ErrorCode::HttpProtocolError: HTTP error: ErrorCode::HttpProtocolError: ErrorCode::HttpProtocolError

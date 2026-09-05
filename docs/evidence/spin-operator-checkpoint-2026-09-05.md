@@ -50,8 +50,7 @@ For SHA-1 and SHA-256 it verifies:
   and cold Spin fetches into the filesystem clone; every cycle passes strict
   fsck and exact tag identity. All pack proofs remain retained.
 
-The final provider run passed in 16.26 seconds. Runtime uses run.sh's existing
-single-instance pooling and 128 MiB WASM memory cap. The test does not establish
+The final provider run passed in 16.26 seconds. Current fixtures use ordinary Spin defaults. The test does not establish
 a total Spin-host RSS cap, concurrency safety, arbitrary repository capacity,
 or indefinite sustained operation.
 

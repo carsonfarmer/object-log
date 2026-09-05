@@ -38,8 +38,6 @@ def run(args, cwd=None, env=None):
 
 
 def git(path, *args):
-    # See existing HTTP fixture: isolate known single-instance admission race.
-    time.sleep(.05)
     return run(["git", "-c", "protocol.version=2", *args], cwd=path)
 
 
@@ -158,7 +156,7 @@ try:
             log_path = ROOT / "tests" / ("partial-" + name + ".log")
             with log_path.open("w") as log:
                 def start():
-                    host = subprocess.Popen([str(ROOT / "run.sh"), "--listen", f"127.0.0.1:{port}",
+                    host = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", f"127.0.0.1:{port}",
                                              "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                     try:
                         ready(f"http://127.0.0.1:{port}/.well-known/spin/health", host)

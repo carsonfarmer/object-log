@@ -47,7 +47,7 @@ history, or pass them as `--variable auth_write_token=...` arguments. Set
 TOML alongside the existing storage/policy settings. Invoke:
 
 ```sh
-./run.sh --listen 127.0.0.1:3000 --variable @/private/repository.toml
+spin up --from spin.toml --listen 127.0.0.1:3000 --variable @/private/repository.toml
 ```
 
 Use a Git credential helper that retrieves the HTTP token from your existing
@@ -87,5 +87,5 @@ The HTTP fixture counts backend calls and sends no POST body bytes despite a
 nonzero Content-Length. The MinIO fixture uses unchanged Git for both SHA-1 and
 SHA-256, writer push, reader clone/fetch and denied push, cold restart, token
 rotation, read-only denial, and exact head bytes/ETag preservation on rejection.
-Tests bind only to loopback. They do not qualify new 128 MiB serving headroom;
+Tests bind only to loopback and use ordinary Spin runtime settings;
 builds and Wasmtime cache preparation remain outside the serving budget.

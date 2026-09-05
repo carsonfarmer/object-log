@@ -160,8 +160,8 @@ def run():
         temp = pathlib.Path(temp)
         with (temp / "runtime.log").open("w") as log:
             process = subprocess.Popen(["spin", "up", "--from", str(ROOT / "memory.toml"),
-                                        "--listen", "127.0.0.1:19176", "--max-instance-memory", "134217728"],
-                                       env={**os.environ, "SPIN_MAX_INSTANCE_COUNT": "1", "SPIN_WASMTIME_INSTANCE_COUNT": "1", "SPIN_WASMTIME_POOLING": "1"},
+                                        "--listen", "127.0.0.1:19176"],
+                                       env=os.environ.copy(),
                                        stdout=log, stderr=subprocess.STDOUT)
             try:
                 for _ in range(100):
@@ -202,7 +202,7 @@ def run():
                             counts[name] = check_pack(checked, source, fmt, target, unpack(reply), seed_pack, have)
                         print(json.dumps({"hash":fmt, "fixture":label, "request_bytes":len(body), "response_frame_bytes":[len(r) for r in replies],
                                           "elapsed_seconds":elapsed, "objects":counts, "gc":replies[6].decode().strip(),
-                                          "instance_limit_bytes":134217728}), flush=True)
+                                          "runtime_configuration":"Spin defaults"}), flush=True)
             finally:
                 process.terminate()
                 process.wait(timeout=10)

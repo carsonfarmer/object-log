@@ -23,8 +23,8 @@ The core `object-log` crate remains independent from Git.
 
 The full [review and execution queue](docs/reviews/git-proof-2026-09-05.md)
 records ordinary-workflow gaps and core API lessons. Issue #26 sets minimum
-capacity at 50 MiB files and 1 GiB pushes. The 128 MiB budget applies to serving
-runtime, not builds or component compilation/cache preparation.
+capacity at 50 MiB files and 1 GiB pushes. Use ordinary Spin defaults for runtime
+behavior; no host memory cap, pooling override, or one-instance wrapper is required.
 
 Tasks 1–9 were accepted at `b4b05f3`. Tasks 10–12 now pass unchanged-client,
 local-provider, functional, and resource qualification for the shared native
@@ -153,15 +153,11 @@ advertised. Add a capability only with a test for its complete behavior.
 
 The native process admits one active Git engine operation through an 88 MiB
 shared live allocation pool. In WASI that static pool belongs to one component
-instance; the qualified Spin launcher forces one live instance.
+instance. Spin controls host concurrency with its default configuration.
 
-| Process memory | Budget |
-| --- | ---: |
-| Git live pool | 88 MiB |
-| Runtime allowance | 24 MiB |
-| Safety reserve | 16 MiB |
-| WASI host model | 128 MiB |
-| Provisional observed peak target | 120 MiB |
+The shared engine retains its 88 MiB live pool and 24 MiB retained-state
+allowance. These are library operation limits, not a Spin host-memory limit.
+Do not force pooling, connection reuse, instance count, or a 128 MiB host cap.
 
 Each operation uses one cumulative budget. A retry does not reset its counters.
 
@@ -204,9 +200,8 @@ Task 1 applies these phase limits:
 Receive control and the incoming pack have separate limits. Both are charged
 to the same live pool.
 
-These limits are provisional until the WASIp2 adapter measures peak process
-memory. If the runtime needs more than 24 MiB, reduce the live pool or a phase
-limit. Do not assign the 16 MiB reserve to a phase.
+Measure runtime resource use with the ordinary Spin configuration. Investigate
+library costs before changing host settings or proposing Spin patches.
 
 ## Pack creation policy
 
@@ -340,13 +335,9 @@ Git baseline, run 30 paired samples and record the performance finding for
 owner review. The owner subsequently authorized old-engine removal independently
 of that finding; installed-Git comparisons remain. Record noisy results as inconclusive.
 
-After the Spin component exists, measure a fresh process with
-`--max-instance-memory 134217728` and `/usr/bin/time -l`. A peak at or below
-120 MiB is a provisional target, not a hard gate. The [Linux qualification](docs/evidence/git-spin-linux-2026-09-04.md) now proves
-that fresh processes with a prepared executable cache survive the both-hash
-workload inside a 128 MiB no-swap cgroup. They reach the cap, so no spare margin
-is established. Empty-cache compilation fails at that limit; the documented
-deployment prepares the exact component cache outside the serving cgroup.
+Measure fresh-process resource use with ordinary `spin up --from` and record
+observations with verification results. No 128 MiB process or instance cap is
+an acceptance requirement. Builds and runtime behavior remain separate concerns.
 
 No tighter call-count or serial-depth performance gate exists yet. Measurement
 code must add zero product lines; keep it in test and support code. A failed
@@ -404,8 +395,8 @@ remain acceptance requirements.
   is prior art for indexed range reads and a process-wide block cache over
   object storage.
 - Cloudflare documents a [128 MB per-isolate memory limit](https://developers.cloudflare.com/workers/platform/limits/),
-  including WebAssembly allocations. This plan uses a 128 MiB process model
-  and a lower 120 MiB provisional target.
+  including WebAssembly allocations. That platform-specific limit does not
+  configure or constrain this Spin proof.
 - The `git-server` package in `imjasonh/playground` targets Cloudflare Workers.
   It is not a Cloudflare-owned project. Its root license is unclear, so do not
   copy its source or structure.

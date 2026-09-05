@@ -547,7 +547,9 @@ async fn serve(config: &Path, state: &Path) -> TestResult<(Host, String)> {
     let log = fs::File::create(state.join(format!("spin-{port}.log")))?;
     let mut host = Host(
         Some(
-            Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("run.sh"))
+            Command::new("spin")
+                .args(["up", "--from"])
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("spin.toml"))
                 .process_group(0)
                 .args([
                     "--listen",

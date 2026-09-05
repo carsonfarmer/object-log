@@ -1,5 +1,4 @@
 """Exercise the actual component's HTTP boundary without storage access."""
-import argparse
 import json
 import pathlib
 import itertools
@@ -11,10 +10,6 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 URL = "http://127.0.0.1:19174"
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--back-to-back", action="store_true", help="remove policy isolation gap to reproduce the open #21 host admission race")
-GAP = 0 if parser.parse_args().back_to_back else .05
-print(f"HTTP fixture: {'back-to-back admission probe' if GAP == 0 else 'isolated policy checks with a 50 ms inter-request gap'}", flush=True)
 
 
 def request(path, headers=None, data=None):
@@ -23,11 +18,6 @@ def request(path, headers=None, data=None):
             return response.status, response.read(), response.headers
     except urllib.error.HTTPError as error:
         return error.code, error.read(), error.headers
-    finally:
-        # Response delivery can precede release of Spin's single instance slot.
-        # Isolate policy assertions; back-to-back admission is tracked in #21.
-        if GAP:
-            time.sleep(GAP)
 
 
 policies = [(None, None), (None, "true"), (None, "invalid"), ("true", "true"), ("true", "invalid"), ("invalid", None)]
@@ -48,7 +38,7 @@ for object_format, (read_only, allow_rewrite) in itertools.product(["sha1", "sha
         config = pathlib.Path(directory) / "repository.toml"
         config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
         command = [
-            str(ROOT / "run.sh"), "--listen", "127.0.0.1:19174",
+            "spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", "127.0.0.1:19174",
             "--variable", "@" + str(config),
         ]
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)

@@ -126,13 +126,9 @@ required for that recovery envelope. A damaged WAL is an integrity error, never
 permission to skip records. Do not advertise arbitrary resource-exhaustion
 recovery from the first successful tail fixture.
 
-The 128 MiB constraint remains the serving-runtime qualification. Rust builds
-and Wasmtime/cache preparation run outside it. A maintenance process is runtime,
-not compilation: report its memory separately and do not silently claim an
-unlimited exemption. Prefer a measured bounded 128 MiB maintenance run where
-the implementation permits it; any different operator runtime requirement must
-be an explicit deployment decision before acceptance. A future HTTP maintenance
-component sharing the serving envelope must satisfy that envelope itself.
+Use ordinary Spin defaults for serving and report maintenance resource use
+separately. The library's operation budgets remain bounded; no host memory cap,
+pooling override, or special Spin runtime is required for acceptance.
 
 ## Outcomes and crash recovery
 

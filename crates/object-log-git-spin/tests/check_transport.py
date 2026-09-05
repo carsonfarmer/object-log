@@ -149,7 +149,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 19171), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 with (ROOT / "runtime.log").open("w") as log:
-    process = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", "127.0.0.1:19172", "--max-instance-memory", "134217728"], stdout=log, stderr=subprocess.STDOUT, env={**os.environ, "SPIN_WASMTIME_POOLING": "1", "SPIN_MAX_INSTANCE_COUNT": "1", "SPIN_WASMTIME_INSTANCE_COUNT": "1"})
+    process = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", "127.0.0.1:19172"], stdout=log, stderr=subprocess.STDOUT, env=os.environ.copy())
     try:
         for attempt in range(100):
             try:
@@ -182,16 +182,13 @@ with (ROOT / "runtime.log").open("w") as log:
             first = executor.submit(get_held)
             assert held.wait(10), "first instance did not reach provider"
             try:
-                try:
-                    urllib.request.urlopen("http://127.0.0.1:19172/failure", timeout=5)
-                    raise AssertionError("second live instance was admitted")
-                except urllib.error.HTTPError as error:
-                    assert error.code >= 500, error.code
-                assert calls[-1] == ("GET", "held") and len(calls) == 10, calls
+                with urllib.request.urlopen("http://127.0.0.1:19172/failure", timeout=5) as response:
+                    assert response.read() == b"bounded failure passed\n"
+                assert calls[-2:] == [("GET", "held"), ("GET", "503")] and len(calls) == 11, calls
             finally:
                 release.set()
             assert first.result() == b"held request released\n"
-        print(json.dumps({"host_admission": "second concurrent instance rejected","result": result.strip(), "failure": "503 propagated without retry", "calls": calls}))
+        print(json.dumps({"host_admission": "concurrent requests use Spin defaults","result": result.strip(), "failure": "503 propagated without retry", "calls": calls}))
     finally:
         process.terminate()
         process.wait(timeout=10)

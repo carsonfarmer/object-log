@@ -95,9 +95,8 @@ byte-oriented upload/receive commands, with command-local indexes and sparse
 range reads. No scratch Git repository is required.
 
 An 88 MiB pool admits one engine operation per native process or WASI instance.
-Spin serving at a configured 128 MiB process limit requires one live instance
-and an executable cache prepared outside that limit. Empty-cache compilation
-fails there, and serving has no proven spare memory margin. The SHA-1 8 MiB
+Run ordinary Spin with default runtime settings. No one-instance launcher,
+pooling workaround, or imposed host-memory cap is required. The SHA-1 8 MiB
 WASIp2 push remains approximately 1.65 times its native Git timing baseline;
 removing old product code does not resolve that observation.
 
@@ -108,11 +107,10 @@ open until it demonstrates useful scale and straightforward integration:
   bound catalog work as live packs accumulate, preserve atomic replacement and
   GC safety, and measure sustained Spin/MinIO workloads before and after.
 - [#21: memory and admission](https://github.com/carsonfarmer/object-log/issues/21):
-  separate cold compilation from serving, establish headroom, and measure
-  concurrency instead of assuming the single-instance qualification generalizes.
+  measure normal runtime behavior and concurrent clients using Spin defaults.
 - [#22: pooled HTTP failure](https://github.com/carsonfarmer/object-log/issues/22):
-  isolate the intermittent protocol error and pursue an upstream issue/fix if
-  a minimal reproducer establishes responsibility.
+  revisit only if ordinary Spin testing reveals a blocking problem. No Spin
+  patch or upstream work is a prerequisite.
 - [#23: large-push performance](https://github.com/carsonfarmer/object-log/issues/23):
   profile the SHA-1 8 MiB WASIp2 receive finding before choosing an optimization.
 - [#24: clone extensions](https://github.com/carsonfarmer/object-log/issues/24):

@@ -50,7 +50,6 @@ def request(port, path, headers, post=False):
     response = connection.getresponse()
     result = response.status, dict(response.getheaders()), response.read()
     connection.close()
-    time.sleep(.05)  # Separate policy checks from the known host admission race.
     return result
 
 
@@ -97,7 +96,7 @@ def host(variables, directory):
     config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
     address = port()
     with (pathlib.Path(directory) / "runtime.log").open("w") as log:
-        process = subprocess.Popen([str(ROOT / "run.sh"), "--listen", f"127.0.0.1:{address}", "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", f"127.0.0.1:{address}", "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             for _ in range(200):
                 if process.poll() is not None:

@@ -1,3 +1,0 @@
-# Qualified with fresh WASIp2 instances against local MinIO. See EVIDENCE.md.
-[outbound_http]
-connection_pooling = false

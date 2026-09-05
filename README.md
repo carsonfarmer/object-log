@@ -137,11 +137,10 @@ retries. Existing caller guards run first; denied admission never removes caller
 policy. These counters cover logical storage-client calls and bounded payloads,
 while Spin separately bounds HTTP traffic including bootstrap. They are not
 whole-process memory measurements. Admission exhaustion returns HTTP 503.
-Spin deployment forces one live component instance. A fresh Linux serving
-process passes a hard 128 MiB cgroup with a prepared executable cache, but
-empty-cache compilation exceeds that cap. See the
-[Linux qualification](docs/evidence/git-spin-linux-2026-09-04.md) for cache setup
-and the measured lack of spare process-memory margin. The Git engine has no
+Run the service with ordinary `spin up --from` and the application's manifest.
+Tests use Spin defaults for pooling, instance count, and instance memory.
+The engine's own bounded operation budgets remain; they do not impose a host
+process-memory target or require Spin patches. The Git engine has no
 high-level `gix` repository or Tokio filesystem runtime dependency. The
 [Git proof plan](GIT_PLAN.md) defines the 12 tasks, phase limits, performance
 gates, and source-size review thresholds.

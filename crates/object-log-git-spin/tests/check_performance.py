@@ -85,7 +85,7 @@ def percentile(values, quantile):
 
 def run():
     assert m.git(m.ROOT, "--version").startswith(b"git version 2.54.")
-    output = pathlib.Path(os.environ.get("OBJECT_LOG_SPIN_PERFORMANCE_OUTPUT", "docs/evidence/git-spin-performance-2026-09-04.jsonl"))
+    output = pathlib.Path(os.environ.get("OBJECT_LOG_SPIN_PERFORMANCE_OUTPUT", str(pathlib.Path(tempfile.gettempdir()) / "object-log-spin-performance.jsonl")))
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w") as raw, tempfile.TemporaryDirectory(prefix="object-log-spin-performance-") as temporary:
         temp = pathlib.Path(temporary)
@@ -105,15 +105,15 @@ def run():
                 "source_diff_sha256": hashlib.sha256(m.git(m.ROOT, "diff", "HEAD")).hexdigest(),
                 "machine": platform.platform(), "processor": platform.processor(),
                 "driver_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
-                "instance_limit_bytes": 134217728, "warmups": 1, "initial_pairs": 10, "escalated_pairs": 30,
+                "runtime_configuration": "Spin defaults", "warmups": 1, "initial_pairs": 10, "escalated_pairs": 30,
                 "candidate_scope": "Guest common command: repository open, log reads/writes, graph/pack/ref work; InMemory provider. Whole fresh lifecycle HTTP and runtime startup recorded separately. No transport or JIT in guest timer.",
                 "oracle_scope": "Native Git subprocess pack-objects fetch or strict index-pack plus update-ref push; fixture creation, seed import and verification excluded. Filesystem provider; no log work.",
                 "io_scope": "Each guest command timer includes repository open and measured InMemory GET/PUT including body consumption; calls and combined payload bytes exclude bootstrap and verification. Serial depth is longest nonoverlapping interval chain, not a causal DAG or remote latency.",
-                "qualification": "Scope comparison only; native oracle retained. Instance cap is not process RSS; startup includes compilation/cache costs without attribution."})
+                "qualification": "Installed-Git comparison using Spin defaults; startup includes compilation/cache costs without attribution."})
         startup = time.monotonic_ns()
         with (temp / "runtime.log").open("w") as log:
-            process = subprocess.Popen(["spin", "up", "--from", str(m.ROOT / "memory.toml"), "--listen", f"127.0.0.1:{port}", "--max-instance-memory", "134217728"],
-                env={**os.environ, "SPIN_MAX_INSTANCE_COUNT": "1", "SPIN_WASMTIME_INSTANCE_COUNT": "1", "SPIN_WASMTIME_POOLING": "1"}, stdout=log, stderr=subprocess.STDOUT)
+            process = subprocess.Popen(["spin", "up", "--from", str(m.ROOT / "memory.toml"), "--listen", f"127.0.0.1:{port}"],
+                env=os.environ.copy(), stdout=log, stderr=subprocess.STDOUT)
             try:
                 for _ in range(600):
                     try:

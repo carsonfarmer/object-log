@@ -79,29 +79,17 @@ Evidence:
 - `docs/evidence/git-receive-2026-09-04.md`
 - `docs/evidence/git-adapter-regression-2026-09-04.md`
 - `docs/evidence/git-shared-performance-2026-09-04.md`
-- `docs/evidence/git-wasip2-memory-2026-09-04.md`
-- `docs/evidence/git-spin-linux-2026-09-04.md`
 - `docs/evidence/git-spin-performance-2026-09-04.md`
 - `docs/evidence/git-final-workspace-2026-09-04.txt`
 - `docs/evidence/git-final-architecture-2026-09-04.md`
 
-## Spin deployment constraint
+## Spin runtime
 
-A fresh Linux Spin process using a prepared executable cache passes the
-both-hash workload inside a hard 128 MiB cgroup with swap disabled. The runs
-reach the cap and trigger reclaim; the extended workload also shows small
-temporary accounting overshoots permitted by Linux. No spare margin is established.
-Empty-cache compilation is OOM-killed under 128 MiB. Prepare the exact component's
-cache on the deployment platform outside the serving cgroup using
-`crates/object-log-git-spin/prewarm_cache.py`, then serve with `run.sh --cache`.
-Cache setup peaked at roughly 228–231 MB in the recorded runs.
-
-The compiled-code cache contains no repository authority. Losing it requires
-recompilation; repository recovery still needs only the object-log head and
-immutable store objects. `run.sh` forces one pooled component instance and
-disables outbound connection pooling. Earlier pooled transport runs had an
-intermittent WASI protocol error; its cause is not proven. Successful unpooled
-runs and the prior failure are both recorded.
+Use ordinary `spin up --from crates/object-log-git-spin/spin.toml`. Do not add
+pooling, instance-count, or instance-memory overrides. The previous launcher,
+capped-runtime diagnostics, and their reports are removed; Git history preserves
+them. Keep normal Git clients, provider tests, process cleanup, and library
+operation budgets. Spin patches are not a project prerequisite.
 
 ## Preserved boundaries and follow-ons
 
@@ -127,11 +115,6 @@ Compaction: https://github.com/carsonfarmer/object-log/issues/19
 
 Live AWS: https://github.com/carsonfarmer/object-log/issues/10
 
-The pooled HTTP error is now reproduced with a standalone Spin SDK component
-without object-log, object_store or the custom bridge. Pooled GETs fail with
-IncompleteMessage; two unpooled runs pass 1,000 invocations each. Exact fault
-ownership remains unproven. See `docs/evidence/spin-pooling-2026-09-05.md` and #22.
-
 ## Current review and execution queue
 
 Read `docs/reviews/git-proof-2026-09-05.md`. GitHub #11 is the queue and #17 the
@@ -139,9 +122,8 @@ Git outcome. New findings #27–#35 cover authenticated read bounds, repeated pa
 normal refs/default branch, maintenance, client authorization, node sizing,
 proof-preserving traversal and bounded materialization. #26 requires at least
 50 MiB regular files and 1 GiB pushes with working fetch/recovery/maintenance.
-The owner accepts 128 MiB as a serving-runtime budget; builds and Wasmtime
-compilation/cache preparation are outside it. Do not call their OOM under the
-serving cap a product acceptance failure.
+The current owner direction is basic Spin testing with default runtime settings.
+There is no imposed host memory cap or pooling workaround.
 
 The first reviewed queue batch has source revision `5c037c3`: #27/#28 fixes,
 Spin read-only policy/operator instructions, and authenticated range copying
