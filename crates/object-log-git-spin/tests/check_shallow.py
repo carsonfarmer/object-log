@@ -76,6 +76,9 @@ def stop(host, port):
             group_gone = False
         except ProcessLookupError:
             group_gone = True
+        except PermissionError:
+            # macOS can transiently report EPERM while the group exits.
+            group_gone = False
         if listener_closed and group_gone:
             return
         if attempt == 100:
