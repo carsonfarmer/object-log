@@ -62,6 +62,7 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         ("secret_key", env::var("OBJECT_LOG_MINIO_SECRET_KEY")?),
         ("prefix", prefix.clone()),
         ("object_format", name.into()),
+        ("auth_mode", "disabled".into()),
     ] {
         writeln!(config, "{key} = {}", serde_json::to_string(&value)?)?;
     }
@@ -178,20 +179,18 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
     assert_eq!(log.load().await?.tail().len(), 2);
     fill_tail(&log, &source, name, format, &new).await?;
     assert_eq!(log.load().await?.tail().len(), 1024);
+    let full_view = log.load().await?;
+    assert!(matches!(Repository::open(&log, format).await,
+        Err(object_log_git::Error::InvalidPack(reason)) if reason == "object-log call limit exceeded"));
     let (mut blocked, blocked_url) = serve(&config_path, root.path()).await?;
     let rejected = git(None, &["ls-remote", &blocked_url])
         .err()
         .ok_or("full tail unexpectedly served")?;
     blocked.stop()?;
-    let blocked_port = url::Url::parse(&blocked_url)?
-        .port()
-        .ok_or("missing port")?;
-    assert!(
-        fs::read_to_string(root.path().join(format!("spin-{blocked_port}.log")))?
-            .contains("object-log call limit exceeded")
-    );
+    assert!(rejected.to_string().contains("HTTP 400"));
+    assert!(log.refresh(&full_view).await?.is_none());
     println!(
-        "{name}: serving full-tail rejection confirmed by component call-limit diagnostic: {rejected}"
+        "{name}: shared engine confirms full-tail call limit; unchanged head produces Spin HTTP 400: {rejected}"
     );
     let full = operator(&config_path, &["status"])?;
     assert!(full.status.success());
@@ -348,9 +347,9 @@ fn operator(config: &Path, args: &[&str]) -> TestResult<Output> {
         .arg(config)
         .args(args)
         .output()?;
-    decode(&output)?;
+    let report = decode(&output)?;
     println!(
-        "Operator {} executable: {}\n{}",
+        "Operator {} executable: {}\nReport: {report}\n{}",
         args.first().copied().unwrap_or("unknown"),
         Path::new(&binary).display(),
         fs::read_to_string(metrics)?

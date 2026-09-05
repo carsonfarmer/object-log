@@ -1,0 +1,72 @@
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/.codex/worktrees/fd2d/object-log/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.42s
+     Running unittests src/lib.rs (target/debug/deps/object_log_git_spin-13c07666bddd6da5)
+
+running 10 tests
+test auth::tests::configuration_is_fail_closed ... ok
+test transport::tests::quota_accepts_exact_limits_and_rejects_overflow_without_wrapping ... ok
+test transport::tests::overall_deadline_cannot_be_silently_ignored ... ok
+test tests::input_limit_is_checked_before_append ... ok
+test auth::tests::scopes_and_read_only ... ok
+test auth::tests::rejects_untrusted_headers ... ok
+test transport::tests::exhausted_calls_fail_before_entering_wasi_http ... ok
+test tests::concatenated_gzip_members_are_preserved ... ok
+test transport::tests::connector_clones_share_bootstrap_and_command_quota ... ok
+test tests::compressed_input_is_bounded_after_expansion ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/bin/object-log-git-maintain.rs (target/debug/deps/object_log_git_maintain-5810f3fc79a47bde)
+
+running 16 tests
+test auth::tests::configuration_is_fail_closed ... ok
+test auth::tests::rejects_untrusted_headers ... ok
+test auth::tests::scopes_and_read_only ... ok
+test operator::tests::output_errors_and_provider_errors_do_not_leak_secrets ... ok
+test operator::tests::argument_errors_and_help_are_bounded_redacted_json ... ok
+test operator::tests::checkpoint_requires_explicit_retention_and_accepts_no_destructive_options ... ok
+test operator::tests::checkpoint_deadline_reports_pending_without_claiming_a_published_view ... ok
+test operator::tests::invalid_token_and_huge_nested_length_never_mutate_the_head ... ok
+test operator::tests::resume_exact_token_is_idempotent_and_losers_do_not_rebase ... ok
+test operator::tests::pending_and_expired_are_not_reported_as_rejections ... ok
+test operator::tests::private_file_limits_check_exact_boundary_and_reject_special_files ... ok
+test operator::tests::optional_http_auth_uses_shared_validation_before_provider_access ... ok
+test operator::tests::config_is_strict_and_invalid_inputs_do_not_contact_a_provider ... ok
+test operator::tests::deadline_after_head_cas_preserves_uncertainty_and_same_token_recovery ... ok
+test operator::tests::checkpoint_faults_preserve_uncertainty_and_fresh_head_convergence ... ok
+test operator::tests::status_survives_a_full_tail_without_git_admission ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running tests/auth_minio.rs (target/debug/deps/auth_minio-2a284cbc9da8a1f7)
+
+running 2 tests
+test auth_minio_credential_helper_lifecycle ... ignored, requires local MinIO, Spin 4, AWS CLI, Python, and release WASIp2 component
+test auth_minio_preflight_without_backend_or_body ... ignored, requires Spin 4, Python, and release WASIp2 component
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/minio.rs (target/debug/deps/minio-9766c9e73f031db5)
+
+running 5 tests
+test spin_host_process_group_shutdown_closes_listener ... ignored, requires Spin 4, a release component and fixture variables, but no provider
+test spin_minio_clients_recover_after_collection ... ignored, requires local MinIO, Spin 4, and a release WASIp2 component build
+test spin_minio_default_git_large_push_probes_then_streams_both_hashes ... ignored, requires local MinIO, Spin 4, and a release WASIp2 component build
+test spin_minio_force_with_lease_and_notes_obey_host_policy ... ignored, requires local MinIO, Spin 4, and a release WASIp2 component build
+test spin_minio_large_fetch_uses_gzip_multi_round_negotiation ... ignored, requires local MinIO, Spin 4, and a release WASIp2 component build
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/operator_minio.rs (target/debug/deps/operator_minio-cd157fa405323e75)
+
+running 2 tests
+test operator_minio_status_and_exact_resume_preserve_both_hashes ... ignored, requires local MinIO, Spin 4 and a release WASIp2 component
+test operator_spin_process_group_shutdown_closes_listener ... ignored, requires Spin 4 and a release WASIp2 component, but no provider
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests object_log_git_spin
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

@@ -117,6 +117,9 @@ struct Config {
     read_only: String,
     #[serde(default = "read_only")]
     allow_non_fast_forward: String,
+    auth_mode: Option<String>,
+    auth_read_token: Option<String>,
+    auth_write_token: Option<String>,
 }
 fn region() -> String {
     "us-east-1".into()
@@ -169,6 +172,19 @@ impl Config {
             || StorePath::parse(&config.prefix).is_err()
         {
             return Err(Failure("invalid_config", 2));
+        }
+        // Storage-only operator configs need no HTTP credentials. Explicit HTTP
+        // settings use exactly the serving parser and cannot be silently ignored.
+        if config.auth_mode.is_some()
+            || config.auth_read_token.is_some()
+            || config.auth_write_token.is_some()
+        {
+            super::auth::AuthConfig::parse(
+                config.auth_mode.as_deref().unwrap_or("basic"),
+                config.auth_read_token.as_deref().unwrap_or(""),
+                config.auth_write_token.as_deref().unwrap_or(""),
+            )
+            .map_err(|_| Failure("invalid_config", 2))?;
         }
         Ok(config)
     }

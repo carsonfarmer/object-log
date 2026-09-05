@@ -1,5 +1,13 @@
 //! One-shot, local operator access to an existing WAL. No HTTP listener.
 
+#[path = "../auth.rs"]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[allow(
+    dead_code,
+    reason = "the local operator shares config validation but serves no HTTP requests"
+)]
+mod auth;
+
 #[path = "../operator.rs"]
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 mod operator;

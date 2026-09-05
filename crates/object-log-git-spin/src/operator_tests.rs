@@ -158,6 +158,57 @@ fn config_is_strict_and_invalid_inputs_do_not_contact_a_provider() -> TestResult
 }
 
 #[test]
+fn optional_http_auth_uses_shared_validation_before_provider_access() -> TestResult {
+    let root = TempDir::new()?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let base = config(&format!("http://{}", listener.local_addr()?));
+    let reader = "ab".repeat(32);
+    let writer = "cd".repeat(32);
+    for (index, suffix) in [
+        String::new(),
+        "auth_mode = \"disabled\"\n".into(),
+        format!("auth_read_token = \"{reader}\"\n"),
+        format!("auth_mode = \"basic\"\nauth_write_token = \"{writer}\"\n"),
+        format!("auth_mode = \"basic\"\nauth_read_token = \"{reader}\"\nauth_write_token = \"{writer}\"\n"),
+    ].iter().enumerate() {
+        let file = private_file(&root, &format!("auth-valid-{index}"), format!("{base}{suffix}").as_bytes())?;
+        assert!(Config::load(&file).is_ok());
+    }
+    for (index, suffix) in [
+        "auth_mode = \"basic\"\n".into(),
+        "auth_mode = true\n".into(),
+        "auth_mode = \"unknown\"\n".into(),
+        "auth_read_token = \"PRIVATE_SECRET\"\n".into(),
+        format!("auth_mode = \"disabled\"\nauth_read_token = \"{reader}\"\n"),
+        format!(
+            "auth_read_token = \"{reader}\"\nauth_write_token = \"{}\"\n",
+            reader.to_uppercase()
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let file = private_file(
+            &root,
+            &format!("auth-invalid-{index}"),
+            format!("{base}{suffix}").as_bytes(),
+        )?;
+        let report = run(arguments(&file, &["status"]));
+        assert_eq!(report.exit(), 2);
+        let value = json(&report)?;
+        assert_eq!(value["outcome"], "invalid_config");
+        assert!(!value.to_string().contains(&reader));
+        assert!(!value.to_string().contains(&writer));
+    }
+    assert_eq!(
+        listener.accept().err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
+    Ok(())
+}
+
+#[test]
 fn argument_errors_and_help_are_bounded_redacted_json() -> TestResult {
     for args in [
         vec!["operator", "--PRIVATE_ARGUMENT"],

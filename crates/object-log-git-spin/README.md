@@ -131,6 +131,12 @@ command validates the configured format name, but head-only status and generic
 WAL resumption do not inspect or certify the repository's actual Git format.
 Keep operator execution and S3 credentials within the trusted OS boundary.
 
+Storage-only operator configs may omit all HTTP authentication fields. If any
+of `auth_mode`, `auth_read_token` or `auth_write_token` is supplied, the command
+validates the complete policy with the same parser as Spin before provider
+access. In that case an omitted mode defaults to `basic`; omitted tokens are
+empty. These credentials do not authorize or restrict local maintenance.
+
 Use regular files with no group/other permissions (`chmod 600`) for config and
 token inputs; final-path symlinks, directories and FIFOs are rejected. Config
 is limited to 16 KiB and tokens to 1 MiB. The token bound covers ordinary
