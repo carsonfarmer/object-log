@@ -9,6 +9,7 @@
 
 mod auth;
 mod packfiles;
+mod receive_body;
 mod transport;
 
 use std::{io::Read, sync::Arc, time::Duration};
@@ -217,8 +218,8 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
             ),
         ));
     }
-    // Opening holds engine admission before host body collection. The bounded
-    // host buffer lives in the runtime allowance until the command charges it.
+    // Acquire engine admission before reading a body. Receive decoding retains
+    // only fixed host buffers before each frame transfers to engine accounting.
     let repository = repository(format).await?;
     if receive_advert {
         return Ok(Reply::Normal(
@@ -227,21 +228,17 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
             repository.receive_advertisement().await?,
         ));
     }
-    let Ok(body) = body(
-        request,
-        encoding
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case("gzip")),
-    )
-    .await
-    else {
-        return Ok(Reply::Normal(
-            400,
-            "text/plain",
-            Bytes::from_static(b"invalid or oversized request body\n"),
-        ));
-    };
+    let gzip = encoding
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("gzip"));
     if upload {
+        let Ok(body) = body(request, gzip).await else {
+            return Ok(Reply::Normal(
+                400,
+                "text/plain",
+                Bytes::from_static(b"invalid or oversized request body\n"),
+            ));
+        };
         return Ok(Reply::Normal(
             200,
             UPLOAD_RESULT,
@@ -252,20 +249,42 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
             },
         ));
     }
-    receive_command(repository, body, policy).await
+    let source = request
+        .into_body_stream()
+        .map(|chunk| chunk.map_err(|_| std::io::Error::other("HTTP request body failed")));
+    let Some(frames) = receive_body::frames(source, gzip).await? else {
+        return Ok(Reply::Normal(200, RECEIVE_RESULT, Bytes::new()));
+    };
+    receive_stream(repository, frames, policy).await
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
 async fn receive_command(
     repository: Repository,
     body: Bytes,
     policy: ReceivePolicy,
 ) -> anyhow::Result<Reply> {
-    // Git probes authentication before sending a chunked receive request.
-    if body.as_ref() == b"0000" {
+    let source = futures::stream::iter(
+        body.chunks(16 * 1024)
+            .map(|chunk| Ok(chunk.to_vec()))
+            .collect::<Vec<_>>(),
+    );
+    let Some(frames) = receive_body::frames(source, false).await? else {
         return Ok(Reply::Normal(200, RECEIVE_RESULT, Bytes::new()));
-    }
+    };
+    receive_stream(repository, frames, policy).await
+}
+
+async fn receive_stream<S>(
+    repository: Repository,
+    frames: S,
+    policy: ReceivePolicy,
+) -> anyhow::Result<Reply>
+where
+    S: futures::Stream<Item = Result<Bytes, Error>> + Unpin,
+{
     match repository
-        .prepare_receive_with_policy(TransactionId::new(), body, policy)
+        .prepare_receive_stream_with_policy(TransactionId::new(), frames, policy)
         .await
     {
         Ok(prepared) => {

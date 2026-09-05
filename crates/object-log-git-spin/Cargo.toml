@@ -37,6 +37,7 @@ spin-sdk = { version = "=5.2.0", default-features = false }
 spin-executor = "=5.2.0"
 subtle = "=2.6.1"
 wasi = "=0.13.1"
+async-compression = { version = "0.4.42", default-features = false, features = ["futures-io", "gzip"] }
 
 [lints.rust]
 unsafe_code = "deny"
