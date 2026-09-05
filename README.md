@@ -99,8 +99,12 @@ reference. Spin is the Git HTTP host. The optional local
 [`object-log-git-maintain` command](crates/object-log-git-spin/README.md) provides
 existing-WAL status, exact commit-token recovery, and conservative metadata
 checkpointing with `checkpoint --retain-packs` under a bounded metadata profile.
-It clears a qualifying WAL tail while retaining every pack; pack compaction,
-catalog limits, and collection remain separate.
+It clears a qualifying WAL tail while retaining every pack. The command also
+resumes an installed collection with `collect --resume-only` and migrates the
+legacy pack catalog with `migrate-catalog --recovery-file`. Migration publishes
+an authenticated lookup tree through the same conditional WAL head; cold object
+reads load only the indexes for selected packs. Migration remains
+bounded and explicit; live-pack compaction is separate work.
 The same command can explicitly change the persisted default branch with
 `set-default-branch`, an expected old target, and a private recovery-file path.
 Unborn targets are supported; cloning follows the persisted symbolic `HEAD`.

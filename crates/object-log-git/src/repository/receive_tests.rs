@@ -1352,34 +1352,49 @@ async fn shallow_push_requires_complete_server_history() -> TestResult {
         let mut shallow = format!("{:04x}{declaration}", declaration.len() + 4).into_bytes();
         shallow.extend_from_slice(&input);
         let shallow = Bytes::from(shallow);
-        let (log, _, _) = test_log("shallow-push-closure").await?;
-        for policy in [
-            crate::ReceivePolicy::FastForwardOnly,
-            crate::ReceivePolicy::AllowNonFastForward,
-        ] {
+        for migrated in [false, true] {
+            let (log, _, _) = test_log("shallow-push-closure").await?;
+            if migrated {
+                assert!(matches!(common_open(&log, format).await?.migrate_catalog_attempt(TransactionId::new()).await?, Some(CommitStatus::Committed(_))));
+            }
+            let before = log.load().await?.tail().len();
+            for policy in [
+                crate::ReceivePolicy::FastForwardOnly,
+                crate::ReceivePolicy::AllowNonFastForward,
+            ] {
+                assert!(matches!(
+                    common_open(&log, format)
+                        .await?
+                        .prepare_receive_with_policy(TransactionId::new(), shallow.clone(), policy)
+                        .await,
+                    Err(Error::ReceiveRejected { .. })
+                ));
+            }
+            assert_eq!(log.load().await?.tail().len(), before);
+            let base_input = receive_input(
+                format,
+                &[RefUpdate::new("refs/heads/main", None, Some(base.target))?],
+                &fs::read(&base.pack)?,
+                true,
+            );
+            let prepared = common_open(&log, format).await?
+                .prepare_receive(TransactionId::new(), base_input).await?;
+            assert!(matches!(prepared.publish_receive().await?.0,
+                object_log::Resolution::Committed(_)));
+            let prepared = common_open(&log, format)
+                .await?
+                .prepare_receive(TransactionId::new(), shallow.clone())
+                .await?;
             assert!(matches!(
-                common_open(&log, format)
-                    .await?
-                    .prepare_receive_with_policy(TransactionId::new(), shallow.clone(), policy)
-                    .await,
-                Err(Error::ReceiveRejected { .. })
+                prepared.publish_receive().await?.0,
+                object_log::Resolution::Committed(_)
             ));
+            let recovered = cold_checked(&log, format).await?;
+            assert_eq!(
+                recovered.refs().get(b"refs/heads/contribution".as_slice()),
+                Some(&tip)
+            );
         }
-        assert!(log.load().await?.tail().is_empty());
-        publish_durable_pack(&log, &base, format).await?;
-        let prepared = common_open(&log, format)
-            .await?
-            .prepare_receive(TransactionId::new(), shallow)
-            .await?;
-        assert!(matches!(
-            prepared.publish_receive().await?.0,
-            object_log::Resolution::Committed(_)
-        ));
-        let recovered = cold_checked(&log, format).await?;
-        assert_eq!(
-            recovered.refs().get(b"refs/heads/contribution".as_slice()),
-            Some(&tip)
-        );
     }
     Ok(())
 }
