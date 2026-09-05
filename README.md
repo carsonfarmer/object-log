@@ -86,18 +86,19 @@ API:
   protocol v2 for upload-pack discovery and fetch. Push remains standard
   receive-pack.
 
-At revision `b322985`, the private pack, durable-reader and writer, wire, and
-operation-budget foundations contain 2,189 product lines. Tasks 1 and 2 are
-complete. Task 3 adds one common public `Repository` for native and `WASIp2`. It
-owns the exact `View`, refs, authenticated pack roots and sizes, `Operation`,
-and retained-state reservation. Each later object-reading command creates its
-own private `Catalog` and `Reader`, so `ls-refs` does not load pack indexes and
-`Repository` needs no self-reference. This pre-release API correction replaces
-the native-only signatures with `Repository::open(&Log, ObjectFormat)` and
-`refs(&self)`. The shared API has no work directory or path output. The
-replacement path has not run a real Git protocol-v2 client trial because these
-private modules remain disconnected. The plan adds no public `Engine`,
-`Service`, `Outcome`, `Catalog`, or `Reader` type. Receive-pack remains later.
+Tasks 1–3 provide the private pack, sparse reader/writer, wire, and budget
+foundations plus one common `Repository::open(&Log, ObjectFormat)` for native
+and `WASIp2`. The repository retains one exact view and exposes its refs without
+local paths. Durable packs use authenticated variable chunk geometry, including
+logs with 8,240-byte object limits. Head transfer, recovery scratch, retained
+state, and catalog allocations are budgeted before allocation. The native oracle
+remains available through `open_native` until replacement client parity passes.
+
+The replacement still needs graph selection and protocol integration before a
+real Git protocol-v2 client trial. The next tranche makes catalogs command-local
+so ref discovery avoids index loads. Receive-pack and the Spin adapter follow.
+The [Task 3 evidence](docs/evidence/git-repository-2026-09-04.md) records the
+recovery fixes, unchanged small-limit tests, independent reviews, and limits.
 One process-wide 88 MiB pool admits one active engine operation under the
 provisional 128 MiB WASI process model. The package manifest declares the
 Tokio runtime support used by the native oracle, so standalone all-feature

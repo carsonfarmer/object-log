@@ -1,6 +1,6 @@
 # object-log handoff
 
-Updated: 2026-09-04 16:36 PDT
+Updated: 2026-09-04 17:50 PDT
 
 ## Start here
 
@@ -11,7 +11,7 @@ Read these files in order:
 3. `docs/evidence/git-fetch-pack-2026-09-04.md`
 4. This file
 
-The active implementation branch is `cf/git-repository-task3`. Its local
+Task 3 is ready for accepted integration on `cf/git-repository-task3`. Its local
 worktree is:
 
 ```text
@@ -44,97 +44,40 @@ core target and 2,000-line proof target are architecture review signals. Report
 and justify material overage. Correct behavior and measured performance have
 priority.
 
-## Accepted state on main
+## Accepted foundations
 
-`main` is clean and pushed at
-`d3669f1e89edf1d20a31059c0c5c82bbe1e0018d` (before this clarification).
+Task 2 is accepted at `b322985`. Its private fetch-pack writer supports both
+hash formats, validated compressed-entry reuse, and full-object fallback when
+a delta base is absent from the selected set. It passed Git 2.54 strict pack
+validation, native checks, and locked WASIp2 checks. The native oracle remains
+until replacement client and storage parity is proven.
 
-Task 2 is accepted at `b322985c616d948e7365739e3286baeaeb460acc`.
-It provides a private bounded fetch-pack writer with:
+## Task 3 acceptance
 
-- SHA-1 and SHA-256 output;
-- validated full-object, OFS-delta, and REF-delta reuse;
-- full-object fallback when the selected base is absent;
-- exact output, memory, call, transfer, work, and retry bounds;
-- Git 2.54 strict pack validation; and
-- native and locked `wasm32-wasip2` checks.
+Task 3 now passes all local gates after authenticated variable chunk geometry
+and repository allocation/accounting repairs. The focused fixes are `1eabf9c`
+(geometry) and `c578b22` (bounds). The current branch also contains the latest
+main documentation. See `docs/evidence/git-repository-2026-09-04.md`.
 
-The full local gate passed with 294 tests passed and 9 opt-in tests ignored.
-Hosted CI also passed:
-
-- `b322985`: https://github.com/carsonfarmer/object-log/actions/runs/33927234897
-- `1e0c0d3`: https://github.com/carsonfarmer/object-log/actions/runs/33928228253
-
-The current strict product-source counts are:
-
-| Crate | Product lines |
-| --- | ---: |
-| `object-log` | 4,713 |
-| `object-log-kv` | 434 |
-| `object-log-sqlite` | 1,460 |
-| `object-log-git` | 4,043 |
-| `object-log-git-http` | 1,023 |
-
-Tests, benchmarks, documentation, generated code, and vendored code are not in
-these counts. The Git count includes the temporary native oracle and the new
-replacement path. Keep the oracle until replacement parity is proven.
-
-## Task 3 checkpoint
-
-The branch `cf/git-repository-task3` is clean and pushed at
-`f20a8d92155e21589d5b0de5d3096c5cb94c890b`. This is a checkpoint, not an
-accepted integration commit.
-
-The branch adds one common `Repository::open(&Log, ObjectFormat)` and keeps the
-native oracle behind `open_native`. It connects one exact object-log view,
-refs, authenticated pack roots, operation accounting, and durable pack reads.
-It deletes the obsolete `storage.rs` path. The net product change is 6 lines.
-
-Evidence on this branch:
-
-- focused repository tests: 10 passed;
-- native strict Clippy: passed;
-- locked `wasm32-wasip2` check and strict Clippy: passed;
-- `git diff --check`: passed;
-- full `mise exec -- make check`: failed in the three Git GC integration tests.
-
-## Blocking defect
-
-`durable::stage` uses fixed 1 MiB chunks. The Git GC tests open logs with
-`max_object_bytes` values of 8,240 bytes or 16 KiB. A valid native pack then
-fails during staging with:
-
-```text
-ObjectLog(LimitExceeded("object bytes"))
-```
-
-The next change must support the object-log contract instead of increasing the
-test limits. Prefer this shape:
-
-1. Stage with `min(1 MiB, log.options().max_object_bytes)`.
-2. Derive and validate chunk geometry from the authenticated root children.
-3. Avoid a new durable field unless child lengths cannot define one canonical
-   layout.
-4. Keep random access bounded when a pack uses smaller chunks.
-5. Test 8,240-byte, 16 KiB, and 1 MiB chunk limits.
-
-The checkpoint already fixes two related bridge defects. Native file reads
-reserve the receive buffer before allocation. Native cold recovery reads the
-authenticated stored pack under the 16 MiB durable limit instead of using the
-9,437,184-byte network fetch limit.
+- 303 workspace tests passed, 9 opt-in tests ignored.
+- All 3 Git GC tests preserve their original 8,240-byte/16 KiB object limits.
+- Strict native Clippy and locked WASIp2 check/Clippy passed.
+- Independent Rust correctness and simplification reviews completed; findings
+  were fixed, including pre-allocation rejection of impossible core node counts.
 
 ## Next actions
 
-1. Continue in the existing Task 3 worktree. Do not reset or discard it.
-2. Fix and test variable durable chunk geometry.
-3. Run `cargo test -p object-log-git --test gc`.
-4. Run the focused repository tests, native strict Clippy, locked WASIp2 check,
-   and `mise exec -- make check`.
-5. Run one independent Rust correctness and simplification review.
-6. Commit the focused fix on `cf/git-repository-task3`.
-7. Integrate the Task 3 commits into current `main`, push, and update issue
-   #17 and the README.
-8. Continue with Task 4 in `GIT_PLAN.md`. Do not stop after Task 3.
+Continue Task 4: iterative graph traversal and command-local catalogs, followed
+by exact want/have selection and protocol integration. The implementation
+worktree is `.object-log-worktrees/git-graph-task4` beside the main checkout,
+on branch `cf/git-graph-task4`. Its agent owns `graph.rs` and minimal private
+reader helpers. Integrate only after review and gates.
+
+The owner reaffirmed Spin serverless compatibility as a design constraint.
+A separate `cf/spin-transport-probe` worktree is testing Spin SDK 5.2 with the
+established object_store S3 implementation and a WASI HTTP connector. This is
+a probe, not an accepted adapter. Keep native-only dependencies out of the
+common libraries and verify actual component imports as well as compilation.
 
 ## Decisions and risks
 
