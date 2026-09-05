@@ -110,6 +110,6 @@ root alone integrates main. Keep source small through removal of duplication,
 not by cutting behavior or weakening validation. Add a generic WAL capability
 only when a consumer demonstrates a missing contract.
 
-The completion queue is #17, with scale in #19, ordinary Spin reliability in
-#21 and the final reduction pass in #25. The next KV implementation is scoped
+Git completion is tracked in #17. Scale #19 and ordinary Spin reliability #21
+are complete; #25 records the final reduction pass. The next KV implementation is scoped
 in #39; SQLite and verifiable KV remain separate follow-ons.

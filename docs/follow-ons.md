@@ -83,7 +83,7 @@ verification, performance, and live AWS qualification.
 The Git service now exercises the generic WAL through ordinary Spin and
 unchanged clients: both hashes, sparse reads, atomic push, full and partial
 fetch, large histories, compaction and cold recovery. The final cleanup is
-tracked in #25; [GIT_PLAN.md](../GIT_PLAN.md) states its current contract and
+recorded in #25; [GIT_PLAN.md](../GIT_PLAN.md) states its current contract and
 finite resource bounds. Installed Git remains the test and benchmark reference.
 
 [KV issue #39](https://github.com/carsonfarmer/object-log/issues/39) scopes a

@@ -254,4 +254,4 @@ AWS or remote object-store performance.
 The Git service has passed the local client and provider proof. Resource bounds
 remain explicit in [GIT_PLAN.md](GIT_PLAN.md). The next production-oriented KV
 consumer is scoped in [#39](https://github.com/carsonfarmer/object-log/issues/39);
-SQLite hardening and live AWS qualification remain separate work.
+`SQLite` hardening and live AWS qualification remain separate work.

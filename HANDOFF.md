@@ -10,8 +10,10 @@ filtered and URI histories, compaction and cold recovery. Collection now drains
 stale backlogs in bounded batches; repeat until empty. The live graph and
 operation budgets remain finite.
 
-Finish the owner-requested Rust code-reduction and prose cleanup pass (#25),
-check hosted CI, and close completed Git tickets. Performance #23 is closed.
+The owner-requested Rust reduction and prose cleanup pass is complete.
+The combined local gate and final provider checks pass. Git completion and
+review results are tracked in #17 and #25. Scale #19, reliability #21 and
+performance #23 are closed.
 KV follow-on design is in #39; leave SQLite and verifiable KV for later.
 
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
