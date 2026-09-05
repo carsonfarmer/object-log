@@ -1,6 +1,8 @@
 use std::io::{self, Write};
 use std::{collections::VecDeque, mem::size_of, path::PathBuf};
 
+#[path = "durable_fetch.rs"]
+mod fetch_writer;
 #[path = "durable_catalog.rs"]
 mod tree_reader;
 use tree_reader::SelectedPacks;
@@ -617,8 +619,8 @@ impl<'a> Reader<'a> {
 
     /// Size for filtering only: full blobs use authenticated, canonical pack
     /// metadata without checking the decoded size or object ID. Selected content
-    /// must still pass `verify`. Deltas and structural objects use `find`, so a
-    /// delta reports its decoded result size, never its instruction-stream size.
+    /// must still pass `verify`. Deltas are verified through bounded replay, so
+    /// their size is the decoded result, never the instruction-stream size.
     pub(crate) async fn object_size(&mut self, id: ObjectId) -> Result<Option<usize>, Error> {
         let Some(location) = self.location(id).await? else {
             return Ok(None);
@@ -630,11 +632,14 @@ impl<'a> Reader<'a> {
                 usize::try_from(entry.decompressed_size).map_err(pack_error)?,
             ));
         }
+        if entry.header.is_delta() {
+            return Ok(Some(self.verify_decoded(location).await?.1));
+        }
         Ok(self.find(id).await?.map(|object| object.data.len()))
     }
 
-    // Verify selected content without retaining decoded full blobs. Delta and
-    // structural objects keep the existing bounded materialization path.
+    // Verify blobs and deltas without retaining the whole decoded object.
+    // Full structural objects retain their existing bounded parser path.
     pub(crate) async fn verify(&mut self, id: ObjectId) -> Result<Option<gix_object::Kind>, Error> {
         let Some(location) = self.location(id).await? else {
             return Ok(None);
@@ -645,6 +650,9 @@ impl<'a> Reader<'a> {
             .operation
             .work((range.end - range.start) as usize)?;
         let entry = self.entry_header(location).await?;
+        if entry.header.is_delta() {
+            return Ok(Some(self.verify_decoded(location).await?.0));
+        }
         if entry.header != EntryHeader::Blob {
             return Ok(self.find(id).await?.map(|object| object.kind));
         }
@@ -722,107 +730,27 @@ impl<'a> Reader<'a> {
         Ok(Some(Object { kind, data }))
     }
 
-    #[allow(clippy::expect_used, reason = "fetch count is bounded by MAX_OBJECTS")]
     pub(crate) async fn fetch_pack(&mut self, ids: &[ObjectId]) -> Result<Bytes, Error> {
-        let format = self.catalog.format;
-        if ids.len() > MAX_OBJECTS as usize || ids.iter().any(|id| id.format() != format) {
-            return invalid("fetch selection is invalid");
-        }
-        let selected_bytes =
-            ids.len() * (size_of::<ObjectId>() + size_of::<(ObjectId, ObjectId, u32)>());
-        let _selected_memory = self.catalog.operation.reserve(selected_bytes)?;
-        let mut selected = ids.to_vec();
-        selected.sort_unstable();
-        selected.dedup();
-        let mut entries = Vec::with_capacity(selected.len());
-        for id in &selected {
-            let location = self
-                .location(*id)
-                .await?
-                .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
-            let pack = self.pack(location.pack);
-            entries.push((pack.id, *id, pack.offset(location.index)));
-        }
-        entries.sort_unstable_by_key(|(pack, id, offset)| (*pack, *offset, *id));
-
-        let hash = object_hash(format);
-        let hash_len = hash.len_in_bytes();
-        let count = u32::try_from(entries.len()).expect("MAX_OBJECTS fits u32");
-        let output_memory = self.catalog.operation.reserve(MAX_FETCH_PACK_BYTES)?;
-        let mut writer = gix_hash::io::Write::new(
-            PackOutput {
-                bytes: Vec::with_capacity(MAX_FETCH_PACK_BYTES),
-                limit: MAX_FETCH_PACK_BYTES - hash_len,
-                operation: &self.catalog.operation,
-            },
-            hash,
-        );
-        writer
-            .write_all(&gix_pack::data::header::encode(
-                gix_pack::data::Version::V2,
-                count,
-            ))
-            .map_err(output_error)?;
-        for (_, id, _) in entries {
-            // Lookup again: a tree cache slot may have been evicted while planning.
-            let location = self
-                .location(id)
-                .await?
-                .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
-            let stored = self.pack(location.pack);
-            let range = stored.entry_range(location.index);
-            self.catalog
-                .operation
-                .work((range.end - range.start) as usize)?;
-            let entry = self.entry_header(location).await?;
-            let pack = self.pack(location.pack);
-            let base = pack
-                .base(&entry)?
-                .map(|index| ObjectId::from_bytes(format, pack.oid(index)))
-                .transpose()?;
-            if base.is_some_and(|base| selected.binary_search(&base).is_err()) {
-                let object = self
-                    .find(id)
-                    .await?
-                    .ok_or_else(|| Error::InvalidPack("fetch object is missing".into()))?;
-                let header = match object.kind {
-                    gix_object::Kind::Tree => EntryHeader::Tree,
-                    gix_object::Kind::Blob => EntryHeader::Blob,
-                    gix_object::Kind::Commit => EntryHeader::Commit,
-                    gix_object::Kind::Tag => EntryHeader::Tag,
-                };
-                header
-                    .write_to(object.data.len() as u64, &mut writer)
-                    .map_err(output_error)?;
-                self.catalog.operation.work(object.data.len())?;
-                let _compress_memory = self.catalog.operation.reserve(COMPRESS_BYTES)?;
-                let mut compressor = gix_zlib::stream::deflate::Write::new(
-                    &mut writer,
-                    gix_zlib::Compression::DEFAULT,
-                );
-                compressor
-                    .write_all(&object.data)
-                    .and_then(|()| compressor.flush())
-                    .map_err(output_error)?;
-                continue;
-            }
-            let header = base.map_or(entry.header, |base| EntryHeader::RefDelta {
-                base_id: gix_hash::ObjectId::from_bytes_or_panic(base.as_bytes()),
+        let memory = self.catalog.operation.reserve(MAX_FETCH_PACK_BYTES)?;
+        let mut bytes = Vec::with_capacity(MAX_FETCH_PACK_BYTES);
+        let operation = &self.catalog.operation;
+        {
+            let sink = futures::sink::unfold(&mut bytes, |bytes, frame: Bytes| async move {
+                if frame.len() > MAX_FETCH_PACK_BYTES - bytes.len() {
+                    return Err(io::Error::other(pack_error(
+                        "fetch pack exceeds byte limit",
+                    )));
+                }
+                operation.work(frame.len()).map_err(io::Error::other)?;
+                bytes.extend_from_slice(&frame);
+                Ok(bytes)
             });
-            header
-                .write_to(entry.decompressed_size, &mut writer)
-                .map_err(output_error)?;
-            self.copy_compressed_entry(location, &entry, &mut writer)
-                .await?;
+            self.write_fetch(ids, &mut Box::pin(sink)).await?;
         }
-        let gix_hash::io::Write { hash, mut inner } = writer;
-        let digest = hash.try_finalize().map_err(pack_error)?;
-        inner.operation.work(hash_len)?;
-        inner.bytes.extend_from_slice(digest.as_slice());
-        Ok(hold(Bytes::from(inner.bytes), output_memory))
+        Ok(hold(Bytes::from(bytes), memory))
     }
 
-    // Only write into private staging/output: CRC failure can follow writes.
+    // The synchronous consumer verifies bounded full-object inflation.
     async fn copy_compressed_entry(
         &mut self,
         location: Location,
@@ -1098,33 +1026,8 @@ fn parse_entry(bytes: &[u8], offset: u64, format: ObjectFormat) -> Result<PackEn
     Ok(entry)
 }
 
-struct PackOutput<'a> {
-    bytes: Vec<u8>,
-    limit: usize,
-    operation: &'a Operation,
-}
-
-fn output_error(error: io::Error) -> Error {
+pub(crate) fn output_error(error: io::Error) -> Error {
     error.downcast::<Error>().unwrap_or_else(pack_error)
-}
-
-impl Write for PackOutput<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.limit - self.bytes.len() {
-            return Err(io::Error::other(pack_error(
-                "fetch pack exceeds byte limit",
-            )));
-        }
-        self.operation
-            .work(bytes.len() * 2)
-            .map_err(io::Error::other)?;
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 fn apply_delta(op: &Operation, base: &[u8], delta: &[u8], hash: bool) -> Result<Bytes, Error> {
@@ -2705,7 +2608,7 @@ mod tests {
                 })
                 .await?;
             assert_eq!(length, (range.end - range.start) as usize);
-            let allowance = MAX_FETCH_PACK_BYTES + 1024;
+            let allowance = MAX_FETCH_PACK_BYTES + 65536 + 1024;
             let pressure = catalog
                 .operation
                 .reserve(LIVE_BYTES - catalog.operation.live_bytes() - allowance)?;
@@ -2819,27 +2722,6 @@ mod tests {
             .await?;
             verify_fetch_pack(&output, format, &[])?;
         }
-        Ok(())
-    }
-
-    #[test]
-    fn fetch_output_accepts_the_raw_maximum_and_rejects_the_next_byte() -> TestResult {
-        let operation = test_operation();
-        let hash_len = ObjectFormat::Sha1.digest_len();
-        let mut output = PackOutput {
-            bytes: Vec::with_capacity(MAX_FETCH_PACK_BYTES),
-            limit: MAX_FETCH_PACK_BYTES - hash_len,
-            operation: &operation,
-        };
-        let chunk = vec![0; 64 * 1024];
-        let mut remaining = output.limit;
-        while remaining != 0 {
-            let bytes = remaining.min(chunk.len());
-            output.write_all(&chunk[..bytes])?;
-            remaining -= bytes;
-        }
-        assert_eq!(output.bytes.len() + hash_len, MAX_FETCH_PACK_BYTES);
-        assert!(output.write_all(&[0]).is_err());
         Ok(())
     }
 
@@ -3445,4 +3327,5 @@ mod tests {
         );
         Ok(())
     }
+    include!("durable_fetch_tests.rs");
 }

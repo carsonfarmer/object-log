@@ -13,6 +13,8 @@ mod default_branch;
 mod maintenance;
 mod pack_compaction;
 mod receive_command;
+mod upload_stream;
+pub use upload_stream::PreparedUpload;
 mod uri;
 
 use crate::{
@@ -157,12 +159,47 @@ impl Repository {
         .await
     }
 
+    #[cfg(test)]
     async fn fetch_pack_or_ack(
         &self,
         wants: &[ObjectId],
         haves: &[ObjectId],
         options: FetchOptions<'_>,
     ) -> Result<Bytes, Error> {
+        self.buffer_fetch(self.prepare_fetch(wants, haves, options).await?)
+            .await
+    }
+
+    async fn buffer_fetch(&self, plan: upload_stream::FetchPlan) -> Result<Bytes, Error> {
+        match plan {
+            upload_stream::FetchPlan::Bytes(bytes) => Ok(bytes),
+            upload_stream::FetchPlan::Pack {
+                catalog,
+                selected,
+                prefix,
+                ..
+            } => {
+                let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
+                let pack = reader.fetch_pack(&selected.ids).await?;
+                match prefix {
+                    None => Ok(pack),
+                    Some(prefix) => wire_response(&self.operation, |output| {
+                        output.write_all(&prefix)?;
+                        wire::write_pack_data(output, &pack)?;
+                        output.write_all(b"0000")?;
+                        Ok(())
+                    }),
+                }
+            }
+        }
+    }
+
+    async fn prepare_fetch(
+        &self,
+        wants: &[ObjectId],
+        haves: &[ObjectId],
+        options: FetchOptions<'_>,
+    ) -> Result<upload_stream::FetchPlan, Error> {
         let FetchOptions {
             include_tag,
             done,
@@ -212,7 +249,8 @@ impl Repository {
                     self.format,
                     FetchReply::Acknowledgments(&selected.common),
                 )
-            });
+            })
+            .map(upload_stream::FetchPlan::Bytes);
         }
         if let Some(filter) = filter {
             crate::selection::filter(
@@ -243,21 +281,39 @@ impl Repository {
                 }
             }
         }
-        let pack = reader.fetch_pack(&selected.ids).await?;
-        if raw_pack {
-            return Ok(pack);
-        }
-        wire_response(&self.operation, |output| {
-            wire::write_fetch(
-                output,
-                self.format,
-                FetchReply::ShallowPack {
-                    pack: &pack,
-                    shallow: &selected.shallow,
-                    unshallow: &selected.unshallow,
-                    uris: &locations,
-                },
-            )
+        let prefix = self.fetch_prefix(raw_pack, &selected, &locations)?;
+        drop(reader);
+        let catalog_memory = self.operation.reserve(size_of::<Catalog>())?;
+        Ok(upload_stream::FetchPlan::Pack {
+            catalog: Box::new(catalog),
+            _catalog_memory: catalog_memory,
+            selected,
+            prefix,
+        })
+    }
+
+    fn fetch_prefix(
+        &self,
+        raw_pack: bool,
+        selected: &crate::selection::Selection,
+        locations: &[(ObjectId, String)],
+    ) -> Result<Option<Bytes>, Error> {
+        Ok(if raw_pack {
+            None
+        } else {
+            let bytes = wire_response(&self.operation, |output| {
+                wire::write_fetch(
+                    output,
+                    self.format,
+                    FetchReply::ShallowPack {
+                        pack: &[],
+                        shallow: &selected.shallow,
+                        unshallow: &selected.unshallow,
+                        uris: locations,
+                    },
+                )
+            })?;
+            Some(bytes.slice(..bytes.len() - 4))
         })
     }
 
@@ -319,72 +375,7 @@ impl Repository {
         input: Bytes,
         uris: Option<&crate::PackfileUris>,
     ) -> Result<Bytes, Error> {
-        if input.len() > wire::MAX_UPLOAD_BYTES {
-            return Err(Error::InvalidProtocol("upload control bytes"));
-        }
-        let operation = self.operation.clone();
-        let _input_memory = operation.reserve(input.len())?;
-        // Vec growth plus into_boxed_slice can temporarily retain three copies.
-        let maximum =
-            3 * ((1024 + 2 * 32768) * size_of::<ObjectId>() + 2 * 1024 * size_of::<&[u8]>());
-        let _parse_memory = operation.reserve((input.len() * 4 + 128).min(maximum))?;
-        operation.work(input.len())?;
-        let request = wire::parse_upload(&input, self.format)?;
-        match self.upload_attempt(&request, uris).await {
-            Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
-                let (log, format) = (self.log.clone(), self.format);
-                drop(self);
-                operation.retry()?;
-                Self::open_attempt(&log, format, &operation)
-                    .await?
-                    .upload_attempt(&request, uris)
-                    .await
-            }
-            result => result,
-        }
-    }
-
-    async fn upload_attempt(
-        &self,
-        request: &UploadRequest<'_>,
-        uris: Option<&crate::PackfileUris>,
-    ) -> Result<Bytes, Error> {
-        match request {
-            UploadRequest::LsRefs {
-                peel,
-                symrefs,
-                unborn,
-                prefixes,
-            } => self.ls_refs(*peel, *symrefs, *unborn, prefixes).await,
-            UploadRequest::Fetch {
-                wants,
-                haves,
-                done,
-                include_tag,
-                shallow,
-                filter,
-                uri_protocols,
-                ..
-            } => {
-                if uri_protocols.is_some() && uris.is_none() {
-                    return Err(Error::InvalidProtocol("packfile URIs not enabled"));
-                }
-                let enabled = uris
-                    .filter(|base| uri_protocols.is_some_and(|protocols| base.accepts(protocols)));
-                self.fetch_pack_or_ack(
-                    wants,
-                    haves,
-                    FetchOptions {
-                        include_tag: *include_tag,
-                        done: *done,
-                        shallow: Some(shallow),
-                        filter: *filter,
-                        uris: enabled,
-                    },
-                )
-                .await
-            }
-        }
+        self.prepare_upload(input, uris).await?.buffered().await
     }
 
     async fn ls_refs(

@@ -16,7 +16,7 @@ pub(super) const MAX_OBJECTS: u32 = 32_768;
 pub(super) const MAX_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_DELTA_DEPTH: usize = 256;
 pub(super) const INFLATE_BYTES: usize = 48 * 1024;
-const SCAN_WINDOW_BYTES: usize = 32 * 1024;
+pub(crate) const SCAN_WINDOW_BYTES: usize = 32 * 1024;
 pub(super) const COMPRESS_BYTES: usize = 416 * 1024;
 const DEFAULT_LIMITS: Limits = Limits {
     input_bytes: MAX_RECEIVE_PACK_BYTES,

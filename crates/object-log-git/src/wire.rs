@@ -10,7 +10,7 @@ pub(crate) const MAX_RECEIVE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_FETCH_RESPONSE_BYTES: usize = 9_437_926;
 const MAX_COMMANDS: usize = 1_024;
 const MAX_ITEMS: usize = 32_768;
-const MAX_PACKET_PAYLOAD: usize = 65_515;
+pub(crate) const MAX_PACKET_PAYLOAD: usize = 65_515;
 const UPLOAD_SHA1: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0019fetch=shallow filter\n0017object-format=sha1\n0000";
 const UPLOAD_SHA256: &[u8] = b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0019fetch=shallow filter\n0019object-format=sha256\n0000";
 
@@ -801,6 +801,10 @@ fn write_text(output: &mut impl Write, line: &mut Vec<u8>) -> Result<(), Error> 
 
 fn write_pack(output: &mut impl Write, pack: &[u8]) -> Result<(), Error> {
     encode::text_to_write(b"packfile", &mut *output)?;
+    write_pack_data(output, pack)
+}
+
+pub(crate) fn write_pack_data(output: &mut impl Write, pack: &[u8]) -> Result<(), Error> {
     for chunk in pack.chunks(MAX_PACKET_PAYLOAD) {
         encode::band_to_write(Channel::Data, chunk, &mut *output)?;
     }

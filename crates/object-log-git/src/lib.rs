@@ -17,6 +17,7 @@ mod wire;
 
 pub use packfile_uri::PackfileUris;
 pub use repository::PreparedPush;
+pub use repository::PreparedUpload;
 pub use repository::Repository;
 
 use std::{collections::BTreeMap, fmt};

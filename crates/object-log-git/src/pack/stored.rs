@@ -9,6 +9,48 @@ use object_log::{Log, ObjectRef, StagedObject, View};
 use std::{mem::size_of, sync::Arc};
 
 impl<'a> Input<'a> {
+    /// Construct a read-only cursor from children of an authenticated node.
+    /// References convey no staging proof and are never publication roots.
+    pub(crate) fn read_only(
+        operation: &Operation,
+        log: &'a Log,
+        view: &'a View,
+        node: &object_log::ReferenceNode,
+        bytes: u64,
+        width: usize,
+    ) -> Result<Self, Error> {
+        if width == 0 || width > super::FRAME_BYTES {
+            return invalid("read-only pack width is invalid");
+        }
+        let length = usize::try_from(bytes).map_err(pack_error)?;
+        let count = length.div_ceil(width);
+        if count != node.children().len() || count > log.options().max_object_refs {
+            return invalid("read-only pack geometry mismatch");
+        }
+        for (index, child) in node.children().iter().enumerate() {
+            let expected = (length - index * width).min(width);
+            if child.kind() != object_log::ObjectKind::Blob || child.len() != expected as u64 {
+                return invalid("read-only chunk geometry mismatch");
+            }
+        }
+        let memory = operation.reserve(count * size_of::<ObjectRef>() + 2 * size_of::<usize>())?;
+        operation.work(count * size_of::<ObjectRef>())?;
+        Ok(Self {
+            log,
+            view,
+            operation: operation.clone(),
+            context: Arc::new(()),
+            chunks: Vec::new(),
+            read_refs: Some(node.children().to_vec().into_boxed_slice()),
+            inline: None,
+            cache: std::sync::Mutex::new(None),
+            bytes,
+            width,
+            maximum: count,
+            memory,
+        })
+    }
+
     pub(crate) fn operation(&self) -> &Operation {
         &self.operation
     }
@@ -72,6 +114,7 @@ impl<'a> Input<'a> {
             operation: self.operation.clone(),
             context: Arc::new(()),
             chunks,
+            read_refs: None,
             inline: None,
             cache: std::sync::Mutex::new(None),
             bytes,

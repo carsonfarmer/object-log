@@ -1407,3 +1407,5 @@ async fn shallow_push_requires_complete_server_history() -> TestResult {
 include!("receive_stream_tests.rs");
 
 include!("receive_stream_many_tests.rs");
+
+include!("upload_stream_tests.rs");

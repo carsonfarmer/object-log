@@ -30,6 +30,7 @@ const RECEIVE_RESULT: &str = "application/x-git-receive-pack-result";
 enum Reply {
     Normal(u16, &'static str, Bytes),
     Pack(packfiles::PackReply),
+    Upload(Box<object_log_git::PreparedUpload>),
 }
 
 async fn repository(format: ObjectFormat) -> anyhow::Result<Repository> {
@@ -239,15 +240,9 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
                 Bytes::from_static(b"invalid or oversized request body\n"),
             ));
         };
-        return Ok(Reply::Normal(
-            200,
-            UPLOAD_RESULT,
-            if let Some(base) = &uri_base {
-                repository.upload_pack_with_uris(body, base).await?
-            } else {
-                repository.upload_pack(body).await?
-            },
-        ));
+        return Ok(Reply::Upload(Box::new(
+            repository.prepare_upload(body, uri_base.as_ref()).await?,
+        )));
     }
     let source = request
         .into_body_stream()
@@ -350,23 +345,26 @@ fn append(output: &mut Vec<u8>, chunk: &[u8]) -> anyhow::Result<()> {
 }
 
 async fn respond(out: ResponseOutparam, reply: Reply) -> anyhow::Result<()> {
-    let (status, content_type, bytes, extra) = match reply {
-        Reply::Normal(status, content_type, bytes) => (status, content_type, bytes, Vec::new()),
+    let (status, content_type, bytes, extra, upload) = match reply {
+        Reply::Normal(status, content_type, bytes) => {
+            (status, content_type, Some(bytes), Vec::new(), None)
+        }
         Reply::Pack(pack) => (
             pack.status,
             "application/x-git-packed-objects",
-            pack.bytes,
+            Some(pack.bytes),
             pack.headers,
+            None,
         ),
+        Reply::Upload(upload) => (200, UPLOAD_RESULT, None, Vec::new(), Some(upload)),
     };
     let fields = Fields::from_list(&[
         ("content-type".into(), content_type.as_bytes().to_vec()),
-        (
-            "content-length".into(),
-            bytes.len().to_string().into_bytes(),
-        ),
         ("cache-control".into(), b"no-cache".to_vec()),
     ])?;
+    if let Some(bytes) = &bytes {
+        fields.set("content-length", &[bytes.len().to_string().into_bytes()])?;
+    }
     for (name, value) in extra {
         fields.set(&name, &[value.into_bytes()])?;
     }
@@ -388,7 +386,17 @@ async fn respond(out: ResponseOutparam, reply: Reply) -> anyhow::Result<()> {
         .map_err(|()| anyhow::anyhow!("response stream unavailable"))?;
     out.set(response);
     // Keep the original Bytes owner (and engine reservation) until all writes finish.
-    transport::write_chunk(&output, &bytes).await?;
+    if let Some(upload) = upload {
+        let sink = futures::sink::unfold(&output, |output, bytes: Bytes| async move {
+            transport::write_chunk(output, &bytes)
+                .await
+                .map_err(std::io::Error::other)?;
+            Ok::<_, std::io::Error>(output)
+        });
+        upload.write_to(&mut Box::pin(sink)).await?;
+    } else if let Some(bytes) = &bytes {
+        transport::write_chunk(&output, bytes).await?;
+    }
     drop(output);
     OutgoingBody::finish(body, None)?;
     drop(bytes);

@@ -17,6 +17,8 @@ use crate::{Error, ObjectFormat, durable::publication_plan};
 pub(crate) mod controls;
 #[path = "normalize.rs"]
 mod normalize;
+#[path = "read_only_delta.rs"]
+pub(crate) mod read_only_delta;
 #[path = "replay.rs"]
 mod replay;
 #[path = "resolve.rs"]
@@ -42,6 +44,7 @@ pub(crate) struct Input<'a> {
     operation: Operation,
     context: Arc<()>,
     chunks: Vec<StagedObject>,
+    read_refs: Option<Box<[ObjectRef]>>,
     inline: Option<Bytes>,
     cache: std::sync::Mutex<Option<(usize, Bytes)>>,
     bytes: u64,
@@ -51,6 +54,18 @@ pub(crate) struct Input<'a> {
 }
 
 impl<'a> Input<'a> {
+    fn chunk_reference(&self, index: usize) -> Result<&ObjectRef, Error> {
+        if let Some(refs) = &self.read_refs {
+            refs.get(index)
+                .ok_or_else(|| pack_error("input chunk is missing"))
+        } else {
+            self.chunks
+                .get(index)
+                .map(StagedObject::reference)
+                .ok_or_else(|| pack_error("input chunk is missing"))
+        }
+    }
+
     fn empty(
         operation: &Operation,
         log: &'a Log,
@@ -71,6 +86,7 @@ impl<'a> Input<'a> {
             operation: operation.clone(),
             context: Arc::new(()),
             chunks: Vec::with_capacity(maximum),
+            read_refs: None,
             inline: None,
             cache: std::sync::Mutex::new(None),
             bytes: 0,
@@ -186,12 +202,7 @@ impl<'a, 'log> Cursor<'a, 'log> {
                     .cache
                     .lock()
                     .map_err(|_| pack_error("input cache lock poisoned"))? = None;
-                let object = self
-                    .input
-                    .chunks
-                    .get(index)
-                    .ok_or_else(|| pack_error("input chunk is missing"))?
-                    .reference();
+                let object = self.input.chunk_reference(index)?;
                 let size = usize::try_from(object.len()).map_err(pack_error)?;
 
                 self.input.operation.work(size)?;
