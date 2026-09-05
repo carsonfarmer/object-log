@@ -1,0 +1,37 @@
+spin_manifest_version = 2
+
+[application]
+name = "object-log-git"
+version = "0.1.0"
+
+[variables]
+endpoint = { required = true }
+bucket = { required = true }
+access_key = { required = true }
+secret_key = { required = true, secret = true }
+region = { default = "us-east-1" }
+prefix = { default = "object-log-git" }
+log_id = { default = "repository" }
+object_format = { default = "sha1" }
+
+[[trigger.http]]
+route = "/repo/..."
+component = "git"
+
+[component.git]
+source = "../../target/wasm32-wasip2/release/object_log_git_spin.wasm"
+allowed_outbound_hosts = ["{{ endpoint }}"]
+
+[component.git.variables]
+endpoint = "{{ endpoint }}"
+bucket = "{{ bucket }}"
+access_key = "{{ access_key }}"
+secret_key = "{{ secret_key }}"
+region = "{{ region }}"
+prefix = "{{ prefix }}"
+log_id = "{{ log_id }}"
+object_format = "{{ object_format }}"
+
+[component.git.build]
+command = "cargo build --locked -p object-log-git-spin --target wasm32-wasip2 --release"
+workdir = "../.."
