@@ -40,7 +40,7 @@ async fn filtered_pack_selection_and_explicit_lazy_wants_match_git() -> TestResu
             ("empty", vec![]),
             ("small", b"tiny".to_vec()),
             ("boundary", vec![b'b'; 1024]),
-            ("large", vec![b'a'; 4096]),
+            ("large", vec![b'a'; 65536]),
         ] {
             std::fs::write(path.join(filename), contents)?;
         }
@@ -49,7 +49,7 @@ async fn filtered_pack_selection_and_explicit_lazy_wants_match_git() -> TestResu
         let old = text(path, &["rev-parse", "HEAD"])?;
         std::fs::write(
             path.join("large"),
-            [vec![b'a'; 4000], vec![b'b'; 96]].concat(),
+            [vec![b'a'; 65440], vec![b'b'; 96]].concat(),
         )?;
         git(path, &["commit", "--quiet", "-am", "update"], &[])?;
         let tip = text(path, &["rev-parse", "HEAD"])?;
@@ -175,6 +175,8 @@ async fn filtered_pack_selection_and_explicit_lazy_wants_match_git() -> TestResu
                 "filter blob:none".into(),
             ],
         ]);
+        let base = object_log_git::PackfileUris::new("https://example.invalid/repo")?;
+        let mut uri_count = 0;
         for mut args in cases {
             args.push("done".into());
             let input = request(name, &args)?;
@@ -190,7 +192,72 @@ async fn filtered_pack_selection_and_explicit_lazy_wants_match_git() -> TestResu
                     .await?,
             )?;
             assert_eq!(actual, expected, "{name}: {args:?}");
+            args.insert(0, "packfile-uris https".into());
+            let response = Repository::open(&log, format)
+                .await?
+                .upload_pack_with_uris(request(name, &args)?.into(), &base)
+                .await?;
+            let mut combined = reply(path, &response)?;
+            let locations = uri_locations(&response)?;
+            assert!(locations.len() <= 8);
+            drop(response);
+            for (checksum, uri) in locations {
+                let fields = uri.split('/').collect::<Vec<_>>();
+                let id = object_log_git::ObjectId::parse(format, fields[fields.len() - 2])?;
+                let checksum = object_log_git::ObjectId::parse(format, &checksum)?;
+                let pack = Repository::open(&log, format)
+                    .await?
+                    .fetch_uri_pack(id, checksum)
+                    .await?;
+                let ids = reply(path, &frame_pack(&pack))?.ids;
+                assert_eq!(ids.len(), 1);
+                assert!(ids.contains(&id.to_string()));
+                for id in ids {
+                    assert!(combined.ids.insert(id));
+                }
+                uri_count += 1;
+            }
+            assert_eq!(combined, expected, "URI {name}: {args:?}");
         }
+        assert!(uri_count > 0);
+        // URI access must reject stored-but-unreachable objects and reachable non-blobs.
+        let checksum = object_log_git::ObjectId::parse(format, &blob)?;
+        for rejected in [&unreachable, &tip, &tree] {
+            assert!(matches!(
+                Repository::open(&log, format)
+                    .await?
+                    .fetch_uri_pack(object_log_git::ObjectId::parse(format, rejected)?, checksum)
+                    .await,
+                Err(object_log_git::Error::InvalidReference)
+            ));
+        }
+        let args = vec![
+            format!("want {tip}"),
+            "packfile-uris http".into(),
+            "done".into(),
+        ];
+        let unsupported = request(name, &args)?;
+        assert!(
+            Repository::open(&log, format)
+                .await?
+                .upload_pack(unsupported.clone().into())
+                .await
+                .is_err()
+        );
+        let fallback = Repository::open(&log, format)
+            .await?
+            .upload_pack_with_uris(unsupported.into(), &base)
+            .await?;
+        assert!(uri_locations(&fallback)?.is_empty());
+        let fallback_ids = reply(path, &fallback)?;
+        drop(fallback);
+        let ordinary = Repository::open(&log, format)
+            .await?
+            .upload_pack(request(name, &[format!("want {tip}"), "done".into()])?.into())
+            .await?;
+        assert_eq!(fallback_ids, reply(path, &ordinary)?);
+        drop(ordinary);
+
         for filter in ["blob:none", "blob:limit=1024"] {
             let input = request(
                 name,

@@ -1,4 +1,5 @@
 //! Both-hash installed Git upload protocol oracle.
+#[allow(dead_code, reason = "shared helpers include partial URI operations")]
 #[path = "support/upload.rs"]
 mod upload;
 use object_log::{Log, LogId, Options, Resolution, TransactionId, ValidatedBackend};

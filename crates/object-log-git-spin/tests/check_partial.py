@@ -126,119 +126,124 @@ def external_minio():
     return endpoint.rstrip("/"), *values
 
 
-external = external_minio()
-owned_container = external is None
-try:
-    if external:
-        endpoint, bucket, access_key, secret_key = external
-        ENV.update(AWS_ACCESS_KEY_ID=access_key, AWS_SECRET_ACCESS_KEY=secret_key)
-        ready(endpoint + "/minio/health/ready")
-    else:
-        bucket, access_key, secret_key = "object-log-test", "objectlog", "objectlog-local-test-secret"
-        run(["docker", "run", "--detach", "--rm", "--name", CONTAINER,
-             "--publish", "127.0.0.1::9000", "--env", "MINIO_ROOT_USER=" + access_key,
-             "--env", "MINIO_ROOT_PASSWORD=" + secret_key, IMAGE, "server", "/data"])
-        endpoint = "http://" + run(["docker", "port", CONTAINER, "9000/tcp"])
-        ready(endpoint + "/minio/health/ready")
-        run(["aws", "--endpoint-url", endpoint, "s3api", "create-bucket", "--bucket", bucket])
-    for name in ["sha1", "sha256"]:
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = sock.getsockname()[1]
-            url = f"http://127.0.0.1:{port}/repo"
-            prefix = "partial-fixture-" + uuid.uuid4().hex
-            variables = dict(endpoint=endpoint, bucket=bucket, access_key=access_key,
-                             secret_key=secret_key, prefix=prefix, object_format=name, auth_mode="disabled")
-            config = root / "config.toml"
-            config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
-            log_path = ROOT / "tests" / ("partial-" + name + ".log")
-            with log_path.open("w") as log:
-                def start():
-                    host = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", f"127.0.0.1:{port}",
-                                             "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                    try:
-                        ready(f"http://127.0.0.1:{port}/.well-known/spin/health", host)
-                    except BaseException:
-                        stop(host, port)
-                        raise
-                    return host
-                host = start()
-                try:
-                    source = root / "source"
-                    git(root, "init", "--quiet", "-b", "main", "--object-format=" + name, str(source))
-                    for n in range(3):
-                        (source / "small").write_text("small" + str(n))
-                        (source / "large").write_text("x" * 8192 + str(n))
-                        git(source, "add", ".")
-                        git(source, "commit", "--quiet", "-m", str(n))
-                    small = git(source, "rev-parse", "HEAD:small")
-                    large = git(source, "rev-parse", "HEAD:large")
-                    tip = git(source, "rev-parse", "HEAD")
-                    git(source, "tag", "-a", "v1", "-m", "v1")
-                    git(source, "push", "--quiet", url, "main", "v1")
-                    clones = {}
-                    for filter_spec in ["blob:none", "blob:limit=1024"]:
-                        target = root / filter_spec.replace(":", "-").replace("=", "-")
-                        git(root, "clone", "--quiet", "--no-checkout", "--filter=" + filter_spec, url, str(target))
-                        assert git(target, "config", "remote.origin.promisor") == "true"
-                        assert git(target, "config", "remote.origin.partialclonefilter") == filter_spec
-                        assert list((target / ".git/objects/pack").glob("*.promisor"))
-                        assert large in missing(target)
-                        assert present(target, small) == (filter_spec != "blob:none")
-                        git(target, "fsck", "--strict")
-                        clones[filter_spec] = target
-                    shallow = root / "shallow"
-                    git(root, "clone", "--quiet", "--no-checkout", "--depth=1", "--filter=blob:none", url, str(shallow))
-                    assert large in missing(shallow)
-                    verify(shallow, 1)
-                    stop(host, port)
-                    unavailable = subprocess.run(["git", "show", "HEAD:large"], cwd=clones["blob:none"], env=ENV, capture_output=True, timeout=10)
-                    assert unavailable.returncode != 0
-                    assert not present(clones["blob:none"], large)
-                    maintenance_env = dict(ENV, OBJECT_LOG_MINIO_ENDPOINT=endpoint,
-                        OBJECT_LOG_MINIO_ACCESS_KEY=access_key, OBJECT_LOG_MINIO_SECRET_KEY=secret_key,
-                        OBJECT_LOG_MINIO_BUCKET=bucket, OBJECT_LOG_PARTIAL_PREFIX=prefix, OBJECT_LOG_PARTIAL_FORMAT=name)
-                    print(run(["cargo", "test", "--locked", "-p", "object-log-git", "--features", "aws", "--test", "partial_maintenance",
-                               "--", "--ignored", "--nocapture"], ROOT.parent.parent, maintenance_env), flush=True)
+def main():
+    external = external_minio()
+    owned_container = external is None
+    try:
+        if external:
+            endpoint, bucket, access_key, secret_key = external
+            ENV.update(AWS_ACCESS_KEY_ID=access_key, AWS_SECRET_ACCESS_KEY=secret_key)
+            ready(endpoint + "/minio/health/ready")
+        else:
+            bucket, access_key, secret_key = "object-log-test", "objectlog", "objectlog-local-test-secret"
+            run(["docker", "run", "--detach", "--rm", "--name", CONTAINER,
+                 "--publish", "127.0.0.1::9000", "--env", "MINIO_ROOT_USER=" + access_key,
+                 "--env", "MINIO_ROOT_PASSWORD=" + secret_key, IMAGE, "server", "/data"])
+            endpoint = "http://" + run(["docker", "port", CONTAINER, "9000/tcp"])
+            ready(endpoint + "/minio/health/ready")
+            run(["aws", "--endpoint-url", endpoint, "s3api", "create-bucket", "--bucket", bucket])
+        for name in ["sha1", "sha256"]:
+            with tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+                url = f"http://127.0.0.1:{port}/repo"
+                prefix = "partial-fixture-" + uuid.uuid4().hex
+                variables = dict(endpoint=endpoint, bucket=bucket, access_key=access_key,
+                                 secret_key=secret_key, prefix=prefix, object_format=name, auth_mode="disabled")
+                config = root / "config.toml"
+                config.write_text("".join(f"{key} = {json.dumps(value)}\n" for key, value in variables.items()))
+                log_path = ROOT / "tests" / ("partial-" + name + ".log")
+                with log_path.open("w") as log:
+                    def start():
+                        host = subprocess.Popen(["spin", "up", "--from", str(ROOT / "spin.toml"), "--listen", f"127.0.0.1:{port}",
+                                                 "--variable", "@" + str(config)], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                        try:
+                            ready(f"http://127.0.0.1:{port}/.well-known/spin/health", host)
+                        except BaseException:
+                            stop(host, port)
+                            raise
+                        return host
                     host = start()
-                    for target in clones.values():
-                        assert host.poll() is None, f"Spin exited after restart: {host.returncode}"
-                        ready(f"http://127.0.0.1:{port}/.well-known/spin/health", host)
-                        before = missing(target)
-                        assert git(target, "show", "HEAD:large") == "x" * 8192 + "2"
-                        assert present(target, large)
-                        assert missing(target) < before
-                        git(target, "checkout", "--quiet", "main")
-                        assert (target / "small").read_text() == "small2"
-                        assert (target / "large").read_text() == "x" * 8192 + "2"
-                        git(target, "fsck", "--strict")
-                    git(shallow, "fetch", "--quiet", "--deepen=1")
-                    verify(shallow, 2)
-                    assert git(shallow, "show", "HEAD:large") == "x" * 8192 + "2"
-                    git(shallow, "fetch", "--quiet", "--unshallow")
-                    verify(shallow, 3)
-                    (source / "large").write_text("y" * 8192)
-                    git(source, "commit", "--quiet", "-am", "incremental")
-                    git(source, "push", "--quiet", url, "main")
-                    new_large = git(source, "rev-parse", "HEAD:large")
-                    for target in clones.values():
-                        git(target, "fetch", "--quiet")
-                        assert not present(target, new_large)
-                        assert git(target, "show", "origin/main:large") == "y" * 8192
-                        git(target, "fsck", "--strict")
-                    refetch = clones["blob:none"]
-                    git(refetch, "fetch", "--quiet", "--refetch", "--filter=blob:limit=16384")
-                    assert not missing(refetch)
-                    git(refetch, "fsck", "--strict")
-                    print(name + ": promisor omissions, thresholds, lazy show/checkout, cold checkpoint/GC, shallow/deepen/unshallow incremental fetch, filter refetch and unavailable-remote recovery passed", flush=True)
-                finally:
-                    stop(host, port)
-except Exception:
-    for path in ROOT.glob("tests/partial-*.log"):
-        print(path.read_text())
-    raise
-finally:
-    if owned_container:
-        subprocess.run(["docker", "rm", "--force", CONTAINER], capture_output=True, check=False, timeout=20)
+                    try:
+                        source = root / "source"
+                        git(root, "init", "--quiet", "-b", "main", "--object-format=" + name, str(source))
+                        for n in range(3):
+                            (source / "small").write_text("small" + str(n))
+                            (source / "large").write_text("x" * 8192 + str(n))
+                            git(source, "add", ".")
+                            git(source, "commit", "--quiet", "-m", str(n))
+                        small = git(source, "rev-parse", "HEAD:small")
+                        large = git(source, "rev-parse", "HEAD:large")
+                        tip = git(source, "rev-parse", "HEAD")
+                        git(source, "tag", "-a", "v1", "-m", "v1")
+                        git(source, "push", "--quiet", url, "main", "v1")
+                        clones = {}
+                        for filter_spec in ["blob:none", "blob:limit=1024"]:
+                            target = root / filter_spec.replace(":", "-").replace("=", "-")
+                            git(root, "clone", "--quiet", "--no-checkout", "--filter=" + filter_spec, url, str(target))
+                            assert git(target, "config", "remote.origin.promisor") == "true"
+                            assert git(target, "config", "remote.origin.partialclonefilter") == filter_spec
+                            assert list((target / ".git/objects/pack").glob("*.promisor"))
+                            assert large in missing(target)
+                            assert present(target, small) == (filter_spec != "blob:none")
+                            git(target, "fsck", "--strict")
+                            clones[filter_spec] = target
+                        shallow = root / "shallow"
+                        git(root, "clone", "--quiet", "--no-checkout", "--depth=1", "--filter=blob:none", url, str(shallow))
+                        assert large in missing(shallow)
+                        verify(shallow, 1)
+                        stop(host, port)
+                        unavailable = subprocess.run(["git", "show", "HEAD:large"], cwd=clones["blob:none"], env=ENV, capture_output=True, timeout=10)
+                        assert unavailable.returncode != 0
+                        assert not present(clones["blob:none"], large)
+                        maintenance_env = dict(ENV, OBJECT_LOG_MINIO_ENDPOINT=endpoint,
+                            OBJECT_LOG_MINIO_ACCESS_KEY=access_key, OBJECT_LOG_MINIO_SECRET_KEY=secret_key,
+                            OBJECT_LOG_MINIO_BUCKET=bucket, OBJECT_LOG_PARTIAL_PREFIX=prefix, OBJECT_LOG_PARTIAL_FORMAT=name)
+                        print(run(["cargo", "test", "--locked", "-p", "object-log-git", "--features", "aws", "--test", "partial_maintenance",
+                                   "--", "--ignored", "--nocapture"], ROOT.parent.parent, maintenance_env), flush=True)
+                        host = start()
+                        for target in clones.values():
+                            assert host.poll() is None, f"Spin exited after restart: {host.returncode}"
+                            ready(f"http://127.0.0.1:{port}/.well-known/spin/health", host)
+                            before = missing(target)
+                            assert git(target, "show", "HEAD:large") == "x" * 8192 + "2"
+                            assert present(target, large)
+                            assert missing(target) < before
+                            git(target, "checkout", "--quiet", "main")
+                            assert (target / "small").read_text() == "small2"
+                            assert (target / "large").read_text() == "x" * 8192 + "2"
+                            git(target, "fsck", "--strict")
+                        git(shallow, "fetch", "--quiet", "--deepen=1")
+                        verify(shallow, 2)
+                        assert git(shallow, "show", "HEAD:large") == "x" * 8192 + "2"
+                        git(shallow, "fetch", "--quiet", "--unshallow")
+                        verify(shallow, 3)
+                        (source / "large").write_text("y" * 8192)
+                        git(source, "commit", "--quiet", "-am", "incremental")
+                        git(source, "push", "--quiet", url, "main")
+                        new_large = git(source, "rev-parse", "HEAD:large")
+                        for target in clones.values():
+                            git(target, "fetch", "--quiet")
+                            assert not present(target, new_large)
+                            assert git(target, "show", "origin/main:large") == "y" * 8192
+                            git(target, "fsck", "--strict")
+                        refetch = clones["blob:none"]
+                        git(refetch, "fetch", "--quiet", "--refetch", "--filter=blob:limit=16384")
+                        assert not missing(refetch)
+                        git(refetch, "fsck", "--strict")
+                        print(name + ": promisor omissions, thresholds, lazy show/checkout, cold checkpoint/GC, shallow/deepen/unshallow incremental fetch, filter refetch and unavailable-remote recovery passed", flush=True)
+                    finally:
+                        stop(host, port)
+    except Exception:
+        for path in ROOT.glob("tests/partial-*.log"):
+            print(path.read_text())
+        raise
+    finally:
+        if owned_container:
+            subprocess.run(["docker", "rm", "--force", CONTAINER], capture_output=True, check=False, timeout=20)
+
+
+if __name__ == "__main__":
+    main()

@@ -281,3 +281,48 @@ These checks use ordinary requests without a host-slot timing workaround.
 The functional fixtures exercise real Spin with its defaults. The previous
 constrained-runtime launcher and diagnostics are removed. Verification results
 belong in commits and the issue tracker; Git history retains prior reports.
+
+## Optional packfile URI downloads
+
+Set `packfile_uri_base = "https://git.example.com/repo"` to advertise protocol-v2
+packfile URIs. The default is empty (disabled). Use the canonical public URL;
+its authority must match the request authority. The path is exactly `/repo`,
+with no credentials, query, fragment or trailing slash. HTTP is accepted only
+for loopback fixtures. Forwarded headers never choose the advertised origin.
+
+Clients opt in with `fetch.uriprotocols=http,https`. Private clients using a
+credential helper must also set `http.proactiveAuth=basic`: Git's separate URI
+downloader does not retry a 401 challenge like smart HTTP does. Configure the
+helper for the `/repo/packfiles/` paths as well as `/repo`; keep tokens in the
+helper. For example, after configuring the helper:
+
+```sh
+git -c protocol.version=2 -c fetch.uriprotocols=https -c http.proactiveAuth=basic clone https://git.example.com/repo
+```
+
+Each response can move up to eight selected blobs of at least 64 KiB into
+canonical single-blob packs; remaining objects stay in the normal pack. Filter,
+shallow and explicit lazy-fetch selection still determine the exact object set.
+This version computes the URI checksum during negotiation and regenerates the
+pack on download, so it adds compression and storage reads. Each request keeps
+the existing engine limits. This is useful client functionality, not a claimed
+bandwidth or latency improvement.
+
+Every download authenticates independently and verifies current reachability.
+A URL grants no access or retention: deleting refs can revoke it. Checkpointing
+and collection preserve the bytes while the blob remains reachable. Downloads
+support byte ranges, ETags and Git's retained temporary-pack resume. Responses
+are private and must not be cached. Credentials and pack URLs contain no signed
+capability or second durable authority.
+
+The opt-in local provider check uses ordinary Spin and unchanged Git, for both
+hash formats, including authentication, ranges, shallow/filtered/lazy fetches,
+cold checkpoint/collection, token rotation and ref deletion:
+
+```sh
+python3 crates/object-log-git-spin/tests/check_uri.py
+```
+
+Build the release WASIp2 component first. The check accepts the same loopback
+`OBJECT_LOG_MINIO_*` settings as `check_partial.py`, or starts its own pinned
+MinIO container when those settings are absent.

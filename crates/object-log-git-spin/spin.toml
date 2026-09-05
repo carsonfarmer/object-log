@@ -16,6 +16,7 @@ object_format = { default = "sha1" }
 auth_mode = { default = "basic" }
 auth_read_token = { default = "", secret = true }
 auth_write_token = { default = "", secret = true }
+packfile_uri_base = { default = "" }
 read_only = { default = "false" }
 allow_non_fast_forward = { default = "false" }
 
@@ -39,6 +40,7 @@ object_format = "{{ object_format }}"
 auth_mode = "{{ auth_mode }}"
 auth_read_token = "{{ auth_read_token }}"
 auth_write_token = "{{ auth_write_token }}"
+packfile_uri_base = "{{ packfile_uri_base }}"
 read_only = "{{ read_only }}"
 allow_non_fast_forward = "{{ allow_non_fast_forward }}"
 

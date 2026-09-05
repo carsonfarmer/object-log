@@ -36,6 +36,7 @@ pub(crate) enum UploadRequest<'a> {
         haves: Box<[ObjectId]>,
         shallow: ShallowRequest<'a>,
         filter: Option<Filter>,
+        uri_protocols: Option<&'a [u8]>,
         done: bool,
         #[allow(
             dead_code,
@@ -122,6 +123,7 @@ pub(crate) enum FetchReply<'a> {
         pack: &'a [u8],
         shallow: &'a [ObjectId],
         unshallow: &'a [ObjectId],
+        uris: &'a [(ObjectId, String)],
     },
 }
 
@@ -145,6 +147,13 @@ pub(crate) const fn upload_advertisement(format: ObjectFormat) -> &'static [u8] 
     match format {
         ObjectFormat::Sha1 => UPLOAD_SHA1,
         ObjectFormat::Sha256 => UPLOAD_SHA256,
+    }
+}
+
+pub(crate) const fn uri_advertisement(format: ObjectFormat) -> &'static [u8] {
+    match format {
+        ObjectFormat::Sha1 => b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0027fetch=shallow filter packfile-uris\n0017object-format=sha1\n0000",
+        ObjectFormat::Sha256 => b"000eversion 2\n0015agent=object-log\n0013ls-refs=unborn\n0027fetch=shallow filter packfile-uris\n0019object-format=sha256\n0000",
     }
 }
 
@@ -211,6 +220,25 @@ fn parse_ls_refs<'a>(packets: &mut &'a [u8]) -> Result<UploadRequest<'a>, Error>
     })
 }
 
+fn validate_uri_protocols(protocols: &[u8], duplicate: bool) -> Result<(), Error> {
+    if duplicate
+        || protocols.len() > 128
+        || protocols
+            .split(|b| *b == b',')
+            .any(|scheme| scheme.is_empty() || !scheme.iter().all(u8::is_ascii_lowercase))
+    {
+        return Err(Error::Protocol("invalid URI protocols"));
+    }
+    Ok(())
+}
+
+fn positive_depth(depth: &[u8]) -> Result<u32, Error> {
+    u32::try_from(decimal(depth)?)
+        .ok()
+        .filter(|depth| *depth > 0 && i32::try_from(*depth).is_ok())
+        .ok_or(Error::Protocol("invalid depth"))
+}
+
 fn parse_fetch<'a>(
     packets: &mut &'a [u8],
     format: ObjectFormat,
@@ -218,6 +246,7 @@ fn parse_fetch<'a>(
     let (mut wants, mut haves) = (Vec::new(), Vec::new());
     let mut shallow = ShallowRequest::default();
     let mut filter = None;
+    let mut uri_protocols = None;
     let (mut boundaries, mut exclude) = (Vec::new(), Vec::new());
     let (mut done, mut options) = (false, 0_u8);
     while let Some(line) = data_until(packets, PacketLineRef::Flush)? {
@@ -243,6 +272,9 @@ fn parse_fetch<'a>(
                 return Err(Error::Protocol("duplicate filter"));
             }
             filter = Some(Filter::parse(spec)?);
+        } else if let Some(protocols) = line.strip_prefix(b"packfile-uris ") {
+            validate_uri_protocols(protocols, uri_protocols.is_some())?;
+            uri_protocols = Some(protocols);
         } else if let Some(id) = line.strip_prefix(b"shallow ") {
             within(boundaries.len() + 1, MAX_ITEMS, "shallow boundaries")?;
             boundaries.push(parse_id(id, format)?);
@@ -250,13 +282,7 @@ fn parse_fetch<'a>(
             if shallow.depth.is_some() {
                 return Err(Error::Protocol("duplicate deepen"));
             }
-            let depth = decimal(depth)?;
-            shallow.depth = Some(
-                u32::try_from(depth)
-                    .ok()
-                    .filter(|depth| *depth > 0 && i32::try_from(*depth).is_ok())
-                    .ok_or(Error::Protocol("invalid depth"))?,
-            );
+            shallow.depth = Some(positive_depth(depth)?);
         } else if let Some(since) = line.strip_prefix(b"deepen-since ") {
             if shallow.since.is_some() {
                 return Err(Error::Protocol("duplicate deepen-since"));
@@ -308,6 +334,7 @@ fn parse_fetch<'a>(
         haves: haves.into_boxed_slice(),
         shallow,
         filter,
+        uri_protocols,
         done,
         thin_pack: options & 1 != 0,
         ofs_delta: options & 2 != 0,
@@ -391,6 +418,7 @@ pub(crate) fn write_fetch(
             pack,
             shallow,
             unshallow,
+            uris,
         } => {
             within(shallow.len(), MAX_ITEMS, "shallow boundaries")?;
             within(unshallow.len(), MAX_ITEMS, "unshallow boundaries")?;
@@ -398,6 +426,20 @@ pub(crate) fn write_fetch(
                 validate_id(*id, format)?;
             }
             within(pack.len(), MAX_FETCH_PACK_BYTES, "pack bytes")?;
+            within(uris.len(), crate::packfile_uri::MAX_URIS, "packfile URIs")?;
+            let uri_overhead = uris.iter().try_fold(
+                if uris.is_empty() { 0 } else { 22 },
+                |total: usize, (hash, uri)| {
+                    validate_id(*hash, format)?;
+                    within(uri.len(), 1536, "packfile URI")?;
+                    if uri.bytes().any(|byte| byte <= b' ' || byte >= 127) {
+                        return Err(Error::Protocol("invalid packfile URI"));
+                    }
+                    total
+                        .checked_add(format.digest_len() * 2 + uri.len() + 6)
+                        .ok_or(Error::Limit("packfile URIs"))
+                },
+            )?;
             let overhead = if shallow.is_empty() && unshallow.is_empty() {
                 0
             } else {
@@ -406,7 +448,7 @@ pub(crate) fn write_fetch(
             };
             within(
                 fetch_response_len(pack.len())?
-                    .checked_add(overhead)
+                    .checked_add(overhead + uri_overhead)
                     .ok_or(Error::Limit("fetch response bytes"))?,
                 MAX_FETCH_RESPONSE_BYTES,
                 "fetch response bytes",
@@ -423,6 +465,13 @@ pub(crate) fn write_fetch(
                         push_id(&mut line, *id);
                         write_text(output, &mut line)?;
                     }
+                }
+                encode::delim_to_write(&mut *output)?;
+            }
+            if !uris.is_empty() {
+                encode::text_to_write(b"packfile-uris", &mut *output)?;
+                for (hash, uri) in uris {
+                    encode::text_to_write(format!("{hash} {uri}").as_bytes(), &mut *output)?;
                 }
                 encode::delim_to_write(&mut *output)?;
             }
@@ -1101,6 +1150,7 @@ mod tests {
                 pack: &pack,
                 shallow: &[],
                 unshallow: &[],
+                uris: &[],
             },
         )?;
         assert!(output.starts_with(b"000dpackfile\n"));
@@ -1142,6 +1192,7 @@ mod tests {
                 pack: &pack[..MAX_FETCH_PACK_BYTES],
                 shallow: &[],
                 unshallow: &[],
+                uris: &[],
             },
         )?;
         output.clear();
@@ -1152,6 +1203,7 @@ mod tests {
                 pack: &pack,
                 shallow: &[],
                 unshallow: &[],
+                uris: &[],
             },
         ));
         assert!(output.is_empty());
@@ -1693,6 +1745,7 @@ mod tests {
                 pack: &pack,
                 shallow: &[],
                 unshallow: &[],
+                uris: &[],
             },
         )?;
         let mut packets = output.as_slice();
@@ -1806,7 +1859,7 @@ mod tests {
                 vec![b"deepen-not "],
                 vec![b"shallow 00"],
                 vec![b"filter tree:0"],
-                vec![b"packfile-uris https"],
+                vec![b"packfile-uris https,,http"],
             ] {
                 let mut options = vec![want.as_bytes()];
                 options.extend(args);
@@ -1822,6 +1875,7 @@ mod tests {
                 pack: &pack,
                 shallow: &[id(ObjectFormat::Sha1, SHA1_A)?],
                 unshallow: &[],
+                uris: &[],
             },
         ));
         assert!(output.is_empty());
@@ -1832,6 +1886,7 @@ mod tests {
                 pack: EMPTY_SHA1_PACK,
                 shallow: &[id(ObjectFormat::Sha256, SHA256_A)?],
                 unshallow: &[],
+                uris: &[],
             },
         ));
         assert!(output.is_empty());

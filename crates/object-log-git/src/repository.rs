@@ -9,6 +9,7 @@ use object_log::{CommitStatus, Log, ObjectRef, PreparedCommit, View, materialize
 mod default_branch;
 mod maintenance;
 mod receive_command;
+mod uri;
 
 use crate::{
     Error, ObjectFormat, ObjectId, RefSnapshot,
@@ -46,6 +47,14 @@ pub struct PreparedPush {
     prepared: PreparedCommit,
     recovery_token: Bytes,
     receive: receive_command::Publication,
+}
+
+struct FetchOptions<'a> {
+    include_tag: bool,
+    done: bool,
+    shallow: Option<&'a wire::ShallowRequest<'a>>,
+    filter: Option<wire::Filter>,
+    uris: Option<&'a crate::PackfileUris>,
 }
 
 impl Repository {
@@ -127,19 +136,33 @@ impl Repository {
         haves: &[ObjectId],
         include_tag: bool,
     ) -> Result<Bytes, Error> {
-        self.fetch_pack_or_ack(wants, haves, include_tag, true, None, None)
-            .await
+        self.fetch_pack_or_ack(
+            wants,
+            haves,
+            FetchOptions {
+                include_tag,
+                done: true,
+                shallow: None,
+                filter: None,
+                uris: None,
+            },
+        )
+        .await
     }
 
     async fn fetch_pack_or_ack(
         &self,
         wants: &[ObjectId],
         haves: &[ObjectId],
-        include_tag: bool,
-        done: bool,
-        shallow: Option<&wire::ShallowRequest<'_>>,
-        filter: Option<wire::Filter>,
+        options: FetchOptions<'_>,
     ) -> Result<Bytes, Error> {
+        let FetchOptions {
+            include_tag,
+            done,
+            shallow,
+            filter,
+            uris,
+        } = options;
         let catalog = self.catalog().await?;
         let mut reader = durable::Reader::new(&self.log, &self.view, &catalog);
         let _roots_memory = self
@@ -196,6 +219,14 @@ impl Repository {
             )
             .await?;
         }
+        let _uri_memory = self.operation.reserve(if uris.is_some() {
+            crate::packfile_uri::MAX_URIS * 2048
+        } else {
+            0
+        })?;
+        let locations = self
+            .uri_locations(&graph, &mut reader, &mut selected.ids, uris)
+            .await?;
         for id in &selected.ids {
             let node = &graph.nodes[graph.location(*id).ok_or(Error::InvalidReference)? as usize];
             if !node.verified {
@@ -217,6 +248,7 @@ impl Repository {
                     pack: &pack,
                     shallow: &selected.shallow,
                     unshallow: &selected.unshallow,
+                    uris: &locations,
                 },
             )
         })
@@ -260,6 +292,26 @@ impl Repository {
     /// Returns an error for invalid input, resource exhaustion, or storage
     /// failure. One expired-view retry shares all counters with repository open.
     pub async fn upload_pack(self, input: Bytes) -> Result<Bytes, Error> {
+        self.upload_with_uris(input, None).await
+    }
+
+    /// Serves upload-pack with negotiated, bounded URI support.
+    ///
+    /// # Errors
+    /// Same limits and cumulative expiry retry as `upload_pack`.
+    pub async fn upload_pack_with_uris(
+        self,
+        input: Bytes,
+        uris: &crate::PackfileUris,
+    ) -> Result<Bytes, Error> {
+        self.upload_with_uris(input, Some(uris)).await
+    }
+
+    async fn upload_with_uris(
+        self,
+        input: Bytes,
+        uris: Option<&crate::PackfileUris>,
+    ) -> Result<Bytes, Error> {
         if input.len() > wire::MAX_UPLOAD_BYTES {
             return Err(Error::InvalidProtocol("upload control bytes"));
         }
@@ -271,21 +323,25 @@ impl Repository {
         let _parse_memory = operation.reserve((input.len() * 4 + 128).min(maximum))?;
         operation.work(input.len())?;
         let request = wire::parse_upload(&input, self.format)?;
-        match self.upload_attempt(&request).await {
+        match self.upload_attempt(&request, uris).await {
             Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
                 let (log, format) = (self.log.clone(), self.format);
                 drop(self);
                 operation.retry()?;
                 Self::open_attempt(&log, format, &operation)
                     .await?
-                    .upload_attempt(&request)
+                    .upload_attempt(&request, uris)
                     .await
             }
             result => result,
         }
     }
 
-    async fn upload_attempt(&self, request: &UploadRequest<'_>) -> Result<Bytes, Error> {
+    async fn upload_attempt(
+        &self,
+        request: &UploadRequest<'_>,
+        uris: Option<&crate::PackfileUris>,
+    ) -> Result<Bytes, Error> {
         match request {
             UploadRequest::LsRefs {
                 peel,
@@ -300,10 +356,26 @@ impl Repository {
                 include_tag,
                 shallow,
                 filter,
+                uri_protocols,
                 ..
             } => {
-                self.fetch_pack_or_ack(wants, haves, *include_tag, *done, Some(shallow), *filter)
-                    .await
+                if uri_protocols.is_some() && uris.is_none() {
+                    return Err(Error::InvalidProtocol("packfile URIs not enabled"));
+                }
+                let enabled = uris
+                    .filter(|base| uri_protocols.is_some_and(|protocols| base.accepts(protocols)));
+                self.fetch_pack_or_ack(
+                    wants,
+                    haves,
+                    FetchOptions {
+                        include_tag: *include_tag,
+                        done: *done,
+                        shallow: Some(shallow),
+                        filter: *filter,
+                        uris: enabled,
+                    },
+                )
+                .await
             }
         }
     }
@@ -573,6 +645,7 @@ mod tests {
     include!("repository/maintenance_tests.rs");
     include!("repository/partial_tests.rs");
     include!("repository/default_branch_tests.rs");
+    include!("repository/uri_tests.rs");
 
     struct Fixture {
         directory: TempDir,

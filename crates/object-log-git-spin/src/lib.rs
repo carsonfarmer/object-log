@@ -8,6 +8,7 @@
 )]
 
 mod auth;
+mod packfiles;
 mod transport;
 
 use std::{io::Read, sync::Arc, time::Duration};
@@ -25,7 +26,10 @@ const BODY_LIMIT: usize = 10 * 1024 * 1024;
 const UPLOAD_RESULT: &str = "application/x-git-upload-pack-result";
 const RECEIVE_RESULT: &str = "application/x-git-receive-pack-result";
 
-struct Reply(u16, &'static str, Bytes);
+enum Reply {
+    Normal(u16, &'static str, Bytes),
+    Pack(packfiles::PackReply),
+}
 
 async fn repository(format: ObjectFormat) -> anyhow::Result<Repository> {
     let variable = spin_sdk::variables::get;
@@ -143,54 +147,81 @@ fn http_policy() -> anyhow::Result<(auth::AuthConfig, bool, ReceivePolicy, Objec
     Ok((config, read_only, policy, format))
 }
 
+fn auth_rejection(
+    request: &IncomingRequest,
+    config: &auth::AuthConfig,
+    write: bool,
+    read_only: bool,
+) -> Option<Reply> {
+    let authorization = request.headers().get("authorization");
+    if let Err(denied) = config.authorize(authorization.iter().map(Vec::as_slice), write, read_only)
+    {
+        return Some(match denied {
+            auth::Denied::Unauthorized => Reply::Normal(
+                401,
+                "text/plain",
+                Bytes::from_static(b"authentication required\n"),
+            ),
+            auth::Denied::Forbidden => {
+                Reply::Normal(403, "text/plain", Bytes::from_static(b"access forbidden\n"))
+            }
+        });
+    }
+    None
+}
+
 async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
     let path = request.path_with_query().unwrap_or_default();
     let upload = path == "/repo/git-upload-pack";
     let receive = path == "/repo/git-receive-pack";
     let upload_advert = path == "/repo/info/refs?service=git-upload-pack";
     let receive_advert = path == "/repo/info/refs?service=git-receive-pack";
+    let packfile = path.starts_with("/repo/packfiles/");
     let get = request.method() == Method::Get;
     let post = request.method() == Method::Post;
-    if !(get && (upload_advert || receive_advert) || post && (upload || receive)) {
-        return Ok(Reply(404, "text/plain", Bytes::from_static(b"not found\n")));
+    if !(get && (upload_advert || receive_advert || packfile) || post && (upload || receive)) {
+        return Ok(Reply::Normal(
+            404,
+            "text/plain",
+            Bytes::from_static(b"not found\n"),
+        ));
     }
     let (config, read_only, policy, format) = http_policy()?;
-    let authorization = request.headers().get("authorization");
-    if let Err(denied) = config.authorize(
-        authorization.iter().map(Vec::as_slice),
-        receive || receive_advert,
-        read_only,
-    ) {
-        return Ok(match denied {
-            auth::Denied::Unauthorized => Reply(
-                401,
-                "text/plain",
-                Bytes::from_static(b"authentication required\n"),
-            ),
-            auth::Denied::Forbidden => {
-                Reply(403, "text/plain", Bytes::from_static(b"access forbidden\n"))
-            }
-        });
+    if let Some(reply) = auth_rejection(&request, &config, receive || receive_advert, read_only) {
+        return Ok(reply);
+    }
+    let uri_base = packfiles::configured(
+        spin_sdk::variables::get("packfile_uri_base")?.as_str(),
+        request.authority().as_deref(),
+    )?;
+    if packfile {
+        if uri_base.is_none() {
+            return Ok(Reply::Normal(404, "text/plain", Bytes::new()));
+        }
+        return packfiles::download(&request, &path, format).await;
     }
     let Ok(encoding) = validate_headers(&request, upload, upload_advert, post) else {
-        return Ok(Reply(
+        return Ok(Reply::Normal(
             400,
             "text/plain",
             Bytes::from_static(b"invalid Git HTTP request\n"),
         ));
     };
     if upload_advert {
-        return Ok(Reply(
+        return Ok(Reply::Normal(
             200,
             "application/x-git-upload-pack-advertisement",
-            Repository::upload_advertisement(format),
+            uri_base.as_ref().map_or_else(
+                || Repository::upload_advertisement(format),
+                |base| base.advertisement(format),
+            ),
         ));
     }
     // Opening holds engine admission before host body collection. The bounded
     // host buffer lives in the runtime allowance until the command charges it.
     let repository = repository(format).await?;
     if receive_advert {
-        return Ok(Reply(
+        return Ok(Reply::Normal(
             200,
             "application/x-git-receive-pack-advertisement",
             repository.receive_advertisement().await?,
@@ -204,22 +235,34 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
     )
     .await
     else {
-        return Ok(Reply(
+        return Ok(Reply::Normal(
             400,
             "text/plain",
             Bytes::from_static(b"invalid or oversized request body\n"),
         ));
     };
     if upload {
-        return Ok(Reply(
+        return Ok(Reply::Normal(
             200,
             UPLOAD_RESULT,
-            repository.upload_pack(body).await?,
+            if let Some(base) = &uri_base {
+                repository.upload_pack_with_uris(body, base).await?
+            } else {
+                repository.upload_pack(body).await?
+            },
         ));
     }
+    receive_command(repository, body, policy).await
+}
+
+async fn receive_command(
+    repository: Repository,
+    body: Bytes,
+    policy: ReceivePolicy,
+) -> anyhow::Result<Reply> {
     // Git probes authentication before sending a chunked receive request.
     if body.as_ref() == b"0000" {
-        return Ok(Reply(200, RECEIVE_RESULT, Bytes::new()));
+        return Ok(Reply::Normal(200, RECEIVE_RESULT, Bytes::new()));
     }
     match repository
         .prepare_receive_with_policy(TransactionId::new(), body, policy)
@@ -231,7 +274,7 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
                 Ok((
                     object_log::Resolution::Committed(_) | object_log::Resolution::NotCommitted(_),
                     response,
-                )) => Ok(Reply(200, RECEIVE_RESULT, response)),
+                )) => Ok(Reply::Normal(200, RECEIVE_RESULT, response)),
                 Ok((
                     object_log::Resolution::StillPending(_) | object_log::Resolution::Expired(_),
                     _,
@@ -239,11 +282,13 @@ async fn dispatch(request: IncomingRequest) -> anyhow::Result<Reply> {
                 | Err(_) => {
                     // Return the opaque exact-candidate token without allocating an
                     // encoded copy. A 503 never claims successful publication.
-                    Ok(Reply(503, "application/octet-stream", token))
+                    Ok(Reply::Normal(503, "application/octet-stream", token))
                 }
             }
         }
-        Err(Error::ReceiveRejected { response, .. }) => Ok(Reply(200, RECEIVE_RESULT, response)),
+        Err(Error::ReceiveRejected { response, .. }) => {
+            Ok(Reply::Normal(200, RECEIVE_RESULT, response))
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -285,10 +330,16 @@ fn append(output: &mut Vec<u8>, chunk: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn respond(
-    out: ResponseOutparam,
-    Reply(status, content_type, bytes): Reply,
-) -> anyhow::Result<()> {
+async fn respond(out: ResponseOutparam, reply: Reply) -> anyhow::Result<()> {
+    let (status, content_type, bytes, extra) = match reply {
+        Reply::Normal(status, content_type, bytes) => (status, content_type, bytes, Vec::new()),
+        Reply::Pack(pack) => (
+            pack.status,
+            "application/x-git-packed-objects",
+            pack.bytes,
+            pack.headers,
+        ),
+    };
     let fields = Fields::from_list(&[
         ("content-type".into(), content_type.as_bytes().to_vec()),
         (
@@ -297,6 +348,9 @@ async fn respond(
         ),
         ("cache-control".into(), b"no-cache".to_vec()),
     ])?;
+    for (name, value) in extra {
+        fields.set(&name, &[value.into_bytes()])?;
+    }
     if status == 401 {
         fields.set(
             "www-authenticate",
@@ -338,32 +392,35 @@ mod entry {
                     .chain()
                     .any(<dyn std::error::Error + 'static>::is::<super::transport::QuotaExceeded>);
                 match error.downcast::<Error>() {
-                    Ok(Error::Busy) => Reply(
+                    Ok(Error::Busy) => Reply::Normal(
                         503,
                         "text/plain",
                         Bytes::from_static(b"Git operation busy\n"),
                     ),
-                    Ok(Error::ObjectLog(object_log::Error::RequestDenied)) => Reply(
+                    Ok(Error::ObjectLog(object_log::Error::RequestDenied)) => Reply::Normal(
                         503,
                         "text/plain",
                         Bytes::from_static(b"Git operation limit reached\n"),
                     ),
                     Ok(
-                        Error::InvalidProtocol(_) | Error::InvalidReference | Error::InvalidPack(_),
-                    ) => Reply(
+                        Error::InvalidProtocol(_)
+                        | Error::InvalidObjectId
+                        | Error::InvalidReference
+                        | Error::InvalidPack(_),
+                    ) => Reply::Normal(
                         400,
                         "text/plain",
                         Bytes::from_static(b"invalid Git request\n"),
                     ),
                     Ok(Error::ReceiveRejected { response, .. }) => {
-                        Reply(200, RECEIVE_RESULT, response)
+                        Reply::Normal(200, RECEIVE_RESULT, response)
                     }
-                    _ if transport_limit => Reply(
+                    _ if transport_limit => Reply::Normal(
                         503,
                         "text/plain",
                         Bytes::from_static(b"Git operation limit reached\n"),
                     ),
-                    _ => Reply(
+                    _ => Reply::Normal(
                         500,
                         "text/plain",
                         Bytes::from_static(b"Git request failed\n"),

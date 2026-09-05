@@ -6,12 +6,14 @@ mod durable;
 mod format;
 mod graph;
 mod pack;
+mod packfile_uri;
 mod receive;
 mod repository;
 mod selection;
 mod state;
 mod wire;
 
+pub use packfile_uri::PackfileUris;
 pub use repository::PreparedPush;
 pub use repository::Repository;
 

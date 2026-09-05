@@ -105,3 +105,42 @@ pub(crate) fn reply(path: &Path, mut bytes: &[u8]) -> TestResult<Reply> {
         ids,
     })
 }
+
+pub(crate) fn uri_locations(mut bytes: &[u8]) -> TestResult<Vec<(String, String)>> {
+    let mut output = Vec::new();
+    let mut in_uris = false;
+    while !bytes.is_empty() {
+        let n = usize::from_str_radix(std::str::from_utf8(&bytes[..4])?, 16)?;
+        bytes = &bytes[4..];
+        if n <= 2 {
+            in_uris = false;
+            continue;
+        }
+        let line = &bytes[..n - 4];
+        bytes = &bytes[n - 4..];
+        if line == b"packfile\n" {
+            break;
+        }
+        if line == b"packfile-uris\n" {
+            in_uris = true;
+        } else if in_uris {
+            let (hash, uri) = std::str::from_utf8(line)?
+                .trim()
+                .split_once(' ')
+                .ok_or("URI")?;
+            output.push((hash.into(), uri.into()));
+        }
+    }
+    Ok(output)
+}
+
+pub(crate) fn frame_pack(pack: &[u8]) -> Vec<u8> {
+    let mut output = b"000dpackfile\n".to_vec();
+    for chunk in pack.chunks(65514) {
+        output.extend_from_slice(format!("{:04x}", chunk.len() + 5).as_bytes());
+        output.push(1);
+        output.extend_from_slice(chunk);
+    }
+    output.extend_from_slice(b"0000");
+    output
+}

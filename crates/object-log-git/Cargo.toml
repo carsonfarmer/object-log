@@ -23,6 +23,7 @@ gix-zlib = { version = "0.1.0", default-features = false }
 minicbor = { version = "2.3", features = ["derive", "std"] }
 object-log = { path = "../.." }
 thiserror = "2.0"
+url = "2.5"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 gix-pack = { version = "=0.74.2", default-features = false, features = ["sha1", "sha256", "streaming-input"] }
