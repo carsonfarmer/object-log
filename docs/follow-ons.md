@@ -78,53 +78,20 @@ current limitations and follow-on work. The linked issues define separate
 acceptance criteria for SQLite hardening, Spin factors, Git, WASI filesystem,
 verification, performance, and live AWS qualification.
 
-## 1. Git storage API proof
+## Git and key-value storage
 
-The shared engine now supports both hashes, protocol-v2 discovery and
-have-aware fetch, classic receive-pack, thin packs, atomic publication,
-checkpoint/collection, and cold recovery. Native and actual Spin WASIp2
-qualification passed with unchanged Git clients and local MinIO. The core
-log remains generic and independent from Git and Spin.
+The Git service now exercises the generic WAL through ordinary Spin and
+unchanged clients: both hashes, sparse reads, atomic push, full and partial
+fetch, large histories, compaction and cold recovery. The final cleanup is
+tracked in #25; [GIT_PLAN.md](../GIT_PLAN.md) states its current contract and
+finite resource bounds. Installed Git remains the test and benchmark reference.
 
-The previous filesystem-backed native Git engine and entire native HTTP host
-are removed. Useful client tests run against actual Spin, and portable tests
-cover uncertain publication and recovery. Installed Git remains the independent
-correctness/performance reference. The
-shared library exposes one `Repository::open(&Log, ObjectFormat)` and
-byte-oriented upload/receive commands, with command-local indexes and sparse
-range reads. No scratch Git repository is required.
-
-An 88 MiB pool admits one engine operation per native process or WASI instance.
-Run ordinary Spin with default runtime settings. No one-instance launcher,
-pooling workaround, or imposed host-memory cap is required. The SHA-1 8 MiB
-WASIp2 push remains approximately 1.65 times its native Git timing baseline;
-removing old product code does not resolve that observation.
-
-The bounded functional proof is complete, but the broader Git proof remains
-open until it demonstrates useful scale and straightforward integration:
-
-- [#19: compaction and scale](https://github.com/carsonfarmer/object-log/issues/19):
-  bound catalog work as live packs accumulate, preserve atomic replacement and
-  GC safety, and measure sustained Spin/MinIO workloads before and after.
-- [#21: memory and admission](https://github.com/carsonfarmer/object-log/issues/21):
-  measure normal runtime behavior and concurrent clients using Spin defaults.
-- [#22: pooled HTTP failure](https://github.com/carsonfarmer/object-log/issues/22):
-  revisit only if ordinary Spin testing reveals a blocking problem. No Spin
-  patch or upstream work is a prerequisite.
-- [#23: large-push performance](https://github.com/carsonfarmer/object-log/issues/23):
-  profile the SHA-1 8 MiB WASIp2 receive finding before choosing an optimization.
-- [#24: clone extensions](https://github.com/carsonfarmer/object-log/issues/24):
-  shallow/deepen/unshallow, partial and filtered clones, and packfile URIs with
-  unchanged clients, both hashes, cold recovery and GC. Do not advertise them
-  before implementation and provider acceptance. Larger object/pack/history
-  support needs measured range-backed processing, not merely larger constants.
-- [#25: simplification](https://github.com/carsonfarmer/object-log/issues/25):
-  remove avoidable machinery and identify missing generic capabilities without
-  moving Git policy into the core or reducing required behavior.
-
-See [GIT_PLAN.md](../GIT_PLAN.md) and the dated evidence for exact scopes,
-limits, and qualification conditions. The filesystem provider's missing
-conditional compare-and-swap remains separately tested. Live AWS is #10.
+[KV issue #39](https://github.com/carsonfarmer/object-log/issues/39) scopes a
+production-oriented byte-key/value library with conditional atomic batches,
+ordered scans, disposable caches, recovery and bounded maintenance. Select its
+index and layout from measured workloads. Git's sparse reads, proof reuse and
+batched collection should inform it without importing Git policy into the core.
+SQLite hardening and verifiable g-trees are separate projects.
 
 ## 2. WASI filesystem storage
 

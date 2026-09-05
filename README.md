@@ -181,49 +181,12 @@ Tests use Spin defaults for pooling, instance count, and instance memory.
 The engine's own bounded operation budgets remain; they do not impose a host
 process-memory target or require Spin patches. The Git engine has no
 high-level `gix` repository or Tokio filesystem runtime dependency. The
-[Git proof plan](GIT_PLAN.md) defines the 12 tasks, phase limits, performance
-gates, and source-size review thresholds.
+[Git proof contract](GIT_PLAN.md) defines behavior, resource bounds and checks.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
-[SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md). The
-[`StagedObject` evidence](docs/evidence/staged-objects-local-2026-09-03.md)
-records request counts, transferred bytes, and recovery checks. The
-[`materialized proof` evidence](docs/evidence/materialized-proofs-2026-09-04.md)
-records the no-read checkpoint path and its proof boundaries. The
-[`API simplification` evidence](docs/evidence/api-simplification-local-2026-09-03.md)
-records allocation, encoding, line-count, and API changes. The
-[`observed-state API` evidence](docs/evidence/observed-state-api-2026-09-04.md)
-records the current accepted API shape, local measurements, and line counts. The
-[`SQLite` evidence](docs/evidence/sqlite-local-2026-09-03.md) records tests,
-local measurements, and remaining qualification work. The
-[`Git` evidence](docs/evidence/git-local-2026-09-03.md) records storage
-measurements and the `MinIO` lifecycle. The
-[`Git HTTP` evidence](docs/evidence/git-http-local-2026-09-03.md) records the
-protocol proof. The
-[`Git server` evidence](docs/evidence/git-server-local-2026-09-03.md) records
-native host tests and limits. The
-[`Git WASI baseline`](docs/evidence/git-wasi-baseline-2026-09-04.md) records the
-native line count, protocol trace, request bytes, and latency baseline for the
-WASI-compatible replacement. The
-[`Git WASI contract`](docs/evidence/git-wasi-contract-2026-09-04.md) records the
-first target boundary, CI gate, dependency graph, and limitations. The
-[`Git WASI pack engine`](docs/evidence/git-wasi-pack-2026-09-04.md) records the
-pack normalizer's behavior, limits, tests, source size, and local timing. The
-[`Git WASI durable reader`](docs/evidence/git-wasi-durable-reader-2026-09-04.md)
-records durable layout, sparse request counts, cache behavior, limits, and
-remaining engine work. The
-[`Git WASI wire protocol`](docs/evidence/git-wasi-wire-2026-09-04.md) records
-protocol behavior, exact fixtures, limits, `WASIp2` checks, and remaining host
-integration work. The
-[`Git fetch-pack writer`](docs/evidence/git-fetch-pack-2026-09-04.md) records
-task-2 behavior, validation, line counts, and the remaining connection work.
-
-[docs/follow-ons.md](docs/follow-ons.md) orders the Git, WASI filesystem, and
-live AWS qualification goals.
-
-[GitHub issue #11](https://github.com/carsonfarmer/object-log/issues/11) is the
-current index of active limitations and follow-on work. Each linked issue has
-its own scope, acceptance criteria, dependencies, and evidence.
+[SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md).
+[docs/follow-ons.md](docs/follow-ons.md) describes the next consumers and
+[issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes the queue.
 
 ## Local checks
 
@@ -284,24 +247,11 @@ qualify that host and binary, not Docker or Linux runtime memory limits.
 The single-flow test includes a 1,001-object
 collection boundary. The large acceptance target collects 100,000
 memory-backed objects and 10,001 objects from local `MinIO`. Each collection
-must complete its timed phase within 30 seconds. See the
-[initial baseline](docs/evidence/local-baseline-2026-09-02.md) and the
-[GC evidence](docs/evidence/gc-local-2026-09-03.md) for measured local results
-and their limits. The
-[large GC acceptance record](docs/evidence/gc-acceptance-2026-09-03.md)
-contains the exact revision, results, and limitations. See the
-[`SQLite` WAL prototype evidence](docs/evidence/sqlite-wal-prototype-2026-09-03.md)
-for the accepted low-level WAL access boundary. Local results do not
-qualify live AWS or remote object-store performance.
+must complete its timed phase within 30 seconds, including repeated bounded
+batches when the backlog exceeds one plan. Local results do not qualify live
+AWS or remote object-store performance.
 
-The bounded Git proof is implemented; the broader scale and deployment goal
-remains open. Follow-on acceptance covers [pack compaction and useful scale](https://github.com/carsonfarmer/object-log/issues/19),
-[ordinary Spin reliability](https://github.com/carsonfarmer/object-log/issues/21),
-[large-push performance](https://github.com/carsonfarmer/object-log/issues/23),
-[50 MiB files and 1 GiB pushes](https://github.com/carsonfarmer/object-log/issues/26),
-and [simpler integration](https://github.com/carsonfarmer/object-log/issues/25).
-
-The [Git proof review and execution queue](docs/reviews/git-proof-2026-09-05.md)
-tracks the remaining work toward an ordinary, usable service and the generic
-WAL improvements justified by building it. Shared-engine calls, transfer and work
-remain cumulative across expired-view retries.
+The Git service has passed the local client and provider proof. Resource bounds
+remain explicit in [GIT_PLAN.md](GIT_PLAN.md). The next production-oriented KV
+consumer is scoped in [#39](https://github.com/carsonfarmer/object-log/issues/39);
+SQLite hardening and live AWS qualification remain separate work.
