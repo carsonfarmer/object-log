@@ -62,6 +62,8 @@ impl Repository {
 
     async fn open_with_pool(log: &Log, format: ObjectFormat, pool: &Pool) -> Result<Self, Error> {
         let operation = pool.admit()?;
+        let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+        let log = &guarded;
         match Self::open_attempt(log, format, &operation).await {
             Err(Error::ObjectLog(object_log::Error::ViewExpired)) => {
                 operation.retry()?;
@@ -79,7 +81,7 @@ impl Repository {
         // The core loads and decodes the head before returning its exact view.
         let head = log.options().max_head_bytes;
         let head_memory = operation.reserve(memory_bound(head, HEAD_DECODE_FACTOR)?)?;
-        operation.io(head)?;
+
         operation.work(head)?;
         let view = log.load().await?;
         let view_memory = operation.reserve_state(memory_bound(head, VIEW_RETAIN_FACTOR)?)?;
@@ -394,16 +396,14 @@ fn preflight_view(operation: &Operation, log: &Log, view: &View) -> Result<Reser
     {
         let bytes = usize::try_from(bytes)
             .map_err(|_| Error::InvalidPack("Git state exceeds memory".into()))?;
-        operation.io(bytes)?;
         operation.work(bytes)?;
     }
     // The core owns the bounded concurrent-read window. The additional head
     // reservation covers a missing-record classification while records remain
-    // buffered; charge its possible read before entering materialization.
+    // buffered. The request guard charges the actual read if it is needed.
     let window = log.materialization_read_bound(view)?;
     let head = log.options().max_head_bytes;
     if window != 0 {
-        operation.io(head)?;
         operation.work(head)?;
     }
     let memory = memory_bound(window, RECORD_DECODE_FACTOR)?
@@ -1377,7 +1377,7 @@ mod tests {
         let operation = Pool::new(0).admit()?;
         assert!(preflight_view(&operation, &log, &view).is_err());
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
-        assert_eq!(operation.calls(), view.tail().len() + 1);
+        assert_eq!(operation.calls(), 0);
         assert_eq!(operation.live_bytes(), 0);
         Ok(())
     }
@@ -1387,6 +1387,7 @@ mod tests {
         let (log, faults, _) = test_log("head-budget").await?;
         let operation = Pool::new(crate::pack::budget::LIVE_BYTES).admit()?;
         operation.io(crate::pack::budget::TRANSFER_BYTES - log.options().max_head_bytes)?;
+        let log = log.with_request_guard(std::sync::Arc::new(operation.clone()));
         faults.reset();
         let repository = Repository::open_attempt(&log, ObjectFormat::Sha1, &operation).await?;
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);

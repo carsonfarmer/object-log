@@ -347,6 +347,7 @@ mod tests {
             let mut roots = Vec::new();
             for group in groups {
                 let operation = Pool::new(LIVE_BYTES).admit()?;
+                let log = log.with_request_guard(Arc::new(operation.clone()));
                 let bytes = pack(format, group)?;
                 let normalized = pack::normalize(&operation, format, &bytes, &[])?;
                 let (descriptor, root) =
@@ -354,6 +355,7 @@ mod tests {
                 roots.push((descriptor, root.reference().clone()));
             }
             let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
             let catalog = durable::load(&operation, &log, &view, format, &roots).await?;
             store.reset();
             Ok(Self {

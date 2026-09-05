@@ -126,9 +126,6 @@ impl Repository {
                     let publication_memory = operation
                         .reserve(publication_bytes(options, super::HEAD_DECODE_FACTOR)?)?;
                     for _ in 0..2 {
-                        operation.io(options.max_commit_bytes)?;
-                        operation.io(options.max_head_bytes)?;
-                        operation.io(options.max_head_bytes)?;
                         operation.work(options.max_commit_bytes + options.max_head_bytes * 2)?;
                     }
                     // A pending commit can read the same plan during resolution.

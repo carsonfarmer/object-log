@@ -181,6 +181,7 @@ mod tests {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let (store, log, view) = log().await?;
             let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
             let base = b"external base";
             let source = pack(format, vec![blob(format, base)?])?;
             let normalized = pack::normalize(&operation, format, &source, &[])?;
@@ -230,6 +231,7 @@ mod tests {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let (store, log, view) = log().await?;
             let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
             let catalog = durable::load(&operation, &log, &view, format, &[]).await?;
             let mut reader = Reader::new(&log, &view, &catalog);
             let input = pack(
@@ -256,6 +258,7 @@ mod tests {
             for exhausted in [0, 1, 2] {
                 let (store, log, view) = log().await?;
                 let operation = Pool::new(LIVE_BYTES).admit()?;
+                let log = log.with_request_guard(Arc::new(operation.clone()));
                 let catalog = durable::load(&operation, &log, &view, format, &[]).await?;
                 let mut reader = Reader::new(&log, &view, &catalog);
                 let input = pack(format, vec![delta(format, b"missing", b"target")?])?;
@@ -296,6 +299,7 @@ mod tests {
                 let external = &values[39];
                 let (store, log, view) = log().await?;
                 let operation = Pool::new(LIVE_BYTES).admit()?;
+                let log = log.with_request_guard(Arc::new(operation.clone()));
                 let mut remote = vec![
                     blob(format, full)?,
                     blob(format, resolved)?,
@@ -370,6 +374,7 @@ mod tests {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let (store, log, view) = log().await?;
             let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
             let source = pack(format, vec![blob(format, b"base")?])?;
             let normalized = pack::normalize(&operation, format, &source, &[])?;
             let (descriptor, root) = durable::stage(&operation, &log, &view, normalized).await?;
@@ -404,6 +409,7 @@ mod tests {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let (store, log, view) = log().await?;
             let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
             let source = pack(format, vec![blob(format, b"middle")?])?;
             let normalized = pack::normalize(&operation, format, &source, &[])?;
             let (descriptor, root) = durable::stage(&operation, &log, &view, normalized).await?;
@@ -447,6 +453,7 @@ mod tests {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let (store, log, view) = log().await?;
             let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
             let source = pack(format, vec![blob(format, b"base")?])?;
             let normalized = pack::normalize(&operation, format, &source, &[])?;
             let (descriptor, root) = durable::stage(&operation, &log, &view, normalized).await?;
@@ -482,6 +489,7 @@ mod tests {
         for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
             let (store, log, view) = log().await?;
             let operation = Pool::new(LIVE_BYTES).admit()?;
+            let log = log.with_request_guard(Arc::new(operation.clone()));
             let catalog = durable::load(&operation, &log, &view, format, &[]).await?;
             let mut reader = Reader::new(&log, &view, &catalog);
             let duplicate = pack(format, vec![blob(format, b"same")?, blob(format, b"same")?])?;

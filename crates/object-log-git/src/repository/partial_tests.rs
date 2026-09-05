@@ -21,7 +21,8 @@ async fn partial_lazy_fetch_reopens_once_with_cumulative_counters() -> TestResul
             let (log, faults, _) = test_log("partial-upload-expiry").await?;
             publish_durable_pack(&log, &old, format).await?;
             let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
-            let repository = Repository::open_with_pool(&log, format, &pool).await?;
+            let caller = CallerGuard::new(usize::MAX);
+            let repository = Repository::open_with_pool(&log.with_request_guard(caller.clone()), format, &pool).await?;
             let operation = repository.operation.clone();
             if spent {
                 operation.retry()?;
@@ -98,6 +99,7 @@ async fn partial_lazy_fetch_reopens_once_with_cumulative_counters() -> TestResul
                 );
             }
             assert!(operation.calls() > before);
+            assert_eq!(caller.calls(), operation.calls(), "reopen must not append the operation guard twice");
             assert!(operation.retry().is_err());
         }
     }
@@ -117,13 +119,16 @@ async fn filtered_fetch_accounts_for_store_work_and_retained_response() -> TestR
         publish_durable_pack(&log, &fixture, format).await?;
         for filter in [None, Some("blob:none"), Some("blob:limit=4096"), Some("blob:limit=4194304")] {
             let pool = Pool::new(crate::pack::budget::LIVE_BYTES);
-            let repository = Repository::open_with_pool(&log, format, &pool).await?;
+            let caller = CallerGuard::new(usize::MAX);
+            let repository = Repository::open_with_pool(&log.with_request_guard(caller.clone()), format, &pool).await?;
             let operation = repository.operation.clone();
             let mut args = vec![format!("want {}", fixture.target)];
             if let Some(filter) = filter { args.push(format!("filter {filter}")); }
             args.push("done".into());
+            let before = operation.calls();
             faults.reset();
             let response = repository.upload_pack(upload_request(format, "fetch", &args)?).await?;
+            assert_eq!(operation.calls() - before, usize::try_from(faults.metrics().total_requests())?);
             assert_eq!(operation.live_bytes(), response.len());
             let omitted = matches!(filter, Some("blob:none" | "blob:limit=4096"));
             if omitted { assert!(response.len() < 1024); } else { assert!(response.len() > contents.len()); }

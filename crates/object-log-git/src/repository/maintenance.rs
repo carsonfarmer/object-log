@@ -39,6 +39,8 @@ impl Repository {
         format: ObjectFormat,
         operation: &Operation,
     ) -> Result<CheckpointStatus, Error> {
+        let guarded = log.with_request_guard(std::sync::Arc::new(operation.clone()));
+        let log = &guarded;
         loop {
             let result = async {
                 Self::open_attempt(log, format, operation)
@@ -102,16 +104,11 @@ impl Repository {
         // publish_checkpoint validates the tail again before its first PUT.
         let _tail_memory = preflight_view(&self.operation, &self.log, &self.view)?;
         let _plan_memory = durable::publication_plan(&self.operation, &self.view)?;
-        let (attempts, uploaded) = self
+        let (_, uploaded) = self
             .log
             .checkpoint_write_bound(snapshot.len(), objects.len())?;
-        // All fresh-identity attempts resend the same immutable envelope.
-        for _ in 0..attempts {
-            self.operation.io(uploaded / attempts)?;
-        }
         self.operation.work(uploaded)?;
         for _ in 0..2 {
-            self.operation.io(options.max_head_bytes)?;
             self.operation.work(options.max_head_bytes)?;
         }
         Ok(self

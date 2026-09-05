@@ -1,3 +1,34 @@
+#[derive(Debug)]
+struct CallerGuard {
+    calls: std::sync::atomic::AtomicUsize,
+    limit: usize,
+}
+impl CallerGuard {
+    fn new(limit: usize) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {calls: std::sync::atomic::AtomicUsize::new(0), limit})
+    }
+    fn calls(&self) -> usize { self.calls.load(std::sync::atomic::Ordering::Relaxed) }
+}
+impl object_log::RequestGuard for CallerGuard {
+    fn before_request(&self, _: object_log::Request) -> Result<(), object_log::RequestDenied> {
+        self.calls.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed,
+            |calls| calls.checked_add(1).filter(|next| *next <= self.limit))
+            .map(|_| ()).map_err(|_| object_log::RequestDenied)
+    }
+}
+
+#[tokio::test]
+async fn repository_preserves_callers_request_denial() -> TestResult {
+    let (log, faults, _) = test_log("caller-denied").await?;
+    let caller = CallerGuard::new(0);
+    faults.reset();
+    assert!(matches!(common_open(&log.with_request_guard(caller.clone()), ObjectFormat::Sha1).await,
+        Err(Error::ObjectLog(object_log::Error::RequestDenied))));
+    assert_eq!(caller.calls(), 0);
+    assert_eq!(faults.metrics().total_requests(), 0);
+    Ok(())
+}
+
 fn receive_input(format: ObjectFormat, updates: &[RefUpdate], pack: &[u8], report: bool) -> Bytes {
     let mut bytes = Vec::new();
     for (position, update) in updates.iter().enumerate() {
@@ -927,14 +958,7 @@ async fn common_receive_active_collection_charges_plan_before_staging() -> TestR
         let push = repository
             .prepare_receive(TransactionId::new(), input)
             .await?;
-        assert!(
-            operation.calls()
-                >= before
-                    + usize::try_from(
-                        faults.metrics().operation(Operation::Get).requests
-                            + faults.metrics().operation(Operation::Put).requests
-                    )?
-        );
+        assert_eq!(operation.calls() - before, usize::try_from(faults.metrics().total_requests())?);
         assert!(matches!(
             push.publish_receive().await?.0,
             object_log::Resolution::Committed(_)
@@ -1267,6 +1291,34 @@ async fn common_receive_expired_candidate_never_reports_success() -> TestResult 
                 .get(b"refs/heads/main".as_slice()),
             Some(&fixture.target)
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn guarded_receive_matches_client_attempts_through_publication_and_recovery() -> TestResult {
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        for failure in [None, Some(FailurePhase::Before), Some(FailurePhase::After)] {
+            let fixture = fixture(format, b"guarded publication")?;
+            let (log, faults, _) = test_log("guarded-receive-parity").await?;
+            faults.reset();
+            let repository = common_open(&log, format).await?;
+            let operation = repository.operation.clone();
+            let prepared = repository.prepare_receive(TransactionId::new(), receive_input(format,
+                &[RefUpdate::new("refs/heads/main", None, Some(fixture.target))?],
+                &fs::read(&fixture.pack)?, true)).await?;
+            assert_eq!(operation.calls(), usize::try_from(faults.metrics().total_requests())?);
+            let before = operation.calls();
+            faults.reset();
+            if let Some(phase) = failure { faults.schedule(Failure {operation: Operation::Put, occurrence: 2, phase}); }
+            let (outcome, response) = prepared.publish_receive().await?;
+            assert!(matches!(outcome, object_log::Resolution::Committed(_)));
+            assert_eq!(operation.calls() - before, usize::try_from(faults.metrics().total_requests())?);
+            assert!(response.windows(3).any(|bytes| bytes == b"ok "));
+            drop(response);
+            assert_eq!(operation.live_bytes(), 0);
+            assert_eq!(cold_checked(&log, format).await?.refs().get(b"refs/heads/main".as_slice()), Some(&fixture.target));
+        }
     }
     Ok(())
 }

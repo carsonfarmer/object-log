@@ -33,10 +33,12 @@ async fn conservative_checkpoint_recovers_1024_transaction_tail_for_both_hashes(
         fill_metadata_tail(&log, format, fixture.target, 1024).await?;
         assert_eq!(log.load().await?.tail().len(), 1024);
         faults.reset();
+        let caller = CallerGuard::new(1024);
         assert!(
-            matches!(common_open(&log, format).await, Err(Error::InvalidPack(reason)) if reason == "object-log call limit exceeded")
+            matches!(common_open(&log.with_request_guard(caller.clone()), format).await, Err(Error::ObjectLog(object_log::Error::RequestDenied)))
         );
-        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        assert_eq!(caller.calls(), 513, "operation denial does not refund caller admission");
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 512);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
         faults.reset();
         let operation = Pool::new(crate::pack::budget::LIVE_BYTES).admit_maintenance()?;
@@ -46,9 +48,9 @@ async fn conservative_checkpoint_recovers_1024_transaction_tail_for_both_hashes(
             return Err("maintenance checkpoint was not published".into());
         };
         assert!(view.tail().is_empty());
-        // Head + all 1,024 commits twice + possible classification reads +
-        // checkpoint/head publication and possible conflicting-head refresh.
-        assert_eq!(operation.calls(), 2069);
+        // Only admitted client calls: head, two tail passes, checkpoint/head PUTs.
+        assert_eq!(operation.calls(), 2051);
+        assert_eq!(operation.calls(), usize::try_from(faults.metrics().total_requests())?);
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 2049);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 2);
         assert_eq!(operation.live_bytes(), 0);

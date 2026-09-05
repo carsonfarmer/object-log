@@ -38,7 +38,6 @@ pub(crate) fn publication_plan(
     let bytes = usize::try_from(view.collection_plan_bytes().unwrap_or(0))
         .map_err(|_| Error::InvalidPack("collection plan exceeds memory".into()))?;
     if bytes != 0 {
-        operation.io(bytes)?;
         operation.work(bytes)?;
     }
     operation.reserve(
@@ -76,12 +75,12 @@ pub(crate) async fn stage(
     )?;
     let _root_memory = operation.reserve(root_bytes)?;
     operation.work(root_bytes)?;
-    operation.io(root_bytes)?;
+
     let children = stream::iter((0..count).map(|index| {
         let chunk = bytes.slice(index * width..bytes.len().min((index + 1) * width));
         async move {
             let _plan_memory = publication_plan(operation, view)?;
-            operation.io(chunk.len())?;
+
             Ok::<_, Error>(log.put_object(view, chunk).await?)
         }
     }))
@@ -159,7 +158,6 @@ pub(crate) async fn load(
         let root_bytes = usize::try_from(root.len())
             .map_err(|_| Error::InvalidPack("pack root exceeds memory".into()))?;
         operation.work(root_bytes)?;
-        operation.io(root_bytes)?;
     }
     let loads = stream::iter(roots.iter().cloned().map(|(descriptor, root)| async move {
         load_pack(log, view, format, &descriptor, &root).await
@@ -807,7 +805,7 @@ impl<'a> Reader<'a> {
             };
             self.cache_bytes -= removed.len();
         }
-        self.catalog.operation.io(bytes)?;
+
         self.catalog.operation.work(bytes)?;
         let memory = self.catalog.operation.reserve(bytes)?;
         let value = self.log.read_object(self.view, &object).await?;
@@ -1076,6 +1074,27 @@ mod tests {
         })
     }
 
+    async fn stage(
+        operation: &crate::pack::budget::Operation,
+        log: &Log,
+        view: &View,
+        normalized: Normalized,
+    ) -> Result<(PackDescriptor, StagedObject), Error> {
+        let guarded = log.with_request_guard(Arc::new(operation.clone()));
+        super::stage(operation, &guarded, view, normalized).await
+    }
+
+    async fn load(
+        operation: &crate::pack::budget::Operation,
+        log: &Log,
+        view: &View,
+        format: ObjectFormat,
+        roots: &[(PackDescriptor, ObjectRef)],
+    ) -> Result<Catalog, Error> {
+        let guarded = log.with_request_guard(Arc::new(operation.clone()));
+        super::load(operation, &guarded, view, format, roots).await
+    }
+
     struct Fixture {
         normalized: Normalized,
         objects: Vec<(ObjectId, Vec<u8>)>,
@@ -1277,7 +1296,9 @@ mod tests {
         assert_eq!(gets.requests, 1);
         assert_eq!(gets.downloaded_bytes, root.reference().len());
 
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         store.reset();
         let missing = ObjectId::from_bytes(format, &vec![0xfe; format.digest_len()])?;
         assert!(reader.find(missing).await?.is_none());
@@ -1289,12 +1310,14 @@ mod tests {
             assert_eq!(object.kind, gix_object::Kind::Blob);
             assert_eq!(&object.data[..], expected);
         }
-        let mut shared = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut shared = Reader::new(&guarded_log, &view, &catalog);
         assert!(shared.find(first_id).await?.is_some());
         while catalog.operation.calls() < crate::pack::budget::CALLS {
             catalog.operation.io(0)?;
         }
-        let mut second = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut second = Reader::new(&guarded_log, &view, &catalog);
         store.reset();
         assert!(second.find(first_id).await.is_err());
         assert_eq!(store.metrics().operation(StoreOperation::Get).requests, 0);
@@ -1336,7 +1359,8 @@ mod tests {
                 assert_eq!(root.reference().len(), root_bytes as u64);
                 let catalog = load_one(&log, &view, format, descriptor, &root).await?;
                 assert_eq!(catalog.packs[0].chunk_bytes, width);
-                let mut reader = Reader::new(&log, &view, &catalog);
+                let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+                let mut reader = Reader::new(&guarded_log, &view, &catalog);
                 store.reset();
                 let boundary = u32::try_from(width)?;
                 assert_eq!(
@@ -1375,7 +1399,8 @@ mod tests {
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let metadata = crate::pack::budget::CALLS * size_of::<((u16, u16), Bytes)>();
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         let pressure = catalog
             .operation
             .reserve(LIVE_BYTES - catalog.operation.live_bytes() - metadata + 1)?;
@@ -1625,7 +1650,8 @@ mod tests {
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let pack_bytes = usize::try_from(descriptor.bytes)?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         let boundary = u32::try_from(CHUNK_BYTES)?;
         store.reset();
         assert_eq!(
@@ -1668,7 +1694,8 @@ mod tests {
         let fixture = pack_fixture(ObjectFormat::Sha1, data, false, true)?;
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         assert!(catalog.packs[0].node.children().len() > MAX_CACHE_BYTES / CHUNK_BYTES);
         for index in 0..MAX_CACHE_BYTES / CHUNK_BYTES {
             drop(reader.chunk(0, index).await?);
@@ -1756,8 +1783,26 @@ mod tests {
     ) -> TestResult {
         let (descriptor, root) = store_raw(log, view, pack, index).await?;
         let catalog = load_one(log, view, ObjectFormat::Sha1, descriptor, &root).await?;
-        assert!(Reader::new(log, view, &catalog).find(id).await.is_err());
-        assert!(Reader::new(log, view, &catalog).verify(id).await.is_err());
+        assert!(
+            Reader::new(
+                &log.with_request_guard(Arc::new(catalog.operation.clone())),
+                view,
+                &catalog
+            )
+            .find(id)
+            .await
+            .is_err()
+        );
+        assert!(
+            Reader::new(
+                &log.with_request_guard(Arc::new(catalog.operation.clone())),
+                view,
+                &catalog
+            )
+            .verify(id)
+            .await
+            .is_err()
+        );
         Ok(())
     }
 
@@ -1948,7 +1993,8 @@ mod tests {
                 let (descriptor, root) =
                     stage(&test_operation(), &log, &view, fixture.normalized).await?;
                 let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-                let mut reader = Reader::new(&log, &view, &catalog);
+                let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+                let mut reader = Reader::new(&guarded_log, &view, &catalog);
                 let output = reader.fetch_pack(&ids).await?;
                 verify_fetch_pack(&output, format, &ids)?;
                 let output_entries = inspect_pack(&output, format)?;
@@ -1995,7 +2041,8 @@ mod tests {
                 let (descriptor, root) =
                     stage(&test_operation(), &log, &view, fixture.normalized).await?;
                 let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-                let mut reader = Reader::new(&log, &view, &catalog);
+                let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+                let mut reader = Reader::new(&guarded_log, &view, &catalog);
                 for (id, data) in fixture.objects {
                     assert_eq!(reader.object_size(id).await?, Some(data.len()));
                 }
@@ -2010,7 +2057,8 @@ mod tests {
                 let (descriptor, root) =
                     stage(&test_operation(), &log, &view, fixture.normalized).await?;
                 let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-                let mut reader = Reader::new(&log, &view, &catalog);
+                let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+                let mut reader = Reader::new(&guarded_log, &view, &catalog);
                 reader
                     .entry_header(catalog.location(id).ok_or("missing location")?)
                     .await?;
@@ -2046,7 +2094,8 @@ mod tests {
             let (descriptor, root) =
                 stage(&test_operation(), &log, &view, fixture.normalized).await?;
             let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-            let mut reader = Reader::new(&log, &view, &catalog);
+            let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+            let mut reader = Reader::new(&guarded_log, &view, &catalog);
             assert_eq!(reader.object_size(id).await?, Some(129));
             assert!(reader.verify(id).await.is_err());
             assert!(reader.find(id).await.is_err());
@@ -2070,7 +2119,8 @@ mod tests {
                 let (descriptor, root) =
                     stage(&test_operation(), &log, &view, fixture.normalized).await?;
                 let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-                let mut reader = Reader::new(&log, &view, &catalog);
+                let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+                let mut reader = Reader::new(&guarded_log, &view, &catalog);
                 // Cache compressed chunks before isolating decoder allocation.
                 let range = catalog.packs[0].entry_range(0);
                 reader.visit_range(0, range, |_| Ok(())).await?;
@@ -2171,7 +2221,8 @@ mod tests {
             &[(descriptor, root.reference().clone())],
         )
         .await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         drop(reader.chunk(0, 0).await?);
         let baseline = operation.live_bytes();
         let mut pause = store.pause_next_get(FailurePhase::Before);
@@ -2188,6 +2239,7 @@ mod tests {
         drop(catalog);
         assert_eq!(operation.live_bytes(), 0);
         drop(operation);
+        drop(guarded_log);
         assert!(pool.admit().is_ok());
         Ok(())
     }
@@ -2201,7 +2253,8 @@ mod tests {
         let size = fixture.objects[0].1.len();
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         drop(reader.chunk(0, 0).await?);
         let baseline = catalog.operation.live_bytes();
         let pressure = catalog
@@ -2236,7 +2289,8 @@ mod tests {
             let (descriptor, root) =
                 stage(&test_operation(), &log, &view, fixture.normalized).await?;
             let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-            let mut reader = Reader::new(&log, &view, &catalog);
+            let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+            let mut reader = Reader::new(&guarded_log, &view, &catalog);
             let range = catalog.packs[0].entry_range(0);
             assert!(range.end - range.start > u32::try_from(CHUNK_BYTES)?);
             // Warm the two authenticated chunks, then leave enough space for
@@ -2279,7 +2333,8 @@ mod tests {
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let end = u32::try_from(expected.len())?;
         let boundary = u32::try_from(CHUNK_BYTES)?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         for range in [
             0..0,
             end..end,
@@ -2305,7 +2360,8 @@ mod tests {
         let reversed = std::ops::Range { start: 1, end: 0 };
         assert!(reader.visit_range(0, reversed, |_| Ok(())).await.is_err());
         drop(reader);
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         store.reset();
         assert!(
             reader
@@ -2331,7 +2387,8 @@ mod tests {
             let (descriptor, root) = stage(&test_operation(), &log, &view, normalized).await?;
             let catalog = load_one(&log, &view, format, descriptor, &root).await?;
             let baseline = catalog.operation.live_bytes();
-            let mut reader = Reader::new(&log, &view, &catalog);
+            let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+            let mut reader = Reader::new(&guarded_log, &view, &catalog);
             assert!(matches!(reader.fetch_pack(&[id]).await,
                 Err(Error::InvalidPack(message)) if message == "pack entry CRC does not match"));
             assert!(matches!(reader.verify(id).await,
@@ -2352,7 +2409,13 @@ mod tests {
             let (descriptor, root) =
                 stage(&test_operation(), &log, &view, fixture.normalized).await?;
             let catalog = load_one(&log, &view, format, descriptor, &root).await?;
-            let output = Reader::new(&log, &view, &catalog).fetch_pack(&[]).await?;
+            let output = Reader::new(
+                &log.with_request_guard(Arc::new(catalog.operation.clone())),
+                &view,
+                &catalog,
+            )
+            .fetch_pack(&[])
+            .await?;
             verify_fetch_pack(&output, format, &[])?;
         }
         Ok(())
@@ -2411,10 +2474,14 @@ mod tests {
         let (descriptor, root) = store_raw(&log, &view, pack, index).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         assert!(
-            Reader::new(&log, &view, &catalog)
-                .fetch_pack(&[delta])
-                .await
-                .is_err()
+            Reader::new(
+                &log.with_request_guard(Arc::new(catalog.operation.clone())),
+                &view,
+                &catalog
+            )
+            .fetch_pack(&[delta])
+            .await
+            .is_err()
         );
         Ok(())
     }
@@ -2435,7 +2502,8 @@ mod tests {
             &[(descriptor, root.reference().clone())],
         )
         .await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         let baseline = operation.live_bytes();
         store.reset();
         let missing = ObjectId::from_bytes(ObjectFormat::Sha1, &[0xfe; 20])?;
@@ -2473,7 +2541,8 @@ mod tests {
             &[(descriptor.clone(), root.reference().clone())],
         )
         .await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         drop(reader.chunk(0, 0).await?);
         let baseline = operation.live_bytes();
         let output = reader.fetch_pack(&[id]).await?;
@@ -2499,9 +2568,13 @@ mod tests {
         let worker_log = log.clone();
         let worker_view = view.clone();
         let task = tokio::spawn(async move {
-            Reader::new(&worker_log, &worker_view, &catalog)
-                .fetch_pack(&[id])
-                .await
+            Reader::new(
+                &worker_log.with_request_guard(Arc::new(catalog.operation.clone())),
+                &worker_view,
+                &catalog,
+            )
+            .fetch_pack(&[id])
+            .await
         });
         assert!(pause.wait_until_entered().await);
         assert!(operation.live_bytes() >= MAX_FETCH_PACK_BYTES);
@@ -2522,7 +2595,8 @@ mod tests {
         let id = fixture.objects[0].0;
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         let object = reader.find(id).await?.ok_or("empty object is missing")?;
         assert!(object.data.is_empty());
         store.reset();
@@ -2556,7 +2630,8 @@ mod tests {
             &[(descriptor.clone(), root.reference().clone())],
         )
         .await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         drop(reader.chunk(0, 0).await?);
         let allowance = size + INFLATE_BYTES - 1;
         let pressure = operation.reserve(LIVE_BYTES - operation.live_bytes() - allowance)?;
@@ -2573,7 +2648,8 @@ mod tests {
 
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
         let range = catalog.packs[0].entry_range(0);
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         drop(reader.chunk(0, 0).await?);
         let required = (range.end - range.start) as usize + size * 2;
         let used = catalog.operation.work_bytes();
@@ -2892,7 +2968,8 @@ mod tests {
         )?;
         let (descriptor, root) = stage(&test_operation(), &log, &view, fixture.normalized).await?;
         let catalog = load_one(&log, &view, ObjectFormat::Sha1, descriptor, &root).await?;
-        let mut reader = Reader::new(&log, &view, &catalog);
+        let guarded_log = log.with_request_guard(Arc::new(catalog.operation.clone()));
+        let mut reader = Reader::new(&guarded_log, &view, &catalog);
         for (id, expected) in fixture.objects {
             let found = reader.find(id).await?.ok_or("object is missing")?;
             assert_eq!(&found.data[..], expected);
@@ -2945,10 +3022,14 @@ mod tests {
         )
         .await?;
         assert!(
-            Reader::new(&log, &current, &live)
-                .find(live_id)
-                .await?
-                .is_some()
+            Reader::new(
+                &log.with_request_guard(Arc::new(live.operation.clone())),
+                &current,
+                &live
+            )
+            .find(live_id)
+            .await?
+            .is_some()
         );
         assert!(
             load(
