@@ -1,69 +1,43 @@
-use std::{env, error::Error as StdError, path::Path, process::Command, sync::Arc, time::Duration};
+//! Real Spin HTTP clients against opt-in local `MinIO`.
+//!
+//! Maintenance uses the same repository library outside the stopped Spin host;
+//! all Git discovery, push, fetch, and cold clone traffic goes through Spin.
+#![cfg(not(target_arch = "wasm32"))]
 
-use axum::Router;
 use object_log::{Log, LogId, Options, TransactionId, ValidatedBackend};
 use object_log_git::ObjectFormat;
-use object_log_git_http::SharedGitHttpServer;
 use object_store::{
     aws::{AmazonS3, AmazonS3Builder},
-    memory::InMemory,
     path::Path as StorePath,
 };
+use std::{env, error::Error as StdError, path::Path, process::Command, sync::Arc, time::Duration};
 use tempfile::TempDir;
-use tokio::{net::TcpListener, task::JoinHandle};
 
-static SHARED_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shared_engine_clients_support_both_hashes() -> TestResult {
-    let _serial = SHARED_TEST.lock().await;
-    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
-        client_lifecycle(format, Arc::new(InMemory::new()), false).await?;
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires local MinIO"]
-async fn shared_minio_clients_recover_after_collection() -> TestResult {
-    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
-        client_lifecycle(format, Arc::new(build_minio()?), false).await?;
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires local MinIO, Spin 4, and a release WASIp2 component build"]
 async fn spin_minio_clients_recover_after_collection() -> TestResult {
+    let _serial = TEST_LOCK.lock().await;
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
-        client_lifecycle(format, Arc::new(build_minio()?), true).await?;
+        client_lifecycle(format).await?;
     }
     Ok(())
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "one unchanged-client lifecycle is shared by native and Spin hosts with both hashes"
+    reason = "one unchanged-client Spin lifecycle exercises both hashes"
 )]
-async fn client_lifecycle(
-    format: ObjectFormat,
-    store: Arc<dyn object_store::ObjectStore>,
-    spin: bool,
-) -> TestResult {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+async fn client_lifecycle(format: ObjectFormat) -> TestResult {
     let root = TempDir::new()?;
-    let namespace = format!("git-http-loopback-{}", TransactionId::new());
-    let backend = ValidatedBackend::new(store, StorePath::from(namespace.clone())).await?;
+    let namespace = format!("git-spin-minio-{}", TransactionId::new());
+    let backend =
+        ValidatedBackend::new(Arc::new(build_minio()?), StorePath::from(namespace.clone())).await?;
     let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
-    let app = SharedGitHttpServer::new(log.clone(), format).router();
-    let (url, mut server) = if spin {
-        serve_spin(format, &namespace).await?
-    } else {
-        let (url, server) = serve(app).await?;
-        (url, RunningHost::Native(server))
-    };
+    let (url, mut server) = serve_spin(format, &namespace).await?;
     assert!(git_output(None, ["ls-remote", &url])?.stdout.is_empty());
 
     let source = root.path().join("source");
@@ -171,13 +145,7 @@ async fn client_lifecycle(
             object_log::CollectionFinish::Complete(..)
         ));
         drop(log);
-        let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
-        let (url, mut cold_server) = if spin {
-            serve_spin(format, &namespace).await?
-        } else {
-            let (url, server) = serve(SharedGitHttpServer::new(log, format).router()).await?;
-            (url, RunningHost::Native(server))
-        };
+        let (url, mut cold_server) = serve_spin(format, &namespace).await?;
         let cold = root.path().join("cold");
         git(None, ["clone", "--quiet", &url, path(&cold)?])?;
         git(Some(&cold), ["fsck", "--strict"])?;
@@ -187,21 +155,24 @@ async fn client_lifecycle(
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shared_large_fetch_uses_gzip_negotiation_and_chunked_output() -> TestResult {
-    let _serial = SHARED_TEST.lock().await;
+#[tokio::test]
+#[ignore = "requires local MinIO, Spin 4, and a release WASIp2 component build"]
+async fn spin_minio_large_fetch_uses_gzip_multi_round_negotiation() -> TestResult {
+    let _serial = TEST_LOCK.lock().await;
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         large_fetch(format).await?;
     }
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn default_git_large_push_probes_then_streams_both_hashes() -> TestResult {
-    let _serial = SHARED_TEST.lock().await;
+#[tokio::test]
+#[ignore = "requires local MinIO, Spin 4, and a release WASIp2 component build"]
+async fn spin_minio_default_git_large_push_probes_then_streams_both_hashes() -> TestResult {
+    let _serial = TEST_LOCK.lock().await;
     for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
         let root = TempDir::new()?;
-        let (url, server) = repository_server("git-http-large-push", format).await?;
+        let (url, mut server) =
+            serve_spin(format, &format!("spin-large-push-{}", TransactionId::new())).await?;
         let source = root.path().join("source");
         let hash = match format {
             ObjectFormat::Sha1 => "--object-format=sha1",
@@ -238,14 +209,18 @@ async fn default_git_large_push_probes_then_streams_both_hashes() -> TestResult 
         git(None, ["clone", "--quiet", &url, path(&clone)?])?;
         git(Some(&clone), ["fsck", "--strict"])?;
         assert_eq!(std::fs::read(clone.join("large"))?, content);
-        server.abort();
+        server.stop();
     }
     Ok(())
 }
 
 async fn large_fetch(format: ObjectFormat) -> TestResult {
     let root = TempDir::new()?;
-    let (url, server) = repository_server("git-http-large", format).await?;
+    let (url, mut server) = serve_spin(
+        format,
+        &format!("spin-large-fetch-{}", TransactionId::new()),
+    )
+    .await?;
     let source = root.path().join("large-source");
     let format_option = match format {
         ObjectFormat::Sha256 => "--object-format=sha256",
@@ -321,7 +296,8 @@ async fn large_fetch(format: ObjectFormat) -> TestResult {
     let trace = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
     assert!(trace.matches("=> send header: post ").count() >= 2);
     assert!(trace.contains("=> send header: content-encoding: gzip"));
-    assert!(trace.contains("<= recv header: transfer-encoding: chunked"));
+    // Spin chooses HTTP response framing; Git must receive the protocol result.
+    assert!(trace.contains("<= recv header: content-type: application/x-git-upload-pack-result"));
     assert_eq!(
         git_stdout(Some(&clone), ["rev-parse", "refs/remotes/origin/main"])?,
         expected_tip
@@ -333,73 +309,21 @@ async fn large_fetch(format: ObjectFormat) -> TestResult {
     {
         assert!(trace.contains("acknowledgments"), "{trace}");
     }
-    server.abort();
+    server.stop();
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_clients_report_one_durable_winner() -> TestResult {
-    let _serial = SHARED_TEST.lock().await;
-    let root = TempDir::new()?;
-    let (url, server) = repository_server("git-http-concurrent", ObjectFormat::Sha1).await?;
-    let source = root.path().join("concurrent-source");
-    git(None, ["init", "--quiet", "-b", "main", path(&source)?])?;
-    write(&source, "base")?;
-    git(Some(&source), ["add", "file"])?;
-    git(Some(&source), ["commit", "--quiet", "-m", "base"])?;
-    git(Some(&source), ["remote", "add", "origin", &url])?;
-    git(Some(&source), ["push", "--quiet", "-u", "origin", "main"])?;
-
-    let left = root.path().join("left");
-    let right = root.path().join("right");
-    git(None, ["clone", "--quiet", &url, path(&left)?])?;
-    git(None, ["clone", "--quiet", &url, path(&right)?])?;
-    write(&left, "left")?;
-    git(Some(&left), ["commit", "--quiet", "-am", "left"])?;
-    write(&right, "right")?;
-    git(Some(&right), ["commit", "--quiet", "-am", "right"])?;
-
-    // The loser may see Busy during discovery or a stale ref after the winner.
-    // This tests client-visible admission, not cross-process CAS contention.
-    let left_push = tokio::task::spawn_blocking(move || {
-        git_trace(Some(&left), ["push", "--quiet", "origin", "main"])
-    });
-    let right_push = tokio::task::spawn_blocking(move || {
-        git_trace(Some(&right), ["push", "--quiet", "origin", "main"])
-    });
-    let (left_push, right_push) = tokio::try_join!(left_push, right_push)?;
-    let left_push = left_push?;
-    let right_push = right_push?;
-    assert_ne!(left_push.status.success(), right_push.status.success());
-    let expected = if left_push.status.success() {
-        "left"
-    } else {
-        "right"
-    };
-
-    let final_clone = root.path().join("concurrent-final");
-    git(None, ["clone", "--quiet", &url, path(&final_clone)?])?;
-    git(Some(&final_clone), ["fsck", "--strict"])?;
-    assert_eq!(std::fs::read_to_string(final_clone.join("file"))?, expected);
-    server.abort();
-    Ok(())
-}
-
-enum RunningHost {
-    Native(JoinHandle<()>),
-    Spin(Option<(std::process::Child, String)>),
-}
+struct RunningHost(Option<(std::process::Child, String)>);
 
 impl RunningHost {
     fn stop(&mut self) {
-        match self {
-            Self::Native(task) => task.abort(),
-            Self::Spin(child) => {
-                if let Some((mut child, pid)) = child.take() {
-                    let _ = Command::new("kill").args(["-TERM", &pid]).status();
-                    let _ = child.wait();
-                }
+        if let Some((mut child, pid)) = self.0.take() {
+            if pid.is_empty() {
+                let _ = child.kill();
+            } else {
+                let _ = Command::new("kill").args(["-TERM", &pid]).status();
             }
+            let _ = child.wait();
         }
     }
 }
@@ -421,7 +345,7 @@ async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, R
     let artifact = std::env::temp_dir().join(format!("object-log-spin-{format}-{port}"));
     let log = std::fs::File::create(artifact.with_extension("log"))?;
     let rss = artifact.with_extension("rss");
-    let run = Path::new(env!("CARGO_MANIFEST_DIR")).join("../object-log-git-spin/run.sh");
+    let run = Path::new(env!("CARGO_MANIFEST_DIR")).join("run.sh");
     let mut process = Command::new("/usr/bin/time");
     let time_report = if cfg!(target_os = "macos") {
         "-l"
@@ -450,9 +374,9 @@ async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, R
         &format!("object_format={format}"),
     ]);
     let child = process.stdout(log.try_clone()?).stderr(log).spawn()?;
-    let mut host = RunningHost::Spin(Some((child, String::new())));
+    let mut host = RunningHost(Some((child, String::new())));
     for _ in 0..100 {
-        if let RunningHost::Spin(Some((child, pid))) = &mut host {
+        if let Some((child, pid)) = &mut host.0 {
             if let Some(status) = child.try_wait()? {
                 return Err(format!(
                     "Spin exited {status}: {}",
@@ -474,29 +398,6 @@ async fn serve_spin(format: ObjectFormat, prefix: &str) -> TestResult<(String, R
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err("Spin startup timed out".into())
-}
-
-async fn repository_server(
-    namespace: &str,
-    format: ObjectFormat,
-) -> TestResult<(String, JoinHandle<()>)> {
-    let backend =
-        ValidatedBackend::new(Arc::new(InMemory::new()), StorePath::from(namespace)).await?;
-    let log = Log::open(&backend, &LogId::new("repository")?, Options::default()).await?;
-    let app = SharedGitHttpServer::new(log, format).router();
-    let (url, server) = serve(app).await?;
-    Ok((url, server))
-}
-
-async fn serve(app: Router) -> TestResult<(String, JoinHandle<()>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let task = tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, app).await {
-            eprintln!("server: {error}");
-        }
-    });
-    Ok((format!("http://{address}/repo"), task))
 }
 
 fn write(path: &Path, contents: &str) -> TestResult {

@@ -49,3 +49,9 @@ wasmparser = "=0.244.0"
 [[example]]
 name = "memory_lifecycle"
 crate-type = ["cdylib"]
+
+# The MinIO driver is native test code; the component retains its WASI transport.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
+tempfile = "3.20"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "time"] }
