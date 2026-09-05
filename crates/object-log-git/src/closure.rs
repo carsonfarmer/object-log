@@ -125,6 +125,11 @@ impl Closure {
                     .ok_or(Error::InvalidReference)?
             };
             if kind == Kind::Blob {
+                // Content verification survives mark passes in this request/view.
+                // Structural objects still need parsing to propagate each mark.
+                if self.nodes.get(&id).is_some_and(|node| node.verified) {
+                    continue;
+                }
                 let actual = reader.verify(id).await?.ok_or(Error::InvalidReference)?;
                 self.verified(id, actual)?;
                 continue;

@@ -67,3 +67,80 @@ async fn closure_checks_duplicate_link_kinds_and_releases_cancelled_walks() -> T
     assert_eq!(repository.operation.live_bytes(), before);
     Ok(())
 }
+
+#[tokio::test]
+async fn closure_reuses_verified_direct_blobs_across_want_and_have_passes() -> TestResult {
+    use crate::closure::{Closure, Edges, WANTED, PRESENT, REQUESTED, KNOWN};
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let blob = (Kind::Blob, b"verified content".to_vec());
+        let blob_id = id(format, &blob)?;
+        let root = tree(&[("100644", "file", blob_id)]);
+        let root_id = id(format, &root)?;
+        let bad = tree(&[("40000", "file", blob_id)]);
+        let bad_id = id(format, &bad)?;
+        let repository = Repository::new(format, &[vec![blob, root, bad]]).await?;
+        let before = repository.operation.live_bytes();
+        let mut closure = Closure::new(&repository.operation)?;
+        for (index, mark) in [WANTED, PRESENT, REQUESTED, KNOWN].into_iter().enumerate() {
+            // A fresh reader excludes encoded-body cache hits from the assertion.
+            let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
+            repository.store.reset();
+            closure.walk(&mut reader, &[blob_id], mark, Edges::All).await?;
+            let reads = repository.store.metrics().operation(StoreOperation::Get).requests;
+            assert_eq!(reads > 0, index == 0);
+            assert!(closure.marked(blob_id, mark));
+        }
+        closure.clear_mark(WANTED)?;
+        closure.clear_mark(PRESENT)?;
+        for mark in [WANTED, PRESENT] {
+            let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
+            repository.store.reset();
+            closure.walk(&mut reader, &[root_id], mark, Edges::All).await?;
+            assert!(repository.store.metrics().operation(StoreOperation::Get).requests > 0);
+            assert!(closure.marked(blob_id, mark));
+        }
+        let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
+        assert!(matches!(closure.walk(&mut reader, &[bad_id], KNOWN, Edges::All).await,
+            Err(Error::InvalidPack(_))));
+        drop(reader); drop(closure);
+        assert_eq!(repository.operation.live_bytes(), before);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn closure_failed_blob_verification_is_retried_by_a_fresh_request() -> TestResult {
+    use crate::closure::{Closure, Edges, WANTED};
+    use object_log::sim::{Failure, FailurePhase};
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let blob = (Kind::Blob, b"retry content".to_vec());
+        let blob_id = id(format, &blob)?;
+        let root = tree(&[("100644", "file", blob_id)]);
+        let root_id = id(format, &root)?;
+        let repository = Repository::new(format, &[vec![blob, root]]).await?;
+        let before = repository.operation.live_bytes();
+        let mut closure = Closure::new(&repository.operation)?;
+        let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
+        // A tree discovers the blob kind but defers content verification.
+        closure.walk(&mut reader, &[root_id], WANTED, Edges::All).await?;
+        drop(reader);
+        let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
+        repository.store.reset();
+        repository.store.schedule(Failure {
+            operation: StoreOperation::Get, occurrence: 1, phase: FailurePhase::Before,
+        });
+        assert!(closure.walk(&mut reader, &[blob_id], WANTED, Edges::All).await.is_err());
+        assert!(!closure.nodes.get(&blob_id).ok_or("missing node")?.verified);
+        drop(reader); drop(closure);
+        assert_eq!(repository.operation.live_bytes(), before);
+        repository.store.reset();
+        let mut closure = Closure::new(&repository.operation)?;
+        let mut reader = Reader::new(&repository.log, &repository.view, &repository.catalog);
+        closure.walk(&mut reader, &[blob_id], WANTED, Edges::All).await?;
+        assert!(repository.store.metrics().operation(StoreOperation::Get).requests > 0);
+        assert!(closure.nodes.get(&blob_id).ok_or("missing node")?.verified);
+        drop(reader); drop(closure);
+        assert_eq!(repository.operation.live_bytes(), before);
+    }
+    Ok(())
+}
