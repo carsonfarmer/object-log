@@ -196,3 +196,52 @@ General cold-resume graph memory is not qualified by the small <10 MiB RSS
 fixtures; #32 remains open. Shallow support is a reviewed worker candidate, not
 yet integrated; partial/filter/URI work remains required. See the fourth-batch
 review and raw evidence. Third-batch Linux CI 33945165604 passed.
+
+## Fifth queue batch under combined qualification
+
+Integration candidate `6477405` combines reviewed shallow protocol support,
+bounded Git metadata materialization, conservative `checkpoint_retaining_packs`,
+and the operator `checkpoint --retain-packs` command. The maintenance profile
+retains serving memory/transfer/work limits with 8,192 calls. It can checkpoint
+a tested tail of 1,024 small valid transactions over bounded pack state without
+loading pack indexes or pruning packs. This does not establish recovery from
+arbitrary catalog or capacity exhaustion.
+A review fix releases the empty ref-map allocation and charges all checkpoint
+identity-collision PUT attempts using a core-owned bound. General staging retry
+accounting remains open in #36. Independent final review and combined gates
+are required before this candidate is accepted.
+
+Next candidates: auth `947c72e`, shallow fixture compatibility `1cbd763`, and
+operator auth-config compatibility (worker pending); partial/filter support is
+under final client review. Catalog foundation `c3c38a2` remains test-only pending
+cache, explicit migration, and lazy reader wiring. Full-only replayable input
+`ecf0992` is also unintegrated; bounded delta normalization and actual caller
+wiring are still required. Do not claim these prototypes complete #19/#26.
+
+The auth worker now investigates #21 admission failures locally; a separate
+sidebar worker investigates #22 pooled outbound HTTP locally. No upstream
+publication is authorized. Issue #22 was corrected to remove stale permission.
+
+Qualification update: the combined candidate passes 382 workspace tests
+(14 opt-in ignored), strict native and WASIp2 checks, six standalone actual-WASI
+fixtures, and the separately run Git request audit. Final provider acceptance
+is pending. An interrupted run hit explicit ENOSPC; inactive build caches were
+removed, restoring about 43 GiB without touching source or raw Criterion data.
+Docker then stopped answering even read-only API requests. Root requested owner
+approval to restart this shared service; do not restart it independently.
+
+Issue #37 records a provider-fixture shutdown bug: stopping `spin up` could leave
+its HTTP child alive. Root stopped its 18 identified orphan triggers; workers
+cleaned their own. Rust/Python fixture fixes and both-hash requalification are
+required before claiming stopped-host maintenance. Earlier new-process tests
+are not proof that all previous listeners were quiescent. Preserve failed logs.
+Pending root container cleanup once Docker answers:
+`object-log-minio-60116d4e-21f7-4db1-93aa-6131b3837655` (creation outcome unknown).
+Protocol worker also tracks
+`object-log-shallow-e64f3dd03290480b8d96b47ac4d08bfa`.
+
+Cache `5b49f7b` is independently approved but remains unintegrated with its
+foundation. #30 owns versioned Git state/format and explicit operator default
+branch changes; catalog migration is coordinated through the same v2 record.
+The chosen first duplicate-pack optimization is bounded OID probing with normal
+staging on inconclusive results, not a second pack-ID index.

@@ -1,0 +1,6 @@
+    Checking object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+    Checking object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+    Checking object-log-sqlite v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-sqlite)
+    Checking object-log-kv v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-kv)
+    Checking object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.69s

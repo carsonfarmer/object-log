@@ -1,0 +1,709 @@
+./scripts/test-minio.sh minio minio_git_push_checkpoint_collection_and_cold_recovery object-log-git aws
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.91s
+     Running tests/minio.rs (target/debug/deps/minio-87747bb799d749c2)
+
+running 1 test
+test minio_git_push_checkpoint_collection_and_cold_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `release` profile [optimized] target(s) in 4.80s
+./scripts/test-minio.sh minio spin_minio object-log-git-spin ""
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.68s
+     Running tests/minio.rs (target/debug/deps/minio-62ba51110b6214aa)
+
+running 4 tests
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-52229.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-53029.rss
+test spin_minio_default_git_large_push_probes_then_streams_both_hashes ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-53211.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-55986.rss
+test spin_minio_large_fetch_uses_gzip_multi_round_negotiation ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-56894.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-57468.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-57584.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-57645.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-58188.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-58274.rss
+test spin_minio_clients_recover_after_collection ... ok
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-58313.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-58391.rss
+Spin sha1 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha1-58585.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-58703.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-58793.rss
+Spin sha256 RSS report: /var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/object-log-spin-sha256-58930.rss
+test spin_minio_force_with_lease_and_notes_obey_host_policy ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.34s
+
+cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+    Finished `release` profile [optimized] target(s) in 0.10s
+./scripts/test-minio.sh operator_minio operator_minio object-log-git-spin operator
+   Compiling object-log v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue)
+   Compiling object-log-git v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git)
+   Compiling object-log-git-spin v0.1.0 (/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.13s
+     Running tests/operator_minio.rs (target/debug/deps/operator_minio-21873db8156b433e)
+
+running 1 test
+Operator status executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.45 real         0.01 user         0.01 sys
+            15761408  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1194  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  49  involuntary context switches
+            81743817  instructions retired
+            54243769  cycles elapsed
+             3441144  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.00 user         0.00 sys
+            15712256  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1191  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  47  involuntary context switches
+            57443204  instructions retired
+            25343003  cycles elapsed
+             3391992  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.00 user         0.00 sys
+            15695872  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1191  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  53  involuntary context switches
+            57657853  instructions retired
+            25112267  cycles elapsed
+             3375608  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.00 user         0.00 sys
+            16121856  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1217  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  50  involuntary context switches
+            60351156  instructions retired
+            28765250  cycles elapsed
+             3441144  peak memory footprint
+
+Operator status executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            15974400  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1207  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  51  involuntary context switches
+            59436125  instructions retired
+            28036733  cycles elapsed
+             3424760  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.00 user         0.00 sys
+            16203776  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1221  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  15  messages sent
+                  15  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  64  involuntary context switches
+            69336371  instructions retired
+            34744986  cycles elapsed
+             3588600  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.00 user         0.00 sys
+            16203776  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1221  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  14  messages sent
+                  14  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  63  involuntary context switches
+            67776944  instructions retired
+            33317587  cycles elapsed
+             3572216  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            16138240  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1217  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  50  involuntary context switches
+            61006117  instructions retired
+            29051871  cycles elapsed
+             3539448  peak memory footprint
+
+sha1: serving full-tail rejection confirmed by component call-limit diagnostic: git ["ls-remote", "http://127.0.0.1:59113/repo"]: error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400
+fatal: expected flush after ref listing
+
+Operator status executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.01 user         0.00 sys
+            16973824  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1268  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  15  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  53  involuntary context switches
+           137422750  instructions retired
+            58862657  cycles elapsed
+             4391440  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.03 real         0.01 user         0.00 sys
+            19038208  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1394  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  43  messages sent
+                  16  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  64  involuntary context switches
+           190313579  instructions retired
+            81080256  cycles elapsed
+             6226448  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.38 real         0.33 user         0.02 sys
+            20185088  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1464  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2061  messages sent
+                2066  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 187  involuntary context switches
+          4277202187  instructions retired
+          1406621088  cycles elapsed
+             7324176  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.01 user         0.00 sys
+            17268736  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1287  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  12  messages sent
+                  16  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  55  involuntary context switches
+           139890605  instructions retired
+            60458688  cycles elapsed
+             4407824  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.03 real         0.01 user         0.00 sys
+            17678336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1312  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  20  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  73  involuntary context switches
+           169167595  instructions retired
+            76023315  cycles elapsed
+             4784656  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.03 real         0.01 user         0.00 sys
+            17465344  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1298  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  21  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  70  involuntary context switches
+           168997837  instructions retired
+            74733362  cycles elapsed
+             4571664  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.03 real         0.01 user         0.00 sys
+            17678336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1311  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  20  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  70  involuntary context switches
+           169379021  instructions retired
+            75635105  cycles elapsed
+             4784656  peak memory footprint
+
+sha1: missing target, status, exact token resume, duplicate/loser, 1024-tail escape, wrong format, cold clone/fsck and three Spin push/checkpoint/fetch cycles passed
+Operator status executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            15695872  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1190  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  49  involuntary context switches
+            57682141  instructions retired
+            28604393  cycles elapsed
+             3375608  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            15728640  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1192  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  49  involuntary context switches
+            59750219  instructions retired
+            29956168  cycles elapsed
+             3408376  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            15663104  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1188  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  10  messages sent
+                  10  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  45  involuntary context switches
+            57433375  instructions retired
+            26035144  cycles elapsed
+             3342840  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            16154624  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1219  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  49  involuntary context switches
+            59477487  instructions retired
+            28977502  cycles elapsed
+             3473912  peak memory footprint
+
+Operator status executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            16023552  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1210  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  51  involuntary context switches
+            59458497  instructions retired
+            30489541  cycles elapsed
+             3473912  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.00 user         0.00 sys
+            16154624  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1218  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  15  messages sent
+                  15  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  64  involuntary context switches
+            69436864  instructions retired
+            34663565  cycles elapsed
+             3539448  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            16187392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1220  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  14  messages sent
+                  14  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  61  involuntary context switches
+            67844459  instructions retired
+            32124807  cycles elapsed
+             3555832  peak memory footprint
+
+Operator resume-commit executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.01 real         0.00 user         0.00 sys
+            16056320  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1213  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  11  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  50  involuntary context switches
+            60966539  instructions retired
+            30055629  cycles elapsed
+             3457528  peak memory footprint
+
+sha256: serving full-tail rejection confirmed by component call-limit diagnostic: git ["ls-remote", "http://127.0.0.1:59501/repo"]: error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400
+fatal: expected flush after ref listing
+
+Operator status executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.01 user         0.00 sys
+            17072128  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1274  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  11  messages sent
+                  16  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  55  involuntary context switches
+           137456409  instructions retired
+            61725803  cycles elapsed
+             4489744  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.03 real         0.01 user         0.00 sys
+            19464192  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1421  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  43  messages sent
+                  16  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  53  involuntary context switches
+           190541512  instructions retired
+            81037714  cycles elapsed
+             6652432  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.42 real         0.35 user         0.02 sys
+            20725760  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1499  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                2061  messages sent
+                2065  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 326  involuntary context switches
+          4314509268  instructions retired
+          1466352340  cycles elapsed
+             7881256  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.02 real         0.01 user         0.00 sys
+            17334272  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1291  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  12  messages sent
+                  16  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  54  involuntary context switches
+           139868254  instructions retired
+            64146155  cycles elapsed
+             4473360  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.05 real         0.01 user         0.00 sys
+            17678336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1311  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  21  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 340  involuntary context switches
+           173346143  instructions retired
+            89143037  cycles elapsed
+             4801064  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.04 real         0.01 user         0.00 sys
+            17711104  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1313  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  20  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  84  involuntary context switches
+           171205055  instructions retired
+            83799626  cycles elapsed
+             4817424  peak memory footprint
+
+Operator checkpoint executable: /Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/target/debug/object-log-git-maintain
+        0.05 real         0.02 user         0.00 sys
+            17661952  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1312  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  16  messages sent
+                  21  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 245  involuntary context switches
+           172513140  instructions retired
+            90703558  cycles elapsed
+             4784680  peak memory footprint
+
+sha256: missing target, status, exact token resume, duplicate/loser, 1024-tail escape, wrong format, cold clone/fsck and three Spin push/checkpoint/fetch cycles passed
+test operator_minio_status_and_exact_resume_preserve_both_hashes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.49s
+
+cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
+    Finished `release` profile [optimized] target(s) in 0.10s
+python3 crates/object-log-git-spin/tests/check_shallow.py
+sha1: depth/deepen/absolute-depth/cold-unshallow/since/exclude/HEAD/incremental/merge strict client acceptance passed
+Logging component stdio to "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/.spin/logs/"
+
+Serving http://127.0.0.1:59817
+Available Routes:
+  git: http://127.0.0.1:59817/repo (wildcard)
+Logging component stdio to "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/.spin/logs/"
+
+Serving http://127.0.0.1:59817
+Available Routes:
+  git: http://127.0.0.1:59817/repo (wildcard)
+
+Logging component stdio to "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/.spin/logs/"
+
+Serving http://127.0.0.1:60611
+Available Routes:
+  git: http://127.0.0.1:60611/repo (wildcard)
+Logging component stdio to "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/.spin/logs/"
+
+Serving http://127.0.0.1:60611
+Available Routes:
+  git: http://127.0.0.1:60611/repo (wildcard)
+
+Traceback (most recent call last):
+  File "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/tests/check_shallow.py", line 123, in <module>
+    git(source, "checkout", "--quiet", "-b", "side", "old")
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/tests/check_shallow.py", line 36, in git
+    return run(["git", "-c", "protocol.version=2", *args], cwd=path)
+  File "/Users/carsonfarmer/Developer/Personal/.object-log-worktrees/git-proof-queue/crates/object-log-git-spin/tests/check_shallow.py", line 29, in run
+    raise RuntimeError(f"{args}: {result.stderr}")
+RuntimeError: ['git', '-c', 'protocol.version=2', 'checkout', '--quiet', '-b', 'side', 'old']: fatal: sha1 file '/private/var/folders/wc/km_p_m0x5_s5dxd9y9w2qlh40000gn/T/tmpqbqodcq5/source/.git/index.lock' write error. Out of diskspace
+
+make: *** [git-spin-shallow-test] Error 1

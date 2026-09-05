@@ -77,7 +77,7 @@ lost-reply ambiguity. Custom protocols can use exact-candidate recovery tokens.
 The first bounded functional proof is complete, but the broader project is not.
 The owner requires compaction and a useful scale demonstration (#19), operational
 memory/admission qualification (#21), pooled transport investigation (#22),
-performance review (#23), shallow/partial/filtered clones and packfile URIs (#24),
+performance review (#23), partial/filtered clones and packfile URIs (#24),
 and simplification (#25). See `docs/follow-ons.md` for links and acceptance scope.
 
 ## Storage and consistency contract
@@ -143,9 +143,11 @@ common haves during negotiation. It sends a pack only after `done`. For
 `include-tag`, it fully peels annotated tags and includes the complete applicable
 tag chain, not only a direct target.
 
-The first protocol set excludes shallow fetches, filters, `ref-in-want`,
-packfile URIs, `sideband-all`, and progress. Add a capability only with a test
-for its complete behavior.
+The original protocol set excluded shallow fetches and filters. Shallow clone,
+absolute/relative deepening, unshallow, time cutoffs, and ref exclusions now have
+both-hash unchanged-client coverage through Spin/MinIO. Filters and packfile URIs
+remain required work in #24. `ref-in-want`, `sideband-all`, and progress are not
+advertised. Add a capability only with a test for its complete behavior.
 
 ## Memory and operation budgets
 
@@ -165,15 +167,20 @@ Each operation uses one cumulative budget. A retry does not reset its counters.
 
 | Operation resource | Limit |
 | --- | ---: |
-| Logical object-log I/O calls | 512 |
+| Logical object-log I/O calls (serving) | 512 |
 | Uploaded plus downloaded bytes | 96 MiB |
 | Decode, graph, and pack work | 256 MiB |
 | Thin-base resolution rounds | 32 |
 | Restart after expired evidence | 1 |
 
-These counters conservatively charge object-log I/O issued by the engine.
-Backend retries can add physical calls. Record physical retries in MinIO
-evidence instead of adding product instrumentation.
+Conservative metadata checkpointing uses 8,192 calls with the same live-memory,
+retained-state, transfer, and work limits. It does not traverse or compact packs.
+
+Counters currently precharge logical core operations. Checkpoint collision
+attempts are included, but blob/node staging can still issue uncharged core
+identity-collision retries (#36). Backend retries are a separate source of
+physical calls. Record actual requests in provider evidence; do not claim these
+logical counters prove a universal physical-request cap.
 
 The engine must also record total calls, transferred bytes, and serial request
 depth. There is no smaller request-depth performance threshold yet.

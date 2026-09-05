@@ -97,7 +97,10 @@ filesystem-backed Git implementation, `open_native` API, and entire native HTTP
 host have been removed. Installed Git remains the independent test and benchmark
 reference. Spin is the Git HTTP host. The optional local
 [`object-log-git-maintain` command](crates/object-log-git-spin/README.md) provides
-existing-WAL status and exact commit-token recovery.
+existing-WAL status, exact commit-token recovery, and conservative metadata
+checkpointing with `checkpoint --retain-packs` under a bounded metadata profile.
+It clears a qualifying WAL tail while retaining every pack; pack compaction,
+catalog limits, and collection remain separate.
 
 The replacement has bounded iterative commit, tree, and tag traversal with
 command-local catalogs, so ref discovery avoids index loads. Known blob leaves
@@ -108,7 +111,10 @@ packs; ref updates validate connectivity and exact old IDs before one atomic
 publication. Fast-forward-only is the default; Spin operators can explicitly
 allow rewritten history with `allow_non_fast_forward`. Ordinary Git-valid
 ref namespaces include notes and mirrored refs. Spin passes unchanged-client
-and local-provider qualification.
+and local-provider qualification. Shallow clone, absolute/relative deepening,
+unshallow, time cutoffs, and ref exclusions work through protocol v2 for both
+hashes; `make git-spin-shallow-test` exercises unchanged clients against local
+Spin and `MinIO`.
 The [Spin performance record](docs/evidence/git-spin-performance-2026-09-04.md)
 retains one latency review finding; removing the old implementation does not
 change that measurement. See the
@@ -235,9 +241,11 @@ remains open. Follow-on acceptance covers [pack compaction and useful scale](htt
 [Spin startup, memory headroom and concurrency](https://github.com/carsonfarmer/object-log/issues/21),
 [pooled outbound HTTP failures](https://github.com/carsonfarmer/object-log/issues/22),
 [large-push performance](https://github.com/carsonfarmer/object-log/issues/23),
-[shallow/partial/filtered clones and packfile URIs](https://github.com/carsonfarmer/object-log/issues/24),
+[partial/filtered clones and packfile URIs](https://github.com/carsonfarmer/object-log/issues/24),
 and [simpler integration](https://github.com/carsonfarmer/object-log/issues/25).
 
 The [Git proof review and execution queue](docs/reviews/git-proof-2026-09-05.md)
 tracks the remaining work toward an ordinary, usable service and the generic
-WAL improvements justified by building it.
+WAL improvements justified by building it. Physical storage retries can exceed
+current Git staging charges; [issue #36](https://github.com/carsonfarmer/object-log/issues/36)
+tracks that accounting gap separately from cumulative expired-view retries.
