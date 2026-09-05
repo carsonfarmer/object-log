@@ -103,7 +103,7 @@ opens the log, so measurements must include that fixed provider work.
 
 The one-shot operator command below supports head status, exact commit-token
 resumption, explicit default-branch updates, metadata checkpoints that retain
-every pack, and resumption of installed collection plans. Fresh plan creation
+every pack, catalog migration, and resumption of installed collection plans. Fresh plan creation
 and retention management still require shared-library calls while Spin is
 stopped. Issue #32 remains open for those commands and sustained-service
 qualification.
@@ -119,6 +119,7 @@ target/release/object-log-git-maintain --config /deployment/repository.toml stat
 target/release/object-log-git-maintain --config /deployment/repository.toml resume-commit --token-file /private/push.token
 target/release/object-log-git-maintain --config /deployment/repository.toml checkpoint --retain-packs
 target/release/object-log-git-maintain --config /deployment/repository.toml collect --resume-only
+target/release/object-log-git-maintain --config /deployment/repository.toml migrate-catalog --recovery-file /private/catalog.token
 target/release/object-log-git-maintain --config /deployment/repository.toml set-default-branch --expected refs/heads/main --target refs/heads/trunk --recovery-file /private/default-branch.token
 ```
 
@@ -214,19 +215,30 @@ competing head update rejects this candidate; the command never rebases it.
 The persisted default survives checkpoints and cold serving restarts. This is
 an explicit repository update, not a Spin bootstrap variable.
 
-Each call requires a new `--recovery-file` path. The command reserves and syncs
-an empty mode-0600 file before provider access, and never overwrites an existing
+`migrate-catalog` explicitly converts a legacy pack catalog to the shared tree
+representation using one conditional WAL publication. Stop and drain serving
+processes first. It preserves refs, the default branch and Git objects; normal
+push, fetch, checkpoint and collection use the tree after migration. `migrated`
+confirms publication; `already_tree` means the observed repository was already
+migrated and no new transaction was published. Neither outcome deletes objects.
+Conflicts are returned without rebasing. Oversized or invalid histories are
+rejected through the existing shared maintenance limits.
+
+Both `set-default-branch` and `migrate-catalog` require a new `--recovery-file`
+path on every invocation, including an already-migrated repository. The command
+reserves and syncs an empty mode-0600 file before provider access, and never overwrites an existing
 path. Reservation happens before configuration validation, so even an invalid
-configuration can leave an empty file. Confirmed updates and conflicts leave it
-empty. If publication returns pending, the command writes the exact core token
+configuration can leave an empty file. Confirmed updates, already-tree results
+and conflicts leave it empty. If publication returns pending, the command writes the exact core token
 and fsyncs the file and directory before reporting `recovery_token: "saved"`.
 Use `resume-commit --token-file` with that file to resolve the exact attempt.
 
 A write/fsync failure or deadline reports pending without a saved-token claim.
 The file may then be empty or partial. A crash or lost response before token
 persistence can leave the exact attempt unknown: observing the desired default
-later establishes visibility, not which attempt published it. Do not replay an
-unknown update automatically. Synchronous receipt writes and fsync are not
+later establishes visibility, not which attempt published it. Likewise, an
+`already_tree` observation cannot classify an earlier migration whose receipt
+was lost. Do not replay an unknown update automatically. Synchronous receipt writes and fsync are not
 preempted by the asynchronous backend deadline. Stronger recovery before
 publication remains tracked in #32.
 
@@ -237,7 +249,7 @@ outcome together with the exit status:
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, `collected`, `no_active_plan`, or requested help. `not_committed` means resolution completed, not a successful push. |
+| 0 | `observed`, `committed`, `not_committed`, `checkpointed`, `updated`, `migrated`, `already_tree`, `collected`, `no_active_plan`, or requested help. `not_committed` means resolution completed, not a successful push. |
 | 2 | Invalid arguments/configuration, unavailable/non-private/oversized input, unavailable recovery output, unsupported platform or incompatible durable options. |
 | 3 | `conflict`, `stale_default`, or shared-engine `busy`; inspect the fresh state before another update. |
 | 4 | `pending`/`expired`, backend unavailable, or lost output. Preserve the token; do not automatically replay expired work. |

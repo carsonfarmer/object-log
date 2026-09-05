@@ -22,7 +22,7 @@ const CONFIG_BYTES: usize = 16 * 1024;
 const TOKEN_BYTES: usize = 1024 * 1024;
 const OUTPUT_BYTES: usize = 2048;
 const DEADLINE: Duration = Duration::from_mins(1);
-const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | collect --resume-only | set-default-branch --expected REF --target REF --recovery-file FILE";
+const USAGE: &str = "object-log-git-maintain --config FILE status | resume-commit --token-file FILE | checkpoint --retain-packs | collect --resume-only | migrate-catalog --recovery-file FILE | set-default-branch --expected REF --target REF --recovery-file FILE";
 
 #[derive(Clone, Copy, Debug)]
 struct Failure(&'static str, u8);
@@ -319,6 +319,7 @@ enum Action {
     Resume(Vec<u8>),
     Checkpoint,
     CollectResume,
+    MigrateCatalog(Receipt),
     SetDefault {
         expected: Vec<u8>,
         target: Vec<u8>,
@@ -332,13 +333,14 @@ impl Action {
             Self::Resume(_) => "resume-commit",
             Self::Checkpoint => "checkpoint",
             Self::CollectResume => "collect",
+            Self::MigrateCatalog(_) => "migrate-catalog",
             Self::SetDefault { .. } => "set-default-branch",
         }
     }
 }
 
-fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failure> {
-    let parsed = Command::new("object-log-git-maintain")
+fn command() -> Command {
+    Command::new("object-log-git-maintain")
         .subcommand_required(true)
         .arg(
             Arg::new("config")
@@ -347,6 +349,14 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
                 .value_parser(clap::value_parser!(PathBuf)),
         )
         .subcommand(Command::new("status"))
+        .subcommand(
+            Command::new("migrate-catalog").arg(
+                Arg::new("recovery-file")
+                    .long("recovery-file")
+                    .required(true)
+                    .value_parser(clap::value_parser!(PathBuf)),
+            ),
+        )
         .subcommand(
             Command::new("collect").arg(
                 Arg::new("resume-only")
@@ -392,14 +402,16 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
                     .value_parser(clap::value_parser!(PathBuf)),
             ),
         )
-        .try_get_matches_from(arguments)
-        .map_err(|error| {
-            if error.kind() == clap::error::ErrorKind::DisplayHelp {
-                Failure("usage", 0)
-            } else {
-                Failure("invalid_arguments", 2)
-            }
-        })?;
+}
+
+fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failure> {
+    let parsed = command().try_get_matches_from(arguments).map_err(|error| {
+        if error.kind() == clap::error::ErrorKind::DisplayHelp {
+            Failure("usage", 0)
+        } else {
+            Failure("invalid_arguments", 2)
+        }
+    })?;
     let config = parsed
         .get_one::<PathBuf>("config")
         .cloned()
@@ -408,6 +420,11 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Request, Failu
         Some(("status", _)) => Action::Status,
         Some(("checkpoint", _)) => Action::Checkpoint,
         Some(("collect", _)) => Action::CollectResume,
+        Some(("migrate-catalog", command)) => Action::MigrateCatalog(Receipt::reserve(
+            command
+                .get_one::<PathBuf>("recovery-file")
+                .ok_or(Failure("invalid_arguments", 2))?,
+        )?),
         Some(("set-default-branch", command)) => {
             let name = |key| {
                 command
@@ -478,9 +495,45 @@ async fn collect_resume(log: &Log) -> Report {
     }
 }
 
+fn commit_report(
+    operation: &'static str,
+    success: &'static str,
+    receipt: &Receipt,
+    result: Result<object_log::CommitStatus, object_log_git::Error>,
+) -> Report {
+    match result {
+        Ok(object_log::CommitStatus::Committed(view)) => {
+            Report::new(operation, success, 0).observed(&view)
+        }
+        Ok(object_log::CommitStatus::Conflict(view)) => {
+            Report::new(operation, "conflict", 3).observed(&view)
+        }
+        Ok(object_log::CommitStatus::Pending(pending)) => {
+            let saved = pending
+                .recovery_token()
+                .ok()
+                .is_some_and(|token| receipt.save(&token).is_ok());
+            let mut report = Report::new(operation, "pending", 4);
+            report.recovery_token = Some(if saved { "saved" } else { "unavailable" });
+            report
+        }
+        Err(object_log_git::Error::StaleReference) => Report::new(operation, "stale_default", 3),
+        Err(object_log_git::Error::Busy) => Report::new(operation, "busy", 3),
+        Err(object_log_git::Error::ObjectLog(error)) => Report::failed(operation, classify(&error)),
+        Err(_) => Report::new(operation, "invalid_git_state_or_limit", 5),
+    }
+}
+
 async fn execute(log: &Log, action: &Action, format: ObjectFormat) -> Report {
     match action {
         Action::CollectResume => collect_resume(log).await,
+        Action::MigrateCatalog(receipt) => {
+            match Repository::migrate_catalog(log, format, object_log::TransactionId::new()).await {
+                Ok(None) => Report::new(action.name(), "already_tree", 0),
+                Ok(Some(status)) => commit_report(action.name(), "migrated", receipt, Ok(status)),
+                Err(error) => commit_report(action.name(), "migrated", receipt, Err(error)),
+            }
+        }
         Action::SetDefault {
             expected,
             target,
@@ -493,31 +546,7 @@ async fn execute(log: &Log, action: &Action, format: ObjectFormat) -> Report {
                     .await
             }
             .await;
-            match result {
-                Ok(object_log::CommitStatus::Committed(view)) => {
-                    Report::new(action.name(), "updated", 0).observed(&view)
-                }
-                Ok(object_log::CommitStatus::Conflict(view)) => {
-                    Report::new(action.name(), "conflict", 3).observed(&view)
-                }
-                Ok(object_log::CommitStatus::Pending(pending)) => {
-                    let saved = pending
-                        .recovery_token()
-                        .ok()
-                        .is_some_and(|token| receipt.save(&token).is_ok());
-                    let mut report = Report::new(action.name(), "pending", 4);
-                    report.recovery_token = Some(if saved { "saved" } else { "unavailable" });
-                    report
-                }
-                Err(object_log_git::Error::StaleReference) => {
-                    Report::new(action.name(), "stale_default", 3)
-                }
-                Err(object_log_git::Error::Busy) => Report::new(action.name(), "busy", 3),
-                Err(object_log_git::Error::ObjectLog(error)) => {
-                    Report::failed(action.name(), classify(&error))
-                }
-                Err(_) => Report::new(action.name(), "invalid_git_state_or_limit", 5),
-            }
+            commit_report(action.name(), "updated", receipt, result)
         }
         Action::Checkpoint => match Repository::checkpoint_retaining_packs(log, format).await {
             Ok(object_log::CheckpointStatus::Published(view)) => {
@@ -601,7 +630,11 @@ async fn bounded(
                 operation,
                 if matches!(
                     operation,
-                    "resume-commit" | "checkpoint" | "set-default-branch" | "collect"
+                    "resume-commit"
+                        | "checkpoint"
+                        | "set-default-branch"
+                        | "collect"
+                        | "migrate-catalog"
                 ) {
                     "pending"
                 } else {
@@ -609,7 +642,7 @@ async fn bounded(
                 },
                 4,
             );
-            if operation == "set-default-branch" {
+            if matches!(operation, "set-default-branch" | "migrate-catalog") {
                 report.recovery_token = Some("unavailable");
             }
             report

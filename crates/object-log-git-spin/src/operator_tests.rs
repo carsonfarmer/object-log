@@ -1105,3 +1105,197 @@ async fn collection_install_lost_reply_recovers_only_the_installed_plan() -> Tes
     }
     Ok(())
 }
+
+fn migration_action(root: &Path, name: &str) -> TestResult<(Action, PathBuf)> {
+    let path = root.join(name);
+    Ok((Action::MigrateCatalog(Receipt::reserve(&path)?), path))
+}
+
+#[test]
+fn catalog_migration_requires_a_new_receipt_before_provider_access() -> TestResult {
+    let root = TempDir::new()?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let file = private_file(
+        &root,
+        "config",
+        config(&format!("http://{}", listener.local_addr()?)).as_bytes(),
+    )?;
+    assert_eq!(run(arguments(&file, &["migrate-catalog"])).exit(), 2);
+    let receipt = private_file(&root, "receipt", b"PRIVATE_TOKEN")?;
+    assert_eq!(
+        run(arguments(
+            &file,
+            &[
+                "migrate-catalog",
+                "--recovery-file",
+                receipt.to_str().ok_or("path")?
+            ]
+        ))
+        .exit(),
+        2
+    );
+    assert_eq!(std::fs::read(&receipt)?, b"PRIVATE_TOKEN");
+    assert_eq!(
+        listener.accept().err().map(|error| error.kind()),
+        Some(std::io::ErrorKind::WouldBlock)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_migration_preserves_refs_and_repeated_calls_do_not_publish() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for (name, format) in [
+        ("sha1", ObjectFormat::Sha1),
+        ("sha256", ObjectFormat::Sha256),
+    ] {
+        let root = TempDir::new()?;
+        let (log, faults, backend) = fixture("migrate-catalog", Options::default()).await?;
+        seed_git(&log, name, format).await?;
+        let refs = Repository::open(&log, format).await?.refs().clone();
+        let (action, path) = migration_action(root.path(), "first")?;
+        let report = super::execute(&log, &action, format).await;
+        assert_eq!(report.exit(), 0);
+        assert_eq!(json(&report)?["outcome"], "migrated");
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        drop(log);
+        let log = Log::open_existing(
+            &backend,
+            &LogId::new("migrate-catalog")?,
+            Options::default(),
+        )
+        .await?;
+        let before = log.load().await?;
+        let (repeat, path) = migration_action(root.path(), "repeat")?;
+        faults.reset();
+        let report = super::execute(&log, &repeat, format).await;
+        assert_eq!(report.exit(), 0);
+        assert_eq!(json(&report)?["outcome"], "already_tree");
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        assert!(log.refresh(&before).await?.is_none());
+        let repository = Repository::open(&log, format).await?;
+        assert_eq!(repository.refs(), &refs);
+        assert_eq!(repository.default_branch(), b"refs/heads/main");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_migration_pending_receipt_resumes_the_exact_attempt() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for (name, format) in [
+        ("sha1", ObjectFormat::Sha1),
+        ("sha256", ObjectFormat::Sha256),
+    ] {
+        // Calibrate the final head write from the same one-pack fixture rather
+        // than coupling fault injection to the tree's number of staging writes.
+        let (probe, counts, _) = fixture("migrate-counts", Options::default()).await?;
+        seed_git(&probe, name, format).await?;
+        counts.reset();
+        assert!(matches!(
+            Repository::migrate_catalog(&probe, format, TransactionId::new()).await?,
+            Some(CommitStatus::Committed(_))
+        ));
+        let head_write = counts.metrics().operation(Operation::Put).requests;
+        assert!(head_write > 2);
+        for phase in [FailurePhase::Before, FailurePhase::After] {
+            let root = TempDir::new()?;
+            let (log, faults, backend) = fixture("migrate-pending", Options::default()).await?;
+            seed_git(&log, name, format).await?;
+            let refs = Repository::open(&log, format).await?.refs().clone();
+            faults.reset();
+            let (action, path) = migration_action(root.path(), "pending")?;
+            faults.schedule(object_log::sim::Failure {
+                operation: Operation::Put,
+                occurrence: head_write,
+                phase,
+            });
+            let report = super::execute(&log, &action, format).await;
+            assert_eq!(report.exit(), 4);
+            assert_eq!(json(&report)?["outcome"], "pending");
+            assert_eq!(json(&report)?["recovery_token"], "saved");
+            assert!(report.generation.is_none());
+            let token = read_file(&path, TOKEN_BYTES)?;
+            drop(log);
+            let log = Log::open_existing(
+                &backend,
+                &LogId::new("migrate-pending")?,
+                Options::default(),
+            )
+            .await?;
+            for _ in 0..2 {
+                assert_eq!(
+                    json(&super::execute(&log, &Action::Resume(token.clone()), format).await)?["outcome"],
+                    "committed"
+                );
+            }
+            assert_eq!(read_file(&path, TOKEN_BYTES)?, token);
+            assert_eq!(Repository::open(&log, format).await?.refs(), &refs);
+            let (repeat, _) = migration_action(root.path(), "repeat")?;
+            assert_eq!(
+                json(&super::execute(&log, &repeat, format).await)?["outcome"],
+                "already_tree"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_migration_conflict_and_cancellation_do_not_claim_a_receipt() -> TestResult {
+    let _serial = GIT_TEST_LOCK.lock().await;
+    for format in [ObjectFormat::Sha1, ObjectFormat::Sha256] {
+        let root = TempDir::new()?;
+        let (log, faults, _) = fixture("migrate-conflict", Options::default()).await?;
+        let before = log.load().await?;
+        let (action, path) = migration_action(root.path(), "conflict")?;
+        let mut pause = faults.pause_put_at(2, FailurePhase::Before);
+        let work = super::execute(&log, &action, format);
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        log.retain(&before, object_log::RetentionId::new()).await?;
+        let winner = log.load().await?;
+        assert!(pause.release());
+        let report = work.await;
+        assert_eq!(report.exit(), 3);
+        assert_eq!(json(&report)?["outcome"], "conflict");
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        assert!(log.refresh(&winner).await?.is_none());
+        // A new explicit attempt still sees legacy state after the CAS loss.
+        let (retry, _) = migration_action(root.path(), "retry")?;
+        assert_eq!(
+            json(&super::execute(&log, &retry, format).await)?["outcome"],
+            "migrated"
+        );
+
+        let (log, faults, _) = fixture("migrate-cancel", Options::default()).await?;
+        let (action, path) = migration_action(root.path(), "cancel")?;
+        let mut pause = faults.pause_put_at(2, FailurePhase::After);
+        let work = bounded(
+            action.name(),
+            Duration::from_millis(100),
+            super::execute(&log, &action, format),
+        );
+        tokio::pin!(work);
+        assert!(
+            tokio::select! { entered = pause.wait_until_entered() => entered, _ = &mut work => false }
+        );
+        let report = work.await;
+        assert_eq!(report.exit(), 4);
+        assert_eq!(json(&report)?["outcome"], "pending");
+        assert_eq!(json(&report)?["recovery_token"], "unavailable");
+        assert!(report.generation.is_none());
+        assert!(!pause.release());
+        assert_eq!(std::fs::metadata(path)?.len(), 0);
+        let (repeat, _) = migration_action(root.path(), "observe")?;
+        assert_eq!(
+            json(&super::execute(&log, &repeat, format).await)?["outcome"],
+            "already_tree"
+        );
+    }
+    Ok(())
+}

@@ -85,6 +85,18 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
             .status
             .success()
     );
+    assert!(
+        !operator(
+            &config_path,
+            &[
+                "migrate-catalog",
+                "--recovery-file",
+                text(&root.path().join("missing-migration.receipt"))?
+            ]
+        )?
+        .status
+        .success()
+    );
     let missing = operator(&config_path, &["status"])?;
     assert!(!missing.status.success());
     assert!(
@@ -286,11 +298,78 @@ async fn lifecycle(name: &str, format: ObjectFormat) -> TestResult {
         reader.stop()?;
     }
     default_branch_lifecycle(&config_path, root.path(), &source, &log, &new).await?;
-    collection_lifecycle(&config_path, root.path(), &source, &log, &faults, &new).await?;
+    let migrated_tip = migration_lifecycle(&config_path, root.path(), &source, &log, &new).await?;
+    collection_lifecycle(
+        &config_path,
+        root.path(),
+        &source,
+        &log,
+        &faults,
+        &migrated_tip,
+    )
+    .await?;
     println!(
-        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master, unborn default, interrupted collection and cold push passed"
+        "{name}: missing target, exact resume, 1024-tail escape, three maintenance cycles, default main/trunk/master, unborn default, catalog migration, tree push/fetch/checkpoint, interrupted collection and cold push passed"
     );
     Ok(())
+}
+
+async fn migration_lifecycle(
+    config: &Path,
+    root: &Path,
+    source: &Path,
+    log: &Log,
+    tip: &[u8],
+) -> TestResult<Vec<u8>> {
+    let receipt = root.join("catalog.receipt");
+    let report = operator(
+        config,
+        &["migrate-catalog", "--recovery-file", text(&receipt)?],
+    )?;
+    assert!(report.status.success());
+    assert_eq!(decode(&report)?["outcome"], "migrated");
+    assert_eq!(fs::metadata(&receipt)?.len(), 0);
+    let before = log.load().await?;
+    let report = operator(
+        config,
+        &[
+            "migrate-catalog",
+            "--recovery-file",
+            text(&root.join("catalog-repeat.receipt"))?,
+        ],
+    )?;
+    assert!(report.status.success());
+    assert_eq!(decode(&report)?["outcome"], "already_tree");
+    assert!(log.refresh(&before).await?.is_none());
+
+    let (mut host, url) = serve(config, root).await?;
+    let clone = root.join("clone-migrated");
+    git(None, &["clone", "-q", &url, text(&clone)?])?;
+    assert_eq!(git(Some(&clone), &["rev-parse", "HEAD"])?, tip);
+    assert_eq!(
+        git(Some(&clone), &["symbolic-ref", "HEAD"])?,
+        b"refs/heads/master\n"
+    );
+    git(Some(&clone), &["fsck", "--strict"])?;
+    fs::write(source.join("file"), "three")?;
+    git(Some(source), &["add", "file"])?;
+    git(
+        Some(source),
+        &["commit", "-q", "-m", "after catalog migration"],
+    )?;
+    let next = git(Some(source), &["rev-parse", "HEAD"])?;
+    git(
+        Some(source),
+        &["push", "-q", &url, "HEAD:refs/heads/master"],
+    )?;
+    git(Some(&clone), &["fetch", "-q"])?;
+    assert_eq!(git(Some(&clone), &["rev-parse", "origin/master"])?, next);
+    git(Some(&clone), &["fsck", "--strict"])?;
+    host.stop()?;
+    let report = operator(config, &["checkpoint", "--retain-packs"])?;
+    assert!(report.status.success());
+    assert_eq!(decode(&report)?["outcome"], "checkpointed");
+    Ok(next)
 }
 
 // The test library installs the plan; the operator can only resume it. Each
@@ -336,7 +415,7 @@ async fn collection_lifecycle(
     git(None, &["clone", "-q", &url, text(&clone)?])?;
     assert_eq!(git(Some(&clone), &["rev-parse", "HEAD"])?, tip);
     git(Some(&clone), &["fsck", "--strict"])?;
-    assert_eq!(fs::read_to_string(clone.join("file"))?, "two");
+    assert_eq!(fs::read_to_string(clone.join("file"))?, "three");
     git(
         Some(source),
         &["push", "-q", &url, "HEAD:refs/tags/after-collection"],
