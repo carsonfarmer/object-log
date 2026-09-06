@@ -7,10 +7,23 @@ import json
 import os
 import pathlib
 import secrets
+import sys
 import tempfile
 
 from check_auth import host
 from check_partial import ENV, ROOT, external_minio, git, run
+
+
+def cleanup(aws, urls, primary_error):
+    failures = []
+    for url in urls:
+        try:
+            aws("s3", "rm", url, "--recursive", "--only-show-errors")
+        except Exception as error:
+            failures.append(error)
+            print(f"Fixture cleanup failed for {url}: {error}", file=sys.stderr)
+    if failures and primary_error is None:
+        raise RuntimeError("fixture cleanup failed") from failures[0]
 
 
 def main():
@@ -94,8 +107,7 @@ def main():
                     assert git(clone, "rev-parse", "origin/main") == git(source, "rev-parse", "main")
                 print(f"{name}: offline snapshot, byte-exact restore, cold refs/tag/unborn HEAD, fsck and new push passed", flush=True)
             finally:
-                for url in (source_url, restored_url):
-                    aws("s3", "rm", url, "--recursive", "--only-show-errors")
+                cleanup(aws, (source_url, restored_url), sys.exc_info()[1])
 
 
 if __name__ == "__main__":

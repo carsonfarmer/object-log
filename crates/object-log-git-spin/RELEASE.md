@@ -2,7 +2,7 @@
 
 The generic WAL is the product; ordinary Spin hosts its Git adapter. Use the
 single private `repository.toml` from [README.md](README.md) for both Spin and
-the operator. No runtime wrapper or scheduler is required. Commands below run
+the operator. Commands below run
 from the checkout root, with the matching release component and operator built
 as described in the README. Substitute your paths and namespace explicitly.
 
@@ -27,8 +27,7 @@ authenticated ls-remote, full cold clone/fsck, push, and required maintenance.
 An upgrade that changes durable encodings/options needs a documented migration
 and reader/writer compatibility tests before adoption. Never edit CBOR, object
 keys or the head to force compatibility. Do not mix old/new writers as an
-upgrade strategy. Catalog migration is explicit; it is not a prerequisite for
-an ordinary restart.
+upgrade strategy.
 
 For cutover, close ingress, stop and drain **all** Spin hosts and operator jobs,
 resolve known pending tokens, take the offline backup below, then start the new
@@ -50,6 +49,26 @@ tokens before history advancement. If collection is active, run
 `collect --resume-only` until `status` reports no active plan; stop on unresolved
 errors. Keep the namespace quiescent for the entire copy. A drain is an
 operational exclusion, not a durable lock.
+
+Capture the comparison baseline after resolving pending work and maintenance,
+while writers remain excluded. Temporarily use a loopback Spin host with
+`read_only = "true"` in the private TOML and a configured read credential helper.
+Keep this baseline separate from the object backup directory:
+
+```sh
+umask 077
+BASELINE=/private/backups/repository-2026-09-06-check
+test ! -e "$BASELINE" && mkdir -p "$BASELINE"
+git -c protocol.version=2 ls-remote --refs http://127.0.0.1:3000/repo > "$BASELINE/refs.unsorted"
+LC_ALL=C sort "$BASELINE/refs.unsorted" > "$BASELINE/refs"
+git -c protocol.version=2 clone --no-checkout http://127.0.0.1:3000/repo "$BASELINE/clone"
+git -C "$BASELINE/clone" symbolic-ref HEAD > "$BASELINE/HEAD"
+```
+
+The disposable full clone records even an unborn symbolic HEAD, which
+`ls-remote` may omit. Stop and drain this host too before copying; allow no
+publication between baseline capture and backup. Run each step only after the
+previous one succeeds.
 
 Use the existing AWS CLI credential profile (never put keys in arguments),
 pointed at the same backend as the private TOML. This is a copying recipe for a
@@ -96,15 +115,23 @@ missing head, which could hide a mistyped restore location. In another terminal,
 with the credential helper configured for this test endpoint:
 
 ```sh
+BASELINE=/private/backups/repository-2026-09-06-check
 git -c protocol.version=2 ls-remote --symref http://127.0.0.1:3001/repo
 git -c protocol.version=2 clone http://127.0.0.1:3001/repo /private/restore-check
 git -C /private/restore-check fsck --strict --no-reflogs
+git -c protocol.version=2 ls-remote --refs http://127.0.0.1:3001/repo > "$BASELINE/restored-refs.unsorted"
+LC_ALL=C sort "$BASELINE/restored-refs.unsorted" > "$BASELINE/restored-refs"
+cmp "$BASELINE/refs" "$BASELINE/restored-refs"
+git -C /private/restore-check symbolic-ref HEAD > "$BASELINE/restored-HEAD"
+cmp "$BASELINE/HEAD" "$BASELINE/restored-HEAD"
 ```
 
 Compare all advertised refs and symbolic HEAD with the backup-time observation,
 including an unborn default branch. Use an ordinary full clone, without shallow,
 filter or URI options. Test a new push on the isolated drill copy. This validates
 reachable Git state; it does not certify every historical or unreachable object.
+For that push, set `read_only = "false"` in the isolated restore's private TOML,
+restart its host, and use a write credential in the client helper.
 Keep the old namespace offline when selecting the restored one for service.
 Never expose two independently writable copies as the same repository.
 
@@ -122,8 +149,7 @@ python3 crates/object-log-git-spin/tests/check_restore.py
 
 The drill needs Python 3, AWS CLI, Git with SHA-256 support, Spin 4.0.2, Rust
 with the WASIp2 target, and an existing local MinIO bucket. It does not start or
-stop your provider. Run memory/filesystem tests (`make check`) before this
-opt-in drill. Repeat a restore rehearsal after storage, release or
+stop your provider. Repeat a restore rehearsal after storage, release or
 backup-process changes; measure elapsed restore time against your recovery need.
 
 ## Readiness and operational signals
@@ -136,7 +162,7 @@ the same path. A periodic cold clone/fsck tests more than readiness does.
 Readiness invokes provider validation, including disposable probe writes.
 
 Use existing proxy response/latency counts and the operator's bounded JSON plus
-exit status. No metrics server is needed. Start with these actionable signals:
+exit status. Start with these actionable signals:
 
 | Signal | Operator action |
 | --- | --- |
@@ -147,9 +173,8 @@ exit status. No metrics server is needed. Start with these actionable signals:
 | Growing tail count, storage usage, or repeated resource-limit failure | Schedule maintenance and assess the supported live-set bounds. Repeated collection drains garbage, not an oversized live graph. |
 
 Operator counters are per invocation; absent counters mean unknown, not zero.
-Candidate bytes are not confirmed reclaimed bytes. Head generation is a change
-indicator, not a throughput or health guarantee. Choose alert frequency and
-thresholds from your workload; do not checkpoint merely to make a graph flat.
+Candidate bytes are not confirmed reclaimed bytes. Choose alert frequency and
+thresholds from your workload.
 
 ## Maintenance and rollback
 
