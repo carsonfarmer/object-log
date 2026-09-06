@@ -3,13 +3,12 @@
 use bytes::Bytes;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation, RequestOutcome};
 use object_log::{
-    CheckpointStatus, CollectionStart, CommitRef, CommitStatus, Log, LogId, Materializer, Options,
+    CheckpointStatus, CollectionStart, CommitStatus, Log, LogId, Materializer, Options,
     PendingCommit, Resolution, StagedObject, TransactionId, ValidatedBackend, View, materialize,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, UpdateVersion};
-use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -867,10 +866,109 @@ async fn seeded_model_covers_reopen_readers_writers_and_pending_resolution() -> 
     Ok(())
 }
 
+#[test]
+fn canonical_oracle_rejects_divergent_history() {
+    let first = ExpectedRecord {
+        transaction: transaction_id(1, 1),
+        operation: Bytes::from_static(b"first"),
+        result: Bytes::from_static(b"one"),
+    };
+    let second = ExpectedRecord {
+        transaction: transaction_id(1, 2),
+        ..first.clone()
+    };
+    let mut model = CanonicalHistory::default();
+    assert!(model.publish(0, first.clone()));
+    assert!(!model.publish(0, second.clone())); // A stale CAS cannot append.
+    assert!(model.publish(1, second.clone()));
+    let good = vec![first.clone(), second.clone()];
+    assert!(model.matches(&good, 2));
+    assert!(model.matches(&good[..1], 1));
+    for bad in [
+        vec![],
+        vec![first.clone()],
+        vec![second.clone(), first.clone()],
+        vec![first.clone(), first.clone()],
+        vec![first.clone(), second.clone(), first.clone()],
+    ] {
+        assert!(!model.matches(&bad, 2));
+    }
+    for field in 0..3 {
+        let mut changed = good.clone();
+        match field {
+            0 => changed[0].transaction = transaction_id(9, 9),
+            1 => changed[0].operation = Bytes::from_static(b"substituted"),
+            _ => changed[0].result = Bytes::from_static(b"substituted"),
+        }
+        assert!(!model.matches(&changed, 2));
+    }
+}
+
+#[tokio::test]
+async fn canonical_model_checks_lost_responses_and_competing_recovery() -> TestResult {
+    for fault in [0, 1] {
+        for competitor in [false, true] {
+            let mut scenario = Scenario::new(0xcafe + fault, 16).await?;
+            scenario.commit(0, fault).await?;
+            scenario.check().await?;
+            if competitor {
+                // Current-view competitor wins even if the first response was lost.
+                scenario.writers[1].view = Some(scenario.log.load().await?);
+                scenario.writers[1].revision = scenario.canonical.0.len();
+                scenario.next_transaction += 1;
+                scenario.commit(1, 2).await?;
+                scenario.check().await?;
+            }
+            scenario.crash().await?;
+            scenario.resolve(0, true).await?;
+            scenario.check().await?;
+            scenario.resolve(0, false).await?;
+            scenario.check().await?;
+            scenario.refresh_reader().await?;
+            scenario.finish().await?;
+        }
+    }
+    Ok(())
+}
+
+// This oracle consumes only submitted commands, model-owned revisions, and the
+// selected fault schedule. No returned View, record, or status advances it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExpectedRecord {
+    transaction: TransactionId,
+    operation: Bytes,
+    result: Bytes,
+}
+
+#[derive(Default)]
+struct CanonicalHistory(Vec<ExpectedRecord>);
+
+impl CanonicalHistory {
+    fn publish(&mut self, base: usize, record: ExpectedRecord) -> bool {
+        if base != self.0.len() {
+            return false;
+        }
+        self.0.push(record);
+        true
+    }
+
+    fn matches(&self, visible: &[ExpectedRecord], revision: usize) -> bool {
+        self.0.get(..revision) == Some(visible)
+    }
+}
+
+#[derive(Debug)]
+struct ExpectedPending {
+    base: usize,
+    record: ExpectedRecord,
+}
+
 #[derive(Debug)]
 struct Writer {
     view: Option<View>,
     pending: Option<PendingCommit>,
+    revision: usize,
+    expected_pending: Option<ExpectedPending>,
 }
 
 async fn run_scenario(seed: u64, steps: usize) -> TestResult {
@@ -890,9 +988,8 @@ struct Scenario {
     log_id: LogId,
     writers: [Writer; 2],
     reader: Option<View>,
-    accepted: HashSet<TransactionId>,
-    rejected: HashSet<TransactionId>,
-    prior_history: Vec<TransactionId>,
+    canonical: CanonicalHistory,
+    reader_revision: usize,
     next_transaction: u64,
     random: Seeded,
     trace: Vec<String>,
@@ -912,16 +1009,19 @@ impl Scenario {
                 Writer {
                     view: Some(initial.clone()),
                     pending: None,
+                    revision: 0,
+                    expected_pending: None,
                 },
                 Writer {
                     view: Some(initial.clone()),
                     pending: None,
+                    revision: 0,
+                    expected_pending: None,
                 },
             ],
             reader: Some(initial),
-            accepted: HashSet::new(),
-            rejected: HashSet::new(),
-            prior_history: Vec::new(),
+            canonical: CanonicalHistory::default(),
+            reader_revision: 0,
             next_transaction: 1,
             random: Seeded::new(seed),
             trace: Vec::with_capacity(steps),
@@ -952,16 +1052,10 @@ impl Scenario {
             }
             9 => {
                 self.writers[writer].view = Some(self.log.load().await?);
+                self.writers[writer].revision = self.canonical.0.len();
                 self.trace.push(format!("{step}: writer {writer} reload"));
             }
-            10 => {
-                self.log = reopen_model_log(&self.store, &self.log_id).await?;
-                for writer in &mut self.writers {
-                    writer.view = None;
-                }
-                self.reader = None;
-                self.trace.push(format!("{step}: crash and reopen"));
-            }
+            10 => self.crash().await?,
             _ => {
                 let view = self.log.load().await?;
                 self.log.read_tail(&view).await?;
@@ -971,9 +1065,20 @@ impl Scenario {
         Ok(())
     }
 
+    async fn crash(&mut self) -> TestResult {
+        self.log = reopen_model_log(&self.store, &self.log_id).await?;
+        for writer in &mut self.writers {
+            writer.view = None;
+        }
+        self.reader = None;
+        self.trace.push("crash and reopen".to_owned());
+        Ok(())
+    }
+
     async fn commit(&mut self, writer: usize, fault_choice: u64) -> TestResult {
         if self.writers[writer].view.is_none() {
             self.writers[writer].view = Some(self.log.load().await?);
+            self.writers[writer].revision = self.canonical.0.len();
         }
         let view = self.writers[writer]
             .view
@@ -984,11 +1089,16 @@ impl Scenario {
         operation.extend_from_slice(&self.seed.to_le_bytes());
         operation.extend_from_slice(&self.next_transaction.to_le_bytes());
         operation.extend_from_slice(&[0_u64, 1][writer].to_le_bytes());
+        let record = ExpectedRecord {
+            transaction: transaction_id,
+            operation: Bytes::from(operation),
+            result: Bytes::copy_from_slice(&self.next_transaction.to_le_bytes()),
+        };
         let prepared = self.log.prepare(
             view,
             transaction_id,
-            Bytes::from(operation),
-            Bytes::copy_from_slice(&self.next_transaction.to_le_bytes()),
+            record.operation.clone(),
+            record.result.clone(),
             Vec::new(),
         )?;
         let fault = match fault_choice {
@@ -999,24 +1109,49 @@ impl Scenario {
         if let Some(phase) = fault {
             schedule_head_fault(&self.store, phase);
         }
-        match self.log.commit(prepared).await? {
+        let base = self.writers[writer].revision;
+        let published =
+            fault != Some(FailurePhase::Before) && self.canonical.publish(base, record.clone());
+        let expected = if fault == Some(FailurePhase::Before)
+            || (published && fault == Some(FailurePhase::After))
+        {
+            "pending"
+        } else if published {
+            "committed"
+        } else {
+            "conflict"
+        };
+        self.trace.push(format!(
+            "submit {transaction_id} base={base} fault={fault:?} expected={expected}"
+        ));
+        let status = self.log.commit(prepared).await?;
+        let actual = match &status {
+            CommitStatus::Committed(_) => "committed",
+            CommitStatus::Conflict(_) => "conflict",
+            CommitStatus::Pending(_) => "pending",
+        };
+        assert_eq!(actual, expected, "seed {:#x}: {:#?}", self.seed, self.trace);
+        assert!(self.store.pending_failures().is_empty());
+        match status {
             CommitStatus::Committed(view) => {
-                self.accepted.insert(transaction_id);
                 self.writers[writer].view = Some(view);
+                self.writers[writer].revision = self.canonical.0.len();
                 self.trace.push(format!(
                     "writer {writer} committed {}",
                     self.next_transaction
                 ));
             }
             CommitStatus::Conflict(view) => {
-                self.rejected.insert(transaction_id);
                 self.writers[writer].view = Some(view);
+                self.writers[writer].revision = self.canonical.0.len();
                 self.trace.push(format!(
                     "writer {writer} conflicted {}",
                     self.next_transaction
                 ));
             }
             CommitStatus::Pending(pending) => {
+                assert_eq!(pending.transaction_id(), transaction_id);
+                self.writers[writer].expected_pending = Some(ExpectedPending { base, record });
                 self.writers[writer].pending = Some(pending);
                 self.trace.push(format!(
                     "writer {writer} pending {} {fault:?}",
@@ -1032,30 +1167,67 @@ impl Scenario {
             self.trace.push("resolve skipped".to_owned());
             return Ok(());
         };
-        let transaction_id = pending.transaction_id();
+        let model = self.writers[writer]
+            .expected_pending
+            .take()
+            .ok_or_else(|| test_error("pending evidence has no model command"))?;
+        let transaction_id = model.record.transaction;
+        assert_eq!(pending.transaction_id(), transaction_id);
+        let expected = if fail_read {
+            "pending"
+        } else if self
+            .canonical
+            .0
+            .iter()
+            .any(|record| record.transaction == transaction_id)
+            || self.canonical.publish(model.base, model.record.clone())
+        {
+            "committed"
+        } else {
+            "not committed"
+        };
         if fail_read {
             self.store.fail_next(Operation::Get, FailurePhase::Before);
         }
-        match self.log.resolve(pending).await? {
+        let resolution = if self.writers[writer].view.is_none() {
+            let token = pending.recovery_token()?;
+            drop(pending);
+            self.log.resume(&token).await?
+        } else {
+            self.log.resolve(pending).await?
+        };
+        let actual = match &resolution {
+            Resolution::Committed(_) => "committed",
+            Resolution::NotCommitted(_) => "not committed",
+            Resolution::StillPending(_) => "pending",
+            Resolution::Expired(_) => "expired",
+        };
+        self.trace.push(format!(
+            "resolve {transaction_id} fail_read={fail_read} expected={expected}"
+        ));
+        assert_eq!(actual, expected, "seed {:#x}: {:#?}", self.seed, self.trace);
+        match resolution {
             Resolution::Committed(view) => {
-                self.accepted.insert(transaction_id);
                 self.writers[writer].view = Some(view);
+                self.writers[writer].revision = self.canonical.0.len();
                 self.trace
                     .push(format!("resolved {transaction_id} committed"));
             }
             Resolution::NotCommitted(view) => {
-                self.rejected.insert(transaction_id);
                 self.writers[writer].view = Some(view);
+                self.writers[writer].revision = self.canonical.0.len();
                 self.trace
                     .push(format!("resolved {transaction_id} not committed"));
             }
             Resolution::StillPending(pending) => {
+                self.writers[writer].expected_pending = Some(model);
                 self.writers[writer].pending = Some(pending);
                 self.trace
                     .push(format!("resolved {transaction_id} still pending"));
             }
             Resolution::Expired(view) => {
                 self.writers[writer].view = Some(view);
+                self.writers[writer].revision = self.canonical.0.len();
                 return Err(test_error("pending result expired without checkpointing").into());
             }
         }
@@ -1063,6 +1235,7 @@ impl Scenario {
     }
 
     async fn refresh_reader(&mut self) -> TestResult {
+        self.reader_revision = self.canonical.0.len();
         let Some(view) = self.reader.as_ref() else {
             self.reader = Some(self.log.load().await?);
             return Ok(());
@@ -1092,57 +1265,44 @@ impl Scenario {
             self.trace
         );
         let records = self.log.read_tail(&durable_view).await?;
-        let history = records
+        let observed = records
             .iter()
-            .map(|record| record.reference().transaction_id())
+            .map(|record| ExpectedRecord {
+                transaction: record.reference().transaction_id(),
+                operation: record.operation().clone(),
+                result: record.result().clone(),
+            })
             .collect::<Vec<_>>();
         assert!(
-            history.starts_with(&self.prior_history),
-            "history shrank for seed {:#x}: {:#?}",
+            self.canonical.matches(&observed, self.canonical.0.len()),
+            "durable history differs from submitted commands; seed {:#x}: {:#?}\nexpected: {:?}\nactual: {:?}",
             self.seed,
-            self.trace
+            self.trace,
+            self.canonical.0,
+            observed
         );
         assert_eq!(records.len(), durable_view.tail().len());
         for (index, record) in records.iter().enumerate() {
             assert_eq!(record.reference(), &durable_view.tail()[index]);
             assert_eq!(record.reference().sequence(), u64::try_from(index)?);
         }
-        let unique = history.iter().copied().collect::<HashSet<_>>();
-        assert_eq!(unique.len(), history.len());
-        assert!(self.accepted.iter().all(|transaction| {
-            history
+        if let Some(reader) = self.reader.as_ref() {
+            let reader_records = self.log.read_tail(reader).await?;
+            let observed = reader_records
                 .iter()
-                .filter(|candidate| *candidate == transaction)
-                .count()
-                == 1
-        }));
-        assert!(
-            self.rejected
-                .iter()
-                .all(|transaction| !history.contains(transaction))
-        );
-        for pending in self
-            .writers
-            .iter()
-            .filter_map(|writer| writer.pending.as_ref())
-        {
+                .map(|record| ExpectedRecord {
+                    transaction: record.reference().transaction_id(),
+                    operation: record.operation().clone(),
+                    result: record.result().clone(),
+                })
+                .collect::<Vec<_>>();
             assert!(
-                history
-                    .iter()
-                    .filter(|transaction| **transaction == pending.transaction_id())
-                    .count()
-                    <= 1
+                self.canonical.matches(&observed, self.reader_revision),
+                "reader differs from model revision; seed {:#x}: {:#?}",
+                self.seed,
+                self.trace
             );
         }
-        if let Some(reader) = self.reader.as_ref() {
-            let reader_history = reader
-                .tail()
-                .iter()
-                .map(CommitRef::transaction_id)
-                .collect::<Vec<_>>();
-            assert!(history.starts_with(&reader_history));
-        }
-        self.prior_history = history;
         Ok(())
     }
 }
