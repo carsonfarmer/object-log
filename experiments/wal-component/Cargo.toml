@@ -1,0 +1,26 @@
+[package]
+name = "wal-component-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+object-log = { path = "../.." }
+object_store = { version = "=0.14.1", default-features = false, features = ["aws-base"] }
+bytes = "1"
+futures = "0.3"
+wit-bindgen = "0.46"
+async-trait = "0.1"
+hmac = "0.12"
+humantime = "2"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+sha2 = "0.10"
+spin-sdk = { version = "=5.2.0", default-features = false }
+spin-executor = "=5.2.0"
+wasi = "=0.13.1"
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

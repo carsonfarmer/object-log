@@ -1,0 +1,36 @@
+package object-log:storage@0.1.0;
+
+interface wal {
+    record config {
+        endpoint: string,
+        bucket: string,
+        region: string,
+        access-key: string,
+        secret-key: string,
+        prefix: string,
+        log-id: string,
+    }
+    variant failure { expired, other(string) }
+    variant outcome { committed, conflict, pending(list<u8>), expired }
+    record usage { calls: u64, bytes: u64 }
+    resource object;
+    record entry { snapshot: bool, data: list<u8>, objects: list<own<object>> }
+    resource candidate {
+        token: func() -> result<list<u8>, failure>;
+        publish: func() -> result<outcome, failure>;
+    }
+    resource session {
+        usage: func() -> usage;
+        refresh: func() -> result<own<session>, failure>;
+        records: func() -> result<list<entry>, failure>;
+        read: func(value: borrow<object>) -> result<list<u8>, failure>;
+        read-node: func(value: borrow<object>) -> result<entry, failure>;
+        put: func(data: list<u8>) -> result<own<object>, failure>;
+        put-node: func(data: list<u8>, children: list<borrow<object>>) -> result<own<object>, failure>;
+        prepare: func(data: list<u8>, roots: list<borrow<object>>) -> result<own<candidate>, failure>;
+        reprove: func(values: list<borrow<object>>) -> result<list<own<object>>, failure>;
+        resume: func(token: list<u8>) -> result<outcome, failure>;
+    }
+    open: func(settings: config) -> result<own<session>, failure>;
+}
+world storage { export wal; }

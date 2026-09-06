@@ -10,11 +10,16 @@ filtered and URI histories, compaction and cold recovery. Collection now drains
 stale backlogs in bounded batches; repeat until empty. The live graph and
 operation budgets remain finite.
 
-The owner-requested Rust reduction and prose cleanup pass is complete.
-The combined local gate and final provider checks pass. Git completion and
-review results are tracked in #17 and #25. Scale #19, reliability #21 and
-performance #23 are closed.
-KV follow-on design is in #39; leave SQLite and verifiable KV for later.
+The owner rejected the Git implementation's size (~11,883 production Rust
+lines) and the previous reduction pass as insufficient. Functional coverage does
+not establish a successful simplicity proof. Stop feature expansion. The current
+acceptance target is to remove at least half the Git implementation through
+established libraries and architectural simplification, preserving client
+behavior. Investigate WAL API friction as well as Git-specific duplication.
+Do not meet the target by moving code, compressing formatting, or cutting tests.
+If library substitution cannot meet it, explain concrete, tested incompatibilities
+and the remaining choices. Existing implementation remains the regression baseline.
+KV work waits behind this correction.
 
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
 exact recovery, cumulative retry counters and provider tests. Use ordinary Spin

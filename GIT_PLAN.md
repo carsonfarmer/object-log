@@ -5,6 +5,17 @@ byte-oriented API supports a demanding application. Keep Git rules in
 `object-log-git`, HTTP hosting in the Spin adapter, and one conditional log head
 as the only mutable durable authority.
 
+## Current acceptance target
+
+The functional implementation is a baseline, not an accepted simplicity proof.
+Reduce the roughly 11,883 production lines in the Git engine by at least half.
+Prefer replacing algorithms with established libraries over local refactoring.
+Preserve the behavior below while testing alternatives; do not count moved code
+or removed tests as reduction. The current language split and exact allocation
+budgets are design choices to reconsider, not evidence that custom Git machinery
+is required. Demonstrate library incompatibilities with small executable probes
+before claiming the target cannot be met.
+
 ## Service behavior
 
 The service supports SHA-1 and SHA-256 with unchanged Git clients:
