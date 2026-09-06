@@ -6,6 +6,9 @@ its HTTP and signing interfaces adapted to Spin SDK 5.2 and RustCrypto. Git
 parsing, selection, pack generation, publication, and recovery stay in the
 shared engine; the object-log head remains the only mutable durable authority.
 
+See [release operations](RELEASE.md) for upgrades, offline backup/restore drills,
+readiness, maintenance windows and rollback using the same private configuration.
+
 Use Rust with the `wasm32-wasip2` target, Spin 4.0.2 (the qualified runtime),
 and an existing S3-compatible bucket with conditional-write support. Build from
 the workspace root, outside any serving memory limit:
