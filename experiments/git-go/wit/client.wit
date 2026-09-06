@@ -1,0 +1,2 @@
+package object-log:git-proof@0.1.0;
+world client { import object-log:storage/wal@0.1.0; }
