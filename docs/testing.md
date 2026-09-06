@@ -183,10 +183,18 @@ on failure. It currently checks:
 - Every referenced object has a current staged proof or passes full integrity
   verification before publication.
 
-The current model derives prior history from the implementation output, so it
-is not independent. The remaining qualification work must add an
-independent canonical history, a checkpoint worker, checkpoint and object
-oracles, and separate prepare, stage, checkpoint, and crash actions.
+The append/recovery oracle builds canonical history from submitted operation
+and result bytes, model-owned writer revisions, and the selected fault
+schedule. Returned views, records, and statuses never advance that history.
+Every action checks exact durable records and reader snapshot contents against
+the model. Reopened pending work resumes from a serialized recovery token.
+Fixed lost-response and competing-writer schedules supplement the reproducible
+seeds; mutation checks reject omitted, extra, duplicate, reordered, and
+substituted records.
+
+Generated checkpoint and collection oracles remain qualification work, along
+with object oracles and separate prepare, stage, and checkpoint actions. The
+current generated scenario does not checkpoint or collect.
 
 ## Benchmark contract
 
