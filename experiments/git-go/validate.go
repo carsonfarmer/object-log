@@ -106,6 +106,9 @@ func verifyObjects(st storage.Storer, tips []plumbing.Hash) error {
 			if e != nil {
 				return e
 			}
+			if e = tree.Validate(); e != nil {
+				return e
+			}
 			for _, entry := range tree.Entries {
 				kind := plumbing.BlobObject
 				switch entry.Mode {

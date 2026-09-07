@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"github.com/go-git/go-git/v6/backend"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -81,8 +82,40 @@ func advertise(w io.Writer, s *store) error {
 func init() { wasihttp.HandleFunc(serve) }
 func main() {}
 func serve(response http.ResponseWriter, r *http.Request) {
+	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 2)
+	if len(parts) != 2 || (parts[0] != "sha1.git" && parts[0] != "sha256.git") {
+		http.NotFound(response, r)
+		return
+	}
+	service := parts[1]
+	method := http.MethodPost
+	if service == "info/refs" {
+		service = r.URL.Query().Get("service")
+		method = http.MethodGet
+	}
+	if service != transport.ReceivePackService && service != transport.UploadPackService {
+		http.NotFound(response, r)
+		return
+	}
+	if r.Method != method {
+		response.Header().Set("Allow", method)
+		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if password := os.Getenv("GIT_PASSWORD"); password != "" {
+		_, supplied, ok := r.BasicAuth()
+		if !ok || subtle.ConstantTimeCompare([]byte(password), []byte(supplied)) != 1 {
+			response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
+			http.Error(response, "authentication required", http.StatusUnauthorized)
+			return
+		}
+	}
+	if os.Getenv("GIT_READ_ONLY") == "true" && service == transport.ReceivePackService {
+		http.Error(response, "repository is read-only", http.StatusForbidden)
+		return
+	}
 	format := config.SHA1
-	if strings.HasPrefix(r.URL.Path, "/sha256.git") {
+	if parts[0] == "sha256.git" {
 		format = config.SHA256
 	}
 	session, e := unwrap(wal.Open(wal.Config{Endpoint: os.Getenv("WAL_ENDPOINT"), Bucket: os.Getenv("WAL_BUCKET"), Region: os.Getenv("WAL_REGION"), AccessKey: os.Getenv("WAL_ACCESS_KEY"), SecretKey: os.Getenv("WAL_SECRET_KEY"), Prefix: os.Getenv("WAL_PREFIX"), LogId: "repo-" + format.String()}))
@@ -105,12 +138,12 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Wal-Bytes", fmt.Sprint(u.Bytes))
 		log.Printf("wal %s %s calls=%d bytes=%d", r.Method, r.URL.Path, u.Calls, u.Bytes)
 	}()
-	if r.URL.Query().Get("service") == transport.ReceivePackService {
+	if service == transport.ReceivePackService && method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 		e = advertise(w, s)
-	} else if strings.HasSuffix(r.URL.Path, "/git-receive-pack") {
+	} else if service == transport.ReceivePackService {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-		e = transport.ReceivePack(r.Context(), &frozen{s}, r.Body, writeCloser{w}, &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
+		e = receive(r.Context(), &frozen{s}, r.Body, writeCloser{w}, &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
 			refs, e := validate(s, info.Commands)
 			if e != nil {
 				return e
@@ -128,6 +161,9 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if e != nil {
 		log.Printf("git request failed: %v", e)
+		if !w.sent {
+			http.Error(w, "Git operation failed", http.StatusInternalServerError)
+		}
 	} else if !w.sent {
 		w.WriteHeader(http.StatusOK)
 	}

@@ -16,6 +16,16 @@ budgets are design choices to reconsider, not evidence that custom Git machinery
 is required. Demonstrate library incompatibilities with small executable probes
 before claiming the target cannot be met.
 
+## Replacement scope
+
+Prioritize a small, usable Git service over copying every old feature. Ordinary
+clone/fetch/push, branches/tags, both hashes, safe concurrent publication, cold
+recovery, access control, sparse reads and safe storage cleanup remain essential.
+Evaluate shallow/partial clone on usability and library support. Packfile URIs
+and exact old implementation budgets are not automatic requirements. Keep the
+existing implementation until replacement acceptance; do not weaken its tests.
+The sections below describe that existing baseline, not a mandate to rebuild it.
+
 ## Service behavior
 
 The service supports SHA-1 and SHA-256 with unchanged Git clients:

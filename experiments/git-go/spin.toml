@@ -1,0 +1,16 @@
+spin_manifest_version = 2
+[application]
+name = "wal-git"
+version = "0.0.0"
+
+[[trigger.http]]
+route = "/..."
+component = "git"
+
+[component.git]
+source = "git.wasm"
+allowed_outbound_hosts = ["http://127.0.0.1:19090"]
+[component.git.environment]
+WAL_ENDPOINT = "http://127.0.0.1:19090"
+WAL_BUCKET = "wal-proof"
+WAL_REGION = "us-east-1"

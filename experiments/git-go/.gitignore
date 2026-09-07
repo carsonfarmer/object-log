@@ -1,3 +1,5 @@
 /main.wasm
 /bindings/
 /wit/deps/
+/git.wasm
+/.spin/

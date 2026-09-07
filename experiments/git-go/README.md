@@ -15,7 +15,7 @@ Compose the component with `wal-component` and start ordinary Spin against a
 fresh, isolated local MinIO prefix. The paths are `/sha1.git` and `/sha256.git`.
 The host supplies `WAL_ENDPOINT`, `WAL_BUCKET`, `WAL_REGION`, `WAL_ACCESS_KEY`,
 `WAL_SECRET_KEY`, and `WAL_PREFIX` as environment variables. Bind to loopback;
-this experiment does not provide authentication.
+authentication is optional as described below.
 
 Run the opt-in tests against that host:
 
@@ -31,9 +31,40 @@ retrieval. The byte bound uses actual WAL transport counters. `GIT_PROBE_LOG`
 is only needed when the host drops HTTP trailers; it reads the same counters
 from the corresponding request's log line. Run each suite with a fresh prefix.
 
-Objects use 1 MiB chunks and an immutable bucketed index, not stored Git packs.
-The WAL currently limits each bucket to 1,024 object children. Upstream's parser
-retains inflated objects for non-seekable receive input, so chunked storage does
-not establish bounded receive memory. Packed storage/range reuse, full protocol
-extension parity, maintenance/GC, and expired-view retry remain outside this
-experiment. It does not replace the existing implementation yet.
+Objects use the library's compressed loose-object format in 1 MiB chunks.
+Crowded index leaves split, keeping lookup sparse. Incoming packs are staged as
+seekable WAL chunks so the library can release decoded bodies as it parses;
+individual delta bases/results still require full buffers. Temporary input packs
+are not published roots and need later collection. Packed storage with deltas,
+maintenance/GC, expired-view retry, and full fetch visibility policy remain open.
+
+The replacement is **not accepted**. Ordinary both-hash client tests passed with
+access control, persisted default branches, tags/deletion, thin pushes and
+conflicting atomic updates. Index and codec tests pass with the race detector.
+The retained `TestManyObjects` pushes 32 files (about 2 MiB), but cloning traps
+inside Go's canonical allocator when GC completion calls the wall clock. The
+adapter pauses its monotonic clock only. This also occurred in a small push;
+size is not a safe workaround. No GC disabling, Spin patch, or binding fork is
+included. An intermittent S3 initialization-probe HTTP error also failed one
+concurrent-push run. The full provider gate remains red.
+
+The related upstream [GC issue](https://github.com/bytecodealliance/componentize-go/issues/56)
+describes the monotonic-clock case; our observed stack uses `runtime.walltime1`.
+Do not treat its closure as proof that this toolchain works. The failing provider
+test is the reproduction. No upstream issue or comment has been posted.
+
+Local configuration is in `spin.toml`. After building both components, compose:
+
+```sh
+wac plug --plug ../wal-component/target/wasm32-wasip2/release/wal_component_probe.wasm main.wasm -o git.wasm
+spin up --listen 127.0.0.1:19100 \
+  --env WAL_PREFIX=your-fresh-test-prefix \
+  --env WAL_ACCESS_KEY=your-local-minio-key \
+  --env WAL_SECRET_KEY=your-local-minio-secret
+```
+
+Use `--env GIT_PASSWORD=...` for Git HTTP Basic authentication (any username),
+`--env GIT_READ_ONLY=true` to reject pushes, and `--env WAL_DEFAULT_BRANCH=...`
+for a new repository's default branch. That branch is saved with the repository.
+Set matching `GIT_PROBE_PASSWORD` and `GIT_PROBE_BRANCH` when testing those settings.
+Use HTTPS when credentials leave loopback. No authentication is enabled by default.
