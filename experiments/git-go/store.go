@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
+	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
@@ -40,6 +42,7 @@ type indexed struct {
 }
 type rootMeta struct {
 	Format  config.ObjectFormat
+	Head    string
 	Refs    map[string]string
 	Buckets []string
 }
@@ -50,7 +53,7 @@ type store struct {
 	session *wal.Session
 	meta    rootMeta
 	buckets map[string]*wal.Object
-	loaded  map[string]map[string]indexed
+	loaded  map[*wal.Object]radixNode[indexed, *wal.Object]
 	pending map[string]indexed
 }
 
@@ -59,7 +62,7 @@ func openStore(session *wal.Session, format config.ObjectFormat) (result *store,
 	if e := mem.SetObjectFormat(format); e != nil {
 		return nil, e
 	}
-	s := &store{Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[string]map[string]indexed{}, pending: map[string]indexed{}}
+	s := &store{Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
 			s.Close()
@@ -95,44 +98,40 @@ func openStore(session *wal.Session, format config.ObjectFormat) (result *store,
 			_ = s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
 		}
 	}
-	_ = s.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, "refs/heads/main"))
+	head := s.meta.Head
+	if head == "" {
+		branch := "main"
+		if len(records) == 0 && os.Getenv("WAL_DEFAULT_BRANCH") != "" {
+			branch = os.Getenv("WAL_DEFAULT_BRANCH")
+		}
+		head = "refs/heads/" + branch
+	}
+	if !strings.HasPrefix(head, "refs/heads/") {
+		return nil, fmt.Errorf("invalid default branch")
+	}
+	if e := plumbing.ReferenceName(head).Validate(); e != nil {
+		return nil, e
+	}
+	s.meta.Head = head
+	if e := s.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(head))); e != nil {
+		return nil, e
+	}
 	return s, nil
-}
-func (s *store) bucket(key string) (map[string]indexed, error) {
-	if cached, ok := s.loaded[key]; ok {
-		return cached, nil
-	}
-	result := map[string]indexed{}
-	if root, ok := s.buckets[key]; ok {
-		entry, e := s.readNode(root)
-		if e != nil {
-			return nil, e
-		}
-		var items []objectMeta
-		if e = json.Unmarshal(entry.Data, &items); e != nil {
-			return nil, e
-		}
-		if len(items) != len(entry.Objects) {
-			return nil, fmt.Errorf("invalid index leaf")
-		}
-		for i, item := range items {
-			result[item.ID] = indexed{item, entry.Objects[i]}
-		}
-	}
-	s.loaded[key] = result
-	return result, nil
 }
 func (s *store) lookup(id plumbing.Hash) (indexed, error) {
 	key := id.String()
 	if item, ok := s.pending[key]; ok {
 		return item, nil
 	}
-	bucket, e := s.bucket(key[:2])
-	if e != nil {
-		return indexed{}, e
-	}
-	item, ok := bucket[key]
+	root, ok := s.buckets[key[:2]]
 	if !ok {
+		return indexed{}, plumbing.ErrObjectNotFound
+	}
+	item, found, err := lookupRadix(key, root, s.loadBucket)
+	if err != nil {
+		return indexed{}, err
+	}
+	if !found {
 		return indexed{}, plumbing.ErrObjectNotFound
 	}
 	return item, nil
@@ -154,13 +153,9 @@ func (s *store) EncodedObjectSize(id plumbing.Hash) (int64, error) {
 }
 func (s *store) IterEncodedObjects(kind plumbing.ObjectType) (storer.EncodedObjectIter, error) {
 	items := map[string]indexed{}
-	for key := range s.buckets {
-		bucket, e := s.bucket(key)
-		if e != nil {
+	for _, root := range s.buckets {
+		if e := walkRadix(root, s.loadBucket, func(id string, item indexed) { items[id] = item }); e != nil {
 			return nil, e
-		}
-		for id, item := range bucket {
-			items[id] = item
 		}
 	}
 	for id, item := range s.pending {
@@ -276,7 +271,7 @@ func (o *storedObject) SetType(plumbing.ObjectType)     { panic("immutable objec
 func (o *storedObject) SetSize(int64)                   { panic("immutable object") }
 func (o *storedObject) Writer() (io.WriteCloser, error) { return nil, fmt.Errorf("immutable object") }
 func (o *storedObject) Reader() (io.ReadCloser, error) {
-	entry, e := o.s.readNode(o.item.root)
+	entry, e := unwrap(o.s.session.ReadNode(o.item.root))
 	if e != nil {
 		return nil, e
 	}
@@ -302,6 +297,7 @@ func (r *objectReader) Read(p []byte) (int, error) {
 		if e != nil {
 			return 0, e
 		}
+		r.roots[0].Drop()
 		r.roots = r.roots[1:]
 		r.buf = bytes.NewReader(b)
 	}
@@ -309,39 +305,32 @@ func (r *objectReader) Read(p []byte) (int, error) {
 	r.remaining -= int64(n)
 	return n, e
 }
-func (r *objectReader) Close() error { return nil }
+func (r *objectReader) Close() error {
+	for _, root := range r.roots {
+		root.Drop()
+	}
+	r.roots = nil
+	r.buf = nil
+	r.remaining = 0
+	return nil
+}
 func (s *store) publish(refs map[string]string) error {
 	if s.failure != nil {
 		return s.failure
 	}
-	changed := map[string]bool{}
-	for id, item := range s.pending {
-		key := id[:2]
-		bucket, e := s.bucket(key)
-		if e != nil {
-			return e
-		}
-		bucket[id] = item
-		changed[key] = true
+	changed, e := partition(s.pending, 2)
+	if e != nil {
+		return e
 	}
-	for key := range changed {
-		bucket := s.loaded[key]
-		keys := make([]string, 0, len(bucket))
-		for id := range bucket {
-			keys = append(keys, id)
+	for key, updates := range changed {
+		node := radixNode[indexed, *wal.Object]{}
+		if root, ok := s.buckets[key]; ok {
+			node, e = s.loadBucket(root)
+			if e != nil {
+				return e
+			}
 		}
-		sort.Strings(keys)
-		items := make([]objectMeta, 0, len(keys))
-		children := make([]*wal.Object, 0, len(keys))
-		for _, id := range keys {
-			items = append(items, bucket[id].objectMeta)
-			children = append(children, bucket[id].root)
-		}
-		data, e := json.Marshal(items)
-		if e != nil {
-			return e
-		}
-		root, e := s.putNode(data, children)
+		root, e := updateRadix(key, node, updates, s.loadBucket, s.saveBucket)
 		if e != nil {
 			return e
 		}
