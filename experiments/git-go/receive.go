@@ -29,7 +29,7 @@ func (p *incomingPack) flush() error {
 	if len(p.buf) == 0 {
 		return nil
 	}
-	root, err := p.s.put(p.buf)
+	root, err := unwrap(p.s.session.Put(p.buf))
 	if err != nil {
 		return err
 	}
