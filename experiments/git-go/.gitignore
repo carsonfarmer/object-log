@@ -3,3 +3,4 @@
 /wit/deps/
 /git.wasm
 /.spin/
+/.adapter/

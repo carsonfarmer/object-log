@@ -1,0 +1,151 @@
+--- a/crates/wasi-preview1-component-adapter/src/lib.rs
++++ b/crates/wasi-preview1-component-adapter/src/lib.rs
+@@ -199,13 +199,12 @@
+     }
+ }
+ 
+-/// Toggle whether `clock_time_get` calls `monotonic_clock::now` or uses a
+-/// cached value.
++/// Toggle whether `clock_time_get` calls either host clock or uses cached values.
+ ///
+ /// When `paused` is true, subsequent calls to `clock_time_get` will return a
+-/// cached value instead of calling `monotonic_clock::now`.  This is useful in
++/// cached value instead of calling either host clock.  This is useful in
+ /// cases where the module's `cabi_realloc` function might call `clock_time_get`
+-/// with `CLOCKID_MONOTONIC`.  Since `cabi_realloc` is forbidden to call
++/// with `CLOCKID_MONOTONIC` or `CLOCKID_REALTIME`.  Since `cabi_realloc` is forbidden to call
+ /// imports, we can avoid trapping by using the cached value.
+ ///
+ /// This should be set back to false as soon as it is safe to call imports from
+@@ -703,44 +702,42 @@
+     time: &mut Timestamp,
+ ) -> Errno {
+     match id {
+-        CLOCKID_MONOTONIC => {
+-            // See `adapter_monotonic_clock_set_paused` for details on why we
+-            // sometimes use a cached value instead of calling
+-            // `monotonic_clock::now` here.
++        CLOCKID_MONOTONIC | CLOCKID_REALTIME => {
++            // Canonical realloc cannot call imports. Pause both clocks: Go's
++            // collector uses monotonic time during GC and wall time at completion.
+             if matches!(
+                 unsafe { get_allocation_state() },
+                 AllocationState::StackAllocated | AllocationState::StateAllocated
+             ) {
+                 State::with(|state| {
++                    let cached = if id == CLOCKID_MONOTONIC {
++                        &state.monotonic_clock_cached
++                    } else {
++                        &state.realtime_clock_cached
++                    };
+                     if state.monotonic_clock_paused.get() {
+-                        *time = state.monotonic_clock_cached.get();
++                        *time = cached.get();
+                     } else {
+-                        let now = monotonic_clock::now();
++                        let now = if id == CLOCKID_MONOTONIC {
++                            monotonic_clock::now()
++                        } else {
++                            let value = wall_clock::now();
++                            value
++                                .seconds
++                                .checked_mul(1_000_000_000)
++                                .and_then(|ns| ns.checked_add(value.nanoseconds.into()))
++                                .ok_or(ERRNO_OVERFLOW)?
++                        };
+                         *time = now;
+-                        state.monotonic_clock_cached.set(now);
++                        cached.set(now);
+                     }
+-
+                     Ok(())
+                 })
+             } else {
+-                // If the `State` has not yet been allocated, return a zero
+-                // value.  This ensures that the clock won't go backwards once
+-                // the `State` is allocated and we start calling
+-                // `monotonic_clock::now`.
++                // Bootstrap allocation must not initialize State or call imports.
+                 *time = 0;
+                 ERRNO_SUCCESS
+             }
+-        }
+-        CLOCKID_REALTIME => {
+-            let res = wall_clock::now();
+-            *time = match Timestamp::from(res.seconds)
+-                .checked_mul(1_000_000_000)
+-                .and_then(|ns| ns.checked_add(res.nanoseconds.into()))
+-            {
+-                Some(ns) => ns,
+-                None => return ERRNO_OVERFLOW,
+-            };
+-            ERRNO_SUCCESS
+         }
+         _ => ERRNO_BADF,
+     }
+@@ -2167,6 +2164,36 @@
+         const EVENTTYPE_CLOCK: u8 = wasip1::EVENTTYPE_CLOCK.raw();
+         const EVENTTYPE_FD_READ: u8 = wasip1::EVENTTYPE_FD_READ.raw();
+         const EVENTTYPE_FD_WRITE: u8 = wasip1::EVENTTYPE_FD_WRITE.raw();
++
++        // Go also performs a nonblocking timer poll when restarting GC.
++        // During canonical realloc only an immediate clock needs no host call.
++        if state.monotonic_clock_paused.get() {
++            if subscriptions.len() == 1 && subscriptions[0].u.tag == EVENTTYPE_CLOCK {
++                let subscription = &subscriptions[0];
++                // SAFETY: The subscription tag above identifies the clock union member.
++                let clock = unsafe { &subscription.u.u.clock };
++                if matches!(clock.id, CLOCKID_MONOTONIC | CLOCKID_REALTIME)
++                    && clock.timeout == 0
++                    && clock.flags == 0
++                {
++                    // SAFETY: The caller supplies space for nsubscriptions events (one here).
++                    unsafe {
++                        *out = Event {
++                            userdata: subscription.userdata,
++                            error: ERRNO_SUCCESS,
++                            type_: wasip1::EVENTTYPE_CLOCK,
++                            fd_readwrite: EventFdReadwrite {
++                                nbytes: 0,
++                                flags: 0,
++                            },
++                        };
++                    }
++                    *nevents = 1;
++                    return Ok(());
++                }
++            }
++            return Err(ERRNO_NOTSUP);
++        }
+ 
+         let mut pollables = Pollables {
+             pointer: pollables,
+@@ -2750,8 +2777,10 @@
+     /// Cached copy of the most recent value returned by `monotonic_clock::now`
+     monotonic_clock_cached: Cell<Timestamp>,
+ 
+-    /// If true, skip calling `monotonic_clock::now` in `clock_time_get` and
+-    /// instead return the value in `monotonic_clock_cached`.
++    /// Cached wall-clock timestamp; canonical realloc must not call the host.
++    realtime_clock_cached: Cell<Timestamp>,
++
++    /// If true, return the corresponding cached timestamp for either clock.
+     ///
+     /// See `wasi_snapshot_preview1 adapter_monotonic_clock_set_paused` for
+     /// details.
+@@ -2820,6 +2849,7 @@
+     // Remove miscellaneous metadata also stored in state.
+     let misc = if cfg!(feature = "proxy") { 12 } else { 14 };
+     start -= misc * size_of::<usize>();
++    start -= size_of::<Timestamp>(); // Additional cached realtime clock.
+ 
+     // Everything else is the `command_data` allocation.
+     start
+@@ -2936,6 +2966,7 @@
+                 #[cfg(not(feature = "proxy"))]
+                 dotdot: [UnsafeCell::new(b'.'), UnsafeCell::new(b'.')],
+                 monotonic_clock_cached: Cell::new(0),
++                realtime_clock_cached: Cell::new(0),
+                 monotonic_clock_paused: Cell::new(false),
+             });
+         }

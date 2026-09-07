@@ -5,7 +5,8 @@ interface. It is a replacement feasibility experiment, not the complete Git proo
 The WAL head publishes the object index and refs together; Go has no separate
 durable authority or local repository cache.
 
-Use stock Go 1.26.3 and `make build`. The sibling `../wal-component` supplies the
+Use stock Go 1.26.3, install `rustup target add wasm32-unknown-unknown`,
+and run `make build`. The sibling `../wal-component` supplies the
 shared WIT contract. The Makefile generates bindings and builds `main.wasm`;
 generated files and binaries are ignored. Dependencies are pinned in `go.mod`:
 go-git `e9e5820fe0d2`, Bytecode Alliance go-pkg `91f6c4863e67`, and componentize-go
@@ -38,20 +39,19 @@ individual delta bases/results still require full buffers. Temporary input packs
 are not published roots and need later collection. Packed storage with deltas,
 maintenance/GC, expired-view retry, and full fetch visibility policy remain open.
 
-The replacement is **not accepted**. Ordinary both-hash client tests passed with
-access control, persisted default branches, tags/deletion, thin pushes and
-conflicting atomic updates. Index and codec tests pass with the race detector.
-The retained `TestManyObjects` pushes 32 files (about 2 MiB), but cloning traps
-inside Go's canonical allocator when GC completion calls the wall clock. The
-adapter pauses its monotonic clock only. This also occurred in a small push;
-size is not a safe workaround. No GC disabling, Spin patch, or binding fork is
-included. An intermittent S3 initialization-probe HTTP error also failed one
-concurrent-push run. The full provider gate remains red.
+The replacement is **not complete**. Both-hash provider tests pass with ordinary
+Spin, including the 32-file clone regression, malformed input, competing pushes,
+sparse retrieval and a stress run with `--env GOGC=1` (frequent Go collection).
+Index/codec native tests and strict adapter Clippy also pass. After restarting
+Spin, run `GIT_PROBE_PERSISTED_HEAD=true go test ./tests -run TestPersistedHead`
+with the same connection settings to check the saved default branch.
 
-The related upstream [GC issue](https://github.com/bytecodealliance/componentize-go/issues/56)
-describes the monotonic-clock case; our observed stack uses `runtime.walltime1`.
-Do not treat its closure as proof that this toolchain works. The failing provider
-test is the reproduction. No upstream issue or comment has been posted.
+`make build` applies `adapter.patch` to checksum-verified, pinned upstream source.
+This temporary component-build fix caches both clocks during canonical allocation
+and handles Go's immediate timer poll without calling the host. Other paused polls
+are rejected; it does not invent file-descriptor readiness. Spin itself and the
+Go collector remain unchanged. Remove this patch when the standard adapter passes
+the retained regression and stress tests. No upstream post has been made.
 
 Local configuration is in `spin.toml`. After building both components, compose:
 

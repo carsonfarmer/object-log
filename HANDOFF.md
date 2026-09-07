@@ -26,14 +26,15 @@ The smaller Go consumer is on `cf/git-architecture-reduction` under
 Roughly 1,900 production/interface/config lines now cover basic service policy,
 compressed loose objects, splitting sparse indexes and seekable incoming packs.
 The owner prioritizes ordinary complete Git over copying rarely used extensions.
-The branch is not a replacement yet: its retained 2 MiB provider clone test
-traps in Go component GC (`cabi_realloc` -> `gcMarkTermination` -> wall clock).
-Ordinary workflows and focused native tests have passed, but the full provider
-gate fails. One concurrent run also hit an S3 initialization-probe HTTP error.
-Do not disable GC, patch Spin, declare parity, or integrate this branch into main.
-Investigate a supported toolchain fix before expanding the adapter further.
-Remaining storage cleanup, large-object memory, retry and fetch-policy gaps are
-listed in the experiment README. No upstream posts or remote deployment occurred.
+The runtime crash is fixed by a small local component-adapter patch, built from
+pinned, checksum-verified upstream source. It pauses both clock imports and handles
+the immediate timer poll used by Go GC. Spin and Go's collector are unchanged.
+The full experiment provider suite passes both hashes, including the 2 MiB clone
+regression, with default GC and GOGC=1 stress. Strict adapter Clippy and core
+memory/filesystem conformance pass. The reproduction remains in provider tests.
+Do not integrate this branch as the complete replacement yet. Storage cleanup,
+large-object memory, expired-view retry and fetch-policy work remain; see the
+experiment README. No upstream post or remote deployment occurred.
 
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
 exact recovery, cumulative retry counters and provider tests. Use ordinary Spin
