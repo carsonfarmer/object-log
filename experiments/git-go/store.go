@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
+	"github.com/go-git/go-git/v6/plumbing/format/objfile"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/storage"
 	"github.com/go-git/go-git/v6/storage/memory"
@@ -32,9 +33,11 @@ func unwrap[T any](r wt.Result[T, wal.Failure]) (T, error) {
 }
 
 type objectMeta struct {
-	ID   string
-	Kind plumbing.ObjectType
-	Size int64
+	ID         string
+	Kind       plumbing.ObjectType
+	Size       int64
+	Encoding   string `json:",omitempty"`
+	StoredSize int64  `json:",omitempty"`
 }
 type indexed struct {
 	objectMeta
@@ -173,7 +176,13 @@ func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteC
 	if size < 0 {
 		return nil, fmt.Errorf("invalid object size")
 	}
-	return &objectWriter{s: s, kind: kind, size: size, hash: plumbing.NewHasher(s.meta.Format, kind, size)}, nil
+	sink := &chunkWriter{s: s}
+	codec := objfile.NewWriter(sink, s.meta.Format)
+	if err := codec.WriteHeader(kind, size); err != nil {
+		_ = codec.Close()
+		return nil, err
+	}
+	return &objectWriter{s: s, kind: kind, size: size, codec: codec, sink: sink}, nil
 }
 func (s *store) SetEncodedObject(o plumbing.EncodedObject) (plumbing.Hash, error) {
 	r, e := o.Reader()
@@ -191,71 +200,97 @@ func (s *store) SetEncodedObject(o plumbing.EncodedObject) (plumbing.Hash, error
 	if e = w.Close(); e != nil {
 		return plumbing.ZeroHash, e
 	}
-	return w.(*objectWriter).hash.Sum(), nil
+	return w.(*objectWriter).codec.Hash(), nil
 }
 
 type objectWriter struct {
 	s             *store
 	kind          plumbing.ObjectType
 	size, written int64
-	hash          plumbing.Hasher
-	buf           []byte
-	chunks        []*wal.Object
+	codec         *objfile.Writer
+	sink          *chunkWriter
 	closed        bool
+	err           error
 }
 
 func (w *objectWriter) Write(p []byte) (int, error) {
 	if w.closed || int64(len(p)) > w.size-w.written {
-		return 0, fmt.Errorf("invalid object write")
+		if w.err == nil {
+			w.err = fmt.Errorf("invalid object write")
+		}
+		return 0, w.err
 	}
-	n := len(p)
-	_, _ = w.hash.Write(p)
+	n, err := w.codec.Write(p)
 	w.written += int64(n)
+	if err != nil {
+		w.err = err
+	}
+	return n, err
+}
+func (w *objectWriter) Close() (err error) {
+	if w.closed {
+		return w.err
+	}
+	w.closed = true
+	defer func() {
+		w.err = err
+		if err != nil {
+			w.s.failure = err
+		}
+	}()
+	closed := w.codec.Close()
+	if w.err != nil {
+		return w.err
+	}
+	if closed != nil {
+		return closed
+	}
+	if w.written != w.size {
+		return fmt.Errorf("incomplete object")
+	}
+	if len(w.sink.buf) > 0 {
+		if err = w.sink.flush(); err != nil {
+			return err
+		}
+	}
+	root, err := w.s.putNode(nil, w.sink.chunks)
+	if err != nil {
+		return err
+	}
+	id := w.codec.Hash().String()
+	w.s.pending[id] = indexed{objectMeta{ID: id, Kind: w.kind, Size: w.size, Encoding: "zlib", StoredSize: w.sink.written}, root}
+	return nil
+}
+
+type chunkWriter struct {
+	s       *store
+	written int64
+	buf     []byte
+	chunks  []*wal.Object
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	n := len(p)
 	for len(p) > 0 {
 		k := min(chunkSize-len(w.buf), len(p))
 		w.buf = append(w.buf, p[:k]...)
 		p = p[k:]
+		w.written += int64(k)
 		if len(w.buf) == chunkSize {
-			if e := w.flush(); e != nil {
-				return 0, e
+			if err := w.flush(); err != nil {
+				return n - len(p), err
 			}
 		}
 	}
 	return n, nil
 }
-func (w *objectWriter) flush() error {
-	root, e := w.s.put(w.buf)
-	if e != nil {
-		return e
+func (w *chunkWriter) flush() error {
+	root, err := w.s.put(w.buf)
+	if err != nil {
+		return err
 	}
 	w.chunks = append(w.chunks, root)
 	w.buf = nil
-	return nil
-}
-func (w *objectWriter) Close() (err error) {
-	defer func() {
-		if err != nil {
-			w.s.failure = err
-		}
-	}()
-	if w.closed {
-		return nil
-	}
-	w.closed = true
-	if w.written != w.size {
-		return fmt.Errorf("incomplete object")
-	}
-	if len(w.buf) > 0 {
-		if e := w.flush(); e != nil {
-			return e
-		}
-	}
-	root, e := w.s.putNode(nil, w.chunks)
-	if e != nil {
-		return e
-	}
-	id := w.hash.Sum().String()
-	w.s.pending[id] = indexed{objectMeta{id, w.kind, w.size}, root}
 	return nil
 }
 
@@ -271,11 +306,26 @@ func (o *storedObject) SetType(plumbing.ObjectType)     { panic("immutable objec
 func (o *storedObject) SetSize(int64)                   { panic("immutable object") }
 func (o *storedObject) Writer() (io.WriteCloser, error) { return nil, fmt.Errorf("immutable object") }
 func (o *storedObject) Reader() (io.ReadCloser, error) {
-	entry, e := unwrap(o.s.session.ReadNode(o.item.root))
-	if e != nil {
-		return nil, e
+	if o.item.Encoding != "" && o.item.Encoding != "zlib" {
+		return nil, fmt.Errorf("unknown object encoding")
 	}
-	return &objectReader{s: o.s, roots: entry.Objects, remaining: o.item.Size}, nil
+	entry, err := unwrap(o.s.session.ReadNode(o.item.root))
+	if err != nil {
+		return nil, err
+	}
+	size := o.item.Size
+	if o.item.Encoding != "" {
+		size = o.item.StoredSize
+	}
+	source := &objectReader{s: o.s, roots: entry.Objects, remaining: size}
+	if size < 0 {
+		_ = source.Close()
+		return nil, fmt.Errorf("invalid object size")
+	}
+	if o.item.Encoding == "" {
+		return source, nil
+	}
+	return readLoose(source, o.s.meta.Format, o.item.Kind, o.item.Size, o.Hash())
 }
 
 type objectReader struct {
