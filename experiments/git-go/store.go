@@ -53,6 +53,7 @@ type store struct {
 	owned []*wal.Object
 	storage.Storer
 	failure error
+	tail    bool
 	session *wal.Session
 	meta    rootMeta
 	buckets map[string]*wal.Object
@@ -63,6 +64,15 @@ type store struct {
 func openStore(session *wal.Session, format config.ObjectFormat) (result *store, err error) {
 	mem := memory.NewStorage()
 	if e := mem.SetObjectFormat(format); e != nil {
+		return nil, e
+	}
+	cfg, e := mem.Config()
+	if e != nil {
+		return nil, e
+	}
+	// Emit standard full-object pack entries without retaining large delta bases.
+	cfg.Pack.Window = 0
+	if e = mem.SetConfig(cfg); e != nil {
 		return nil, e
 	}
 	s := &store{Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
@@ -81,6 +91,7 @@ func openStore(session *wal.Session, format config.ObjectFormat) (result *store,
 	}
 	if len(records) > 0 {
 		last := records[len(records)-1]
+		s.tail = !last.Snapshot
 		if len(last.Objects) != 1 {
 			return nil, fmt.Errorf("invalid root record")
 		}
@@ -386,22 +397,7 @@ func (s *store) publish(refs map[string]string) error {
 		}
 		s.buckets[key] = root
 	}
-	keys := make([]string, 0, len(s.buckets))
-	for key := range s.buckets {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	children := make([]*wal.Object, 0, len(keys))
-	for _, key := range keys {
-		children = append(children, s.buckets[key])
-	}
-	s.meta.Refs = refs
-	s.meta.Buckets = keys
-	data, e := json.Marshal(s.meta)
-	if e != nil {
-		return e
-	}
-	root, e := s.putNode(data, children)
+	root, e := s.stageRoot(refs)
 	if e != nil {
 		return e
 	}
@@ -426,6 +422,25 @@ func (s *store) publish(refs map[string]string) error {
 	default:
 		return fmt.Errorf("publication conflict or expired view")
 	}
+}
+
+func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
+	keys := make([]string, 0, len(s.buckets))
+	for key := range s.buckets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	children := make([]*wal.Object, 0, len(keys))
+	for _, key := range keys {
+		children = append(children, s.buckets[key])
+	}
+	s.meta.Refs = refs
+	s.meta.Buckets = keys
+	data, e := json.Marshal(s.meta)
+	if e != nil {
+		return nil, e
+	}
+	return s.putNode(data, children)
 }
 
 func (s *store) Close() {
