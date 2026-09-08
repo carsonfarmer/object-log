@@ -52,13 +52,14 @@ type rootMeta struct {
 type store struct {
 	owned []*wal.Object
 	storage.Storer
-	failure error
-	tail    bool
-	session *wal.Session
-	meta    rootMeta
-	buckets map[string]*wal.Object
-	loaded  map[*wal.Object]radixNode[indexed, *wal.Object]
-	pending map[string]indexed
+	failure     error
+	tail        bool
+	tailEntries int
+	session     *wal.Session
+	meta        rootMeta
+	buckets     map[string]*wal.Object
+	loaded      map[*wal.Object]radixNode[indexed, *wal.Object]
+	pending     map[string]indexed
 }
 
 func openStore(session *wal.Session, format config.ObjectFormat) (result *store, err error) {
@@ -87,6 +88,9 @@ func openStore(session *wal.Session, format config.ObjectFormat) (result *store,
 		return nil, e
 	}
 	for _, record := range records {
+		if !record.Snapshot {
+			s.tailEntries++
+		}
 		s.owned = append(s.owned, record.Objects...)
 	}
 	if len(records) > 0 {
