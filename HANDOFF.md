@@ -10,6 +10,11 @@ maintenance command and old Git harnesses are removed.
 The core, KV and SQLite implementations are unchanged. Local replacement
 qualification passes; the old implementation remains available in Git history.
 
+Local development uses the existing published go-git module pin in `go.mod`,
+without a workspace override. Partial-clone filters are deferred. Leave the
+reviewed `carsonfarmer/go-git` branch `cf/partial-clone-filters` parked until the
+owner decides whether to resume it.
+
 The Go consumer delegates protocols, formats and packs to go-git. It retains
 sparse object lookup, atomic refs, cold recovery, authentication, read-only mode,
 safe checkpoint/collection and a small once-only expired-read retry. Before

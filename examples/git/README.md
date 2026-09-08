@@ -5,6 +5,8 @@ formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
 Local replacement checks pass; this is not production ready.
+Development uses the published go-git module pinned in `go.mod`, without the
+experimental filter fork. Partial-clone filters are currently unavailable.
 
 ## Build and run locally
 
