@@ -78,7 +78,8 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	if e != nil {
 		return nil, e
 	}
-	// Emit standard full-object pack entries without retaining large delta bases.
+	// A nonzero window limits object count, not bytes: go-git buffers delta
+	// bases and targets. Keep full-object streaming until selection can bound bytes.
 	cfg.Pack.Window = 0
 	if e = mem.SetConfig(cfg); e != nil {
 		return nil, e
