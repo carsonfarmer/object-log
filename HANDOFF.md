@@ -55,3 +55,8 @@ Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
 explicit uncertain outcomes and cumulative retry counters. Keep reports short;
 verification belongs in tests and Git history rather than new evidence archives.
 After Git settles, return to the KV design scoped in issue #39.
+
+Mature-tail checkpointing reuses complete verification on an exact local view;
+reopened handles and recovery tokens still verify. SQLite recovery uses one
+ordered 32-chunk window across records. Cold metadata recovery still reads the
+whole tail. Licensing and dependency provenance are in THIRD_PARTY.md.

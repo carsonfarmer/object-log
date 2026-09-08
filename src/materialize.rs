@@ -124,6 +124,7 @@ where
                 .map_err(MaterializeError::State)?;
         }
     }
+    log.remember_tail(&view);
     Ok(Materialized { view, state })
 }
 

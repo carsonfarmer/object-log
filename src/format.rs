@@ -1040,6 +1040,7 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
     let prepared = PreparedCommit {
         view: View {
             observed: Arc::new(ObservedState {
+                verified_tail: std::sync::OnceLock::new(),
                 head: decode_head(&wire.head)?,
                 version: UpdateVersion {
                     e_tag: wire.e_tag,
@@ -2422,6 +2423,7 @@ mod tests {
         let prepared = crate::PreparedCommit {
             view: crate::View {
                 observed: Arc::new(crate::ObservedState {
+                    verified_tail: std::sync::OnceLock::new(),
                     head: Head::empty(log_id(), incarnation(), Options::default()),
                     version: object_store::UpdateVersion {
                         e_tag: Some("etag".to_owned()),
@@ -2463,6 +2465,7 @@ mod tests {
         let mut prepared = crate::PreparedCommit {
             view: crate::View {
                 observed: Arc::new(crate::ObservedState {
+                    verified_tail: std::sync::OnceLock::new(),
                     head: Head::empty(log_id(), incarnation(), Options::default()),
                     version: object_store::UpdateVersion {
                         e_tag: Some("etag".to_owned()),
@@ -2734,6 +2737,7 @@ mod tests {
         let prepared = crate::PreparedCommit {
             view: crate::View {
                 observed: Arc::new(crate::ObservedState {
+                    verified_tail: std::sync::OnceLock::new(),
                     head: Head::empty(log_id(), incarnation(), Options::default()),
                     version: object_store::UpdateVersion {
                         e_tag: Some("etag".to_owned()),

@@ -26,11 +26,11 @@ async fn staged_object_request_accounting() -> TestResult {
     report("1 MiB SQLite update", &update);
 
     let checkpoint = measure_checkpoint().await?;
-    assert_eq!(checkpoint.operation(Operation::Get).requests, 2);
+    assert_eq!(checkpoint.operation(Operation::Get).requests, 1);
     assert_eq!(checkpoint.operation(Operation::Put).requests, 4);
-    assert_eq!(checkpoint.total_requests(), 6);
+    assert_eq!(checkpoint.total_requests(), 5);
     assert_eq!(blob_gets(&checkpoint), 0);
-    assert!(checkpoint.downloaded_bytes() < mib);
+    assert_eq!(checkpoint.downloaded_bytes(), 0);
     assert!(checkpoint.uploaded_bytes() > 100 * mib);
     report("100 MiB SQLite checkpoint", &checkpoint);
     Ok(())

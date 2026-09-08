@@ -27,7 +27,7 @@ use bytes::Bytes;
 use object_store::UpdateVersion;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 
 const DIGEST_LEN: usize = 32;
@@ -312,6 +312,7 @@ impl CheckpointRef {
 
 #[derive(Debug)]
 pub(crate) struct ObservedState {
+    pub(crate) verified_tail: OnceLock<Arc<StagingDomain>>,
     pub(crate) head: format::Head,
     pub(crate) version: UpdateVersion,
 }

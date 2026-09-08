@@ -670,7 +670,7 @@ async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResul
     else {
         return Err(test_error("proof checkpoint did not publish").into());
     };
-    assert_eq!(segment_gets(&store, "commits"), 1);
+    assert_eq!(segment_gets(&store, "commits"), 0);
     assert_eq!(segment_gets(&store, "nodes"), 0);
     assert_eq!(segment_gets(&store, "blobs"), 0);
 

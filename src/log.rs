@@ -1029,7 +1029,11 @@ impl Log {
             .await
         {
             Ok(UpdateResult::Updated { version }) => {
-                Ok(CommitStatus::Committed(Self::view(candidate, version)))
+                let next = Self::view(candidate, version);
+                if self.tail_is_verified(&prepared.view) {
+                    self.remember_tail(&next);
+                }
+                Ok(CommitStatus::Committed(next))
             }
             Ok(UpdateResult::PreconditionFailed) => {
                 let pending = PendingCommit {
@@ -1226,7 +1230,8 @@ impl Log {
     /// Returns expiry for missing commits in an older unretained view. A
     /// missing commit in the current epoch is corruption.
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
-        self.tail_records(view)?
+        let records = self
+            .tail_records(view)?
             .try_fold(
                 Vec::with_capacity(view.tail().len()),
                 |mut records, record| async move {
@@ -1234,7 +1239,36 @@ impl Log {
                     Ok(records)
                 },
             )
-            .await
+            .await?;
+        self.remember_tail(view);
+        Ok(records)
+    }
+
+    // Proofs cover immutable commit bodies and their complete ordered chain,
+    // not referenced payloads. They are local to this handle and exact view.
+    pub(crate) fn remember_tail(&self, view: &View) {
+        let _ = view
+            .observed
+            .verified_tail
+            .set(Arc::clone(&self.staging_domain));
+    }
+
+    fn tail_is_verified(&self, view: &View) -> bool {
+        view.observed
+            .verified_tail
+            .get()
+            .is_some_and(|proof| self.proof_matches(proof))
+    }
+
+    async fn verify_tail(&self, view: &View) -> Result<(), Error> {
+        self.validate_view(view)?;
+        if !self.tail_is_verified(view) {
+            self.tail_records(view)?
+                .try_for_each(|_| futures::future::ready(Ok(())))
+                .await?;
+            self.remember_tail(view);
+        }
+        Ok(())
     }
 
     // Keep ordered decoding bounded independently of the tail length. Callers
@@ -1284,6 +1318,11 @@ impl Log {
     /// hide a successful maintenance update. The method then returns
     /// [`CheckpointStatus::Pending`]. The caller must preserve that evidence
     /// and pass it to [`Log::resolve_checkpoint`].
+    ///
+    /// Complete tail verification is reused for this handle and exact view;
+    /// successful local appends extend the proof to their returned view. As
+    /// with staged objects, this relies on preserving immutable objects.
+    /// Fresh loads and decoded recovery evidence do not carry this proof.
     pub async fn publish_checkpoint(
         &self,
         view: &View,
@@ -1291,9 +1330,7 @@ impl Log {
         snapshot: Bytes,
         objects: Vec<StagedObject>,
     ) -> Result<CheckpointStatus, Error> {
-        self.tail_records(view)?
-            .try_for_each(|_| futures::future::ready(Ok(())))
-            .await?;
+        self.verify_tail(view).await?;
         self.validate_staged_objects(view, &objects)?;
         let objects = objects
             .into_iter()
@@ -1342,7 +1379,9 @@ impl Log {
             .await
         {
             Ok(UpdateResult::Updated { version }) => {
-                Ok(CheckpointStatus::Published(Self::view(candidate, version)))
+                let next = Self::view(candidate, version);
+                self.remember_tail(&next);
+                Ok(CheckpointStatus::Published(next))
             }
             Ok(UpdateResult::PreconditionFailed) => {
                 let current = match self.load().await {
@@ -1419,8 +1458,8 @@ impl Log {
             CheckpointEvidence::Retry => {}
         }
 
-        match self.read_tail(&pending.view).await {
-            Ok(_) => {}
+        match self.verify_tail(&pending.view).await {
+            Ok(()) => {}
             Err(Error::Store(_) | Error::RequestDenied) => {
                 return Ok(CheckpointResolution::StillPending(pending));
             }
@@ -1596,7 +1635,11 @@ impl Log {
 
     fn view(head: Head, version: UpdateVersion) -> View {
         View {
-            observed: Arc::new(ObservedState { head, version }),
+            observed: Arc::new(ObservedState {
+                head,
+                version,
+                verified_tail: std::sync::OnceLock::new(),
+            }),
         }
     }
 
@@ -3706,10 +3749,7 @@ mod tests {
                 .await?,
             CheckpointStatus::Published(_)
         ));
-        assert_eq!(
-            faults.metrics().operation(Operation::Get).requests,
-            u64::try_from(count)?
-        );
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 2);
         Ok(())
     }
@@ -4061,5 +4101,45 @@ mod tests {
             .update(StoreKey::Head, encoded, source.storage_version().clone())
             .await?;
         log.load().await
+    }
+    #[tokio::test]
+    async fn tail_proof_requires_a_complete_read_and_stays_with_its_handle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::sim::{FailurePhase, Operation};
+        let (log, faults, backend) = staged_read_log("tail-proof", Options::default()).await?;
+        let mut view = log.load().await?;
+        for _ in 0..3 {
+            view = fold_append(&log, &view, Bytes::from_static(&[1])).await?;
+        }
+        assert!(!log.tail_is_verified(&view));
+        faults.fail_next(Operation::Get, FailurePhase::Before);
+        assert!(log.read_tail(&view).await.is_err());
+        assert!(!log.tail_is_verified(&view));
+
+        let mut pause = faults.pause_next_get(FailurePhase::Before);
+        {
+            let reading = log.read_tail(&view);
+            tokio::pin!(reading);
+            tokio::select! {
+                result = &mut reading => panic!("read completed before pause: {result:?}"),
+                entered = pause.wait_until_entered() => assert!(entered),
+            }
+        }
+        assert!(!pause.release());
+        assert!(!log.tail_is_verified(&view));
+        log.read_tail(&view).await?;
+        assert!(log.tail_is_verified(&view));
+        let next = fold_append(&log, &view, Bytes::from_static(&[1])).await?;
+        assert!(log.tail_is_verified(&next));
+        assert!(!log.tail_is_verified(&log.load().await?));
+        let other = Log::open_existing(&backend, log.store.log_id(), Options::default()).await?;
+        assert!(!other.tail_is_verified(&next));
+        faults.reset();
+        other.verify_tail(&next).await?;
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 4);
+        faults.reset();
+        log.verify_tail(&next).await?;
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+        Ok(())
     }
 }

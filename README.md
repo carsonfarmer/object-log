@@ -54,7 +54,10 @@ a proven parent and derives child proofs for unchanged-subtree reuse.
 `stage_objects` fully verifies
 arbitrary durable references before it creates proofs. Recovery tokens do not
 contain a proof. `resume` and publication from a separately opened handle fully
-verify the referenced graph. A collection-epoch change rejects an older proof.
+verify the referenced graph. A collection-epoch change rejects an older proof. Complete tail reads and
+materialization also retain verification on that exact view. Local appends
+extend it, so checkpointing avoids rereading immutable commits. A reopened
+handle verifies the tail again.
 
 The current durable format is v1. Before the first release, its byte layout can
 change when a different layout makes the design smaller or better. The project
