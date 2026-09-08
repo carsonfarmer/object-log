@@ -46,6 +46,10 @@ Incoming delta bases and results still require whole-object buffers in go-git.
 Outgoing packs stream full objects without creating deltas, so transfer sizes
 can exceed a delta-compressed server's. There is no fixed process-memory promise.
 The generic WAL's configured object, reference and tail limits still apply.
+The Git example also bounds request bytes and accepted object sizes, with
+cooperative cancellation before storage operations. These checks cannot stop
+an already-running synchronous WASI import or prevent go-git's delta buffers.
+Host-wide request admission remains a deferred hosting concern.
 Normal Spin settings are used; no instance-count, pooling or host-memory wrapper.
 A temporary, pinned component-build adapter patch is currently necessary for Go
 GC host calls. Spin and Go's collector are unchanged.

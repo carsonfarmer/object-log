@@ -66,6 +66,11 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
 - `GIT_LARGE_OBJECT_MIB=513`: larger push/clone/edit/fetch lifecycle.
 - `GIT_PROBE_PERSISTED_HEAD=true`: run `TestPersistedHead` after restarting Spin
   with the same prefix to verify saved default-branch recovery.
+- `GIT_FAILURE_DRILLS=prepare GIT_DRILL_STATE=/tmp/git-drill-state.json`: run
+  `go test -race ./tests -run '^TestFailureDrills$' -count=1` from this directory
+  with `GIT_PROBE_URL` set. It checks concurrent writers/readers and interrupted
+  pushes. Stop and restart Spin with the same prefix, then rerun with
+  `GIT_FAILURE_DRILLS=verify` to check the saved expectations after recovery.
 
 ## Request limits
 
@@ -104,6 +109,13 @@ have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.
 Both hashes pass shallow clone, deepen, unshallow, annotated tags and 1,025
 consecutive pushes with automatic cleanup and cold recovery. Partial filters
 and packfile URIs are not replacement requirements.
+
+`go test ./tests -run TestDeltaEncoderGitCompatibility` checks full and delta packs against Git;
+`go test ./tests -run '^$' -bench BenchmarkOutgoingDeltas -benchmem` compares size
+and allocation costs. Delta selection currently saves transfer bytes at the
+cost of whole-object buffering; go-git's transport offers no byte-bounded selector.
+Intermittent local PUT connection closures remain tracked in
+[issue #41](https://github.com/carsonfarmer/object-log/issues/41).
 
 `make build` applies `adapter.patch` to checksum-verified upstream source. This
 temporary build-tool fix handles Go GC clock and immediate timer calls during
