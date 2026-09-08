@@ -35,12 +35,11 @@ recovery, shallow/deepen/unshallow, annotated tags and fetch visibility checks.
 The full provider suite also passes with frequent Go GC. Concurrent atomic
 pushes/readers, interrupted uploads, lost responses, cleanup and forced-restart
 recovery pass for both hashes. Issue #41 was traced to MinIO writing conflicting
-PUT responses twice, then silently closing a reusable connection. The local
-provider fix and persistent-connection regression are in `examples/git/minio.patch`;
-follow the Git README to build it. Normal Spin and the unchanged Git component
-pass repeated concurrent/restart checks against that server. Do not add transport
-workarounds or replay pushes. MinIO's analogous multipart path is outside this
-single-PUT fix; no upstream report or patch submission is authorized.
+PUT responses twice, then silently closing a reusable connection. A provider
+patch confirmed the cause, but is not an accepted solution. Use released MinIO
+and ordinary Spin; issue #41 remains open until the service handles these
+connection failures safely. Preserve uncertain publication outcomes and never
+blindly replay Git pushes. No upstream report or patch submission is authorized.
 Outgoing delta tests show smaller packs but much more
 allocation; the released library exposes no byte-bounded selection through its
 transport, so full-object streaming remains the default.
