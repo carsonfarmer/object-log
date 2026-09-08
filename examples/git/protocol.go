@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"os"
 
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
@@ -26,7 +28,11 @@ func receive(ctx context.Context, s storage.Storer, body io.ReadCloser, out io.W
 		return nil
 	}
 	var request packp.UpdateRequests
-	if err = request.Decode(reader); err != nil {
+	limits, err := loadLimits(os.Getenv)
+	if err != nil {
+		return err
+	}
+	if err = request.Decode(http.MaxBytesReader(nil, io.NopCloser(reader), limits.negotiationBytes)); err != nil {
 		return err
 	}
 	if len(request.Commands) == 0 {

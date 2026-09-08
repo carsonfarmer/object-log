@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,7 +52,9 @@ type rootMeta struct {
 	Buckets   []string
 }
 type store struct {
-	owned []*wal.Object
+	ctx            context.Context // Request-scoped; go-git storage methods do not accept contexts.
+	maxObjectBytes int64
+	owned          []*wal.Object
 	storage.Storer
 	failure     error
 	tail        bool
@@ -63,7 +66,10 @@ type store struct {
 	pending     map[string]indexed
 }
 
-func openStore(session *wal.Session, format config.ObjectFormat) (result *store, err error) {
+func openStore(ctx context.Context, session *wal.Session, format config.ObjectFormat, maxObjectBytes int64) (result *store, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	mem := memory.NewStorage()
 	if e := mem.SetObjectFormat(format); e != nil {
 		return nil, e
@@ -77,7 +83,7 @@ func openStore(session *wal.Session, format config.ObjectFormat) (result *store,
 	if e = mem.SetConfig(cfg); e != nil {
 		return nil, e
 	}
-	s := &store{Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
+	s := &store{ctx: ctx, maxObjectBytes: maxObjectBytes, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
 			s.Close()
@@ -138,6 +144,9 @@ func openStore(session *wal.Session, format config.ObjectFormat) (result *store,
 	return s, nil
 }
 func (s *store) lookup(id plumbing.Hash) (indexed, error) {
+	if err := s.ctx.Err(); err != nil {
+		return indexed{}, err
+	}
 	key := id.String()
 	if item, ok := s.pending[key]; ok {
 		return item, nil
@@ -189,6 +198,13 @@ func (s *store) IterEncodedObjects(kind plumbing.ObjectType) (storer.EncodedObje
 	return storer.NewEncodedObjectSliceIter(result), nil
 }
 func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteCloser, error) {
+	if err := s.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if size > s.maxObjectBytes {
+		s.failure = errObjectLimit
+		return nil, errObjectLimit
+	}
 	if size < 0 {
 		return nil, fmt.Errorf("invalid object size")
 	}
@@ -230,6 +246,10 @@ type objectWriter struct {
 }
 
 func (w *objectWriter) Write(p []byte) (int, error) {
+	if err := w.s.ctx.Err(); err != nil {
+		w.err = err
+		return 0, err
+	}
 	if w.closed || int64(len(p)) > w.size-w.written {
 		if w.err == nil {
 			w.err = fmt.Errorf("invalid object write")
@@ -322,6 +342,9 @@ func (o *storedObject) SetType(plumbing.ObjectType)     { panic("immutable objec
 func (o *storedObject) SetSize(int64)                   { panic("immutable object") }
 func (o *storedObject) Writer() (io.WriteCloser, error) { return nil, fmt.Errorf("immutable object") }
 func (o *storedObject) Reader() (io.ReadCloser, error) {
+	if err := o.s.ctx.Err(); err != nil {
+		return nil, err
+	}
 	if o.item.Encoding != "" && o.item.Encoding != "zlib" {
 		return nil, fmt.Errorf("unknown object encoding")
 	}
@@ -353,6 +376,9 @@ type objectReader struct {
 }
 
 func (r *objectReader) Read(p []byte) (int, error) {
+	if err := r.s.ctx.Err(); err != nil {
+		return 0, err
+	}
 	if r.remaining == 0 {
 		return 0, io.EOF
 	}
@@ -383,6 +409,9 @@ func (r *objectReader) Close() error {
 	return nil
 }
 func (s *store) publish(refs map[string]string) error {
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
 	if s.failure != nil {
 		return s.failure
 	}
@@ -408,11 +437,17 @@ func (s *store) publish(refs map[string]string) error {
 	if e != nil {
 		return e
 	}
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
 	candidate, e := unwrap(s.session.Prepare(nil, []*wal.Object{root}))
 	if e != nil {
 		return e
 	}
 	defer candidate.Drop()
+	if e := s.ctx.Err(); e != nil {
+		return e
+	}
 	result, e := unwrap(candidate.Publish())
 	if e != nil {
 		return e
@@ -453,6 +488,9 @@ func (s *store) Close() {
 	s.owned = nil
 }
 func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
+	if err := s.ctx.Err(); err != nil {
+		return wal.Entry{}, err
+	}
 	entry, e := unwrap(s.session.ReadNode(root))
 	s.observeRead(e)
 	if e == nil {
@@ -461,6 +499,9 @@ func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
 	return entry, e
 }
 func (s *store) put(b []byte) (*wal.Object, error) {
+	if err := s.ctx.Err(); err != nil {
+		return nil, err
+	}
 	o, e := unwrap(s.session.Put(b))
 	if e == nil {
 		s.owned = append(s.owned, o)
@@ -468,6 +509,9 @@ func (s *store) put(b []byte) (*wal.Object, error) {
 	return o, e
 }
 func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
+	if err := s.ctx.Err(); err != nil {
+		return nil, err
+	}
 	o, e := unwrap(s.session.PutNode(b, children))
 	if e == nil {
 		s.owned = append(s.owned, o)

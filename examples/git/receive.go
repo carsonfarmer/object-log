@@ -26,6 +26,9 @@ type incomingPack struct {
 }
 
 func (p *incomingPack) flush() error {
+	if err := p.s.ctx.Err(); err != nil {
+		return err
+	}
 	if len(p.buf) == 0 {
 		return nil
 	}
@@ -38,6 +41,10 @@ func (p *incomingPack) flush() error {
 	return nil
 }
 func (p *incomingPack) Write(data []byte) (n int, err error) {
+	if err := p.s.ctx.Err(); err != nil {
+		p.err = err
+		return 0, err
+	}
 	if p.closed {
 		return 0, io.ErrClosedPipe
 	}
@@ -98,6 +105,9 @@ type packReader struct {
 }
 
 func (r *packReader) Read(out []byte) (int, error) {
+	if err := r.pack.s.ctx.Err(); err != nil {
+		return 0, err
+	}
 	if len(out) == 0 {
 		return 0, nil
 	}

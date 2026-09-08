@@ -22,7 +22,9 @@ long tails fill, pushes invoke existing maintenance and reopen before accepting
 new updates. The installed Git executable remains the independent test oracle.
 
 Large-file lifecycles have passed at 16, 64 and 513 MiB for both hashes on local
-Spin/MinIO. Incoming delta bases/results still need full buffers, and outgoing
+Spin/MinIO. Request byte/object limits and cooperative deadlines are documented in the Git
+README. They do not bound total memory or cross-instance concurrency.
+Incoming delta bases/results still need full buffers, and outgoing
 packs omit delta compression. The temporary pinned component-build adapter patch
 fixes Go GC host calls; Spin and the Go collector remain unchanged. Do not claim
 a fixed memory ceiling or production readiness. Use a fresh prefix because the

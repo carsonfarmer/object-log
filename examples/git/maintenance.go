@@ -42,6 +42,9 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 		if err != nil {
 			return wal.CollectionResult{}, err
 		}
+		if err := s.ctx.Err(); err != nil {
+			return wal.CollectionResult{}, err
+		}
 		state, err := unwrap(s.session.Checkpoint(nil, []*wal.Object{root}))
 		if err != nil {
 			return wal.CollectionResult{}, err
@@ -52,10 +55,16 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 	}
 	// Refresh shares the original transport counters and observes the checkpoint
 	// or collection epoch before asking the core to resume/install a fenced plan.
+	if err := s.ctx.Err(); err != nil {
+		return wal.CollectionResult{}, err
+	}
 	session, err := unwrap(s.session.Refresh())
 	if err != nil {
 		return wal.CollectionResult{}, err
 	}
 	defer session.Drop()
+	if err := s.ctx.Err(); err != nil {
+		return wal.CollectionResult{}, err
+	}
 	return unwrap(session.Collect())
 }

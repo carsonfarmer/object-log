@@ -67,6 +67,26 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
 - `GIT_PROBE_PERSISTED_HEAD=true`: run `TestPersistedHead` after restarting Spin
   with the same prefix to verify saved default-branch recovery.
 
+## Request limits
+
+Defaults are 2 GiB per push, 8 MiB per negotiation (including expanded gzip),
+1 GiB per accepted object, and a five-minute request deadline. Override with
+`GIT_MAX_PUSH_BYTES`, `GIT_MAX_NEGOTIATION_BYTES`, `GIT_MAX_OBJECT_BYTES` (positive
+byte counts), and `GIT_REQUEST_TIMEOUT` (for example `2m`). Invalid settings fail
+closed. Push command headers share the negotiation bound.
+
+Cancellation is checked between storage calls and before publication. An
+already-running synchronous WASI call must finish; its publication outcome is
+preserved even after the deadline. Decoded deltas can allocate before their
+object-size check, so these limits do not promise a process-memory ceiling.
+Host-wide concurrent-request admission is a hosting concern and remains deferred;
+this example adds no instance limiter or additional durable coordination.
+
+To check small limits, start a fresh-prefix host with push=131072,
+negotiation=4096 and object=65536, then run
+`GIT_PROBE_LIMITS=1 GIT_PROBE_URL=http://127.0.0.1:19100 go test ./tests -run TestConfiguredLimits`
+from this directory. The ordinary suite uses the defaults.
+
 ## Cleanup and limits
 
 Push admission checkpoints long tails automatically. Send an authenticated

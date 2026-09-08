@@ -117,13 +117,29 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, "repository is read-only", http.StatusForbidden)
 		return
 	}
+	limits, e := loadLimits(os.Getenv)
+	if e != nil {
+		http.Error(response, e.Error(), http.StatusInternalServerError)
+		return
+	}
+	r, cancel, e := limitedRequest(response, r, limits, service == transport.ReceivePackService && method == http.MethodPost)
+	if e != nil {
+		http.Error(response, e.Error(), operationStatus(e))
+		return
+	}
+	defer cancel()
+	defer r.Body.Close()
 	format := config.SHA1
 	if parts[0] == "sha256.git" {
 		format = config.SHA256
 	}
+	if err := r.Context().Err(); err != nil {
+		http.Error(response, err.Error(), operationStatus(err))
+		return
+	}
 	session, e := unwrap(wal.Open(wal.Config{Endpoint: os.Getenv("WAL_ENDPOINT"), Bucket: os.Getenv("WAL_BUCKET"), Region: os.Getenv("WAL_REGION"), AccessKey: os.Getenv("WAL_ACCESS_KEY"), SecretKey: os.Getenv("WAL_SECRET_KEY"), Prefix: os.Getenv("WAL_PREFIX"), LogId: "repo-" + format.String()}))
 	if e != nil {
-		http.Error(response, e.Error(), 500)
+		http.Error(response, e.Error(), operationStatus(e))
 		return
 	}
 	defer func() { session.Drop() }()
@@ -136,6 +152,9 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		log.Printf("wal %s %s calls=%d bytes=%d", r.Method, r.URL.Path, u.Calls, u.Bytes)
 	}()
 	refresh := func() error {
+		if err := r.Context().Err(); err != nil {
+			return err
+		}
 		fresh, err := unwrap(session.Refresh())
 		if err == nil {
 			session.Drop()
@@ -145,7 +164,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if service == transport.UploadPackService {
 		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
-			s, err := openStore(session, format)
+			s, err := openStore(r.Context(), session, format, limits.objectBytes)
 			if err != nil {
 				return err
 			}
@@ -166,6 +185,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 				for _, id := range s.meta.Refs {
 					tips = append(tips, plumbing.NewHash(id))
 				}
+				body = http.MaxBytesReader(nil, io.NopCloser(body), limits.negotiationBytes)
 				body, err = filterFetch(s, tips, body, strings.Contains(request.Header.Get("Git-Protocol"), "version=2"))
 				if err != nil {
 					return err
@@ -180,14 +200,14 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			log.Printf("git read failed: %v", e)
 			if !w.sent {
-				http.Error(w, "Git read failed", http.StatusInternalServerError)
+				http.Error(w, "Git read failed", operationStatus(e))
 			}
 		}
 		return
 	}
-	s, e := openStore(session, format)
+	s, e := openStore(r.Context(), session, format, limits.objectBytes)
 	if e != nil {
-		http.Error(response, e.Error(), 500)
+		http.Error(response, e.Error(), operationStatus(e))
 		return
 	}
 	defer func() { s.Close() }()
@@ -203,7 +223,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 				return
 			}
-			fresh, err := openStore(session, format)
+			fresh, err := openStore(r.Context(), session, format, limits.objectBytes)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 				return
@@ -214,7 +234,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	if maintenance {
 		report, err := s.maintain()
 		if err != nil {
-			http.Error(w, "maintenance failed: "+err.Error(), 500)
+			http.Error(w, "maintenance failed: "+err.Error(), operationStatus(err))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -244,7 +264,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		log.Printf("git request failed: %v", e)
 		if !w.sent {
-			http.Error(w, "Git operation failed", http.StatusInternalServerError)
+			http.Error(w, "Git operation failed", operationStatus(e))
 		}
 	} else if !w.sent {
 		w.WriteHeader(http.StatusOK)

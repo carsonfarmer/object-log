@@ -1,0 +1,73 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRequestLimits(t *testing.T) {
+	defaults, err := loadLimits(func(string) string { return "" })
+	if err != nil || defaults.pushBytes != 2<<30 || defaults.objectBytes != 1<<30 {
+		t.Fatalf("defaults: %+v %v", defaults, err)
+	}
+	for _, key := range []string{"GIT_MAX_PUSH_BYTES", "GIT_MAX_NEGOTIATION_BYTES", "GIT_MAX_OBJECT_BYTES", "GIT_REQUEST_TIMEOUT"} {
+		for _, value := range []string{"0", "-1", "invalid", "9223372036854775808"} {
+			_, err := loadLimits(func(name string) string {
+				if name == key {
+					return value
+				}
+				return ""
+			})
+			if err == nil {
+				t.Errorf("accepted %s=%s", key, value)
+			}
+		}
+	}
+	for _, chunked := range []bool{false, true} {
+		for _, size := range []int{4, 5} {
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", size)))
+			if chunked {
+				req.ContentLength = -1
+			}
+			bounded, cancel, err := limitedRequest(httptest.NewRecorder(), req, requestLimits{pushBytes: 4, timeout: time.Minute}, true)
+			if err == nil {
+				_, err = io.ReadAll(bounded.Body)
+				bounded.Body.Close()
+				cancel()
+			}
+			if size == 4 && err != nil {
+				t.Fatal(err)
+			}
+			if size == 5 && operationStatus(err) != http.StatusRequestEntityTooLarge {
+				t.Fatalf("size=%d chunked=%v: %v", size, chunked, err)
+			}
+		}
+	}
+}
+
+func TestRequestDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("data")).WithContext(ctx)
+	bounded, stop, err := limitedRequest(httptest.NewRecorder(), request, requestLimits{negotiationBytes: 8, timeout: time.Minute}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	defer bounded.Body.Close()
+	cancel()
+	if _, err := io.ReadAll(bounded.Body); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled body: %v", err)
+	}
+	expired, finish := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer finish()
+	body := &requestBody{ReadCloser: io.NopCloser(strings.NewReader("data")), ctx: expired}
+	if _, err := io.ReadAll(body); !errors.Is(err, context.DeadlineExceeded) || operationStatus(err) != http.StatusRequestTimeout {
+		t.Fatalf("expired body: %v", err)
+	}
+}
