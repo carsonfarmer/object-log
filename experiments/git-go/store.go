@@ -44,10 +44,11 @@ type indexed struct {
 	root *wal.Object
 }
 type rootMeta struct {
-	Format  config.ObjectFormat
-	Head    string
-	Refs    map[string]string
-	Buckets []string
+	Validated bool `json:",omitempty"`
+	Format    config.ObjectFormat
+	Head      string
+	Refs      map[string]string
+	Buckets   []string
 }
 type store struct {
 	owned []*wal.Object

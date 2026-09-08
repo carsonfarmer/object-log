@@ -3,11 +3,8 @@ package main
 import (
 	"fmt"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
-	"github.com/go-git/go-git/v6/plumbing/revlist"
-	"github.com/go-git/go-git/v6/storage"
 	"strings"
 )
 
@@ -17,7 +14,6 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 		refs[name] = id
 	}
 	seen := map[string]bool{}
-	var tips []plumbing.Hash
 	for _, cmd := range cmds {
 		name := string(cmd.Name)
 		if seen[name] || !strings.HasPrefix(name, "refs/") || (cmd.Old.IsZero() && cmd.New.IsZero()) {
@@ -34,6 +30,9 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 		if cmd.New.IsZero() {
 			delete(refs, name)
 			continue
+		}
+		if _, e := st.EncodedObject(plumbing.AnyObject, cmd.New); e != nil {
+			return nil, e
 		}
 		if cmd.Name.IsBranch() {
 			next, e := object.GetCommit(st, cmd.New)
@@ -55,7 +54,6 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 			}
 		}
 		refs[name] = cmd.New.String()
-		tips = append(tips, cmd.New)
 	}
 	for name := range refs {
 		for parent := name; ; {
@@ -69,73 +67,13 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 			}
 		}
 	}
-	return refs, verifyObjects(st, tips)
-}
-
-// Upstream revlist selects objects; it is not a connectivity/kind validator.
-func verifyObjects(st storage.Storer, tips []plumbing.Hash) error {
-	ids, err := revlist.Objects(st, tips, nil)
-	if err != nil {
-		return err
+	ids := make([]plumbing.Hash, 0, len(st.pending))
+	for id := range st.pending {
+		ids = append(ids, plumbing.NewHash(id))
 	}
-	check := func(id plumbing.Hash, kind plumbing.ObjectType) error {
-		_, err := st.EncodedObject(kind, id)
-		return err
+	if err := verifyCatalog(st, st.meta.Validated, ids); err != nil {
+		return nil, err
 	}
-	for _, id := range ids {
-		o, err := st.EncodedObject(plumbing.AnyObject, id)
-		if err != nil {
-			return err
-		}
-		switch o.Type() {
-		case plumbing.CommitObject:
-			c, e := object.DecodeCommit(st, o)
-			if e != nil {
-				return e
-			}
-			if e = check(c.TreeHash, plumbing.TreeObject); e != nil {
-				return e
-			}
-			for _, p := range c.ParentHashes {
-				if e = check(p, plumbing.CommitObject); e != nil {
-					return e
-				}
-			}
-		case plumbing.TreeObject:
-			tree, e := object.DecodeTree(st, o)
-			if e != nil {
-				return e
-			}
-			if e = tree.Validate(); e != nil {
-				return e
-			}
-			for _, entry := range tree.Entries {
-				kind := plumbing.BlobObject
-				switch entry.Mode {
-				case filemode.Submodule:
-					continue
-				case filemode.Dir:
-					kind = plumbing.TreeObject
-				case filemode.Regular, filemode.Deprecated, filemode.Executable, filemode.Symlink:
-				default:
-					return fmt.Errorf("invalid tree mode")
-				}
-				if e = check(entry.Hash, kind); e != nil {
-					return e
-				}
-			}
-		case plumbing.TagObject:
-			tag, e := object.DecodeTag(st, o)
-			if e != nil {
-				return e
-			}
-			if e = check(tag.Target, tag.TargetType); e != nil {
-				return e
-			}
-		case plumbing.BlobObject:
-		default:
-			return fmt.Errorf("invalid object kind")
-		}
-	}
-	return nil
+	st.meta.Validated = true
+	return refs, nil
 }
