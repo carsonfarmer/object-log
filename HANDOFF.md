@@ -36,10 +36,13 @@ The full provider suite also passes with frequent Go GC. Concurrent atomic
 pushes/readers, interrupted uploads, lost responses, cleanup and forced-restart
 recovery pass for both hashes. Issue #41 was traced to MinIO writing conflicting
 PUT responses twice, then silently closing a reusable connection. A provider
-patch confirmed the cause, but is not an accepted solution. Use released MinIO
-and ordinary Spin; issue #41 remains open until the service handles these
-connection failures safely. Preserve uncertain publication outcomes and never
-blindly replay Git pushes. No upstream report or patch submission is authorized.
+patch confirmed the cause, but is not an accepted solution. The bridge now retries
+an identical conditional storage PUT once after a connection failure, accepting
+only a successful replay and otherwise preserving the first uncertain outcome.
+Released MinIO and ordinary Spin pass concurrent Git tests; injected response
+loss confirms that a successful write followed by a rejected retry stays pending,
+with published refs visible after refresh. Both attempts retain the same budget.
+Git pushes are never replayed. No upstream report or submission is authorized.
 Outgoing delta tests show smaller packs but much more
 allocation; the released library exposes no byte-bounded selection through its
 transport, so full-object streaming remains the default.

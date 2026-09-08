@@ -34,6 +34,8 @@ explicit; ordinary Git clients refresh refs after a lost response. Pushes are
 never automatically replayed. Expired reads may reopen once before response
 bytes are sent, with at most 1 MiB of request replay and cumulative storage
 counters. A late failure stops the response rather than restarting it.
+The storage bridge can retry one identical conditional write after a connection
+failure. A rejected retry preserves the original uncertain outcome for recovery.
 
 Before a push fills a long tail, existing maintenance checkpoints the reachable
 catalog. The HTTP maintenance endpoint also prunes unreachable objects and runs

@@ -103,21 +103,21 @@ fn http_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Htt
 #[async_trait]
 impl HttpService for Service {
     async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        retry_read(request, |request| self.call_once(request)).await
+        retry_request(request, |request| self.call_once(request)).await
     }
 }
 
-#[path = "read_retry.rs"]
-mod read_retry;
+#[path = "request_retry.rs"]
+mod request_retry;
 
-async fn retry_read<F, Fut>(request: HttpRequest, attempt: F) -> Result<HttpResponse, HttpError>
+async fn retry_request<F, Fut>(request: HttpRequest, attempt: F) -> Result<HttpResponse, HttpError>
 where
     F: FnMut(HttpRequest) -> Fut,
     Fut: std::future::Future<Output = Result<HttpResponse, HttpError>>,
 {
-    // A stalled bodyless read may retry once before any response is exposed.
+    // Retry before exposing a response; failed conditional replays remain uncertain.
     // Each attempt retains the same transport budget and configured deadlines.
-    read_retry::retry_read(request, attempt, |error| {
+    request_retry::retry_request(request, attempt, |error| {
         std::error::Error::source(error)
             .and_then(|source| source.downcast_ref::<spin_sdk::http::ErrorCode>())
             .is_some_and(|code| {

@@ -88,6 +88,11 @@ object-size check, so these limits do not promise a process-memory ceiling.
 Host-wide concurrent-request admission is a hosting concern and remains deferred;
 this example adds no instance limiter or additional durable coordination.
 
+A connection failure may retry one bodyless storage read or one identical
+conditional storage write. A rejected write retry preserves the first uncertain
+outcome for WAL recovery; it cannot turn a lost success into a definite conflict.
+Both attempts count toward the same storage budget. Git pushes are never replayed.
+
 To check small limits, start a fresh-prefix host with push=131072,
 negotiation=4096 and object=65536, then run
 `GIT_PROBE_LIMITS=1 GIT_PROBE_URL=http://127.0.0.1:19100 go test ./tests -run TestConfiguredLimits`
