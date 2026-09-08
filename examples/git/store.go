@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -187,9 +188,7 @@ func (s *store) IterEncodedObjects(kind plumbing.ObjectType) (storer.EncodedObje
 			return nil, e
 		}
 	}
-	for id, item := range s.pending {
-		items[id] = item
-	}
+	maps.Copy(items, s.pending)
 	result := make([]plumbing.EncodedObject, 0, len(items))
 	for _, item := range items {
 		if kind == plumbing.AnyObject || item.Kind == kind {
@@ -464,11 +463,8 @@ func (s *store) publish(refs map[string]string) error {
 }
 
 func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
-	keys := make([]string, 0, len(s.buckets))
-	for key := range s.buckets {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.AppendSeq(make([]string, 0, len(s.buckets)), maps.Keys(s.buckets))
+	slices.Sort(keys)
 	children := make([]*wal.Object, 0, len(keys))
 	for _, key := range keys {
 		children = append(children, s.buckets[key])

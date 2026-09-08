@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"maps"
+)
 
 // A leaf fits the WAL's default child-reference limit. Internal nodes split
 // one hex digit at a time, so they have at most sixteen children.
@@ -30,12 +33,8 @@ func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[stri
 	var zero H
 	if node.Children == nil {
 		items := make(map[string]V, len(node.Items)+len(updates))
-		for id, value := range node.Items {
-			items[id] = value
-		}
-		for id, value := range updates {
-			items[id] = value
-		}
+		maps.Copy(items, node.Items)
+		maps.Copy(items, updates)
 		if len(items) <= indexLeafSize {
 			return save(radixNode[V, H]{Items: items})
 		}
@@ -46,9 +45,7 @@ func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[stri
 		return zero, err
 	}
 	children := make(map[string]H, len(node.Children)+len(groups))
-	for key, root := range node.Children {
-		children[key] = root
-	}
+	maps.Copy(children, node.Children)
 	for key, group := range groups {
 		child := radixNode[V, H]{}
 		if root, ok := children[key]; ok {

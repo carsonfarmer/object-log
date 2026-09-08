@@ -3,8 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
-	"sort"
+	"slices"
 )
 
 type bucketMeta struct {
@@ -62,19 +63,13 @@ func (s *store) saveBucket(node radixNode[indexed, *wal.Object]) (*wal.Object, e
 	var meta bucketMeta
 	var children []*wal.Object
 	if node.Children != nil {
-		for prefix := range node.Children {
-			meta.Prefixes = append(meta.Prefixes, prefix)
-		}
-		sort.Strings(meta.Prefixes)
+		meta.Prefixes = slices.Sorted(maps.Keys(node.Children))
 		for _, prefix := range meta.Prefixes {
 			children = append(children, node.Children[prefix])
 		}
 	} else {
-		keys := make([]string, 0, len(node.Items))
-		for id := range node.Items {
-			keys = append(keys, id)
-		}
-		sort.Strings(keys)
+		keys := slices.AppendSeq(make([]string, 0, len(node.Items)), maps.Keys(node.Items))
+		slices.Sort(keys)
 		for _, id := range keys {
 			meta.Items = append(meta.Items, node.Items[id].objectMeta)
 			children = append(children, node.Items[id].root)

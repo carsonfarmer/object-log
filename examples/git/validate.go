@@ -5,14 +5,13 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
+	"maps"
 	"strings"
 )
 
 func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	refs := map[string]string{}
-	for name, id := range st.meta.Refs {
-		refs[name] = id
-	}
+	maps.Copy(refs, st.meta.Refs)
 	seen := map[string]bool{}
 	for _, cmd := range cmds {
 		name := string(cmd.Name)
