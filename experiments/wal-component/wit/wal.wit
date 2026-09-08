@@ -12,6 +12,8 @@ interface wal {
     }
     variant failure { expired, other(string) }
     variant outcome { committed, conflict, pending(list<u8>), expired }
+    enum maintenance-state { complete, more, conflict, pending, retained }
+    record collection-result { state: maintenance-state, objects: u64, bytes: u64 }
     record usage { calls: u64, bytes: u64 }
     resource object;
     record entry { snapshot: bool, data: list<u8>, objects: list<own<object>> }
@@ -20,6 +22,8 @@ interface wal {
         publish: func() -> result<outcome, failure>;
     }
     resource session {
+        checkpoint: func(data: list<u8>, roots: list<borrow<object>>) -> result<maintenance-state, failure>;
+        collect: func() -> result<collection-result, failure>;
         usage: func() -> usage;
         refresh: func() -> result<own<session>, failure>;
         records: func() -> result<list<entry>, failure>;

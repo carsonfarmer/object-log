@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"github.com/go-git/go-git/v6/backend"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -88,12 +89,13 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	service := parts[1]
+	maintenance := service == "maintenance"
 	method := http.MethodPost
 	if service == "info/refs" {
 		service = r.URL.Query().Get("service")
 		method = http.MethodGet
 	}
-	if service != transport.ReceivePackService && service != transport.UploadPackService {
+	if service != transport.ReceivePackService && service != transport.UploadPackService && !maintenance {
 		http.NotFound(response, r)
 		return
 	}
@@ -110,7 +112,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if os.Getenv("GIT_READ_ONLY") == "true" && service == transport.ReceivePackService {
+	if os.Getenv("GIT_READ_ONLY") == "true" && (service == transport.ReceivePackService || maintenance) {
 		http.Error(response, "repository is read-only", http.StatusForbidden)
 		return
 	}
@@ -138,7 +140,20 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Wal-Bytes", fmt.Sprint(u.Bytes))
 		log.Printf("wal %s %s calls=%d bytes=%d", r.Method, r.URL.Path, u.Calls, u.Bytes)
 	}()
-	if service == transport.ReceivePackService && method == http.MethodGet {
+	if maintenance {
+		report, err := s.maintain()
+		if err != nil {
+			http.Error(w, "maintenance failed: "+err.Error(), 500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		states := map[wal.MaintenanceState]string{wal.MaintenanceStateComplete: "complete", wal.MaintenanceStateMore: "more", wal.MaintenanceStateConflict: "conflict", wal.MaintenanceStatePending: "pending", wal.MaintenanceStateRetained: "retained"}
+		e = json.NewEncoder(w).Encode(struct {
+			State   string `json:"state"`
+			Objects uint64 `json:"candidate_objects"`
+			Bytes   uint64 `json:"candidate_bytes"`
+		}{states[report.State], report.Objects, report.Bytes})
+	} else if service == transport.ReceivePackService && method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 		e = advertise(w, s)
 	} else if service == transport.ReceivePackService {

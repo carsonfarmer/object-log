@@ -3,6 +3,7 @@ use bytes::Bytes;
 use exports::object_log::storage::wal::*;
 use object_log::{CommitStatus, Log, Materializer, Resolution, StagedObject, View};
 use std::sync::Arc;
+mod maintenance;
 mod transport;
 wit_bindgen::generate!({ path: "wit", world: "storage" });
 
@@ -67,6 +68,16 @@ impl Materializer for Records {
 }
 impl GuestObject for ObjectState {}
 impl GuestSession for SessionState {
+    fn checkpoint(
+        &self,
+        data: Vec<u8>,
+        roots: Vec<ObjectBorrow<'_>>,
+    ) -> Result<MaintenanceState, Failure> {
+        spin_executor::run(maintenance::checkpoint(self, data, proofs(&roots)))
+    }
+    fn collect(&self) -> Result<CollectionResult, Failure> {
+        spin_executor::run(maintenance::collect(self))
+    }
     fn usage(&self) -> Usage {
         let (calls, bytes) = self.transport.usage();
         Usage { calls, bytes }
@@ -230,3 +241,6 @@ impl Guest for Component {
     }
 }
 export!(Component);
+
+#[cfg(test)]
+mod maintenance_tests;

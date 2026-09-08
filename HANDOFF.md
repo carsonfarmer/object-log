@@ -32,9 +32,22 @@ the immediate timer poll used by Go GC. Spin and Go's collector are unchanged.
 The full experiment provider suite passes both hashes, including the 2 MiB clone
 regression, with default GC and GOGC=1 stress. Strict adapter Clippy and core
 memory/filesystem conformance pass. The reproduction remains in provider tests.
-Do not integrate this branch as the complete replacement yet. Storage cleanup,
-large-object memory, expired-view retry and fetch-policy work remain; see the
-experiment README. No upstream post or remote deployment occurred.
+Storage cleanup now uses the existing WAL checkpoint and fenced collection APIs:
+POST the repository's `/maintenance` endpoint until complete. Independent review,
+focused tests, native/WASIp2 Clippy and the workspace gate pass. The provider suite
+covers retained history and unreachable-object pruning for both hashes. Ordinary
+16, 64 and 513 MiB push/clone/edit/fetch lifecycles pass both hashes on local
+Spin/MinIO with unchanged Git client settings. Fetch
+streams full objects instead of building outgoing deltas; incoming delta bases
+and results still need full buffers. The exact 512 MiB fsck failure is a native
+Git threshold-equality bug, confirmed by matching content hashes and successful
+streaming verification with the threshold one byte lower.
+Do not integrate this branch as the complete replacement yet. Expired-view retry,
+fetch visibility policy and large-delta memory remain; see the experiment README.
+Fetch currently accepts known unreachable IDs within the authenticated repository
+until pruning. Use public library codecs for any policy fix and preserve the
+ref-tip sparse fast path; do not add a whole-history walk to every fetch.
+No upstream post or remote deployment occurred.
 
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
 exact recovery, cumulative retry counters and provider tests. Use ordinary Spin

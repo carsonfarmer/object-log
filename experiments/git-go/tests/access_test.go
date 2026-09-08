@@ -27,9 +27,14 @@ func TestAccess(t *testing.T) {
 		{"GET", "/sha1.git/info/refs?service=git-receive-pack", password, receiveStatus},
 		{"POST", "/sha1.git/info/refs?service=git-upload-pack", password, 405},
 		{"GET", "/sha1.git/git-upload-pack", password, 405},
+		{"GET", "/sha1.git/maintenance", password, 405},
+		{"GET", "/sha1.git/info/refs?service=maintenance", password, 404},
 		{"GET", "/unknown.git/info/refs?service=git-upload-pack", password, 404},
 		{"GET", "/sha256.git-extra/info/refs?service=git-upload-pack", password, 404},
 		{"GET", "/sha1.git/info/refs?service=unknown", password, 404},
+	}
+	if os.Getenv("GIT_PROBE_READ_ONLY") == "true" {
+		cases = append(cases, request{"POST", "/sha1.git/maintenance", password, 403})
 	}
 	if password != "" {
 		cases = append(cases, request{"GET", "/sha1.git/info/refs?service=git-upload-pack", "wrong", 401})

@@ -36,8 +36,9 @@ Objects use the library's compressed loose-object format in 1 MiB chunks.
 Crowded index leaves split, keeping lookup sparse. Incoming packs are staged as
 seekable WAL chunks so the library can release decoded bodies as it parses;
 individual delta bases/results still require full buffers. Temporary input packs
-are not published roots and need later collection. Packed storage with deltas,
-maintenance/GC, expired-view retry, and full fetch visibility policy remain open.
+are not published roots and need later collection. Fetch streams full objects without delta compression, trading larger transfers
+for lower memory use. Packed storage with deltas, expired-view retry, and full
+fetch visibility policy remain open.
 
 The replacement is **not complete**. Both-hash provider tests pass with ordinary
 Spin, including the 32-file clone regression, malformed input, competing pushes,
@@ -68,3 +69,20 @@ Use `--env GIT_PASSWORD=...` for Git HTTP Basic authentication (any username),
 for a new repository's default branch. That branch is saved with the repository.
 Set matching `GIT_PROBE_PASSWORD` and `GIT_PROBE_BRANCH` when testing those settings.
 Use HTTPS when credentials leave loopback. No authentication is enabled by default.
+
+For cleanup, send an authenticated `POST /sha1.git/maintenance` (or `/sha256.git/maintenance`).
+It prunes unreachable objects, checkpoints the retained history, and collects one
+bounded batch. Repeat `more` until `complete`; retry `pending` or `conflict` with a
+fresh request. `retained` means a WAL retention prevents collection. Reported
+counts are deletion candidates, not unique deletions across retries. Read-only
+mode also rejects maintenance. No separate maintenance program is needed.
+
+The ordinary-client large-file lifecycle passes at 16, 64 and 513 MiB for both
+hashes on local Spin/MinIO. Set `GIT_LARGE_OBJECT_MIB=513` and `-timeout 15m`
+to run the larger case. Git 2.54
+and 2.55 have a verifier boundary bug at exactly the default 512 MiB threshold:
+the verifier selects streaming at equality but its reader rejects equality.
+The 512 MiB checkout hash and pack verification match; moving the verification
+threshold one byte lower also passes. Keep the normal client settings in the
+larger lifecycle test. Individual incoming delta bases/results still require
+full buffers; this experiment does not establish a fixed memory ceiling.
