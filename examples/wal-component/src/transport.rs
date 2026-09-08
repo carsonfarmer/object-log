@@ -137,6 +137,18 @@ impl Service {
     async fn call_once(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
         self.budget.call()?;
         let (mut parts, mut body) = request.into_parts();
+        // A rejected conditional upload may leave its body unread. Expect lets
+        // the server close that HTTP/1 connection explicitly instead of pooling it.
+        if parts.method == http::Method::PUT
+            && (parts.headers.contains_key(http::header::IF_MATCH)
+                || parts.headers.contains_key(http::header::IF_NONE_MATCH))
+            && body.size_hint().exact().is_some_and(|length| length > 0)
+        {
+            parts.headers.insert(
+                http::header::EXPECT,
+                http::HeaderValue::from_static("100-continue"),
+            );
+        }
         // Preserve exact framing supplied by object_store's body. In particular,
         // S3 bulk deletion requires Content-Length rather than chunked encoding.
         if !parts.headers.contains_key(http::header::CONTENT_LENGTH)

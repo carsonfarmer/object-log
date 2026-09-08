@@ -42,7 +42,11 @@ only a successful replay and otherwise preserving the first uncertain outcome.
 Released MinIO and ordinary Spin pass concurrent Git tests; injected response
 loss confirms that a successful write followed by a rejected retry stays pending,
 with published refs visible after refresh. Both attempts retain the same budget.
-Git pushes are never replayed. No upstream report or submission is authorized.
+Conditional uploads also send `Expect: 100-continue`, making early MinIO
+rejections advertise connection closure while successful connections remain
+reusable. Use default Spin HTTP pooling; no extra bootstrap retry or provider
+patch is required. Git pushes are never replayed. No upstream report or
+submission is authorized.
 Outgoing delta tests show smaller packs but much more
 allocation; the released library exposes no byte-bounded selection through its
 transport, so full-object streaming remains the default.

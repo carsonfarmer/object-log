@@ -63,7 +63,12 @@ storage counters as the trailers.
 
 The tests use installed Git as an independent oracle. Opt-in extensions:
 
-- `GIT_REPEATED_PUSHES=1`: repeated ordinary pushes and cold history recovery.
+- `GIT_REPEATED_PUSHES=1`: 1,025 pushes per hash with concurrent fetch/integrity
+  checks, automatic cleanup, and final cold history recovery. Run with
+  `go test -race ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
+  It reports client latency percentiles in 256-push windows, including negotiation,
+  transfer and cleanup. Use an isolated prefix and keep competing workloads off
+  the host when measuring. These timings do not include component compilation.
 - `GIT_LARGE_OBJECT_MIB=513`: larger push/clone/edit/fetch lifecycle.
 - `GIT_PROBE_PERSISTED_HEAD=true`: run `TestPersistedHead` after restarting Spin
   with the same prefix to verify saved default-branch recovery.
@@ -120,8 +125,10 @@ and packfile URIs are not replacement requirements.
 `go test ./tests -run '^$' -bench BenchmarkOutgoingDeltas -benchmem` compares size
 and allocation costs. Delta selection currently saves transfer bytes at the
 cost of whole-object buffering; go-git's transport offers no byte-bounded selector.
-Intermittent local PUT connection closures remain tracked in
-[issue #41](https://github.com/carsonfarmer/object-log/issues/41).
+Conditional S3 uploads use `Expect: 100-continue` so early rejections can
+advertise connection closure. This avoids reusing MinIO connections whose
+request bodies were not consumed; successful connections remain reusable.
+See [issue #41](https://github.com/carsonfarmer/object-log/issues/41).
 
 `make build` applies `adapter.patch` to checksum-verified upstream source. This
 temporary build-tool fix handles Go GC clock and immediate timer calls during
