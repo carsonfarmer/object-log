@@ -469,7 +469,9 @@ async fn materialize(log: &Log, mut view: View) -> Result<(Materialized, View), 
             }
             Err(error) => return Err(error),
         };
-        let current = log.load().await?;
+        let Some(current) = log.refresh(&view).await? else {
+            return Ok((materialized, view));
+        };
         if view.checkpoint() == current.checkpoint() && view.tail() == current.tail() {
             return Ok((materialized, current));
         }
@@ -480,11 +482,20 @@ async fn materialize(log: &Log, mut view: View) -> Result<(Materialized, View), 
 async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, SqliteError> {
     let checkpoint = log.read_checkpoint(view).await?;
     let tail = log.read_tail(view).await?;
+    // One ordered window across records: many one-chunk records can overlap
+    // without multiplying per-record concurrency or buffering future payloads.
+    let objects = checkpoint
+        .iter()
+        .flat_map(object_log::CheckpointRecord::objects)
+        .chain(tail.iter().flat_map(object_log::CommitRecord::objects));
+    let mut chunks = stream::iter(objects)
+        .map(|object| log.read_object(view, object))
+        .buffered(MAX_CONCURRENT_OBJECTS);
     let mut snapshot = None;
     let mut wal = Vec::new();
     let mut position = WalPosition::default();
 
-    if let Some(checkpoint) = checkpoint {
+    if let Some(checkpoint) = &checkpoint {
         let descriptor = Record::decode(checkpoint.snapshot(), checkpoint.objects().len())?;
         if !matches!(
             &descriptor,
@@ -496,7 +507,7 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
         }
         let payload = load_payload(
             log,
-            view,
+            &mut chunks,
             &descriptor,
             checkpoint.objects(),
             PAGE_SIZE as usize,
@@ -505,15 +516,20 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
         validate_snapshot(&payload)?;
         snapshot = Some(payload);
     }
-    for commit in tail {
+    for commit in &tail {
         let descriptor = Record::decode(commit.operation(), commit.objects().len())?;
         match &descriptor {
             Record::SnapshotInline(_) | Record::SnapshotChunks { .. }
                 if snapshot.is_none() && position.frames == 0 =>
             {
-                let payload =
-                    load_payload(log, view, &descriptor, commit.objects(), PAGE_SIZE as usize)
-                        .await?;
+                let payload = load_payload(
+                    log,
+                    &mut chunks,
+                    &descriptor,
+                    commit.objects(),
+                    PAGE_SIZE as usize,
+                )
+                .await?;
                 validate_snapshot(&payload)?;
                 snapshot = Some(payload);
             }
@@ -525,8 +541,14 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
                         "WAL records do not form one continuous epoch".into(),
                     ));
                 }
-                let payload =
-                    load_payload(log, view, &descriptor, commit.objects(), WAL_FRAME_BYTES).await?;
+                let payload = load_payload(
+                    log,
+                    &mut chunks,
+                    &descriptor,
+                    commit.objects(),
+                    WAL_FRAME_BYTES,
+                )
+                .await?;
                 position = wal::validate_record(header, &payload, position)?;
                 if wal.is_empty() {
                     append(&mut wal, header)?;
@@ -556,7 +578,7 @@ async fn read_materialized(log: &Log, view: &View) -> Result<Materialized, Sqlit
 
 async fn load_payload(
     log: &Log,
-    view: &View,
+    chunks: &mut (impl futures::Stream<Item = Result<Bytes, LogError>> + Unpin),
     record: &Record,
     objects: &[ObjectRef],
     unit: usize,
@@ -598,9 +620,8 @@ async fn load_payload(
     payload
         .try_reserve_exact(payload_len)
         .map_err(|_| SqliteError::PayloadLimit)?;
-    let payload = stream::iter(objects)
-        .map(|object| log.read_object(view, object))
-        .buffered(MAX_CONCURRENT_OBJECTS)
+    let payload = chunks
+        .take(objects.len())
         .try_fold(payload, |mut payload, chunk| async move {
             payload.extend_from_slice(&chunk);
             Ok(payload)

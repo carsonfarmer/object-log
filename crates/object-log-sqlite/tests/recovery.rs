@@ -15,6 +15,82 @@ use rusqlite::ErrorCode;
 type TestResult<T = ()> = Result<T, Box<dyn StdError>>;
 
 #[tokio::test]
+async fn recovery_prefetches_across_records_with_one_global_chunk_bound() -> TestResult {
+    use object_log::sim::{FailurePhase, FaultStore, Operation};
+
+    let faults = FaultStore::new(InMemory::new());
+    let backend = ValidatedBackend::new(Arc::new(faults.clone()), Path::from("prefetch")).await?;
+    let log = Log::open(
+        &backend,
+        &LogId::new("recovery")?,
+        Options {
+            max_inline_operation_bytes: 1024,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let directory = tempfile::tempdir()?;
+    let mut database = Database::open(log.clone(), directory.path().join("writer.sqlite")).await?;
+    commit_sql(&mut database, "CREATE TABLE events (value INTEGER)").await?;
+    for value in 0..40 {
+        commit_sql(
+            &mut database,
+            &format!("INSERT INTO events VALUES ({value})"),
+        )
+        .await?;
+    }
+    drop(database);
+    let view = log.load().await?;
+    let records = log.read_tail(&view).await?;
+    assert_eq!(records.len(), 41);
+    assert!(records.iter().all(|record| record.objects().len() == 1));
+
+    faults.reset();
+    drop(Database::open(log.clone(), directory.path().join("baseline.sqlite")).await?);
+    let first_blob = faults
+        .metrics()
+        .events
+        .into_iter()
+        .filter(|event| event.operation == Operation::Get && event.path.contains("/blobs/"))
+        .map(|event| event.occurrence)
+        .min()
+        .ok_or("missing payload reads")?;
+    faults.reset();
+    let mut pause = faults.pause_get_at(first_blob, FailurePhase::Before);
+    let target = directory.path().join("interrupted.sqlite");
+    {
+        let mut recovery = Box::pin(Database::open(log.clone(), &target));
+        tokio::select! {
+            result = &mut recovery => return Err(format!("recovery did not pause: {:?}", result.err()).into()),
+            entered = pause.wait_until_entered() => assert!(entered),
+        }
+        assert!(futures::poll!(recovery.as_mut()).is_pending());
+        assert_eq!(
+            faults.metrics().operation(Operation::Get).requests - first_blob + 1,
+            32
+        );
+    }
+    assert!(!pause.release());
+    assert!(
+        !target.exists(),
+        "cancelled recovery must not install a cache"
+    );
+    let mut recovered = Database::open(log, &target).await?;
+    let values = recovered
+        .read(|connection| {
+            let mut statement = connection.prepare("SELECT value FROM events ORDER BY value")?;
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await?;
+    assert_eq!(values, (0..40).collect::<Vec<_>>());
+    drop(recovered);
+    assert_integrity(&target)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn ten_wal_transactions_recover_without_the_cache() -> TestResult {
     recover_wal_tail("ten-wal", 10).await
 }
