@@ -4,7 +4,7 @@ A Go Git service backed by the existing Rust WAL. go-git handles Git protocols,
 formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
-Final replacement qualification is in progress; this is not production ready.
+Local replacement checks pass; this is not production ready.
 
 ## Build and run locally
 
@@ -79,8 +79,9 @@ bases/results still need whole-object buffers. Fetch streams full objects
 without making deltas, trading larger transfers for lower memory use. This does
 not establish a fixed process-memory ceiling. Ordinary large-file lifecycles
 have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.
-Shallow/tag and other remaining provider gates must pass before acceptance;
-partial filters and packfile URIs are not replacement requirements.
+Both hashes pass shallow clone, deepen, unshallow, annotated tags and 1,025
+consecutive pushes with automatic cleanup and cold recovery. Partial filters
+and packfile URIs are not replacement requirements.
 
 `make build` applies `adapter.patch` to checksum-verified upstream source. This
 temporary build-tool fix handles Go GC clock and immediate timer calls during

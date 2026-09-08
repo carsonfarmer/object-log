@@ -14,12 +14,11 @@ unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
 - Optional authentication, read-only serving, persisted default branch and
   cold recovery from object storage without a local repository cache.
 - Sparse object lookup and streamed chunk reads; cleanup preserves live history.
-- Shallow clone, deepen and unshallow where the library supports them. These
-  remain qualification gates, not claims based only on advertised capability.
+- Shallow clone, deepen and unshallow, checked with ordinary Git clients.
 
 The custom Rust Git engine and its native maintenance command are retired in
 this replacement branch. Installed Git remains the independent test oracle.
-Final local provider qualification must pass before replacement acceptance.
+Local provider and workspace qualification passes for this replacement.
 Advanced partial filters and packfile URIs are not required for acceptance;
 add them only when useful and supported without bespoke protocol machinery.
 

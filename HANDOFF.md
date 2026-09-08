@@ -4,11 +4,11 @@ The goal is a small, powerful, generic object-storage WAL. A useful Git consumer
 proves its API; domain rules stay outside the core and the conditional head is
 the only mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 
-This replacement branch moves the library-backed Go Git consumer to
-`examples/git`, with the Rust WAL component at `examples/wal-component`, and
-removes the custom Rust Git engine, native maintenance command and old harnesses.
-The core, KV and SQLite implementations are unchanged. This is preparation for
-acceptance, not a claim that the remaining provider gates have passed.
+The library-backed Go Git consumer lives at `examples/git`, with the Rust WAL
+component at `examples/wal-component`. The custom Rust Git engine, native
+maintenance command and old Git harnesses are removed.
+The core, KV and SQLite implementations are unchanged. Local replacement
+qualification passes; the old implementation remains available in Git history.
 
 The Go consumer delegates protocols, formats and packs to go-git. It retains
 sparse object lookup, atomic refs, cold recovery, authentication, read-only mode,
@@ -23,9 +23,12 @@ fixes Go GC host calls; Spin and the Go collector remain unchanged. Do not claim
 a fixed memory ceiling or production readiness. Use a fresh prefix because the
 old Git catalog format is incompatible.
 
-Before accepting this layout, root must finish the remaining ordinary-client
-provider gates and run the full workspace gate after integration. Follow
-`examples/git/README.md`; use ordinary Spin and isolated local MinIO. No remote
+Both hashes pass 1,025 ordinary pushes with automatic cleanup and cold history
+recovery, shallow/deepen/unshallow, annotated tags and fetch visibility checks.
+The full provider suite also passes with frequent Go GC. A parallel long run
+hit one transient MinIO HTTP protocol error before a push; the unchanged SHA-1
+rerun passed. No concrete runtime bug or reason for a Spin patch was found.
+Follow `examples/git/README.md`; use ordinary Spin and isolated local MinIO. No remote
 deployment or upstream posts are authorized. Do not restart shared Docker.
 
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,

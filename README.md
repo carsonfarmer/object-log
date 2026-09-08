@@ -75,9 +75,9 @@ API:
 
 The Git consumer replaces the custom Rust Git engine and native maintenance
 command. Installed Git remains the independent client and correctness oracle.
-See [its README](examples/git/README.md) for build and local MinIO instructions,
-current limitations, and opt-in provider tests. Final replacement qualification
-is still in progress; it is not a production-readiness claim.
+See [its README](examples/git/README.md) for build and local `MinIO` instructions,
+current limitations, and opt-in provider tests. Local replacement checks pass;
+this is not a production-readiness claim.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md).
