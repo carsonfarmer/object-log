@@ -18,7 +18,6 @@ interface wal {
     resource object;
     record entry { snapshot: bool, data: list<u8>, objects: list<own<object>> }
     resource candidate {
-        token: func() -> result<list<u8>, failure>;
         publish: func() -> result<outcome, failure>;
     }
     resource session {
@@ -32,8 +31,6 @@ interface wal {
         put: func(data: list<u8>) -> result<own<object>, failure>;
         put-node: func(data: list<u8>, children: list<borrow<object>>) -> result<own<object>, failure>;
         prepare: func(data: list<u8>, roots: list<borrow<object>>) -> result<own<candidate>, failure>;
-        reprove: func(values: list<borrow<object>>) -> result<list<own<object>>, failure>;
-        resume: func(token: list<u8>) -> result<outcome, failure>;
     }
     open: func(settings: config) -> result<own<session>, failure>;
 }

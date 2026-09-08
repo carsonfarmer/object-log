@@ -1,7 +1,7 @@
 //! Feasibility binding of the existing WAL; no Git rules or new authority.
 use bytes::Bytes;
 use exports::object_log::storage::wal::*;
-use object_log::{CommitStatus, Log, Materializer, Resolution, StagedObject, View};
+use object_log::{CommitStatus, Log, Materializer, StagedObject, View};
 use std::sync::Arc;
 mod maintenance;
 mod transport;
@@ -143,38 +143,8 @@ impl GuestSession for SessionState {
             prepared,
         }))
     }
-    fn reprove(&self, values: Vec<ObjectBorrow<'_>>) -> Result<Vec<Object>, Failure> {
-        let refs = values
-            .iter()
-            .map(|value| value.get::<ObjectState>().staged.reference().clone())
-            .collect();
-        spin_executor::run(self.log.stage_objects(&self.view, refs))
-            .map(|objects| {
-                objects
-                    .into_iter()
-                    .map(|staged| Object::new(ObjectState { staged }))
-                    .collect()
-            })
-            .map_err(failure)
-    }
-    fn resume(&self, token: Vec<u8>) -> Result<Outcome, Failure> {
-        match spin_executor::run(self.log.resume(&token)).map_err(failure)? {
-            Resolution::Committed(_) => Ok(Outcome::Committed),
-            Resolution::NotCommitted(_) => Ok(Outcome::Conflict),
-            Resolution::Expired(_) => Ok(Outcome::Expired),
-            Resolution::StillPending(pending) => Ok(Outcome::Pending(
-                pending.recovery_token().map_err(failure)?.to_vec(),
-            )),
-        }
-    }
 }
 impl GuestCandidate for CandidateState {
-    fn token(&self) -> Result<Vec<u8>, Failure> {
-        self.prepared
-            .recovery_token()
-            .map(|bytes| bytes.to_vec())
-            .map_err(failure)
-    }
     fn publish(&self) -> Result<Outcome, Failure> {
         match spin_executor::run(self.log.commit(self.prepared.clone())).map_err(failure)? {
             CommitStatus::Committed(_) => Ok(Outcome::Committed),

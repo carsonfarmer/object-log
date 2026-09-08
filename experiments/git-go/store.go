@@ -412,10 +412,6 @@ func (s *store) publish(refs map[string]string) error {
 		return e
 	}
 	defer candidate.Drop()
-	token, e := unwrap(candidate.Token())
-	if e != nil {
-		return e
-	}
 	result, e := unwrap(candidate.Publish())
 	if e != nil {
 		return e
@@ -424,7 +420,7 @@ func (s *store) publish(refs map[string]string) error {
 	case wal.OutcomeCommitted:
 		return nil
 	case wal.OutcomePending:
-		return &pendingError{token: token}
+		return &pendingError{token: result.Pending()}
 	default:
 		return fmt.Errorf("publication conflict or expired view")
 	}
