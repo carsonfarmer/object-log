@@ -10,8 +10,8 @@ experimental filter fork. Partial-clone filters are currently unavailable.
 
 ## Build and run locally
 
-Install Go 1.26.3, the repository's pinned Rust toolchain, Spin, `wac`, MinIO and
-its `mc` client. From the repository root:
+Install Go 1.26.3, the repository's pinned Rust toolchain, Spin, `wac` and MinIO's
+`mc` client. From the repository root:
 
 ```sh
 rustup target add wasm32-unknown-unknown wasm32-wasip2
@@ -21,11 +21,24 @@ make git-build
 
 The Go Makefile generates bindings and builds the component. Dependencies and
 the build adapter are pinned; generated files and binaries are ignored.
+Build the local MinIO test server with the three-line fix in `minio.patch`:
+
+```sh
+git clone --depth 1 --branch RELEASE.2025-09-07T16-13-09Z https://github.com/minio/minio.git /tmp/object-log-minio
+git -C /tmp/object-log-minio apply "$PWD/examples/git/minio.patch"
+(cd /tmp/object-log-minio && go test -tags integration ./cmd -run '^TestPutObjectPreconditionKeepsConnectionAligned$' && go build -o minio .)
+```
+
+That release is commit `07c3a429bfed433e49018cb0f78a52145d4bedeb`. Its unmodified
+PUT handler writes conflict responses twice, causing silent connection closure
+and intermittent failures on the next pooled request. The patch includes a
+regression that checks the next request on the same connection. It changes only
+MinIO's single-object PUT path; no Spin patch or client retry is added.
 Start a disposable local MinIO instance in another terminal:
 
 ```sh
 MINIO_ROOT_USER=objectlog MINIO_ROOT_PASSWORD=local-test-secret \
-  minio server /tmp/object-log-git-minio --address 127.0.0.1:19090
+  /tmp/object-log-minio/minio server /tmp/object-log-git-minio --address 127.0.0.1:19090
 mc alias set local-git http://127.0.0.1:19090 objectlog local-test-secret
 mc mb --ignore-existing local-git/wal-proof
 ```
@@ -45,6 +58,7 @@ Use `--env GIT_PASSWORD=...` for HTTP Basic authentication (any username),
 `--env GIT_READ_ONLY=true` to reject pushes and maintenance, and
 `--env WAL_DEFAULT_BRANCH=...` for a new repository's persisted default branch.
 Authentication is off by default; keep this configuration on loopback.
+Branches require fast-forward updates; force and force-with-lease cannot rewrite them.
 Use a fresh prefix: the retired custom Git catalog is incompatible.
 
 ## Test
@@ -114,7 +128,7 @@ and packfile URIs are not replacement requirements.
 `go test ./tests -run '^$' -bench BenchmarkOutgoingDeltas -benchmem` compares size
 and allocation costs. Delta selection currently saves transfer bytes at the
 cost of whole-object buffering; go-git's transport offers no byte-bounded selector.
-Intermittent local PUT connection closures remain tracked in
+The local MinIO connection-closure diagnosis and fix are tracked in
 [issue #41](https://github.com/carsonfarmer/object-log/issues/41).
 
 `make build` applies `adapter.patch` to checksum-verified upstream source. This

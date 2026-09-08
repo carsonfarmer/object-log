@@ -1,0 +1,127 @@
+diff --git a/cmd/object-handlers.go b/cmd/object-handlers.go
+index 9663e99..11e2a77 100644
+--- a/cmd/object-handlers.go
++++ b/cmd/object-handlers.go
+@@ -2111,6 +2111,9 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
+ 	// Create the object..
+ 	objInfo, err := putObject(ctx, bucket, object, pReader, opts)
+ 	if err != nil {
++		if isErrPreconditionFailed(err) {
++			return
++		}
+ 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+ 		return
+ 	}
+diff --git a/cmd/object-handlers_precondition_test.go b/cmd/object-handlers_precondition_test.go
+new file mode 100644
+index 0000000..fb0d072
+--- /dev/null
++++ b/cmd/object-handlers_precondition_test.go
+@@ -0,0 +1,107 @@
++// SPDX-License-Identifier: AGPL-3.0-only
++
++//go:build integration
++
++package cmd
++
++import (
++	"bufio"
++	"bytes"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/minio/minio/internal/auth"
++)
++
++func TestPutObjectPreconditionKeepsConnectionAligned(t *testing.T) {
++	ExecObjectLayerAPITest(ExecObjectLayerAPITestArgs{
++		t:          t,
++		objAPITest: testPutObjectPreconditionKeepsConnectionAligned,
++		endpoints:  []string{"PutObject", "GetObject"},
++	})
++}
++
++func testPutObjectPreconditionKeepsConnectionAligned(
++	_ ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
++	credentials auth.Credentials, t *testing.T,
++) {
++	// Match the response-buffering middleware used by the production S3 router.
++	server := httptest.NewServer(gzipHandler(apiRouter))
++	defer server.Close()
++	for _, condition := range []struct {
++		name    string
++		headers map[string]string
++	}{
++		{name: "existing", headers: map[string]string{"If-None-Match": "*"}},
++		{name: "stale", headers: map[string]string{"If-Match": "\"stale\""}},
++	} {
++		t.Run(instanceType+"/"+condition.name, func(t *testing.T) {
++			conn, err := net.DialTimeout("tcp", server.Listener.Addr().String(), 5*time.Second)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			reader := bufio.NewReader(conn)
++			payload := []byte("original object")
++			url := getPutObjectURL(server.URL, bucketName, condition.name)
++			for _, step := range []struct {
++				method  string
++				headers map[string]string
++				status  int
++			}{
++				{method: http.MethodPut, status: http.StatusOK},
++				{method: http.MethodPut, headers: condition.headers, status: http.StatusPreconditionFailed},
++				{method: http.MethodGet, status: http.StatusOK},
++			} {
++				body := payload
++				if len(step.headers) != 0 {
++					body = []byte("rejected replacement")
++				}
++				if step.method == http.MethodGet {
++					body = nil
++				}
++				request, err := newTestSignedRequestV4(
++					step.method,
++					url,
++					int64(len(body)),
++					bytes.NewReader(body),
++					credentials.AccessKey,
++					credentials.SecretKey,
++					step.headers,
++				)
++				if err != nil {
++					t.Fatal(err)
++				}
++				request.Header.Set("Accept-Encoding", "identity")
++				if err := request.Write(conn); err != nil {
++					t.Fatal(err)
++				}
++				response, err := http.ReadResponse(reader, request)
++				if err != nil {
++					t.Fatalf("reading %s response on persistent connection: %v", step.method, err)
++				}
++				data, readErr := io.ReadAll(response.Body)
++				closeErr := response.Body.Close()
++				if readErr != nil {
++					t.Fatal(readErr)
++				}
++				if closeErr != nil {
++					t.Fatal(closeErr)
++				}
++				if response.StatusCode != step.status {
++					t.Fatalf("status %d, want %d: %s", response.StatusCode, step.status, data)
++				}
++				if step.method == http.MethodGet && !bytes.Equal(data, payload) {
++					t.Fatalf("stored object changed: %q", data)
++				}
++			}
++		})
++	}
++}
