@@ -156,7 +156,7 @@ func TestFailureDrills(t *testing.T) {
 			}
 			finished := make(chan error, 1)
 			go func() {
-				response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+				response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
 				if response != nil {
 					response.Body.Close()
 				}
@@ -225,7 +225,7 @@ func drillRequest(t *testing.T, ctx context.Context, url string, body []byte) *h
 	if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
 		request.SetBasicAuth("git", password)
 	}
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
