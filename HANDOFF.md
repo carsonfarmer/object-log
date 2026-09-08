@@ -1,59 +1,34 @@
 # object-log handoff
 
-The product is a small, powerful, generic object-storage WAL. A fully usable Git
-service proves its API. Keep domain rules outside the core and the conditional
-head as the only mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
+The goal is a small, powerful, generic object-storage WAL. A useful Git consumer
+proves its API; domain rules stay outside the core and the conditional head is
+the only mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 
-The Git functional burndown is integrated at 160820f. Full local checks and
-both-hash provider tests cover concurrent Spin clients, large pushes, shallow,
-filtered and URI histories, compaction and cold recovery. Collection now drains
-stale backlogs in bounded batches; repeat until empty. The live graph and
-operation budgets remain finite.
+This replacement branch moves the library-backed Go Git consumer to
+`examples/git`, with the Rust WAL component at `examples/wal-component`, and
+removes the custom Rust Git engine, native maintenance command and old harnesses.
+The core, KV and SQLite implementations are unchanged. This is preparation for
+acceptance, not a claim that the remaining provider gates have passed.
 
-The owner rejected the Git implementation's size (~11,883 production Rust
-lines) and the previous reduction pass as insufficient. Functional coverage does
-not establish a successful simplicity proof. Stop feature expansion. The current
-acceptance target is to remove at least half the Git implementation through
-established libraries and architectural simplification, preserving client
-behavior. Investigate WAL API friction as well as Git-specific duplication.
-Do not meet the target by moving code, compressing formatting, or cutting tests.
-If library substitution cannot meet it, explain concrete, tested incompatibilities
-and the remaining choices. Existing implementation remains the regression baseline.
-KV work waits behind this correction.
+The Go consumer delegates protocols, formats and packs to go-git. It retains
+sparse object lookup, atomic refs, cold recovery, authentication, read-only mode,
+safe checkpoint/collection and a small once-only expired-read retry. Before
+long tails fill, pushes invoke existing maintenance and reopen before accepting
+new updates. The installed Git executable remains the independent test oracle.
 
-The smaller Go consumer is on `cf/git-architecture-reduction` under
-`experiments/git-go`, using the unchanged Rust WAL through `wal-component`.
-Roughly 1,900 production/interface/config lines now cover basic service policy,
-compressed loose objects, splitting sparse indexes and seekable incoming packs.
-The owner prioritizes ordinary complete Git over copying rarely used extensions.
-The runtime crash is fixed by a small local component-adapter patch, built from
-pinned, checksum-verified upstream source. It pauses both clock imports and handles
-the immediate timer poll used by Go GC. Spin and Go's collector are unchanged.
-The full experiment provider suite passes both hashes, including the 2 MiB clone
-regression, with default GC and GOGC=1 stress. Strict adapter Clippy and core
-memory/filesystem conformance pass. The reproduction remains in provider tests.
-Storage cleanup now uses the existing WAL checkpoint and fenced collection APIs:
-POST the repository's `/maintenance` endpoint until complete. Independent review,
-focused tests, native/WASIp2 Clippy and the workspace gate pass. The provider suite
-covers retained history and unreachable-object pruning for both hashes. Ordinary
-16, 64 and 513 MiB push/clone/edit/fetch lifecycles pass both hashes on local
-Spin/MinIO with unchanged Git client settings. Fetch
-streams full objects instead of building outgoing deltas; incoming delta bases
-and results still need full buffers. The exact 512 MiB fsck failure is a native
-Git threshold-equality bug, confirmed by matching content hashes and successful
-streaming verification with the threshold one byte lower.
-Do not integrate this branch as the complete replacement yet. Expired-view retry,
-fetch visibility policy and large-delta memory remain; see the experiment README.
-Fetch currently accepts known unreachable IDs within the authenticated repository
-until pruning. Use public library codecs for any policy fix and preserve the
-ref-tip sparse fast path; do not add a whole-history walk to every fetch.
-No upstream post or remote deployment occurred.
+Large-file lifecycles have passed at 16, 64 and 513 MiB for both hashes on local
+Spin/MinIO. Incoming delta bases/results still need full buffers, and outgoing
+packs omit delta compression. The temporary pinned component-build adapter patch
+fixes Go GC host calls; Spin and the Go collector remain unchanged. Do not claim
+a fixed memory ceiling or production readiness. Use a fresh prefix because the
+old Git catalog format is incompatible.
+
+Before accepting this layout, root must finish the remaining ordinary-client
+provider gates and run the full workspace gate after integration. Follow
+`examples/git/README.md`; use ordinary Spin and isolated local MinIO. No remote
+deployment or upstream posts are authorized. Do not restart shared Docker.
 
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
-exact recovery, cumulative retry counters and provider tests. Use ordinary Spin
-with default runtime settings. Avoid Spin patches unless essential. Verification
-belongs in tests, commits and concise issue updates, not new evidence archives.
-
-No upstream communications or repository links are authorized. The old Spin
-issue was withdrawn; do not recreate it. Do not restart the shared Docker
-service without the owner's reply. Native MinIO is available for local testing.
+explicit uncertain outcomes and cumulative retry counters. Keep reports short;
+verification belongs in tests and Git history rather than new evidence archives.
+After Git settles, return to the KV design scoped in issue #39.

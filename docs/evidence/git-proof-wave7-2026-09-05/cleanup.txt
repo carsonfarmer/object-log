@@ -1,2 +1,0 @@
-check_shallow.py: group drained, listener closed, parent reaped, repeat stop; closes_only=False
-check_shallow.py: group drained, listener closed, parent reaped, repeat stop; closes_only=True

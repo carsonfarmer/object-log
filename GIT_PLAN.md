@@ -1,136 +1,67 @@
 # Git proof contract
 
-The standalone object-storage WAL is the product. Git proves that its small,
-byte-oriented API supports a demanding application. Keep Git rules in
-`object-log-git`, HTTP hosting in the Spin adapter, and one conditional log head
-as the only mutable durable authority.
+The product is a small, generic object-storage WAL. The Git service proves that
+an established Git library can use it without a second durable authority.
+`examples/git` contains the Go consumer; `examples/wal-component` exposes the
+unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
 
-## Current acceptance target
+## Required behavior
 
-The functional implementation is a baseline, not an accepted simplicity proof.
-Reduce the roughly 11,883 production lines in the Git engine by at least half.
-Prefer replacing algorithms with established libraries over local refactoring.
-Preserve the behavior below while testing alternatives; do not count moved code
-or removed tests as reduction. The current language split and exact allocation
-budgets are design choices to reconsider, not evidence that custom Git machinery
-is required. Demonstrate library incompatibilities with small executable probes
-before claiming the target cannot be met.
+- Unchanged Git clients: SHA-1 and SHA-256, protocol-v2 discovery, clone and
+  have-aware fetch, classic receive-pack push, branches and annotated tags.
+- Atomic ref/catalog publication, stale-write rejection, fast-forward policy,
+  malformed-input rejection and object connectivity validation.
+- Optional authentication, read-only serving, persisted default branch and
+  cold recovery from object storage without a local repository cache.
+- Sparse object lookup and streamed chunk reads; cleanup preserves live history.
+- Shallow clone, deepen and unshallow where the library supports them. These
+  remain qualification gates, not claims based only on advertised capability.
 
-## Replacement scope
+The custom Rust Git engine and its native maintenance command are retired in
+this replacement branch. Installed Git remains the independent test oracle.
+Final local provider qualification must pass before replacement acceptance.
+Advanced partial filters and packfile URIs are not required for acceptance;
+add them only when useful and supported without bespoke protocol machinery.
 
-Prioritize a small, usable Git service over copying every old feature. Ordinary
-clone/fetch/push, branches/tags, both hashes, safe concurrent publication, cold
-recovery, access control, sparse reads and safe storage cleanup remain essential.
-Evaluate shallow/partial clone on usability and library support. Packfile URIs
-and exact old implementation budgets are not automatic requirements. Keep the
-existing implementation until replacement acceptance; do not weaken its tests.
-The sections below describe that existing baseline, not a mandate to rebuild it.
+## Storage and recovery
 
-## Service behavior
+Compressed loose objects live in immutable WAL chunks. A splitting radix catalog
+provides sparse lookup. The catalog and refs publish through the same conditional
+head update. Local handles and caches are disposable; no local repository is
+needed. Git formats, negotiation and pack processing belong to go-git.
 
-The service supports SHA-1 and SHA-256 with unchanged Git clients:
+Push validation completes before one publication. An uncertain result stays
+explicit; ordinary Git clients refresh refs after a lost response. Pushes are
+never automatically replayed. Expired reads may reopen once before response
+bytes are sent, with at most 1 MiB of request replay and cumulative storage
+counters. A late failure stops the response rather than restarting it.
 
-- Protocol-v2 discovery, `ls-refs`, clone and have-aware fetch.
-- Classic receive-pack push, thin-pack normalization, atomic ref updates,
-  stale-write rejection and fast-forward policy.
-- Shallow clone, deepening, unshallow, time/ref exclusions, partial clones with
-  `blob:none` and `blob:limit`, and lazy object retrieval.
-- Authenticated packfile URIs with range resume and inline fallback.
-- Persisted default branches, authentication, read-only operation, catalog
-  migration, pack compaction, checkpoints, collection and cold recovery.
+Before a push fills a long tail, existing maintenance checkpoints the reachable
+catalog. The HTTP maintenance endpoint also prunes unreachable objects and runs
+one bounded fenced deletion batch. Repeat until complete to drain old data.
+Collection, checkpoint safety and uncertain outcomes remain core responsibilities.
 
-Wants must be reachable from published refs in the observed view. Haves are
-validated against that same view. Ordinary fetch selects exactly
-`reachable(wants) - reachable(valid haves)`. Explicit tree/blob wants from partial
-clients remain selected unless noncommit haves prove ownership; commit haves
-alone do not prove the client has those objects. Shallow boundaries and filters alter
-that selection according to the advertised protocol. Negotiation acknowledges
-common haves; a pack is sent after `done`. Applicable annotated-tag chains are
-included when requested.
+## Limits and tradeoffs
 
-Stored packs are self-contained. Fetch reuses verified compressed entries and
-safe deltas when possible; otherwise it verifies and reconstructs the object
-through bounded windows. No scratch Git repository is required. Installed Git remains the
-independent correctness and performance oracle.
+Incoming delta bases and results still require whole-object buffers in go-git.
+Outgoing packs stream full objects without creating deltas, so transfer sizes
+can exceed a delta-compressed server's. There is no fixed process-memory promise.
+The generic WAL's configured object, reference and tail limits still apply.
+Normal Spin settings are used; no instance-count, pooling or host-memory wrapper.
+A temporary, pinned component-build adapter patch is currently necessary for Go
+GC host calls. Spin and Go's collector are unchanged.
 
-## WAL and recovery
+Use a fresh storage prefix: the prior custom Git catalog is incompatible, and
+there is no development-format migration tool. Do not silently reinterpret it.
 
-One log owns one repository. Immutable standard packs, indexes and catalog nodes
-are stored in authenticated object-log objects. Pack and index data use variable
-chunk geometry, and lookup reads only the selected indexes and pack ranges.
+## Checks
 
-`Repository::open(&Log, ObjectFormat)` observes one exact view. Catalogs and
-traversal state are command-local caches. A view is not a retention lease:
-collection can expire it. Commands may reopen once, preserving all operation
-counters, and validate before writing response bytes. Streamed responses never
-retry after output starts; a late failure aborts without the final digest/flush.
+`make check` runs core/consumer Rust checks and `make git-check` (pure Go tests,
+provider-test compilation, bridge tests, strict native and WASIp2 Clippy).
+`make git-build` builds and composes the actual component separately.
+`make git-provider-test` runs unchanged-client tests against a supplied local
+Spin/MinIO service. Its README lists opt-in large/repeated-push and restart cases.
 
-Push verifies pack checksums, object IDs, deltas, connectivity, kinds and ref
-policy before the ordered ref transaction is published through head CAS.
-A pending result retains an exact-candidate recovery token. Standard Git has
-normal lost-reply ambiguity; the operator can resolve stored recovery tokens.
-
-Compaction publishes one replacement catalog and preserves refs and symbolic
-HEAD. Checkpointing establishes the retained roots before collection. Collection
-verifies the live graph, installs a positive deletion batch through head CAS,
-and resumes that exact batch after interruption. Repeat collection until empty
-to drain a large stale backlog. Stable retentions block fresh collection.
-
-## Resource bounds
-
-The engine shares an 88 MiB live allocation pool per native process or WASI
-instance and a 24 MiB retained-state allowance. Spin controls host concurrency
-with its default settings. These are library limits, not a host-memory cap.
-
-Streaming receive supports 1 GiB decoded blobs and 1,040 MiB incoming packs.
-Commit, tree and tag bodies remain bounded at 8 MiB. Each stored pack is bounded
-at 2,080 MiB and 32,768 objects; aggregate fetch can combine several stored packs.
-Buffered entry points retain their smaller limits. See the constants in
-`crates/object-log-git/src/lib.rs`, `pack.rs` and `budget.rs` for exact bounds.
-
-Ordinary traversal stores object membership and a frontier. Shallow, filtered
-and URI selection retain adjacency within the same memory allowance. Neither
-traversal inherits the individual pack's object-count limit. All paths charge
-work, calls, bytes and allocation growth, including overlap while resizing.
-
-Collection bounds both its live graph and each positive plan. A scan examines
-at most the live count plus the plan limit plus one entry. Excess unknown
-namespace entries can exhaust this bound without finding deletable objects.
-This is a finite supported envelope, not an unlimited-scale claim.
-
-## Verification
-
-Run `make check` for formatting, strict native Clippy, workspace tests and
-WASIp2 checks. Run memory and filesystem conformance, including rejection of
-unsupported compare-and-swap, before local MinIO. Network-backed tests stay opt-in and use isolated local storage.
-
-The provider suite covers both hashes with:
-
-- Actual concurrent clients across independent ordinary Spin hosts, one winning
-  conflicting push, immediate reads and cold recovery of the winner.
-- 1 GiB push lifecycles and an aggregate clone over 2 GiB.
-- Connected histories over 32,768 objects, including shallow/deepen/unshallow,
-  filtered lazy retrieval and URI selection checked against installed Git.
-- 1,100 file-changing pushes and 35 maintenance/cold-clone cycles.
-- Real object-log history, interrupted upload, compaction, checkpoints and GC.
-
-Use the existing `git-spin-*` Make targets and `make gc-acceptance`; commands and
-prerequisites are in the Spin README and `docs/testing.md`. Ordinary Spin needs
-no custom instance/pooling wrapper or patches. Live AWS qualification is separate.
-
-Performance comparisons use matched fixtures and the installed Git oracle,
-with warmup and ten pairs per case. A timing ratio above 1.25 triggers thirty
-pairs and investigation. Exact object sets, pack size, calls and transfer limits
-are hard checks. Guest/InMemory command timing is not HTTP or S3 latency.
-Record results in tests, commits and the issue tracker.
-
-## Maintenance
-
-Use exclusive implementation worktrees and independent correctness reviews;
-root alone integrates main. Keep source small through removal of duplication,
-not by cutting behavior or weakening validation. Add a generic WAL capability
-only when a consumer demonstrates a missing contract.
-
-Git completion is tracked in #17. Scale #19 and ordinary Spin reliability #21
-are complete; #25 records the final reduction pass. The next KV implementation is scoped
-in #39; SQLite and verifiable KV remain separate follow-ons.
+Keep fault tests, recovery, collection, memory/filesystem checks and the core
+benchmarks. New verification belongs in executable tests and concise commits,
+not evidence archives. Local MinIO measurements do not establish cloud behavior.

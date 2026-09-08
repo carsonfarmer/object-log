@@ -3,7 +3,7 @@
 The local log, checkpoint, key-value proof, bounded garbage collection, and
 SQLite proof are implemented. `object-log` remains a small, generic,
 object-storage-backed WAL for higher-level storage systems. Git, key-value, and
-SQLite are proof crates. Each next goal keeps object storage as the durable
+SQLite are consumers of the public API. Each next goal keeps object storage as the durable
 authority.
 
 Durable Object behavior, tenancy, routing, and actor or service ownership are

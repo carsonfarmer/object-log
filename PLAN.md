@@ -7,9 +7,9 @@ object-store interface. The library must support concurrent writers, immutable
 payload objects, disposable local caches, explicit uncertain outcomes, and
 bounded recovery through checkpoints and bounded garbage collection.
 
-The first proof is a key-value state machine. SQLite is the second public-API
-consumer. Spin, filesystem, Git, and actor integrations are not part of the
-first release.
+The consumers are a key-value state machine, SQLite storage, and a Git service.
+They exercise the public API; the core remains independent of their languages
+and runtimes.
 
 ## Accepted architecture
 
@@ -384,10 +384,10 @@ amplification, and latency. Live AWS and Spin integration remain separate.
 
 ### 1. Serverless Git example
 
-Build `object-log-git` as a small public-API consumer. Store immutable Git
-packs as log objects. Publish each validated push as one atomic ref
-transaction. Recover from one pack-set checkpoint plus its ordered tail. Keep
-the serverless transport outside the storage model. See `GIT_PLAN.md`.
+Use go-git in `examples/git` with the unchanged Rust WAL exposed through the
+small sibling component. Store compressed Git objects and a sparse catalog as
+immutable WAL objects; publish catalog and refs together through the head.
+Keep ordinary Git clients as the independent oracle. See `GIT_PLAN.md`.
 
 ### 2. WASI filesystem storage
 

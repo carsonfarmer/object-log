@@ -1,10 +1,10 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-bench git-wasi-check git-performance-acceptance git-minio-test
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-check git-build git-provider-test
 
 check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo test --workspace --all-features
-	$(MAKE) git-wasi-check git-spin-wasi-check
+	$(MAKE) git-check
 
 test:
 	cargo test --workspace --all-features
@@ -28,63 +28,24 @@ gc-acceptance:
 	cargo test --features test-util --test gc_acceptance memory_gc_removes_100k_objects -- --ignored --nocapture
 	./scripts/test-minio.sh gc_acceptance minio_gc_removes_10001_objects
 
-git-bench:
-	cargo bench -p object-log-git --bench git
+GIT_DIR = examples/git
+WAL_COMPONENT = examples/wal-component/Cargo.toml
+GIT_TEST_FILES = index.go index_test.go prune_index.go prune_index_test.go codec.go codec_test.go read_retry.go read_retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go
 
-git-wasi-check:
-	cargo +1.97.1 check --locked -p object-log-git --lib --target wasm32-wasip2
+git-check:
+	test -z "$$(gofmt -l $(GIT_DIR)/*.go $(GIT_DIR)/tests/*.go)"
+	cd $(GIT_DIR) && go test -race $(GIT_TEST_FILES)
+	cd $(GIT_DIR) && go vet $(GIT_TEST_FILES) && go vet ./tests && go test ./tests
+	cargo fmt --manifest-path $(WAL_COMPONENT) --check
+	cargo test --locked --manifest-path $(WAL_COMPONENT) --lib
+	cargo clippy --locked --manifest-path $(WAL_COMPONENT) --all-targets -- -D warnings
+	cargo clippy --locked --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2 -- -D warnings
 
-git-performance-acceptance:
-	cargo test -p object-log-git --test performance_acceptance git_request_and_byte_accounting -- --ignored --exact --nocapture
+git-build:
+	cargo build --locked --release --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2
+	$(MAKE) -C $(GIT_DIR) build
+	cd $(GIT_DIR) && wac plug --plug ../wal-component/target/wasm32-wasip2/release/wal_component_probe.wasm main.wasm -o git.wasm
 
-git-minio-test:
-	./scripts/test-minio.sh minio minio_git_push_checkpoint_collection_and_cold_recovery object-log-git aws
-
-.PHONY: git-shared-performance-acceptance
-git-shared-performance-acceptance:
-	cargo +1.97.1 test --locked --release -p object-log-git --test shared_performance -- --ignored --exact shared_git_performance_acceptance --nocapture
-
-.PHONY: git-spin-memory-acceptance
-git-spin-memory-acceptance:
-	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
-	python3 crates/object-log-git-spin/tests/check_memory.py
-
-.PHONY: git-spin-wasi-check git-spin-minio-test
-git-spin-wasi-check:
-	cargo +1.97.1 clippy --locked -p object-log-git-spin --all-targets --all-features --target wasm32-wasip2 -- -D warnings
-
-git-spin-minio-test:
-	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh minio spin_minio object-log-git-spin ""
-.PHONY: git-spin-capacity-test
-git-spin-capacity-test:
-	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh minio spin_capacity_ object-log-git-spin ""
-
-.PHONY: git-spin-performance-acceptance
-git-spin-performance-acceptance:
-	cargo +1.97.1 build --locked -p object-log-git-spin --example memory_lifecycle --target wasm32-wasip2 --release
-	python3 crates/object-log-git-spin/tests/check_performance.py
-
-.PHONY: git-spin-operator-minio-test
-git-spin-operator-minio-test:
-	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh operator_minio operator_minio object-log-git-spin operator
-
-.PHONY: git-spin-shallow-test git-spin-partial-test git-spin-auth-minio-test
-git-spin-shallow-test:
-	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh protocol_minio shallow_minio object-log-git-spin ""
-
-git-spin-partial-test:
-	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh protocol_minio partial_minio object-log-git-spin ""
-
-git-spin-auth-minio-test:
-	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh auth_minio auth_minio object-log-git-spin ""
-
-.PHONY: git-spin-uri-test
-git-spin-uri-test:
-	cargo +1.97.1 build --locked -p object-log-git-spin --target wasm32-wasip2 --release
-	./scripts/test-minio.sh protocol_minio uri_minio object-log-git-spin ""
+git-provider-test:
+	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to your local Spin/MinIO service"; exit 1)
+	cd $(GIT_DIR) && go test ./tests -v -timeout 15m
