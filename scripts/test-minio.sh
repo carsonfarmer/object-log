@@ -124,7 +124,13 @@ test_command=(cargo test --package "${package}")
 if [[ -n "${features}" ]]; then
   test_command+=(--features "${features}")
 fi
-test_command+=(--test "${test_target}" "${test_filter}" -- --ignored --nocapture)
+if [[ "$#" == "0" ]]; then
+  test_command+=(--test minio --test protocol --test store_conformance
+    --test immutable_faults --test maintenance_model minio)
+else
+  test_command+=(--test "${test_target}" "${test_filter}")
+fi
+test_command+=(-- --ignored --nocapture)
 
 OBJECT_LOG_MINIO_ENDPOINT="${endpoint}" \
 OBJECT_LOG_MINIO_ACCESS_KEY="${access_key}" \

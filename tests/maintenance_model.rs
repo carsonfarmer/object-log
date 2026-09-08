@@ -4,10 +4,10 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use bytes::Bytes;
 use futures::TryStreamExt;
-use object_log::sim::{FaultStore, Operation};
+use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 use object_log::{
     CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus, Log, LogId, ObjectRef,
-    Options, PreparedCommit, StagedObject, TransactionId, ValidatedBackend,
+    Options, PreparedCommit, Resolution, StagedObject, TransactionId, ValidatedBackend,
 };
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 
@@ -43,6 +43,7 @@ async fn maintenance_model(store: Arc<dyn ObjectStore>) -> TestResult {
         let mut revision = 0;
         let mut staged: Option<(u64, StagedObject, String)> = None;
         let mut prepared: Option<(u64, u64, PreparedCommit, ObjectRef, String)> = None;
+        let mut pending_tokens = Vec::new();
         let mut random = seed;
         let mut trace = Vec::new();
         for step in 0..128_u64 {
@@ -76,13 +77,11 @@ async fn maintenance_model(store: Arc<dyn ObjectStore>) -> TestResult {
                 2 => {
                     if let Some((observed, value, candidate, reference, key)) = prepared.take() {
                         let wins = observed == revision;
-                        let outcome = log.commit(candidate).await?;
-                        assert_eq!(
-                            matches!(outcome, CommitStatus::Committed(_)),
-                            wins,
-                            "seed {seed:x} trace {trace:?}"
-                        );
-                        assert!(wins || matches!(outcome, CommitStatus::Conflict(_)));
+                        if let Some(token) =
+                            publish(&log, &faults, candidate, wins, step % 2 == 0).await?
+                        {
+                            pending_tokens.push(token);
+                        }
                         if wins {
                             oracle.history.push(value);
                             oracle.blobs.push(reference);
@@ -113,13 +112,15 @@ async fn maintenance_model(store: Arc<dyn ObjectStore>) -> TestResult {
                     staged = None;
                     log = Log::open_existing(&backend, &id, Options::default()).await?;
                 }
-                _ => { /* Pure observation; checked below. */ }
+                _ => resolve_pending(&log, &mut pending_tokens).await?,
             }
             if action != 4 {
                 oracle.record_created_objects(&faults);
             }
             oracle.check(&log, seed, &trace).await?;
         }
+        resolve_pending(&log, &mut pending_tokens).await?;
+        oracle.check(&log, seed, &trace).await?;
         let objects = store.list(Some(&log_scope)).map_ok(|meta| meta.location);
         store
             .delete_stream(Box::pin(objects))
@@ -127,6 +128,45 @@ async fn maintenance_model(store: Arc<dyn ObjectStore>) -> TestResult {
             .await?;
     }
     Ok(())
+}
+
+async fn resolve_pending(log: &Log, tokens: &mut Vec<Bytes>) -> TestResult {
+    for token in tokens.drain(..) {
+        assert!(matches!(
+            log.resume(&token).await?,
+            Resolution::Committed(_)
+        ));
+    }
+    Ok(())
+}
+
+async fn publish(
+    log: &Log,
+    faults: &FaultStore,
+    candidate: PreparedCommit,
+    wins: bool,
+    lose_response: bool,
+) -> Result<Option<Bytes>, Box<dyn std::error::Error>> {
+    let token = candidate.recovery_token()?;
+    if wins && lose_response {
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 2, // Immutable commit first, then the publishing head CAS.
+            phase: FailurePhase::After,
+        });
+    }
+    let outcome = log.commit(candidate).await?;
+    if wins && lose_response {
+        assert!(matches!(outcome, CommitStatus::Pending(_)));
+        assert!(faults.pending_failures().is_empty());
+        Ok(Some(token))
+    } else {
+        assert!(matches!(
+            (wins, outcome),
+            (true, CommitStatus::Committed(_)) | (false, CommitStatus::Conflict(_))
+        ));
+        Ok(None)
+    }
 }
 
 #[derive(Default)]

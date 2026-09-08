@@ -18,6 +18,67 @@ use object_store::{
 };
 use tokio::sync::Notify;
 
+#[cfg(feature = "aws")]
+mod support;
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+type StoreFactory = dyn Fn() -> Result<Arc<dyn ObjectStore>, Box<dyn std::error::Error>>;
+
+// Run identical protocol assertions against fresh memory stores or isolated MinIO stores.
+macro_rules! backend_cases {
+    ($($case:ident),+ $(,)?) => {
+        mod memory {
+            use super::*;
+            $(#[tokio::test]
+            async fn $case() -> TestResult {
+                super::$case(&|| Ok(Arc::new(InMemory::new()))).await
+            })+
+        }
+
+        #[cfg(feature = "aws")]
+        #[tokio::test]
+        #[ignore = "requires local MinIO"]
+        async fn minio_protocol_matrix() -> TestResult {
+            let store: Arc<dyn ObjectStore> = Arc::new(object_store::prefix::PrefixStore::new(
+                support::minio::build_minio()?,
+                Path::from(format!("protocol-{}", uuid::Uuid::new_v4().simple())),
+            ));
+            let factory_store = Arc::clone(&store);
+            let new_store = move || -> Result<Arc<dyn ObjectStore>, Box<dyn std::error::Error>> {
+                Ok(Arc::new(object_store::prefix::PrefixStore::new(
+                    Arc::clone(&factory_store),
+                    Path::from(uuid::Uuid::new_v4().simple().to_string()),
+                )))
+            };
+            $($case(&new_store).await.map_err(|error| format!("{}: {error}", stringify!($case)))?;)+
+            let objects = store.list(None).map_ok(|meta| meta.location);
+            store.delete_stream(Box::pin(objects)).try_collect::<Vec<_>>().await?;
+            Ok(())
+        }
+    };
+}
+
+backend_cases! {
+    concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it,
+    refresh_distinguishes_current_and_changed_heads,
+    capability_probe_rejects_false_not_modified_responses,
+    encoded_commit_limit_fails_before_publication,
+    two_writers_publish_one_order_and_require_explicit_reprepare,
+    repeated_first_attempt_requires_the_recovery_path,
+    view_is_bound_to_one_durable_log_incarnation,
+    open_rejects_options_that_differ_from_the_durable_contract,
+    log_exposes_its_durable_options,
+    stale_view_is_rejected_without_publishing_its_candidate,
+    referenced_objects_are_durable_before_head_publication,
+    tail_replay_leaves_referenced_objects_lazy,
+    object_read_rejects_a_changed_referenced_object,
+    lost_success_response_resolves_to_the_original_commit,
+    cancelled_head_update_resumes_after_reopen,
+    tail_order_survives_out_of_order_read_completion,
+    pending_candidate_resolves_not_committed_after_another_writer_wins,
+    rejected_candidate_remains_pending_when_the_winner_read_fails,
+}
+
 const FAIL_NONE: u8 = 0;
 const FAIL_BEFORE_UPDATE: u8 = 1;
 const FAIL_AFTER_UPDATE: u8 = 2;
@@ -31,10 +92,10 @@ fn log_ids_reject_unsafe_namespace_forms() {
     assert!(LogId::new("tenant.A_1-2").is_ok());
 }
 
-#[tokio::test]
-async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it()
--> Result<(), Box<dyn std::error::Error>> {
-    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
     let log_id = LogId::new("concurrent-open")?;
     let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
     let (first, second) = tokio::join!(
@@ -54,10 +115,10 @@ async fn concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it(
     Ok(())
 }
 
-#[tokio::test]
-async fn refresh_distinguishes_current_and_changed_heads() -> Result<(), Box<dyn std::error::Error>>
-{
-    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn refresh_distinguishes_current_and_changed_heads(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
     let first = open(Arc::clone(&backend), "refresh").await?;
     let second = open(backend, "refresh").await?;
     let stale = first.load().await?;
@@ -84,10 +145,10 @@ async fn refresh_distinguishes_current_and_changed_heads() -> Result<(), Box<dyn
     Ok(())
 }
 
-#[tokio::test]
-async fn capability_probe_rejects_false_not_modified_responses()
--> Result<(), Box<dyn std::error::Error>> {
-    let backend = Arc::new(InstrumentedStore::new());
+async fn capability_probe_rejects_false_not_modified_responses(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend = Arc::new(InstrumentedStore::new(new_store()?));
     backend.lie_about_conditional_reads();
     let store: Arc<dyn ObjectStore> = backend;
     assert!(matches!(
@@ -97,9 +158,10 @@ async fn capability_probe_rejects_false_not_modified_responses()
     Ok(())
 }
 
-#[tokio::test]
-async fn encoded_commit_limit_fails_before_publication() -> Result<(), Box<dyn std::error::Error>> {
-    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn encoded_commit_limit_fails_before_publication(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
     let log_id = LogId::new("commit-limit")?;
     let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
     let options = Options {
@@ -123,10 +185,10 @@ async fn encoded_commit_limit_fails_before_publication() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[tokio::test]
-async fn two_writers_publish_one_order_and_require_explicit_reprepare()
--> Result<(), Box<dyn std::error::Error>> {
-    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn two_writers_publish_one_order_and_require_explicit_reprepare(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
     let first = open(Arc::clone(&backend), "two-writers").await?;
     let second = open(backend, "two-writers").await?;
     let first_view = first.load().await?;
@@ -194,10 +256,10 @@ async fn two_writers_publish_one_order_and_require_explicit_reprepare()
     Ok(())
 }
 
-#[tokio::test]
-async fn repeated_first_attempt_requires_the_recovery_path()
--> Result<(), Box<dyn std::error::Error>> {
-    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn repeated_first_attempt_requires_the_recovery_path(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
     let log = open(backend, "duplicate-candidate").await?;
     let view = log.load().await?;
     let prepared = log.prepare(
@@ -220,10 +282,11 @@ async fn repeated_first_attempt_requires_the_recovery_path()
     Ok(())
 }
 
-#[tokio::test]
-async fn view_is_bound_to_one_durable_log_incarnation() -> Result<(), Box<dyn std::error::Error>> {
-    let first_backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let second_backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn view_is_bound_to_one_durable_log_incarnation(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let first_backend: Arc<dyn ObjectStore> = new_store()?;
+    let second_backend: Arc<dyn ObjectStore> = new_store()?;
     let first = open(first_backend, "same-name").await?;
     let second = open(second_backend, "same-name").await?;
     let foreign = first.load().await?;
@@ -241,10 +304,10 @@ async fn view_is_bound_to_one_durable_log_incarnation() -> Result<(), Box<dyn st
     Ok(())
 }
 
-#[tokio::test]
-async fn open_rejects_options_that_differ_from_the_durable_contract()
--> Result<(), Box<dyn std::error::Error>> {
-    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn open_rejects_options_that_differ_from_the_durable_contract(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
     let first = open(Arc::clone(&backend), "durable-options").await?;
     let log_id = LogId::new("durable-options")?;
     let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
@@ -261,24 +324,24 @@ async fn open_rejects_options_that_differ_from_the_durable_contract()
     Ok(())
 }
 
-#[tokio::test]
-async fn log_exposes_its_durable_options() -> Result<(), Box<dyn std::error::Error>> {
+async fn log_exposes_its_durable_options(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
     let options = Options {
         max_object_bytes: 8 * 1024 * 1024,
         ..Options::default()
     };
-    let backend =
-        ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("protocol-tests")).await?;
+    let backend = ValidatedBackend::new(new_store()?, Path::from("protocol-tests")).await?;
     let log = Log::open(&backend, &LogId::new("options-getter")?, options).await?;
 
     assert_eq!(log.options(), options);
     Ok(())
 }
 
-#[tokio::test]
-async fn stale_view_is_rejected_without_publishing_its_candidate()
--> Result<(), Box<dyn std::error::Error>> {
-    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+async fn stale_view_is_rejected_without_publishing_its_candidate(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
     let log = open(backend, "stale-view").await?;
     let stale = log.load().await?;
     let first = log.prepare(
@@ -312,10 +375,10 @@ async fn stale_view_is_rejected_without_publishing_its_candidate()
     Ok(())
 }
 
-#[tokio::test]
-async fn referenced_objects_are_durable_before_head_publication()
--> Result<(), Box<dyn std::error::Error>> {
-    let observed = Arc::new(InstrumentedStore::new());
+async fn referenced_objects_are_durable_before_head_publication(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new(new_store()?));
     let backend: Arc<dyn ObjectStore> = observed.clone();
     let log = open(backend, "object-order").await?;
     observed.arm_order_check();
@@ -342,9 +405,10 @@ async fn referenced_objects_are_durable_before_head_publication()
     Ok(())
 }
 
-#[tokio::test]
-async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std::error::Error>> {
-    let backend = Arc::new(InMemory::new());
+async fn tail_replay_leaves_referenced_objects_lazy(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend = new_store()?;
     let erased: Arc<dyn ObjectStore> = backend.clone();
     let log = open(erased, "missing-object").await?;
     let view = log.load().await?;
@@ -382,10 +446,10 @@ async fn tail_replay_leaves_referenced_objects_lazy() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-#[tokio::test]
-async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn std::error::Error>>
-{
-    let backend = Arc::new(InMemory::new());
+async fn object_read_rejects_a_changed_referenced_object(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend = new_store()?;
     let erased: Arc<dyn ObjectStore> = backend.clone();
     let log = open(erased, "changed-object").await?;
     let view = log.load().await?;
@@ -426,10 +490,10 @@ async fn object_read_rejects_a_changed_referenced_object() -> Result<(), Box<dyn
     Ok(())
 }
 
-#[tokio::test]
-async fn lost_success_response_resolves_to_the_original_commit()
--> Result<(), Box<dyn std::error::Error>> {
-    let observed = Arc::new(InstrumentedStore::new());
+async fn lost_success_response_resolves_to_the_original_commit(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new(new_store()?));
     let backend: Arc<dyn ObjectStore> = observed.clone();
     let log = open(backend, "lost-success").await?;
     let view = log.load().await?;
@@ -456,9 +520,10 @@ async fn lost_success_response_resolves_to_the_original_commit()
     Ok(())
 }
 
-#[tokio::test]
-async fn cancelled_head_update_resumes_after_reopen() -> Result<(), Box<dyn std::error::Error>> {
-    let observed = Arc::new(InstrumentedStore::new());
+async fn cancelled_head_update_resumes_after_reopen(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new(new_store()?));
     let store: Arc<dyn ObjectStore> = observed.clone();
     let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
     let log_id = LogId::new("cancelled-update")?;
@@ -493,10 +558,10 @@ async fn cancelled_head_update_resumes_after_reopen() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-#[tokio::test]
-async fn tail_order_survives_out_of_order_read_completion() -> Result<(), Box<dyn std::error::Error>>
-{
-    let observed = Arc::new(InstrumentedStore::new());
+async fn tail_order_survives_out_of_order_read_completion(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new(new_store()?));
     let store: Arc<dyn ObjectStore> = observed.clone();
     let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
     let log = Log::open(
@@ -528,10 +593,10 @@ async fn tail_order_survives_out_of_order_read_completion() -> Result<(), Box<dy
     Ok(())
 }
 
-#[tokio::test]
-async fn pending_candidate_resolves_not_committed_after_another_writer_wins()
--> Result<(), Box<dyn std::error::Error>> {
-    let observed = Arc::new(InstrumentedStore::new());
+async fn pending_candidate_resolves_not_committed_after_another_writer_wins(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new(new_store()?));
     let backend: Arc<dyn ObjectStore> = observed.clone();
     let first = open(Arc::clone(&backend), "pending-loser").await?;
     let second = open(backend, "pending-loser").await?;
@@ -571,10 +636,10 @@ async fn pending_candidate_resolves_not_committed_after_another_writer_wins()
     Ok(())
 }
 
-#[tokio::test]
-async fn rejected_candidate_remains_pending_when_the_winner_read_fails()
--> Result<(), Box<dyn std::error::Error>> {
-    let observed = Arc::new(InstrumentedStore::new());
+async fn rejected_candidate_remains_pending_when_the_winner_read_fails(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let observed = Arc::new(InstrumentedStore::new(new_store()?));
     let backend: Arc<dyn ObjectStore> = observed.clone();
     let first = open(Arc::clone(&backend), "rejected-without-view").await?;
     let second = open(backend, "rejected-without-view").await?;
@@ -638,7 +703,7 @@ async fn immutable_location<S: ObjectStore + ?Sized>(
 
 #[derive(Debug)]
 struct InstrumentedStore {
-    inner: Arc<InMemory>,
+    inner: Arc<dyn ObjectStore>,
     failure: AtomicU8,
     order_check_armed: AtomicBool,
     object_created: AtomicBool,
@@ -653,9 +718,9 @@ struct InstrumentedStore {
 }
 
 impl InstrumentedStore {
-    fn new() -> Self {
+    fn new(inner: Arc<dyn ObjectStore>) -> Self {
         Self {
-            inner: Arc::new(InMemory::new()),
+            inner,
             failure: AtomicU8::new(FAIL_NONE),
             order_check_armed: AtomicBool::new(false),
             object_created: AtomicBool::new(false),
@@ -719,7 +784,7 @@ impl InstrumentedStore {
 
 impl fmt::Display for InstrumentedStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("instrumented memory store")
+        formatter.write_str("instrumented store")
     }
 }
 

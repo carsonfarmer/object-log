@@ -162,9 +162,6 @@ format verification.
 
 ### Current matrix gaps
 
-- Combine pending-outcome fault schedules with generated maintenance actions;
-  the append/resolution and maintenance models currently run separately.
-- Run the complete conformance and protocol suites against MinIO.
 - Add filesystem and live object-store performance evidence.
 
 ## Current deterministic scenario
@@ -196,10 +193,20 @@ checkpoint, collection, and crash actions. Submitted values determine its histor
 and checkpoint bytes; captured immutable-create keys determine exact collection
 candidates and survivors. Every action checks snapshot/tail contents and live
 blob bytes. A fixed prefix forces a prepared writer to lose to a checkpoint.
-The maintenance model abandons uncommitted work before collection and does not
-inject faults; dedicated checkpoint/GC tests cover uncertain maintenance outcomes.
+Lost head-write responses create pending candidates whose serialized tokens are
+resolved after checkpoint, collection, and reopening. The model advances history
+from the scheduled successful mutation, independently of the returned status.
+It abandons uncommitted work before collection; dedicated checkpoint/GC tests
+also cover uncertain maintenance outcomes.
 The filesystem backend correctly fails capability validation because it lacks
 conditional updates, so these log-level scenarios use memory and local MinIO.
+
+`make minio-test` runs the same supported-backend conformance and all 18 storage
+protocol cases against pinned local MinIO, plus immutable-create faults,
+maintenance histories, and the existing recovery/checkpoint/GC flow. Provider
+cases use isolated namespaces; the runner removes its owned process/container
+and temporary data even when a test fails. Filesystem capability rejection and
+pure namespace parsing are provider-independent checks.
 
 ## Benchmark contract
 
