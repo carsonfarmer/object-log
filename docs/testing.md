@@ -26,11 +26,11 @@ memory-backed candidates and 10,001 local MinIO candidates. The staged-object
 accounting target proves the request shape for 1 MiB update and 100 MiB
 checkpoint workloads.
 
-Format tests include one hexadecimal encoding assertion for an empty head.
+Format tests pin hexadecimal encodings for an empty head, commit, checkpoint,
+and recovery token (including object references and conditional-write versions).
 Golden values test the current canonical encoding. They do not promise
-pre-release compatibility and can change with a smaller or better v1 layout. A
-complete set for commits, checkpoints, and recovery tokens remains
-qualification work. The CDDL file defines the current schema. Tests reject
+pre-release compatibility and can change with a smaller or better v1 layout.
+The CDDL file defines the current schema. Tests reject
 trailing data, wrong digests, unsupported versions, and unknown fields.
 Protocol tests reject objects above configured limits.
 
@@ -97,10 +97,12 @@ For each point, assert the exact classification. A response lost after the head
 mutation must resolve as committed. A failure before the head mutation must not
 be misreported as committed.
 
-Current tests cover head mutation before/after failures, resolution reads,
-cancellation after a visible head mutation, raw object-store puts, and
-referenced-object verification. Full log-level coverage of blob and commit
-creation before/after failures remains qualification work.
+Current tests cover log-level blob and commit creation before/after failures,
+head mutation before/after failures, resolution reads, cancellation after a
+visible head mutation, raw object-store puts, and referenced-object verification.
+Immutable-create failures return errors without publishing; serialized candidates
+recover exactly once after reopening. The immutable-create fault matrix and
+maintenance model also run as opt-in local MinIO tests with isolated namespaces.
 
 ### Recovery
 
@@ -160,11 +162,8 @@ format verification.
 
 ### Current matrix gaps
 
-- Complete the blob-create and commit-create fault points listed above.
-- Add golden tests for the current canonical commit, checkpoint, and recovery
-  token encodings. Update them when the v1 layout changes.
-- Extend the generated model with independent checkpoint and collection
-  oracles.
+- Combine pending-outcome fault schedules with generated maintenance actions;
+  the append/resolution and maintenance models currently run separately.
 - Run the complete conformance and protocol suites against MinIO.
 - Add filesystem and live object-store performance evidence.
 
@@ -192,9 +191,15 @@ Fixed lost-response and competing-writer schedules supplement the reproducible
 seeds; mutation checks reject omitted, extra, duplicate, reordered, and
 substituted records.
 
-Generated checkpoint and collection oracles remain qualification work, along
-with object oracles and separate prepare, stage, and checkpoint actions. The
-current generated scenario does not checkpoint or collect.
+A separate seeded maintenance model exercises stage, prepare, publish,
+checkpoint, collection, and crash actions. Submitted values determine its history
+and checkpoint bytes; captured immutable-create keys determine exact collection
+candidates and survivors. Every action checks snapshot/tail contents and live
+blob bytes. A fixed prefix forces a prepared writer to lose to a checkpoint.
+The maintenance model abandons uncommitted work before collection and does not
+inject faults; dedicated checkpoint/GC tests cover uncertain maintenance outcomes.
+The filesystem backend correctly fails capability validation because it lacks
+conditional updates, so these log-level scenarios use memory and local MinIO.
 
 ## Benchmark contract
 

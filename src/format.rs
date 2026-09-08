@@ -2711,6 +2711,63 @@ mod tests {
     }
 
     #[test]
+    fn durable_commit_checkpoint_and_token_goldens() -> Result<(), Error> {
+        let transaction = crate::TransactionId::from_uuid(uuid::Uuid::from_u128(3));
+        let objects = vec![object_ref(ObjectKind::Blob, 4)];
+        let commit = Commit {
+            log_id: log_id(),
+            incarnation: incarnation(),
+            transaction_id: transaction,
+            expected_tip: Some(Digest::of(b"parent")),
+            operation: Bytes::from_static(b"op"),
+            result: Bytes::from_static(b"ok"),
+            objects: objects.clone(),
+        };
+        let checkpoint = Checkpoint {
+            log_id: log_id(),
+            incarnation: incarnation(),
+            through_sequence: 7,
+            through_commit: Digest::of(b"commit"),
+            snapshot: Bytes::from_static(b"state"),
+            objects: objects.clone(),
+        };
+        let prepared = crate::PreparedCommit {
+            view: crate::View {
+                observed: Arc::new(crate::ObservedState {
+                    head: Head::empty(log_id(), incarnation(), Options::default()),
+                    version: object_store::UpdateVersion {
+                        e_tag: Some("etag".to_owned()),
+                        version: Some("version".to_owned()),
+                    },
+                }),
+            },
+            staging_domain: Arc::new(crate::StagingDomain),
+            transaction_id: transaction,
+            storage_id: storage_id(),
+            operation: Bytes::from_static(b"op"),
+            result: Bytes::from_static(b"ok"),
+            objects,
+        };
+        for (bytes, golden) in [
+            (
+                encode_commit(&commit)?,
+                include_str!("../tests/fixtures/commit-v1.hex"),
+            ),
+            (
+                encode_checkpoint(&checkpoint)?,
+                include_str!("../tests/fixtures/checkpoint-v1.hex"),
+            ),
+            (
+                encode_recovery_token(&prepared)?,
+                include_str!("../tests/fixtures/token-v1.hex"),
+            ),
+        ] {
+            assert_eq!(hex::encode(bytes), golden.trim());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn empty_head_encoding_is_stable() {
         let encoded = encode_head(&Head::empty(log_id(), incarnation(), Options::default()))
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
