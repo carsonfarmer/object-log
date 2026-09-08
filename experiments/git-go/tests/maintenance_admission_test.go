@@ -16,11 +16,13 @@ func TestRepeatedPushes(t *testing.T) {
 	}
 	for _, format := range []string{"sha1", "sha256"} {
 		t.Run(format, func(t *testing.T) {
+			t.Parallel()
 			url := strings.TrimRight(endpoint, "/") + "/" + format + ".git"
 			source := filepath.Join(t.TempDir(), "source")
 			branch := fmt.Sprintf("repeated-%d", time.Now().UnixNano())
 			git(t, nil, "init", "--object-format="+format, "-b", branch, source)
-			for i := 0; i < 129; i++ {
+			// Cross the WAL tail capacity: this fails without automatic checkpoints.
+			for i := 0; i < 1025; i++ {
 				write(t, filepath.Join(source, "value"), []byte(fmt.Sprint(i)))
 				git(t, nil, "-C", source, "add", ".")
 				git(t, nil, "-C", source, "commit", "-m", fmt.Sprint(i))
@@ -34,7 +36,7 @@ func TestRepeatedPushes(t *testing.T) {
 				t.Fatal("repeated pushes lost history")
 			}
 			data, err := os.ReadFile(filepath.Join(cold, "value"))
-			if err != nil || string(data) != "128" {
+			if err != nil || string(data) != "1024" {
 				t.Fatalf("wrong latest content: %q %v", data, err)
 			}
 		})

@@ -135,15 +135,16 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Wal-Bytes", fmt.Sprint(u.Bytes))
 		log.Printf("wal %s %s calls=%d bytes=%d", r.Method, r.URL.Path, u.Calls, u.Bytes)
 	}()
+	refresh := func() error {
+		fresh, err := unwrap(session.Refresh())
+		if err == nil {
+			session.Drop()
+			session = fresh
+		}
+		return err
+	}
 	if service == transport.UploadPackService {
-		e = retryRead(w, r, func() error {
-			fresh, err := unwrap(session.Refresh())
-			if err == nil {
-				session.Drop()
-				session = fresh
-			}
-			return err
-		}, func(attempt *readResponse, request *http.Request) error {
+		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
 			s, err := openStore(session, format)
 			if err != nil {
 				return err
@@ -189,7 +190,27 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, e.Error(), 500)
 		return
 	}
-	defer s.Close()
+	defer func() { s.Close() }()
+	if service == transport.ReceivePackService && method == http.MethodPost {
+		reopen, err := s.beforePush()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if reopen {
+			s.Close()
+			if err = refresh(); err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			fresh, err := openStore(session, format)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			s = fresh
+		}
+	}
 	if maintenance {
 		report, err := s.maintain()
 		if err != nil {
