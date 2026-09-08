@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -125,13 +126,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, e.Error(), 500)
 		return
 	}
-	defer session.Drop()
-	s, e := openStore(session, format)
-	if e != nil {
-		http.Error(response, e.Error(), 500)
-		return
-	}
-	defer s.Close()
+	defer func() { session.Drop() }()
 	w := &httpWriter{ResponseWriter: response}
 	w.Header().Set("Trailer", "X-Wal-Calls, X-Wal-Bytes")
 	defer func() {
@@ -140,6 +135,61 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Wal-Bytes", fmt.Sprint(u.Bytes))
 		log.Printf("wal %s %s calls=%d bytes=%d", r.Method, r.URL.Path, u.Calls, u.Bytes)
 	}()
+	if service == transport.UploadPackService {
+		e = retryRead(w, r, func() error {
+			fresh, err := unwrap(session.Refresh())
+			if err == nil {
+				session.Drop()
+				session = fresh
+			}
+			return err
+		}, func(attempt *readResponse, request *http.Request) error {
+			s, err := openStore(session, format)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			attempt.failure = &s.failure
+			if request.Method == http.MethodPost {
+				var body io.Reader = request.Body
+				if request.Header.Get("Content-Encoding") == "gzip" {
+					decoded, err := gzip.NewReader(body)
+					if err != nil {
+						return err
+					}
+					defer decoded.Close()
+					body = decoded
+					request.Header.Del("Content-Encoding")
+				}
+				tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
+				for _, id := range s.meta.Refs {
+					tips = append(tips, plumbing.NewHash(id))
+				}
+				body, err = filterFetch(s, tips, body, strings.Contains(request.Header.Get("Git-Protocol"), "version=2"))
+				if err != nil {
+					return err
+				}
+				request.Body = io.NopCloser(body)
+			}
+			b := backend.New(loader{s})
+			b.ErrorLog = log.Default()
+			b.ServeHTTP(attempt, request)
+			return s.failure
+		})
+		if e != nil {
+			log.Printf("git read failed: %v", e)
+			if !w.sent {
+				http.Error(w, "Git read failed", http.StatusInternalServerError)
+			}
+		}
+		return
+	}
+	s, e := openStore(session, format)
+	if e != nil {
+		http.Error(response, e.Error(), 500)
+		return
+	}
+	defer s.Close()
 	if maintenance {
 		report, err := s.maintain()
 		if err != nil {
@@ -169,10 +219,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			}
 			return e
 		}}})
-	} else {
-		b := backend.New(loader{s})
-		b.ErrorLog = log.Default()
-		b.ServeHTTP(w, r)
 	}
 	if e != nil {
 		log.Printf("git request failed: %v", e)

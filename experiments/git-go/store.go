@@ -27,7 +27,7 @@ func unwrap[T any](r wt.Result[T, wal.Failure]) (T, error) {
 	}
 	var zero T
 	if r.Err().Tag() == wal.FailureExpired {
-		return zero, fmt.Errorf("expired view")
+		return zero, errExpired
 	}
 	return zero, fmt.Errorf("wal: %s", r.Err().Other())
 }
@@ -321,6 +321,7 @@ func (o *storedObject) Reader() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("unknown object encoding")
 	}
 	entry, err := unwrap(o.s.session.ReadNode(o.item.root))
+	o.s.observeRead(err)
 	if err != nil {
 		return nil, err
 	}
@@ -355,6 +356,7 @@ func (r *objectReader) Read(p []byte) (int, error) {
 			return 0, io.ErrUnexpectedEOF
 		}
 		b, e := unwrap(r.s.session.Read(r.roots[0]))
+		r.s.observeRead(e)
 		if e != nil {
 			return 0, e
 		}
@@ -451,6 +453,7 @@ func (s *store) Close() {
 }
 func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
 	entry, e := unwrap(s.session.ReadNode(root))
+	s.observeRead(e)
 	if e == nil {
 		s.owned = append(s.owned, entry.Objects...)
 	}
@@ -474,3 +477,9 @@ func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
 type pendingError struct{ token []byte }
 
 func (*pendingError) Error() string { return "publication pending" }
+
+func (s *store) observeRead(err error) {
+	if err == errExpired {
+		s.failure = err
+	}
+}
