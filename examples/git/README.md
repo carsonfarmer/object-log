@@ -110,6 +110,8 @@ Push admission checkpoints long tails automatically. Send an authenticated
 objects and collect one bounded batch. Repeat `more` until `complete`; retry
 `pending` or `conflict` with a fresh request. `retained` means a WAL retention
 blocks collection. Counts are deletion candidates, not unique deleted objects.
+Maintenance still walks reachable history. Unchanged catalog nodes reuse their
+original proofs and maps; filtering copies maps only when needed.
 
 Objects use compressed loose-object bodies in 1 MiB chunks and a splitting
 sparse index. Incoming packs are staged as seekable WAL chunks; individual delta

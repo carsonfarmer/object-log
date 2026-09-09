@@ -7,8 +7,7 @@ the only mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 The library-backed Go Git consumer lives at `examples/git`, with the Rust WAL
 component at `examples/wal-component`. The custom Rust Git engine, native
 maintenance command and old Git harnesses are removed.
-The core, KV and SQLite implementations are unchanged. Local replacement
-qualification passes; the old implementation remains available in Git history.
+Local replacement qualification passes; the old implementation remains available in Git history.
 
 Local development uses the existing published go-git module pin in `go.mod`,
 without a workspace override. Partial-clone filters are deferred. Leave the
@@ -64,3 +63,9 @@ Mature-tail checkpointing reuses complete verification on an exact local view;
 reopened handles and recovery tokens still verify. SQLite recovery uses one
 ordered 32-chunk window across records. Cold metadata recovery still reads the
 whole tail. Licensing and dependency provenance are in THIRD_PARTY.md.
+
+Graph verification keeps the 32-read window filled as objects finish, and Git
+catalog pruning avoids copying unchanged maps. Existing authentication, fencing
+and automatic cleanup remain intact. The full Go WAL experiment stays separate
+on `cf/go-wal-experiment`: its WASI concurrency trap and timeout/cancellation gaps
+block replacement (issue #42). Keep Rust as the accepted core; no runtime fork.
