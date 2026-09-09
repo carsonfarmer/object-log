@@ -24,7 +24,8 @@ add them only when useful and supported without bespoke protocol machinery.
 
 ## Storage and recovery
 
-Compressed loose objects live in immutable WAL chunks. A splitting radix catalog
+Compressed loose objects of at most 512 bytes live in authenticated catalog
+leaves; larger objects use immutable WAL chunks. A splitting radix catalog
 provides sparse lookup. The catalog and refs publish through the same conditional
 head update. Local handles and caches are disposable; no local repository is
 needed. Git formats, negotiation and pack processing belong to go-git.

@@ -76,6 +76,7 @@ API:
 - [`examples/git`](examples/git) uses go-git for Git protocols and object formats.
   A small [Rust component](examples/wal-component) connects it to the same WAL.
   Refs and a sparse object catalog publish together through one head update.
+  Small compressed objects fit in catalog leaves; larger objects use WAL chunks.
   Spin supplies HTTP; the core has no Spin dependency or Git rules.
 
 The Git consumer replaces the custom Rust Git engine and native maintenance

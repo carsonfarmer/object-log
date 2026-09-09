@@ -30,6 +30,10 @@ func TestManyObjects(t *testing.T) {
 				_, _ = rng.Read(data)
 				write(t, filepath.Join(source, fmt.Sprintf("blob-%02d", i)), data)
 			}
+			// Mix inline objects with external chunks in the same catalog leaves.
+			for i := range 512 {
+				write(t, filepath.Join(source, fmt.Sprintf("small-%03d", i)), []byte(fmt.Sprintf("small object %d", i)))
+			}
 			git(t, nil, "-C", source, "add", ".")
 			git(t, nil, "-C", source, "commit", "-m", "many objects")
 			tip := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
@@ -53,6 +57,9 @@ func TestManyObjects(t *testing.T) {
 			clone := filepath.Join(root, "clone")
 			git(t, nil, "-c", "protocol.version=2", "clone", "--single-branch", "--branch", branch, url, clone)
 			git(t, nil, "-C", clone, "fsck", "--full")
+			if got := strings.TrimSpace(string(git(t, nil, "-C", clone, "rev-parse", "HEAD"))); got != tip {
+				t.Fatal("mixed catalog changed the cloned tree")
+			}
 			for i := range 32 {
 				name := fmt.Sprintf("blob-%02d", i)
 				want, err := os.ReadFile(filepath.Join(source, name))

@@ -69,3 +69,9 @@ catalog pruning avoids copying unchanged maps. Existing authentication, fencing
 and automatic cleanup remain intact. The full Go WAL experiment stays separate
 on `cf/go-wal-experiment`: its WASI concurrency trap and timeout/cancellation gaps
 block replacement (issue #42). Keep Rust as the accepted core; no runtime fork.
+
+The Git catalog now holds compressed loose objects up to 512 bytes directly in
+authenticated leaves, reducing history and collection reads without new core
+APIs or custom Git traversal. Larger objects keep sparse WAL chunks. The reader
+accepts the preceding Go catalog, but older binaries cannot read newly written
+inline entries. Existing objects are not automatically migrated.

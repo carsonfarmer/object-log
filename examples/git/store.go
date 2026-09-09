@@ -34,13 +34,6 @@ func unwrap[T any](r wt.Result[T, wal.Failure]) (T, error) {
 	return zero, fmt.Errorf("wal: %s", r.Err().Other())
 }
 
-type objectMeta struct {
-	ID         string
-	Kind       plumbing.ObjectType
-	Size       int64
-	Encoding   string `json:",omitempty"`
-	StoredSize int64  `json:",omitempty"`
-}
 type indexed struct {
 	objectMeta
 	root *wal.Object
@@ -284,17 +277,23 @@ func (w *objectWriter) Close() (err error) {
 	if w.written != w.size {
 		return fmt.Errorf("incomplete object")
 	}
-	if len(w.sink.buf) > 0 {
-		if err = w.sink.flush(); err != nil {
+	id := w.codec.Hash().String()
+	item := indexed{objectMeta: objectMeta{ID: id, Kind: w.kind, Size: w.size, Encoding: "zlib", StoredSize: w.sink.written}}
+	if len(w.sink.chunks) == 0 && len(w.sink.buf) <= inlineObjectLimit {
+		item.Inline = w.sink.buf
+	} else {
+		if len(w.sink.buf) > 0 {
+			if err = w.sink.flush(); err != nil {
+				return err
+			}
+		}
+		item.root, err = w.s.putNode(nil, w.sink.chunks)
+		if err != nil {
 			return err
 		}
 	}
-	root, err := w.s.putNode(nil, w.sink.chunks)
-	if err != nil {
-		return err
-	}
-	id := w.codec.Hash().String()
-	w.s.pending[id] = indexed{objectMeta{ID: id, Kind: w.kind, Size: w.size, Encoding: "zlib", StoredSize: w.sink.written}, root}
+	w.sink.buf = nil
+	w.s.pending[id] = item
 	return nil
 }
 
@@ -347,6 +346,9 @@ func (o *storedObject) Reader() (io.ReadCloser, error) {
 	}
 	if o.item.Encoding != "" && o.item.Encoding != "zlib" {
 		return nil, fmt.Errorf("unknown object encoding")
+	}
+	if len(o.item.Inline) > 0 {
+		return o.item.readInline(o.s.meta.Format)
 	}
 	entry, err := unwrap(o.s.session.ReadNode(o.item.root))
 	o.s.observeRead(err)

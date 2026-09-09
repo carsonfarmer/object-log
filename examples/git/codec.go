@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -8,6 +9,29 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
 	"io"
 )
+
+// Keep full catalog leaves below the WAL node limit, including base64 encoding.
+const inlineObjectLimit = 512
+
+type objectMeta struct {
+	ID         string
+	Kind       plumbing.ObjectType
+	Size       int64
+	Encoding   string `json:",omitempty"`
+	StoredSize int64  `json:",omitempty"`
+	Inline     []byte `json:",omitempty"`
+}
+
+func (m objectMeta) validInline() bool {
+	return len(m.Inline) > 0 && len(m.Inline) <= inlineObjectLimit && m.Encoding == "zlib" && int64(len(m.Inline)) == m.StoredSize
+}
+
+func (m objectMeta) readInline(format config.ObjectFormat) (io.ReadCloser, error) {
+	if !m.validInline() {
+		return nil, fmt.Errorf("invalid inline object")
+	}
+	return readLoose(io.NopCloser(bytes.NewReader(m.Inline)), format, m.Kind, m.Size, plumbing.NewHash(m.ID))
+}
 
 // Close releases both the codec and the underlying WAL chunk handles.
 // Full reads verify decoded size and Git identity, not only the zlib stream.

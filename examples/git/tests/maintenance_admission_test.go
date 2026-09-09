@@ -34,6 +34,8 @@ func TestRepeatedPushes(t *testing.T) {
 			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
 			reader := filepath.Join(t.TempDir(), "reader")
 			git(t, nil, "init", "--bare", "--object-format="+format, reader)
+			// Finish local repacking before fsck opens the resulting pack indexes.
+			git(t, nil, "-C", reader, "config", "maintenance.autoDetach", "false")
 			done := make(chan struct{})
 			// Cross the WAL tail capacity while another ordinary client reads.
 			t.Run("traffic", func(t *testing.T) {

@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/json"
 	"fmt"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
 	"io"
+	"math"
+	"strings"
 	"testing"
 )
 
@@ -89,5 +92,85 @@ func TestLooseRejectsDeclaredBodyMismatch(t *testing.T) {
 		if err == nil || !source.closed {
 			t.Fatalf("accepted wrong length or leaked source: %v", err)
 		}
+	}
+}
+
+func TestInlineLooseObjects(t *testing.T) {
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		t.Run(format.String(), func(t *testing.T) {
+			data := []byte("small authenticated Git object")
+			var encoded bytes.Buffer
+			w := objfile.NewWriter(&encoded, format)
+			if err := w.WriteHeader(plumbing.BlobObject, int64(len(data))); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Write(data); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			original := objectMeta{ID: w.Hash().String(), Kind: plumbing.BlobObject, Size: int64(len(data)), Encoding: "zlib", StoredSize: int64(encoded.Len()), Inline: encoded.Bytes()}
+			r, err := original.readInline(format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(r)
+			_ = r.Close()
+			if err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("inline roundtrip: %q %v", got, err)
+			}
+			for name, mutate := range map[string]func(*objectMeta){
+				"truncated":         func(m *objectMeta) { m.Inline = m.Inline[:len(m.Inline)-2]; m.StoredSize -= 2 },
+				"checksum":          func(m *objectMeta) { m.Inline[len(m.Inline)-1] ^= 1 },
+				"compressed length": func(m *objectMeta) { m.StoredSize++ },
+				"decoded length":    func(m *objectMeta) { m.Size++ },
+				"type":              func(m *objectMeta) { m.Kind = plumbing.TreeObject },
+				"identity":          func(m *objectMeta) { m.ID = strings.Repeat("0", len(m.ID)) },
+				"encoding":          func(m *objectMeta) { m.Encoding = "" },
+				"oversized":         func(m *objectMeta) { m.Inline = make([]byte, inlineObjectLimit+1); m.StoredSize = int64(len(m.Inline)) },
+			} {
+				t.Run(name, func(t *testing.T) {
+					m := original
+					m.Inline = bytes.Clone(original.Inline)
+					mutate(&m)
+					r, err := m.readInline(format)
+					if err == nil {
+						_, err = io.ReadAll(r)
+						_ = r.Close()
+					}
+					if err == nil {
+						t.Fatal("invalid inline object accepted")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestInlineMetadataBound(t *testing.T) {
+	meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: inlineObjectLimit, Inline: make([]byte, inlineObjectLimit)}
+	if !meta.validInline() {
+		t.Fatal("exact limit rejected")
+	}
+	meta.Inline = append(meta.Inline, 0)
+	meta.StoredSize++
+	if meta.validInline() {
+		t.Fatal("oversized metadata accepted")
+	}
+	meta.Inline = meta.Inline[:inlineObjectLimit]
+	meta.StoredSize--
+	leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafSize)}
+	for i := range leaf.Items {
+		leaf.Items[i] = meta
+	}
+	data, err := json.Marshal(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Even worst-case SHA-256 IDs and numeric fields leave over 1 MiB of the
+	// 2 MiB node budget for the WAL envelope. Inline entries have no child refs.
+	if len(data) >= 1024*1024 {
+		t.Fatalf("inline leaf metadata grew to %d bytes", len(data))
 	}
 }

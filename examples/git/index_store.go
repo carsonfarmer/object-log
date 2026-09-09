@@ -44,15 +44,31 @@ func (s *store) loadBucket(root *wal.Object) (radixNode[indexed, *wal.Object], e
 			node.Children[key] = entry.Objects[i]
 		}
 	} else {
-		if len(meta.Items) != len(entry.Objects) || len(meta.Items) > indexLeafSize {
+		if len(meta.Items) > indexLeafSize {
 			return node, fmt.Errorf("invalid index leaf")
 		}
 		node.Items = map[string]indexed{}
-		for i, item := range meta.Items {
+		next := 0
+		for _, item := range meta.Items {
 			if _, exists := node.Items[item.ID]; exists {
 				return node, fmt.Errorf("duplicate index object")
 			}
-			node.Items[item.ID] = indexed{item, entry.Objects[i]}
+			value := indexed{objectMeta: item}
+			if len(item.Inline) > 0 {
+				if !item.validInline() {
+					return node, fmt.Errorf("invalid inline object")
+				}
+			} else {
+				if next == len(entry.Objects) {
+					return node, fmt.Errorf("missing index object")
+				}
+				value.root = entry.Objects[next]
+				next++
+			}
+			node.Items[item.ID] = value
+		}
+		if next != len(entry.Objects) {
+			return node, fmt.Errorf("extra index objects")
 		}
 	}
 	s.loaded[root] = node
@@ -72,7 +88,9 @@ func (s *store) saveBucket(node radixNode[indexed, *wal.Object]) (*wal.Object, e
 		slices.Sort(keys)
 		for _, id := range keys {
 			meta.Items = append(meta.Items, node.Items[id].objectMeta)
-			children = append(children, node.Items[id].root)
+			if len(node.Items[id].Inline) == 0 {
+				children = append(children, node.Items[id].root)
+			}
 		}
 	}
 	data, err := json.Marshal(meta)
