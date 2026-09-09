@@ -10,6 +10,7 @@ use bytes::Bytes;
 use minicbor::bytes::ByteVec;
 use minicbor::{Decode, Encode};
 use object_store::UpdateVersion;
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -364,59 +365,40 @@ struct OptionsWire {
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
 #[cbor(map)]
-struct CommitWire {
+struct CommitWire<'a> {
     #[n(1)]
     format_version: u32,
     #[n(2)]
-    log_id: String,
+    log_id: Cow<'a, str>,
     #[cbor(n(3), with = "minicbor::bytes")]
-    transaction_id: Vec<u8>,
+    transaction_id: Cow<'a, [u8]>,
     #[cbor(n(4), with = "minicbor::bytes")]
-    expected_tip: Option<Vec<u8>>,
+    expected_tip: Option<Cow<'a, [u8]>>,
     #[cbor(n(5), with = "minicbor::bytes")]
-    operation: Vec<u8>,
+    operation: Cow<'a, [u8]>,
     #[cbor(n(6), with = "minicbor::bytes")]
-    result: Vec<u8>,
+    result: Cow<'a, [u8]>,
     #[n(7)]
     objects: Vec<ObjectRefWire>,
     #[cbor(n(8), with = "minicbor::bytes")]
-    incarnation: Vec<u8>,
+    incarnation: Cow<'a, [u8]>,
 }
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
 #[cbor(map)]
-struct CheckpointWire {
+struct CheckpointWire<'a> {
     #[n(1)]
     format_version: u32,
     #[n(2)]
-    log_id: String,
+    log_id: Cow<'a, str>,
     #[n(3)]
     through_sequence: u64,
     #[cbor(n(4), with = "minicbor::bytes")]
-    through_commit: Vec<u8>,
+    through_commit: Cow<'a, [u8]>,
     #[cbor(n(5), with = "minicbor::bytes")]
-    snapshot: Vec<u8>,
+    snapshot: Cow<'a, [u8]>,
     #[cbor(n(6), with = "minicbor::bytes")]
-    incarnation: Vec<u8>,
-    #[n(7)]
-    objects: Vec<ObjectRefWire>,
-}
-
-#[derive(Encode)]
-#[cbor(map)]
-struct CheckpointEncodeWire<'a> {
-    #[n(1)]
-    format_version: u32,
-    #[n(2)]
-    log_id: &'a str,
-    #[n(3)]
-    through_sequence: u64,
-    #[cbor(n(4), with = "minicbor::bytes")]
-    through_commit: &'a [u8],
-    #[cbor(n(5), with = "minicbor::bytes")]
-    snapshot: &'a [u8],
-    #[cbor(n(6), with = "minicbor::bytes")]
-    incarnation: &'a [u8],
+    incarnation: Cow<'a, [u8]>,
     #[n(7)]
     objects: Vec<ObjectRefWire>,
 }
@@ -717,13 +699,16 @@ pub(crate) fn decode_head(bytes: &[u8]) -> Result<Head, Error> {
 pub(crate) fn encode_commit(commit: &Commit) -> Result<Bytes, Error> {
     encode_envelope(&CommitWire {
         format_version: FORMAT_VERSION,
-        log_id: commit.log_id.to_string(),
-        transaction_id: commit.transaction_id.as_uuid().as_bytes().to_vec(),
-        expected_tip: commit.expected_tip.map(|digest| digest.as_bytes().to_vec()),
-        operation: commit.operation.to_vec(),
-        result: commit.result.to_vec(),
+        log_id: Cow::Borrowed(commit.log_id.as_str()),
+        transaction_id: Cow::Borrowed(commit.transaction_id.as_uuid().as_bytes()),
+        expected_tip: commit
+            .expected_tip
+            .as_ref()
+            .map(|digest| Cow::Borrowed(digest.as_bytes().as_slice())),
+        operation: Cow::Borrowed(&commit.operation),
+        result: Cow::Borrowed(&commit.result),
         objects: commit.objects.iter().map(ObjectRefWire::from).collect(),
-        incarnation: commit.incarnation.as_bytes().to_vec(),
+        incarnation: Cow::Borrowed(commit.incarnation.as_bytes()),
     })
 }
 
@@ -731,12 +716,12 @@ pub(crate) fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
     let wire: CommitWire = decode_envelope(bytes)?;
     require_version(wire.format_version)?;
     let commit = Commit {
-        log_id: LogId::new(wire.log_id)?,
+        log_id: LogId::new(wire.log_id.into_owned())?,
         incarnation: uuid(&wire.incarnation, "log incarnation")?,
         transaction_id: transaction_id(&wire.transaction_id)?,
         expected_tip: wire.expected_tip.map(|value| digest(&value)).transpose()?,
-        operation: Bytes::from(wire.operation),
-        result: Bytes::from(wire.result),
+        operation: Bytes::from(wire.operation.into_owned()),
+        result: Bytes::from(wire.result.into_owned()),
         objects: wire
             .objects
             .into_iter()
@@ -748,13 +733,13 @@ pub(crate) fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
 }
 
 pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Bytes, Error> {
-    encode_envelope(&CheckpointEncodeWire {
+    encode_envelope(&CheckpointWire {
         format_version: FORMAT_VERSION,
-        log_id: checkpoint.log_id.as_str(),
+        log_id: Cow::Borrowed(checkpoint.log_id.as_str()),
         through_sequence: checkpoint.through_sequence,
-        through_commit: checkpoint.through_commit.as_bytes(),
-        snapshot: &checkpoint.snapshot,
-        incarnation: checkpoint.incarnation.as_bytes(),
+        through_commit: Cow::Borrowed(checkpoint.through_commit.as_bytes()),
+        snapshot: Cow::Borrowed(&checkpoint.snapshot),
+        incarnation: Cow::Borrowed(checkpoint.incarnation.as_bytes()),
         objects: checkpoint.objects.iter().map(ObjectRefWire::from).collect(),
     })
 }
@@ -763,11 +748,11 @@ pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, Error> {
     let wire: CheckpointWire = decode_envelope(bytes)?;
     require_version(wire.format_version)?;
     let checkpoint = Checkpoint {
-        log_id: LogId::new(wire.log_id)?,
+        log_id: LogId::new(wire.log_id.into_owned())?,
         incarnation: uuid(&wire.incarnation, "log incarnation")?,
         through_sequence: wire.through_sequence,
         through_commit: digest(&wire.through_commit)?,
-        snapshot: Bytes::from(wire.snapshot),
+        snapshot: Bytes::from(wire.snapshot.into_owned()),
         objects: wire
             .objects
             .into_iter()
@@ -1451,16 +1436,18 @@ fn option_to_usize(value: u64) -> Result<usize, Error> {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
+    use std::borrow::Cow;
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::{
         Checkpoint, CheckpointWire, CollectionCandidate, CollectionCandidateWire, CollectionPlan,
-        CollectionPlanRef, CollectionPlanWire, Commit, EnvelopeWire, FORMAT_VERSION, Head,
-        HeadWire, Node, ObjectRefWire, OptionsWire, decode_checkpoint, decode_collection_plan,
-        decode_commit, decode_head, decode_node, decode_recovery_token, encode_checkpoint,
-        encode_collection_plan, encode_commit, encode_envelope, encode_head,
-        encode_node as encode_node_with_options, encode_recovery_token,
+        CollectionPlanRef, CollectionPlanWire, Commit, CommitWire, EnvelopeWire, FORMAT_VERSION,
+        Head, HeadWire, Node, ObjectRefWire, OptionsWire, decode_checkpoint,
+        decode_collection_plan, decode_commit, decode_envelope, decode_head, decode_node,
+        decode_recovery_token, encode_checkpoint, encode_collection_plan, encode_commit,
+        encode_envelope, encode_head, encode_node as encode_node_with_options,
+        encode_recovery_token,
     };
     use crate::store::{ImmutableKey, ImmutableKind};
     use crate::{CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, Options};
@@ -1948,6 +1935,11 @@ mod tests {
 
         let encoded =
             encode_commit(&commit).unwrap_or_else(|error| panic!("encode failed: {error}"));
+        let wire: CommitWire<'static> =
+            decode_envelope(&encoded).unwrap_or_else(|error| panic!("wire decode failed: {error}"));
+        assert!(matches!(wire.log_id, Cow::Owned(_)));
+        assert!(matches!(wire.operation, Cow::Owned(_)));
+        assert!(matches!(wire.result, Cow::Owned(_)));
         let decoded =
             decode_commit(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(decoded, commit);
@@ -1973,14 +1965,17 @@ mod tests {
             encode_checkpoint(&checkpoint).unwrap_or_else(|error| panic!("encode failed: {error}"));
         let owned = encode_envelope(&CheckpointWire {
             format_version: FORMAT_VERSION,
-            log_id: checkpoint.log_id.to_string(),
+            log_id: checkpoint.log_id.to_string().into(),
             through_sequence: checkpoint.through_sequence,
-            through_commit: checkpoint.through_commit.as_bytes().to_vec(),
-            snapshot: checkpoint.snapshot.to_vec(),
-            incarnation: checkpoint.incarnation.as_bytes().to_vec(),
+            through_commit: checkpoint.through_commit.as_bytes().to_vec().into(),
+            snapshot: checkpoint.snapshot.to_vec().into(),
+            incarnation: checkpoint.incarnation.as_bytes().to_vec().into(),
             objects: checkpoint.objects.iter().map(ObjectRefWire::from).collect(),
         })
         .unwrap_or_else(|error| panic!("owned encode failed: {error}"));
+        let wire: CheckpointWire<'static> =
+            decode_envelope(&encoded).unwrap_or_else(|error| panic!("wire decode failed: {error}"));
+        assert!(matches!(wire.snapshot, Cow::Owned(_)));
         let decoded =
             decode_checkpoint(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(encoded, owned);
