@@ -30,6 +30,9 @@ func TestLargeBlob(t *testing.T) {
 	}
 	for _, format := range []string{"sha1", "sha256"} {
 		t.Run(format, func(t *testing.T) {
+			if os.Getenv("GIT_CONCURRENT_LARGE") == "1" {
+				t.Parallel()
+			}
 			root := t.TempDir()
 			source := filepath.Join(root, "source")
 			url := strings.TrimRight(endpoint, "/") + "/" + format + ".git"

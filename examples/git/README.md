@@ -5,8 +5,9 @@ formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
 Local replacement checks pass; this is not production ready.
-Development uses the published go-git module pinned in `go.mod`, without the
-experimental filter fork. Partial-clone filters are currently unavailable.
+Development uses the upstream go-git v6 prerelease pinned in `go.mod`. Its
+dual-hash support, protocol-v2 server, shallow serving and streamed object writer
+are needed here. Stable v5 lacks that combination. Partial-clone filters are deferred.
 
 ## Build and run locally
 
@@ -46,10 +47,9 @@ Use `--env GIT_PASSWORD=...` for HTTP Basic authentication (any username),
 `--env WAL_DEFAULT_BRANCH=...` for a new repository's persisted default branch.
 Authentication is off by default; keep this configuration on loopback.
 Branches require fast-forward updates; force and force-with-lease cannot rewrite them.
-Use a fresh prefix: the retired custom Git catalog is incompatible. The current
-reader also accepts the preceding Go catalog. Once a push writes inline objects,
-older binaries cannot read those leaves; upgrading is one-way. Existing external
-objects keep their layout until rewritten.
+Use a fresh prefix: retired custom catalogs, original array leaves and
+unvalidated experimental roots are unsupported. Current validated catalogs
+contain inline and chunked objects; older binaries cannot read inline entries.
 
 ## Test
 
@@ -73,6 +73,8 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
   transfer and cleanup. Use an isolated prefix and keep competing workloads off
   the host when measuring. These timings do not include component compilation.
 - `GIT_LARGE_OBJECT_MIB=513`: larger push/clone/edit/fetch lifecycle.
+- `GIT_CONCURRENT_LARGE=1`: overlap that lifecycle for both hashes; use
+  `go test ./tests -run '^TestLargeBlob$' -parallel=2 -count=1 -v`.
 - `GIT_PROBE_PERSISTED_HEAD=true`: run `TestPersistedHead` after restarting Spin
   with the same prefix to verify saved default-branch recovery.
 - `GIT_FAILURE_DRILLS=prepare GIT_DRILL_STATE=/tmp/git-drill-state.json`: run
@@ -93,6 +95,12 @@ Cancellation is checked between storage calls and before publication. An
 already-running synchronous WASI call must finish; its publication outcome is
 preserved even after the deadline. Decoded deltas can allocate before their
 object-size check, so these limits do not promise a process-memory ceiling.
+On local Spin 4.0.2/MinIO, the 64 MiB edit lifecycle peaked at about 694 MiB
+whole-process RSS; two overlapping hash-format lifecycles peaked at 1,220 MiB.
+Both returned near 170 MiB afterward. Samples were taken every 100 ms after
+HTTP warm-up, excluding builds and MinIO/client processes. These are workload
+measurements, not upper bounds; delta pushes were the largest spikes.
+
 Host-wide concurrent-request admission is a hosting concern and remains deferred;
 this example adds no instance limiter or additional durable coordination.
 
@@ -140,4 +148,8 @@ See [issue #41](https://github.com/carsonfarmer/object-log/issues/41).
 temporary build-tool fix handles Go GC clock and immediate timer calls during
 canonical allocation. Spin and Go's collector are unchanged. Remove it when the
 standard adapter passes the retained regression and frequent-GC tests. No
-upstream post has been made. No Spin pooling or memory-limit wrapper is used.
+upstream post has been made. Retesting the stock pinned adapter with the current
+inline catalog still traps on 16 MiB pushes at default GC settings, for both
+hashes. `GODEBUG=gctrace=1` also traps because GC logging calls the host during
+canonical allocation; sample host RSS instead. No Spin pooling or memory-limit
+wrapper is used.

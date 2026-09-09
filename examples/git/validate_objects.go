@@ -8,26 +8,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
-// Older roots lack the validation guarantee. Establish it for the entire catalog
-// once, before trusting existing objects as boundaries for incremental checks.
-func verifyCatalog(st storer.EncodedObjectStorer, validated bool, ids []plumbing.Hash) error {
-	if !validated {
-		iter, err := st.IterEncodedObjects(plumbing.AnyObject)
-		if err != nil {
-			return err
-		}
-		defer iter.Close()
-		ids = nil
-		if err = iter.ForEach(func(o plumbing.EncodedObject) error {
-			ids = append(ids, o.Hash())
-			return nil
-		}); err != nil {
-			return err
-		}
-	}
-	return verifyObjects(st, ids)
-}
-
 // Check every new object, including objects the incoming refs do not reach.
 // Direct edges suffice once all objects in the durable catalog were validated.
 func verifyObjects(st storer.EncodedObjectStorer, ids []plumbing.Hash) error {

@@ -9,7 +9,7 @@ component at `examples/wal-component`. The custom Rust Git engine, native
 maintenance command and old Git harnesses are removed.
 Local replacement qualification passes; the old implementation remains available in Git history.
 
-Local development uses the existing published go-git module pin in `go.mod`,
+Local development uses the upstream go-git v6 prerelease pin in `go.mod`,
 without a workspace override. Partial-clone filters are deferred. Leave the
 reviewed `carsonfarmer/go-git` branch `cf/partial-clone-filters` parked until the
 owner decides whether to resume it.
@@ -72,6 +72,10 @@ block replacement (issue #42). Keep Rust as the accepted core; no runtime fork.
 
 The Git catalog now holds compressed loose objects up to 512 bytes directly in
 authenticated leaves, reducing history and collection reads without new core
-APIs or custom Git traversal. Larger objects keep sparse WAL chunks. The reader
-accepts the preceding Go catalog, but older binaries cannot read newly written
-inline entries. Existing objects are not automatically migrated.
+APIs or custom Git traversal. Larger objects keep sparse WAL chunks. Current validated catalogs remain supported; original array leaves and
+unvalidated experimental roots are rejected. There is no migration reader.
+The unpatched adapter still traps on ordinary 16 MiB pushes with this layout.
+See the Git README for concurrent large-file checks and observed memory use.
+
+Commit encoding borrows opaque payloads and checkpoint encoding shares its
+schema with decoding. Durable bytes and owned recovery results are unchanged.

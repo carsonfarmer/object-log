@@ -38,13 +38,6 @@ type indexed struct {
 	objectMeta
 	root *wal.Object
 }
-type rootMeta struct {
-	Validated bool `json:",omitempty"`
-	Format    config.ObjectFormat
-	Head      string
-	Refs      map[string]string
-	Buckets   []string
-}
 type store struct {
 	ctx            context.Context // Request-scoped; go-git storage methods do not accept contexts.
 	maxObjectBytes int64
@@ -105,11 +98,8 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 		if e != nil {
 			return nil, e
 		}
-		if e = json.Unmarshal(root.Data, &s.meta); e != nil {
+		if s.meta, e = decodeRoot(root.Data, format, len(root.Objects)); e != nil {
 			return nil, e
-		}
-		if s.meta.Format != format || len(s.meta.Buckets) != len(root.Objects) {
-			return nil, fmt.Errorf("invalid repository root")
 		}
 		for i, key := range s.meta.Buckets {
 			s.buckets[key] = root.Objects[i]
@@ -118,6 +108,8 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 			_ = s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
 		}
 	}
+	// An empty repository has no unchecked objects. Existing roots must certify validation.
+	s.meta.Validated = true
 	head := s.meta.Head
 	if head == "" {
 		branch := "main"

@@ -23,13 +23,7 @@ func (s *store) loadBucket(root *wal.Object) (radixNode[indexed, *wal.Object], e
 		return node, err
 	}
 	var meta bucketMeta
-	// Read original experiment leaves without a separate migration.
-	if len(entry.Data) > 0 && entry.Data[0] == '[' {
-		err = json.Unmarshal(entry.Data, &meta.Items)
-	} else {
-		err = json.Unmarshal(entry.Data, &meta)
-	}
-	if err != nil {
+	if err = json.Unmarshal(entry.Data, &meta); err != nil {
 		return node, err
 	}
 	if len(meta.Prefixes) > 0 {

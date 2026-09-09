@@ -54,11 +54,14 @@ cooperative cancellation before storage operations. These checks cannot stop
 an already-running synchronous WASI import or prevent go-git's delta buffers.
 Host-wide request admission remains a deferred hosting concern.
 Normal Spin settings are used; no instance-count, pooling or host-memory wrapper.
-A temporary, pinned component-build adapter patch is currently necessary for Go
+The service requires upstream go-git v6 prerelease APIs for both hashes, v2
+serving, shallow history and streamed writes. A temporary, pinned component-build
+adapter patch is currently necessary for Go
 GC host calls. Spin and Go's collector are unchanged.
 
 Use a fresh storage prefix: the prior custom Git catalog is incompatible, and
-there is no development-format migration tool. Do not silently reinterpret it.
+there is no development-format migration tool. Original array leaves and
+unvalidated experimental Go roots are rejected. Do not silently reinterpret them.
 
 ## Checks
 

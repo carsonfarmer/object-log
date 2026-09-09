@@ -2259,14 +2259,17 @@ impl Log {
     }
 
     async fn ensure_immutable(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
-        match self.store.create(key, bytes.clone()).await {
-            Ok(CreateResult::Created { .. }) => Ok(()),
-            Ok(CreateResult::AlreadyExists) => self.verify_immutable(key, &bytes).await,
-            Err(create_error) => match self.store.read(key, bytes.len()).await? {
-                Some(stored) if stored.bytes == bytes => Ok(()),
-                Some(_) => Err(Error::CorruptObject),
-                None => Err(create_error),
-            },
+        let create_error = match self.store.create(key, bytes.clone()).await {
+            Ok(CreateResult::Created { .. }) => return Ok(()),
+            Ok(CreateResult::AlreadyExists) => None,
+            Err(error) => Some(error),
+        };
+        match self.store.read(key, bytes.len()).await? {
+            Some(stored) if stored.bytes == bytes => Ok(()),
+            Some(_) => Err(Error::CorruptObject),
+            None => Err(create_error.unwrap_or_else(|| {
+                Error::InvalidFormat("an immutable object is missing".to_owned())
+            })),
         }
     }
 
@@ -2300,18 +2303,6 @@ impl Log {
             }
         }
         Err(Error::LimitExceeded("fresh physical storage identity"))
-    }
-
-    async fn verify_immutable(&self, key: StoreKey, expected: &Bytes) -> Result<(), Error> {
-        let stored = self
-            .store
-            .read(key, expected.len())
-            .await?
-            .ok_or_else(|| Error::InvalidFormat("an immutable object is missing".to_owned()))?;
-        if stored.bytes != *expected {
-            return Err(Error::CorruptObject);
-        }
-        Ok(())
     }
 
     fn object_key(&self, object: &ObjectRef) -> StoreKey {

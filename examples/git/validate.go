@@ -70,9 +70,8 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	for id := range st.pending {
 		ids = append(ids, plumbing.NewHash(id))
 	}
-	if err := verifyCatalog(st, st.meta.Validated, ids); err != nil {
+	if err := verifyObjects(st, ids); err != nil {
 		return nil, err
 	}
-	st.meta.Validated = true
 	return refs, nil
 }

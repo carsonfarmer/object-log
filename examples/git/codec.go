@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -9,6 +10,25 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
 	"io"
 )
+
+type rootMeta struct {
+	Validated bool `json:",omitempty"`
+	Format    config.ObjectFormat
+	Head      string
+	Refs      map[string]string
+	Buckets   []string
+}
+
+func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta, error) {
+	var meta rootMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return meta, err
+	}
+	if !meta.Validated || meta.Format != format || len(meta.Buckets) != children {
+		return meta, fmt.Errorf("invalid repository root")
+	}
+	return meta, nil
+}
 
 // Keep full catalog leaves below the WAL node limit, including base64 encoding.
 const inlineObjectLimit = 512

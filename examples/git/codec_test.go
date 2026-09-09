@@ -174,3 +174,37 @@ func TestInlineMetadataBound(t *testing.T) {
 		t.Fatalf("inline leaf metadata grew to %d bytes", len(data))
 	}
 }
+
+func TestRepositoryRootAdmission(t *testing.T) {
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		t.Run(format.String(), func(t *testing.T) {
+			for _, test := range []struct {
+				name      string
+				marker    any
+				wantValid bool
+			}{
+				{"missing", nil, false},
+				{"unchecked", false, false},
+				{"validated", true, true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					root := map[string]any{"Format": format, "Buckets": []string{"ab"}}
+					if test.marker != nil {
+						root["Validated"] = test.marker
+					}
+					data, err := json.Marshal(root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, err = decodeRoot(data, format, 1)
+					if (err == nil) != test.wantValid {
+						t.Fatalf("root admission: %v", err)
+					}
+					if _, err = decodeRoot(data, format, 0); err == nil {
+						t.Fatal("accepted missing child")
+					}
+				})
+			}
+		})
+	}
+}

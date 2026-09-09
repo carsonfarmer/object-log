@@ -79,23 +79,16 @@ func TestIncrementalCatalogValidation(t *testing.T) {
 				}
 				tip = put(commit)
 			}
-			if err := verifyCatalog(s, false, nil); err != nil {
-				t.Fatal(err)
-			}
-			if s.iterations != 1 || len(s.reads) != 100 {
-				t.Fatalf("legacy catalog not validated: iterations=%d objects=%d", s.iterations, len(s.reads))
-			}
-			s.reads = map[plumbing.Hash]int{}
 			next := put(&object.Commit{TreeHash: tree, ParentHashes: []plumbing.Hash{tip}, Message: "next"})
-			if err := verifyCatalog(s, true, []plumbing.Hash{next}); err != nil {
+			if err := verifyObjects(s, []plumbing.Hash{next}); err != nil {
 				t.Fatal(err)
 			}
-			if s.iterations != 1 || len(s.reads) != 1 || s.reads[next] != 1 {
+			if s.iterations != 0 || len(s.reads) != 1 || s.reads[next] != 1 {
 				t.Fatalf("incremental check reread old history: iterations=%d reads=%v", s.iterations, s.reads)
 			}
 			failure := errors.New("expired view")
 			s.failure = failure
-			if err := verifyCatalog(s, true, []plumbing.Hash{next}); !errors.Is(err, failure) {
+			if err := verifyObjects(s, []plumbing.Hash{next}); !errors.Is(err, failure) {
 				t.Fatalf("lost storage failure: %v", err)
 			}
 		})
@@ -114,9 +107,6 @@ func TestCatalogValidationRejectsUnreachableMalformedObjects(t *testing.T) {
 				}
 				tree := put(&object.Tree{})
 				commit := put(&object.Commit{TreeHash: tree})
-				if err := verifyCatalog(s, false, nil); err != nil {
-					t.Fatal(err)
-				}
 				var bad plumbing.Hash
 				switch name {
 				case "duplicate tree":
@@ -144,11 +134,8 @@ func TestCatalogValidationRejectsUnreachableMalformedObjects(t *testing.T) {
 				case "wrong tag target kind":
 					bad = put(&object.Tag{Name: "bad", Target: tree, TargetType: plumbing.CommitObject})
 				}
-				if err := verifyCatalog(s, true, []plumbing.Hash{bad}); err == nil {
+				if err := verifyObjects(s, []plumbing.Hash{bad}); err == nil {
 					t.Fatal("accepted new malformed object outside ref history")
-				}
-				if err := verifyCatalog(s, false, nil); err == nil {
-					t.Fatal("trusted legacy catalog containing malformed object outside ref history")
 				}
 			})
 		}
