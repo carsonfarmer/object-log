@@ -2076,22 +2076,19 @@ impl Log {
             self.enqueue_object(object, visited, blocked, &mut pending)?;
         }
 
-        let log = Arc::new(self.clone());
-        while !pending.is_empty() {
-            let count = pending.len().min(MAX_CONCURRENT_READS);
-            let batch = pending.drain(..count).collect::<Vec<_>>();
-            let log = Arc::clone(&log);
-            let children = stream::iter(batch.into_iter().map(move |object| {
-                let log = Arc::clone(&log);
-                async move { log.read_graph_children(&object).await }
-            }))
-            .buffer_unordered(MAX_CONCURRENT_READS)
-            .try_collect::<Vec<_>>()
-            .await?;
-            for children in children {
-                for child in children {
-                    self.enqueue_object(&child, visited, blocked, &mut pending)?;
-                }
+        let mut reads = stream::FuturesUnordered::new();
+        loop {
+            while reads.len() < MAX_CONCURRENT_READS {
+                let Some(object) = pending.pop_front() else {
+                    break;
+                };
+                reads.push(async move { self.read_graph_children(&object).await });
+            }
+            let Some(children) = reads.try_next().await? else {
+                break;
+            };
+            for child in children {
+                self.enqueue_object(&child, visited, blocked, &mut pending)?;
             }
         }
         Ok(())
@@ -3602,6 +3599,62 @@ mod tests {
             self.applied.set(self.applied.get() + 1);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn graph_verification_keeps_reading_while_one_object_is_paused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, _) = staged_read_log("graph-straggler", Options::default()).await?;
+        let view = log.load().await?;
+        let mut roots = Vec::new();
+        for _ in 0..=2 * MAX_CONCURRENT_READS {
+            roots.push(
+                log.put_object(&view, Bytes::from_static(b"live"))
+                    .await?
+                    .reference()
+                    .clone(),
+            );
+        }
+        faults.reset();
+        let pause = faults.pause_next_get(FailurePhase::Before);
+        let mut verification = Box::pin(log.verify_object_graph(&roots));
+        // Drive cooperative yields without relying on elapsed-time thresholds.
+        for _ in 0..roots.len() {
+            assert!(futures::poll!(&mut verification).is_pending());
+        }
+        let reads = faults.metrics().operation(Operation::Get);
+        assert_eq!(reads.requests, roots.len() as u64);
+        assert_eq!(reads.succeeded, roots.len() as u64 - 1);
+        assert!(pause.release());
+        verification.await?;
+        assert_eq!(
+            faults.metrics().operation(Operation::Get).succeeded,
+            roots.len() as u64
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn graph_verification_error_cancels_a_paused_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (log, faults, _) = staged_read_log("graph-cancellation", Options::default()).await?;
+        let view = log.load().await?;
+        let first = log.put_object(&view, Bytes::from_static(b"first")).await?;
+        let second = log.put_object(&view, Bytes::from_static(b"second")).await?;
+        faults.reset();
+        let pause = faults.pause_next_get(FailurePhase::Before);
+        faults.schedule(Failure {
+            operation: Operation::Get,
+            occurrence: 2,
+            phase: FailurePhase::Before,
+        });
+        assert!(
+            log.verify_object_graph(&[first.reference().clone(), second.reference().clone()])
+                .await
+                .is_err()
+        );
+        assert!(!pause.release(), "failed traversal left a read alive");
+        Ok(())
     }
 
     async fn fold_append(log: &Log, view: &View, operation: Bytes) -> Result<View, Error> {
