@@ -1,5 +1,7 @@
 package main
 
+import "maps"
+
 // Filter immutable catalog nodes, retaining the original proof whenever a
 // subtree is unchanged. The caller publishes the replacement root through WAL.
 func filterRadix[V any, H comparable](root H, keep func(string) bool, load func(H) (radixNode[V, H], error), save func(radixNode[V, H]) (H, error)) (H, bool, error) {
@@ -9,31 +11,48 @@ func filterRadix[V any, H comparable](root H, keep func(string) bool, load func(
 		return zero, false, err
 	}
 	changed := false
-	next := radixNode[V, H]{}
+	next := node
 	if node.Children == nil {
-		next.Items = map[string]V{}
+		kept := false
 		for id, item := range node.Items {
 			if keep(id) {
-				next.Items[id] = item
+				kept = true
+				if changed {
+					if next.Items == nil {
+						next.Items = make(map[string]V)
+					}
+					next.Items[id] = item
+				}
 			} else {
-				changed = true
+				if !changed {
+					next.Items = nil
+					if kept {
+						next.Items = maps.Clone(node.Items)
+					}
+					changed = true
+				}
+				delete(next.Items, id)
 			}
 		}
 		if len(next.Items) == 0 {
 			return zero, false, nil
 		}
 	} else {
-		next.Children = map[string]H{}
 		for prefix, child := range node.Children {
 			replacement, exists, err := filterRadix(child, keep, load, save)
 			if err != nil {
 				return zero, false, err
 			}
-			if exists {
-				next.Children[prefix] = replacement
-				changed = changed || replacement != child
-			} else {
-				changed = true
+			if !exists || replacement != child {
+				if !changed {
+					next.Children = maps.Clone(node.Children)
+					changed = true
+				}
+				if exists {
+					next.Children[prefix] = replacement
+				} else {
+					delete(next.Children, prefix)
+				}
 			}
 		}
 		if len(next.Children) == 0 {
