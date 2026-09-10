@@ -84,3 +84,8 @@ Git now uses generic WAL byte writers/readers for both stored objects and
 temporary incoming packs. Chunk sizes, lists and reconstruction belong to the
 core; the existing head still publishes the finished root. Use a fresh prefix
 for this byte-stream representation. Small inline catalog objects remain inline.
+Independent correctness and simplification reviews, workspace/WASI checks, and
+local MinIO Git tests pass, including concurrent 64 MiB workflows and recovery
+after interruption/restart. Three paired 64 MiB comparisons used 35% fewer
+storage requests and 17% less peak worker RSS, with about 3% lower elapsed time.
+Unused raw blob bridge exports were removed; net production growth is 255 lines.

@@ -146,21 +146,10 @@ impl GuestSession for SessionState {
                 })
         })
     }
-    fn read(&self, value: ObjectBorrow<'_>) -> Result<Vec<u8>, Failure> {
-        let value = value.get::<ObjectState>();
-        spin_executor::run(self.log.read_object(&self.view, value.staged.reference()))
-            .map(|bytes| bytes.to_vec())
-            .map_err(failure)
-    }
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<ObjectState>();
         spin_executor::run(self.log.read_staged_node(&self.view, &value.staged))
             .map(|(data, children)| entry(&data, &children))
-            .map_err(failure)
-    }
-    fn put(&self, data: Vec<u8>) -> Result<Object, Failure> {
-        spin_executor::run(self.log.put_object(&self.view, Bytes::from(data)))
-            .map(|staged| Object::new(ObjectState { staged }))
             .map_err(failure)
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {

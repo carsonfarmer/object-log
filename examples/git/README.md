@@ -95,11 +95,13 @@ Cancellation is checked between storage calls and before publication. An
 already-running synchronous WASI call must finish; its publication outcome is
 preserved even after the deadline. Decoded deltas can allocate before their
 object-size check, so these limits do not promise a process-memory ceiling.
-On local Spin 4.0.2/MinIO, the 64 MiB edit lifecycle peaked at about 694 MiB
-whole-process RSS; two overlapping hash-format lifecycles peaked at 1,220 MiB.
-Both returned near 170 MiB afterward. Samples were taken every 100 ms after
-HTTP warm-up, excluding builds and MinIO/client processes. These are workload
-measurements, not upper bounds; delta pushes were the largest spikes.
+On local Spin 4.0.2/MinIO, three alternating comparisons with `879df85` ran
+the 64 MiB push/clone/edit/fetch lifecycle sequentially for both hash formats,
+using fresh prefixes and warmed HTTP workers. Median elapsed time fell from
+41.50 to 40.21 seconds, storage requests from 1,274 to 834, and peak worker RSS
+from 690 to 570 MiB. CPU time and transferred bytes were effectively unchanged.
+RSS samples were taken every 100 ms, excluding builds and MinIO/client processes.
+These are workload measurements, not upper bounds.
 
 Host-wide concurrent-request admission is a hosting concern and remains deferred;
 this example adds no instance limiter or additional durable coordination.
