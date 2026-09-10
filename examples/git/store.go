@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,8 +19,6 @@ import (
 	wt "go.bytecodealliance.org/pkg/wit/types"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 )
-
-const chunkSize = 1024 * 1024
 
 func unwrap[T any](r wt.Result[T, wal.Failure]) (T, error) {
 	if r.IsOk() {
@@ -42,6 +39,7 @@ type store struct {
 	ctx            context.Context // Request-scoped; go-git storage methods do not accept contexts.
 	maxObjectBytes int64
 	owned          []*wal.Object
+	writers        []*byteWriter
 	storage.Storer
 	failure     error
 	tail        bool
@@ -193,7 +191,7 @@ func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteC
 	if size < 0 {
 		return nil, fmt.Errorf("invalid object size")
 	}
-	sink := &chunkWriter{s: s}
+	sink := &objectSink{s: s}
 	codec := objfile.NewWriter(sink, s.meta.Format)
 	if err := codec.WriteHeader(kind, size); err != nil {
 		_ = codec.Close()
@@ -225,7 +223,7 @@ type objectWriter struct {
 	kind          plumbing.ObjectType
 	size, written int64
 	codec         *objfile.Writer
-	sink          *chunkWriter
+	sink          *objectSink
 	closed        bool
 	err           error
 }
@@ -254,6 +252,11 @@ func (w *objectWriter) Close() (err error) {
 	}
 	w.closed = true
 	defer func() {
+		if w.sink.writer != nil {
+			w.sink.writer.close()
+		}
+	}()
+	defer func() {
 		w.err = err
 		if err != nil {
 			w.s.failure = err
@@ -271,54 +274,46 @@ func (w *objectWriter) Close() (err error) {
 	}
 	id := w.codec.Hash().String()
 	item := indexed{objectMeta: objectMeta{ID: id, Kind: w.kind, Size: w.size, Encoding: "zlib", StoredSize: w.sink.written}}
-	if len(w.sink.chunks) == 0 && len(w.sink.buf) <= inlineObjectLimit {
-		item.Inline = w.sink.buf
+	if w.sink.writer == nil {
+		item.Inline = w.sink.prefix
 	} else {
-		if len(w.sink.buf) > 0 {
-			if err = w.sink.flush(); err != nil {
-				return err
-			}
-		}
-		item.root, err = w.s.putNode(nil, w.sink.chunks)
+		item.root, err = w.sink.writer.finish()
 		if err != nil {
 			return err
 		}
+		w.s.owned = append(w.s.owned, item.root)
 	}
-	w.sink.buf = nil
+	w.sink.prefix = nil
 	w.s.pending[id] = item
 	return nil
 }
 
-type chunkWriter struct {
+// Keep tiny compressed objects in the catalog without creating separate WAL objects.
+type objectSink struct {
 	s       *store
 	written int64
-	buf     []byte
-	chunks  []*wal.Object
+	prefix  []byte
+	writer  *byteWriter
 }
 
-func (w *chunkWriter) Write(p []byte) (int, error) {
-	n := len(p)
-	for len(p) > 0 {
-		k := min(chunkSize-len(w.buf), len(p))
-		w.buf = append(w.buf, p[:k]...)
-		p = p[k:]
-		w.written += int64(k)
-		if len(w.buf) == chunkSize {
-			if err := w.flush(); err != nil {
-				return n - len(p), err
-			}
+func (w *objectSink) Write(p []byte) (int, error) {
+	w.written += int64(len(p))
+	if w.writer == nil {
+		if len(p) <= inlineObjectLimit-len(w.prefix) {
+			w.prefix = append(w.prefix, p...)
+			return len(p), nil
 		}
+		var err error
+		w.writer, err = w.s.newByteWriter()
+		if err != nil {
+			return 0, err
+		}
+		if _, err = w.writer.Write(w.prefix); err != nil {
+			return 0, err
+		}
+		w.prefix = nil
 	}
-	return n, nil
-}
-func (w *chunkWriter) flush() error {
-	root, err := w.s.put(w.buf)
-	if err != nil {
-		return err
-	}
-	w.chunks = append(w.chunks, root)
-	w.buf = nil
-	return nil
+	return w.writer.Write(p)
 }
 
 type storedObject struct {
@@ -336,72 +331,24 @@ func (o *storedObject) Reader() (io.ReadCloser, error) {
 	if err := o.s.ctx.Err(); err != nil {
 		return nil, err
 	}
-	if o.item.Encoding != "" && o.item.Encoding != "zlib" {
+	if o.item.Encoding != "zlib" {
 		return nil, fmt.Errorf("unknown object encoding")
 	}
 	if len(o.item.Inline) > 0 {
 		return o.item.readInline(o.s.meta.Format)
 	}
-	entry, err := unwrap(o.s.session.ReadNode(o.item.root))
-	o.s.observeRead(err)
+	source, err := o.s.openBytes(o.item.root)
 	if err != nil {
 		return nil, err
 	}
-	size := o.item.Size
-	if o.item.Encoding != "" {
-		size = o.item.StoredSize
-	}
-	source := &objectReader{s: o.s, roots: entry.Objects, remaining: size}
-	if size < 0 {
+	size := o.item.StoredSize
+	if source.size != size {
 		_ = source.Close()
-		return nil, fmt.Errorf("invalid object size")
-	}
-	if o.item.Encoding == "" {
-		return source, nil
+		return nil, fmt.Errorf("object size differs from index")
 	}
 	return readLoose(source, o.s.meta.Format, o.item.Kind, o.item.Size, o.Hash())
 }
 
-type objectReader struct {
-	s         *store
-	roots     []*wal.Object
-	buf       *bytes.Reader
-	remaining int64
-}
-
-func (r *objectReader) Read(p []byte) (int, error) {
-	if err := r.s.ctx.Err(); err != nil {
-		return 0, err
-	}
-	if r.remaining == 0 {
-		return 0, io.EOF
-	}
-	for r.buf == nil || r.buf.Len() == 0 {
-		if len(r.roots) == 0 {
-			return 0, io.ErrUnexpectedEOF
-		}
-		b, e := unwrap(r.s.session.Read(r.roots[0]))
-		r.s.observeRead(e)
-		if e != nil {
-			return 0, e
-		}
-		r.roots[0].Drop()
-		r.roots = r.roots[1:]
-		r.buf = bytes.NewReader(b)
-	}
-	n, e := r.buf.Read(p[:min(int64(len(p)), r.remaining)])
-	r.remaining -= int64(n)
-	return n, e
-}
-func (r *objectReader) Close() error {
-	for _, root := range r.roots {
-		root.Drop()
-	}
-	r.roots = nil
-	r.buf = nil
-	r.remaining = 0
-	return nil
-}
 func (s *store) publish(refs map[string]string) error {
 	if err := s.ctx.Err(); err != nil {
 		return err
@@ -473,6 +420,10 @@ func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
 }
 
 func (s *store) Close() {
+	for _, w := range s.writers {
+		w.close()
+	}
+	s.writers = nil
 	for _, o := range s.owned {
 		o.Drop()
 	}
@@ -488,16 +439,6 @@ func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
 		s.owned = append(s.owned, entry.Objects...)
 	}
 	return entry, e
-}
-func (s *store) put(b []byte) (*wal.Object, error) {
-	if err := s.ctx.Err(); err != nil {
-		return nil, err
-	}
-	o, e := unwrap(s.session.Put(b))
-	if e == nil {
-		s.owned = append(s.owned, o)
-	}
-	return o, e
 }
 func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
 	if err := s.ctx.Err(); err != nil {

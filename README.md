@@ -39,6 +39,14 @@ Adapters can call `preflight` before expensive local work. Its successful path
 does no I/O and makes no allocation. They can then call `prepare` with the final
 operation and staged objects.
 
+For larger byte sequences, `byte_writer(&view)` accepts successive writes and
+`finish()` returns one `StagedObject`; publish that root normally or leave it
+unpublished for temporary storage. `open_bytes(&view, root.reference())` exposes
+the logical length and authenticated `read_at` calls. Reads may be short; callers
+advance their offset as with an ordinary reader. The WAL chooses chunk geometry
+and enforces its object/reference limits. Discard a writer after a failed or
+cancelled write.
+
 Successful immutable creation has one required storage property: the exact
 bytes remain at the same physical key until object-log garbage collection
 deletes them. External lifecycle expiry, deletion, or overwrite violates this
@@ -76,7 +84,7 @@ API:
 - [`examples/git`](examples/git) uses go-git for Git protocols and object formats.
   A small [Rust component](examples/wal-component) connects it to the same WAL.
   Refs and a sparse object catalog publish together through one head update.
-  Small compressed objects fit in catalog leaves; larger objects use WAL chunks.
+  Small compressed objects fit in catalog leaves; larger objects use WAL byte streams.
   Spin supplies HTTP; the core has no Spin dependency or Git rules.
 
 The Git consumer replaces the custom Rust Git engine and native maintenance

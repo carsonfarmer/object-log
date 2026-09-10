@@ -9,7 +9,10 @@ Build and compose from the repository root with `make git-build`; see the
 [sibling Git example](../git/README.md) for ordinary Spin and local MinIO setup.
 The component reuses the established object_store S3 client through a WASI HTTP
 transport. The core itself has no Spin dependency. WAL objects are limited to
-2 MiB here; the Go consumer uses 1 MiB chunks for sparse reads.
+2 MiB here. Byte writers finish into one ordinary object handle; readers expose
+a logical length and bounded offset reads. The Rust WAL owns chunk geometry and
+keeps one authenticated chunk cached. A stream holds up to 2 GiB with this
+configuration. Temporary packs use the same API without publishing their roots.
 
 `make git-check` runs native library tests and strict native/WASIp2 checks.
 Native tests use `--lib`: the component's HTTP exports are intended for WASI,

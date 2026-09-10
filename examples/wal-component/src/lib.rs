@@ -2,6 +2,7 @@
 use bytes::Bytes;
 use exports::object_log::storage::wal::*;
 use object_log::{CommitStatus, Log, Materializer, StagedObject, View};
+use std::cell::RefCell;
 use std::sync::Arc;
 mod maintenance;
 mod transport;
@@ -66,8 +67,51 @@ impl Materializer for Records {
         Ok(())
     }
 }
+struct WriterState(RefCell<Option<object_log::ByteWriter>>);
+struct ReaderState(RefCell<object_log::ByteReader>);
+impl GuestByteWriter for WriterState {
+    fn write(&self, data: Vec<u8>) -> Result<(), Failure> {
+        let mut writer = self.0.borrow_mut();
+        let writer = writer
+            .as_mut()
+            .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
+        spin_executor::run(writer.write(&data)).map_err(failure)
+    }
+    fn finish(&self) -> Result<Object, Failure> {
+        let writer = self
+            .0
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
+        spin_executor::run(writer.finish())
+            .map(|staged| Object::new(ObjectState { staged }))
+            .map_err(failure)
+    }
+}
+impl GuestByteReader for ReaderState {
+    fn length(&self) -> u64 {
+        self.0.borrow().len()
+    }
+    fn read_at(&self, offset: u64, max_len: u32) -> Result<Vec<u8>, Failure> {
+        spin_executor::run(self.0.borrow_mut().read_at(offset, max_len as usize))
+            .map(|bytes| bytes.to_vec())
+            .map_err(failure)
+    }
+}
 impl GuestObject for ObjectState {}
 impl GuestSession for SessionState {
+    fn write_bytes(&self) -> Result<ByteWriter, Failure> {
+        self.log
+            .byte_writer(&self.view)
+            .map(|writer| ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
+            .map_err(failure)
+    }
+    fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
+        let value = value.get::<ObjectState>();
+        spin_executor::run(self.log.open_bytes(&self.view, value.staged.reference()))
+            .map(|reader| ByteReader::new(ReaderState(RefCell::new(reader))))
+            .map_err(failure)
+    }
     fn checkpoint(
         &self,
         data: Vec<u8>,
@@ -156,6 +200,8 @@ impl GuestCandidate for CandidateState {
     }
 }
 impl Guest for Component {
+    type ByteWriter = WriterState;
+    type ByteReader = ReaderState;
     type Candidate = CandidateState;
     type Session = SessionState;
     type Object = ObjectState;

@@ -20,7 +20,17 @@ interface wal {
     resource candidate {
         publish: func() -> result<outcome, failure>;
     }
+    resource byte-writer {
+        write: func(data: list<u8>) -> result<_, failure>;
+        finish: func() -> result<own<object>, failure>;
+    }
+    resource byte-reader {
+        length: func() -> u64;
+        read-at: func(offset: u64, max-len: u32) -> result<list<u8>, failure>;
+    }
     resource session {
+        write-bytes: func() -> result<own<byte-writer>, failure>;
+        open-bytes: func(value: borrow<object>) -> result<own<byte-reader>, failure>;
         checkpoint: func(data: list<u8>, roots: list<borrow<object>>) -> result<maintenance-state, failure>;
         collect: func() -> result<collection-result, failure>;
         usage: func() -> usage;

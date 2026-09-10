@@ -270,8 +270,8 @@ impl CheckpointRecord {
 /// One immutable node with opaque payload and traversable child references.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferenceNode {
-    payload: Bytes,
-    children: Vec<ObjectRef>,
+    pub(crate) payload: Bytes,
+    pub(crate) children: Vec<ObjectRef>,
 }
 
 impl ReferenceNode {

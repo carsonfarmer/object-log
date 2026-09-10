@@ -79,3 +79,8 @@ See the Git README for concurrent large-file checks and observed memory use.
 
 Commit encoding borrows opaque payloads and checkpoint encoding shares its
 schema with decoding. Durable bytes and owned recovery results are unchanged.
+
+Git now uses generic WAL byte writers/readers for both stored objects and
+temporary incoming packs. Chunk sizes, lists and reconstruction belong to the
+core; the existing head still publishes the finished root. Use a fresh prefix
+for this byte-stream representation. Small inline catalog objects remain inline.

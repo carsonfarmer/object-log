@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod byte_stream;
 mod format;
 mod log;
 mod materialize;
@@ -10,6 +11,7 @@ mod store;
 #[cfg(any(test, feature = "test-util"))]
 pub mod sim;
 
+pub use byte_stream::{ByteReader, ByteWriter};
 pub use log::{
     CheckpointRecord, CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionReport,
     CollectionStart, CommitRecord, CommitStatus, Log, Options, ReferenceNode, Resolution,

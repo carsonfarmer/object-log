@@ -47,9 +47,9 @@ Use `--env GIT_PASSWORD=...` for HTTP Basic authentication (any username),
 `--env WAL_DEFAULT_BRANCH=...` for a new repository's persisted default branch.
 Authentication is off by default; keep this configuration on loopback.
 Branches require fast-forward updates; force and force-with-lease cannot rewrite them.
-Use a fresh prefix: retired custom catalogs, original array leaves and
-unvalidated experimental roots are unsupported. Current validated catalogs
-contain inline and chunked objects; older binaries cannot read inline entries.
+Use a fresh prefix: previous chunk-list objects, retired custom catalogs and
+unvalidated experimental roots are unsupported. Catalogs contain inline objects
+and WAL byte streams.
 
 ## Test
 
@@ -126,8 +126,10 @@ original proofs and maps; filtering copies maps only when needed.
 
 Compressed loose objects of at most 512 bytes live directly in authenticated
 catalog leaves, avoiding separate reads during history traversal and collection.
-Larger objects use 1 MiB chunks and the same splitting sparse index. Incoming packs are staged as seekable WAL chunks; individual delta
-bases/results still need whole-object buffers. Fetch streams full objects
+Larger objects and temporary incoming packs use the WAL byte-stream API, which owns
+chunk geometry, authenticated reconstruction and offset reads. Git retains its
+splitting sparse index and compression. Incoming packs remain unpublished;
+individual delta bases/results still need whole-object buffers. Fetch streams full objects
 without making deltas, trading larger transfers for lower memory use. This does
 not establish a fixed process-memory ceiling. Ordinary large-file lifecycles
 have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.
