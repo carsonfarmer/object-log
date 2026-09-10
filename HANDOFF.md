@@ -61,8 +61,10 @@ After Git settles, return to the KV design scoped in issue #39.
 
 Mature-tail checkpointing reuses complete verification on an exact local view;
 reopened handles and recovery tokens still verify. SQLite recovery uses one
-ordered 32-chunk window across records. Cold metadata recovery still reads the
-whole tail. Licensing and dependency provenance are in THIRD_PARTY.md.
+ordered 32-chunk window across records. Cold metadata recovery still verifies
+the checkpoint and every tail record.
+The bridge retains and returns only the latest complete-state record and exact
+tail count; referenced object payloads remain lazy. Licensing and dependency provenance are in THIRD_PARTY.md.
 
 Graph verification keeps the 32-read window filled as objects finish, and Git
 catalog pruning avoids copying unchanged maps. Existing authentication, fencing

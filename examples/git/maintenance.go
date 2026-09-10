@@ -10,7 +10,7 @@ import (
 // then completes one fenced deletion batch. Another call safely resumes a
 // pending batch; `more` requests another pass, never an unbounded loop.
 func (s *store) maintain() (wal.CollectionResult, error) {
-	if s.tail {
+	if s.tailEntries > 0 {
 		tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
 		for _, id := range s.meta.Refs {
 			tips = append(tips, plumbing.NewHash(id))

@@ -42,8 +42,7 @@ type store struct {
 	writers        []*byteWriter
 	storage.Storer
 	failure     error
-	tail        bool
-	tailEntries int
+	tailEntries uint64
 	session     *wal.Session
 	meta        rootMeta
 	buckets     map[string]*wal.Object
@@ -76,19 +75,14 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 		}
 	}()
 	s.meta = rootMeta{Format: format, Refs: map[string]string{}}
-	records, e := unwrap(session.Records())
+	recovered, e := unwrap(session.LatestCompleteState())
 	if e != nil {
 		return nil, e
 	}
-	for _, record := range records {
-		if !record.Snapshot {
-			s.tailEntries++
-		}
-		s.owned = append(s.owned, record.Objects...)
-	}
-	if len(records) > 0 {
-		last := records[len(records)-1]
-		s.tail = !last.Snapshot
+	s.tailEntries = recovered.TailEntries
+	if recovered.Latest.IsSome() {
+		last := recovered.Latest.Some()
+		s.owned = append(s.owned, last.Objects...)
 		if len(last.Objects) != 1 {
 			return nil, fmt.Errorf("invalid root record")
 		}
@@ -111,7 +105,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	head := s.meta.Head
 	if head == "" {
 		branch := "main"
-		if len(records) == 0 && os.Getenv("WAL_DEFAULT_BRANCH") != "" {
+		if !recovered.Latest.IsSome() && os.Getenv("WAL_DEFAULT_BRANCH") != "" {
 			branch = os.Getenv("WAL_DEFAULT_BRANCH")
 		}
 		head = "refs/heads/" + branch

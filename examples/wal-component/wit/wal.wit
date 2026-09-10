@@ -16,7 +16,8 @@ interface wal {
     record collection-result { state: maintenance-state, objects: u64, bytes: u64 }
     record usage { calls: u64, bytes: u64 }
     resource object;
-    record entry { snapshot: bool, data: list<u8>, objects: list<own<object>> }
+    record entry { data: list<u8>, objects: list<own<object>> }
+    record recovered-state { latest: option<entry>, tail-entries: u64 }
     resource candidate {
         publish: func() -> result<outcome, failure>;
     }
@@ -35,7 +36,8 @@ interface wal {
         collect: func() -> result<collection-result, failure>;
         usage: func() -> usage;
         refresh: func() -> result<own<session>, failure>;
-        records: func() -> result<list<entry>, failure>;
+        // Records must describe complete states; delta consumers require another fold.
+        latest-complete-state: func() -> result<recovered-state, failure>;
         read-node: func(value: borrow<object>) -> result<entry, failure>;
         put-node: func(data: list<u8>, children: list<borrow<object>>) -> result<own<object>, failure>;
         prepare: func(data: list<u8>, roots: list<borrow<object>>) -> result<own<candidate>, failure>;

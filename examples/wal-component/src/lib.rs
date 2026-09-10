@@ -28,13 +28,11 @@ fn failure(error: object_log::Error) -> Failure {
         error => Failure::Other(error.to_string()),
     }
 }
-fn entry(data: &[u8], objects: &[StagedObject]) -> Entry {
+fn entry((data, objects): (Bytes, Vec<StagedObject>)) -> Entry {
     Entry {
-        snapshot: false,
-        data: data.to_vec(),
+        data: data.into(),
         objects: objects
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|staged| Object::new(ObjectState { staged }))
             .collect(),
     }
@@ -45,17 +43,16 @@ fn proofs(objects: &[ObjectBorrow<'_>]) -> Vec<StagedObject> {
         .map(|object| object.get::<ObjectState>().staged.clone())
         .collect()
 }
-struct Records;
-impl Materializer for Records {
-    type State = Vec<Entry>;
+// Each record represents a complete state. Delta consumers must fold differently.
+struct LatestCompleteState;
+impl Materializer for LatestCompleteState {
+    type State = Option<(Bytes, Vec<StagedObject>)>;
     type Error = std::convert::Infallible;
     fn empty(&self) -> Self::State {
-        Vec::new()
+        None
     }
     fn restore(&self, data: &[u8], objects: &[StagedObject]) -> Result<Self::State, Self::Error> {
-        let mut snapshot = entry(data, objects);
-        snapshot.snapshot = true;
-        Ok(vec![snapshot])
+        Ok(Some((Bytes::copy_from_slice(data), objects.to_vec())))
     }
     fn apply(
         &self,
@@ -63,7 +60,7 @@ impl Materializer for Records {
         data: &[u8],
         objects: &[StagedObject],
     ) -> Result<(), Self::Error> {
-        state.push(entry(data, objects));
+        *state = self.restore(data, objects)?;
         Ok(())
     }
 }
@@ -135,11 +132,14 @@ impl GuestSession for SessionState {
         }))
     }
 
-    fn records(&self) -> Result<Vec<Entry>, Failure> {
+    fn latest_complete_state(&self) -> Result<RecoveredState, Failure> {
         spin_executor::run(async {
-            object_log::materialize(&self.log, self.view.clone(), &Records)
+            object_log::materialize(&self.log, self.view.clone(), &LatestCompleteState)
                 .await
-                .map(|value| value.into_parts().1)
+                .map(|value| RecoveredState {
+                    tail_entries: value.view().tail().len() as u64,
+                    latest: value.into_parts().1.map(entry),
+                })
                 .map_err(|error| match error {
                     object_log::MaterializeError::Log(error) => failure(error),
                     object_log::MaterializeError::State(never) => match never {},
@@ -149,7 +149,7 @@ impl GuestSession for SessionState {
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<ObjectState>();
         spin_executor::run(self.log.read_staged_node(&self.view, &value.staged))
-            .map(|(data, children)| entry(&data, &children))
+            .map(entry)
             .map_err(failure)
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {
