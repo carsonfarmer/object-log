@@ -8,7 +8,7 @@ import (
 // Keep ordinary pushes below the WAL tail limit. Run before receiving any pack
 // or validating updates; a completed checkpoint requires a fresh store afterward.
 func (s *store) beforePush() (reopen bool, err error) {
-	if s.tailEntries < 128 {
+	if s.tailEntries < 64 {
 		return false, nil
 	}
 	result, err := s.maintain()
