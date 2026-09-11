@@ -3,7 +3,11 @@ package main
 import (
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
@@ -71,19 +75,20 @@ func TestIncrementalCatalogValidation(t *testing.T) {
 				return validationPut(t, s, value)
 			}
 			tree := put(&object.Tree{})
+			signature := object.Signature{When: time.Unix(0, 0)}
 			var tip plumbing.Hash
 			for i := 0; i < 100; i++ {
-				commit := &object.Commit{TreeHash: tree}
+				commit := &object.Commit{TreeHash: tree, Author: signature, Committer: signature}
 				if i > 0 {
 					commit.ParentHashes = []plumbing.Hash{tip}
 				}
 				tip = put(commit)
 			}
-			next := put(&object.Commit{TreeHash: tree, ParentHashes: []plumbing.Hash{tip}, Message: "next"})
+			next := put(&object.Commit{TreeHash: tree, ParentHashes: []plumbing.Hash{tip}, Message: "next", Author: signature, Committer: signature})
 			if err := verifyObjects(s, []plumbing.Hash{next}); err != nil {
 				t.Fatal(err)
 			}
-			if s.iterations != 0 || len(s.reads) != 1 || s.reads[next] != 1 {
+			if s.iterations != 0 || len(s.reads) != 1 || s.reads[next] != 2 {
 				t.Fatalf("incremental check reread old history: iterations=%d reads=%v", s.iterations, s.reads)
 			}
 			failure := errors.New("expired view")
@@ -136,6 +141,173 @@ func TestCatalogValidationRejectsUnreachableMalformedObjects(t *testing.T) {
 				}
 				if err := verifyObjects(s, []plumbing.Hash{bad}); err == nil {
 					t.Fatal("accepted new malformed object outside ref history")
+				}
+			})
+		}
+	}
+}
+
+func TestCommitIdentityValidationMatchesGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("native Git oracle unavailable")
+	}
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		for _, tc := range []struct {
+			name, identity string
+			valid          bool
+		}{
+			{"ordinary", "A <a@b> 1 +0000", true},
+			{"empty fields and epoch", " <> 0 +0000", true},
+			{"extra spaces", "A <>   1 +0000", true},
+			{"tab before date", "A <> \t1 +0000", true},
+			{"unusual timezone", "A <> 1 +9999", true},
+			{"missing email", "invalid", false},
+			{"missing name space", "A<a@b> 1 +0000", false},
+			{"missing date space", "A <a@b>1 +0000", false},
+			{"carriage return date", "A <> \r1 +0000", false},
+			{"vertical tab date", "A <> \v1 +0000", false},
+			{"form feed date", "A <> \f1 +0000", false},
+			{"bad timezone", "A <> 1 blah", false},
+			{"negative date", "A <> -1 +0000", false},
+			{"padded date", "A <> 01 +0000", false},
+			{"maximum date", "A <> 9223372036854775807 +0000", true},
+			{"signed date overflow", "A <> 9223372036854775808 +0000", false},
+			{"date overflow", "A <> 18446744073709551616 +0000", false},
+			{"missing both", "", false},
+			{"bad committer", "", false},
+			{"missing author", "", false},
+			{"missing committer", "", false},
+			{"duplicate author", "", false},
+			{"extensions", "A <> 1 +0000", true},
+		} {
+			t.Run(format.String()+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				git := func(input string, args ...string) (string, error) {
+					cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+					cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+					cmd.Stdin = strings.NewReader(input)
+					out, err := cmd.CombinedOutput()
+					return strings.TrimSpace(string(out)), err
+				}
+				if out, err := git("", "init", "--bare", "--object-format="+format.String()); err != nil {
+					t.Fatalf("init: %s: %v", out, err)
+				}
+				s := &validationStore{Storage: memory.NewStorage(memory.WithObjectFormat(format)), reads: map[plumbing.Hash]int{}}
+				tree := validationPut(t, s, &object.Tree{})
+				if out, err := git("", "mktree"); err != nil || out != tree.String() {
+					t.Fatalf("tree: %s: %v", out, err)
+				}
+				headers := "author " + tc.identity + "\ncommitter " + tc.identity + "\n"
+				switch tc.name {
+				case "missing both":
+					headers = ""
+				case "bad committer":
+					headers = "author A <> 1 +0000\ncommitter invalid\n"
+				case "missing author":
+					headers = "committer A <> 1 +0000\n"
+				case "missing committer":
+					headers = "author A <> 1 +0000\n"
+				case "duplicate author":
+					headers = "author A <> 1 +0000\nauthor A <> 1 +0000\ncommitter A <> 1 +0000\n"
+				case "extensions":
+					headers += "encoding UTF-8\ngpgsig signature\n continuation\nx-custom arbitrary\n"
+				}
+				data := "tree " + tree.String() + "\n" + headers + "\nmessage\n"
+				o := s.NewEncodedObject()
+				o.SetType(plumbing.CommitObject)
+				w, err := o.Writer()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := io.WriteString(w, data); err != nil {
+					t.Fatal(err)
+				}
+				if err := w.Close(); err != nil {
+					t.Fatal(err)
+				}
+				id, err := s.SetEncodedObject(o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := verifyObjects(s, []plumbing.Hash{id}); (err == nil) != tc.valid {
+					t.Fatalf("validation: %v; want valid=%v", err, tc.valid)
+				}
+				if out, err := git(data, "hash-object", "-t", "commit", "-w", "--stdin", "--literally"); err != nil || out != id.String() {
+					t.Fatalf("hash: %s: %v", out, err)
+				}
+				if out, err := git("", "fsck", "--full", id.String()); (err == nil) != tc.valid {
+					t.Fatalf("native Git: %s: %v; want valid=%v", out, err, tc.valid)
+				}
+			})
+		}
+	}
+}
+
+func TestTagHeaderValidationMatchesGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("native Git oracle unavailable")
+	}
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		for _, tc := range []struct {
+			name, headers string
+			valid         bool
+		}{
+			{"ordinary", "type blob\ntag x\ntagger A <> 1 +0000\n", true},
+			{"historical missing tagger", "type blob\ntag x\n", true},
+			{"empty tag name warning", "type blob\ntag \n", true},
+			{"invalid tag name warning", "type blob\ntag ..\n", true},
+			{"empty identity", "type blob\ntag x\ntagger  <> 0 +0000\n", true},
+			{"malformed tagger", "type blob\ntag x\ntagger invalid\n", false},
+			{"bad tagger timestamp", "type blob\ntag x\ntagger A <> nope +0000\n", false},
+			{"missing type", "tag x\n", false},
+			{"missing tag", "type blob\n", false},
+		} {
+			t.Run(format.String()+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				git := func(input string, args ...string) (string, error) {
+					cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+					cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+					cmd.Stdin = strings.NewReader(input)
+					out, err := cmd.CombinedOutput()
+					return strings.TrimSpace(string(out)), err
+				}
+				if out, err := git("", "init", "--bare", "--object-format="+format.String()); err != nil {
+					t.Fatalf("init: %s: %v", out, err)
+				}
+				s := &validationStore{Storage: memory.NewStorage(memory.WithObjectFormat(format)), reads: map[plumbing.Hash]int{}}
+				put := func(kind plumbing.ObjectType, data string) plumbing.Hash {
+					o := s.NewEncodedObject()
+					o.SetType(kind)
+					w, err := o.Writer()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := io.WriteString(w, data); err != nil {
+						t.Fatal(err)
+					}
+					if err := w.Close(); err != nil {
+						t.Fatal(err)
+					}
+					id, err := s.SetEncodedObject(o)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return id
+				}
+				blob := put(plumbing.BlobObject, "")
+				if out, err := git("", "hash-object", "-w", "--stdin"); err != nil || out != blob.String() {
+					t.Fatalf("blob: %s: %v", out, err)
+				}
+				data := "object " + blob.String() + "\n" + tc.headers + "\nmessage\n"
+				id := put(plumbing.TagObject, data)
+				if err := verifyObjects(s, []plumbing.Hash{id}); (err == nil) != tc.valid {
+					t.Fatalf("validation: %v; want valid=%v", err, tc.valid)
+				}
+				if out, err := git(data, "hash-object", "-t", "tag", "-w", "--stdin", "--literally"); err != nil || out != id.String() {
+					t.Fatalf("tag: %s: %v", out, err)
+				}
+				if out, err := git("", "fsck", "--full", id.String()); (err == nil) != tc.valid {
+					t.Fatalf("native Git: %s: %v; want valid=%v", out, err, tc.valid)
 				}
 			})
 		}
