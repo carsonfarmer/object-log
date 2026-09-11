@@ -26,4 +26,4 @@ require (
 
 tool github.com/bytecodealliance/componentize-go
 
-replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260911034131-6060178b73cf
+replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260911214600-8390c6c21d29

@@ -10,9 +10,11 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
+	"github.com/go-git/go-git/v6/storage/memory"
 )
 
 type lifecycleStorage struct {
+	*memory.Storage
 	base      plumbing.EncodedObject
 	sink      io.WriteCloser
 	openError error
@@ -96,6 +98,22 @@ func TestImportPackWaitsForBaseClose(t *testing.T) {
 				done := make(chan error, 1)
 				go func() { done <- importPack(ctx, bytes.NewReader(packed), s, f, testPackLimits(1024)) }()
 				synctest.Wait()
+				if mode == "open-error" {
+					if err := <-done; !errors.Is(err, expected) {
+						t.Fatalf("got %v, want %v", err, expected)
+					}
+					select {
+					case <-entered:
+						t.Fatal("opened base before admission")
+					default:
+					}
+					select {
+					case <-closed:
+						t.Fatal("closed rejected destination")
+					default:
+					}
+					return
+				}
 				select {
 				case <-entered:
 				default:
@@ -179,3 +197,5 @@ func TestImportPackFailedBackwardReopen(t *testing.T) {
 		t.Fatal("accepted failed reopen")
 	}
 }
+
+func (s lifecycleStorage) LowMemoryMode() bool { return true }

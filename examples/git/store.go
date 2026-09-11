@@ -444,3 +444,5 @@ func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
 type pendingError struct{ token []byte }
 
 func (*pendingError) Error() string { return "publication pending" }
+
+func (s *store) LowMemoryMode() bool { return true }
