@@ -89,3 +89,11 @@ func (w *readResponse) Write(p []byte) (int, error) {
 	w.commit()
 	return w.ResponseWriter.Write(p)
 }
+
+// Record physical storage failures before library traversal can discard them.
+// Normal logical absence and end-of-stream are handled outside this boundary.
+func observeRead(failure *error, err error) {
+	if *failure == nil && err != nil {
+		*failure = err
+	}
+}

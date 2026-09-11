@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -125,6 +124,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 }
 func (s *store) lookup(id plumbing.Hash) (indexed, error) {
 	if err := s.ctx.Err(); err != nil {
+		observeRead(&s.failure, err)
 		return indexed{}, err
 	}
 	key := id.String()
@@ -153,7 +153,7 @@ func (s *store) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) (plumb
 		return nil, plumbing.ErrObjectNotFound
 	}
 	if err := s.limits.checkObject(item.Kind, item.Size); err != nil {
-		s.observeRead(err)
+		observeRead(&s.failure, err)
 		return nil, err
 	}
 	return &storedObject{s, item}, nil
@@ -327,11 +327,12 @@ func (o *storedObject) SetSize(int64)                   { panic("immutable objec
 func (o *storedObject) Writer() (io.WriteCloser, error) { return nil, fmt.Errorf("immutable object") }
 func (o *storedObject) Reader() (io.ReadCloser, error) {
 	if err := o.s.limits.checkObject(o.item.Kind, o.item.Size); err != nil {
-		o.s.observeRead(err)
+		observeRead(&o.s.failure, err)
 		return nil, err
 	}
 
 	if err := o.s.ctx.Err(); err != nil {
+		observeRead(&o.s.failure, err)
 		return nil, err
 	}
 	if o.item.Encoding != "zlib" {
@@ -434,10 +435,11 @@ func (s *store) Close() {
 }
 func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
 	if err := s.ctx.Err(); err != nil {
+		observeRead(&s.failure, err)
 		return wal.Entry{}, err
 	}
 	entry, e := unwrap(s.session.ReadNode(root))
-	s.observeRead(e)
+	observeRead(&s.failure, e)
 	if e == nil {
 		s.owned = append(s.owned, entry.Objects...)
 	}
@@ -457,9 +459,3 @@ func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
 type pendingError struct{ token []byte }
 
 func (*pendingError) Error() string { return "publication pending" }
-
-func (s *store) observeRead(err error) {
-	if s.failure == nil && (errors.Is(err, errExpired) || errors.Is(err, errObjectLimit)) {
-		s.failure = err
-	}
-}

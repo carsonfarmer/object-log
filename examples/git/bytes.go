@@ -64,10 +64,11 @@ type byteReader struct {
 
 func (s *store) openBytes(root *wal.Object) (*byteReader, error) {
 	if err := s.ctx.Err(); err != nil {
+		observeRead(&s.failure, err)
 		return nil, err
 	}
 	reader, err := unwrap(s.session.OpenBytes(root))
-	s.observeRead(err)
+	observeRead(&s.failure, err)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +81,7 @@ func (s *store) openBytes(root *wal.Object) (*byteReader, error) {
 }
 func (r *byteReader) Read(p []byte) (int, error) {
 	if err := r.s.ctx.Err(); err != nil {
+		observeRead(&r.s.failure, err)
 		return 0, err
 	}
 	if r.reader == nil {
@@ -89,7 +91,7 @@ func (r *byteReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	data, err := unwrap(r.reader.ReadAt(uint64(r.pos), uint32(min(uint64(len(p)), math.MaxUint32))))
-	r.s.observeRead(err)
+	observeRead(&r.s.failure, err)
 	if err != nil {
 		return 0, err
 	}

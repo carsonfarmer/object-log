@@ -23,7 +23,7 @@ func (s *store) loadBucket(root *wal.Object) (radixNode[indexed, *wal.Object], e
 		return node, err
 	}
 	if err := s.limits.chargeCatalog(len(entry.Data)); err != nil {
-		s.observeRead(err)
+		observeRead(&s.failure, err)
 		return node, err
 	}
 	var meta bucketMeta

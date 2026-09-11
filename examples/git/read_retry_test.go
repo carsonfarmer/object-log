@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -115,6 +116,24 @@ func TestReadFailureStopsOutputWithoutRetry(t *testing.T) {
 		}
 		if err != failure || refreshes != 0 || output.Body.String() != want {
 			t.Fatalf("started=%v err=%v refreshes=%d body=%q", started, err, refreshes, output.Body.String())
+		}
+	}
+}
+
+func TestObservedStorageFailureStopsOutput(t *testing.T) {
+	for _, cause := range []error{errors.New("storage quota exceeded"), io.ErrUnexpectedEOF, io.EOF, context.Canceled} {
+		var failure error
+		observeRead(&failure, nil)
+		if failure != nil {
+			t.Fatal("successful read recorded a failure")
+		}
+		observeRead(&failure, cause)
+		observeRead(&failure, nil)
+		observeRead(&failure, errExpired)
+		output := httptest.NewRecorder()
+		response := &readResponse{ResponseWriter: output, header: make(http.Header), failure: &failure}
+		if n, err := response.Write([]byte("incomplete pack")); n != 0 || err != cause || response.sent || output.Body.Len() != 0 {
+			t.Fatalf("cause=%v n=%d err=%v sent=%v", cause, n, err, response.sent)
 		}
 	}
 }
