@@ -2206,11 +2206,27 @@ impl Log {
             return Err(Error::LimitExceeded("encoded collection plan bytes"));
         }
         let key = Self::collection_plan_key(head.incarnation, reference);
-        let stored = self
+        let Some(stored) = self
             .store
             .read(StoreKey::Immutable(key), declared_len)
             .await?
-            .ok_or_else(|| Error::InvalidFormat("the active collection plan is missing".into()))?;
+        else {
+            // Completion clears the fence before deleting its plan. A writer
+            // holding that older head must expire, while a missing plan still
+            // required by the authoritative head remains corruption.
+            let current = self.load().await?;
+            if current.generation() > head.generation
+                && current.head().active_plan.as_ref() != Some(reference)
+                && (current.collection_epoch() > head.collection_epoch
+                    || (current.collection_epoch() == head.collection_epoch
+                        && current.head().active_plan.is_none()))
+            {
+                return Err(Error::ViewExpired);
+            }
+            return Err(Error::InvalidFormat(
+                "the active collection plan is missing".into(),
+            ));
+        };
         if stored.bytes.len() != declared_len || Digest::of(&stored.bytes) != reference.digest {
             return Err(Error::CorruptObject);
         }
@@ -4008,6 +4024,87 @@ mod tests {
         let backend =
             ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("log-tests")).await?;
         Log::open(&backend, &LogId::new(id)?, options).await
+    }
+
+    #[tokio::test]
+    async fn missing_collection_plan_after_completion_expires() -> Result<(), Error> {
+        missing_collection_plan_case("completed").await
+    }
+
+    #[tokio::test]
+    async fn missing_collection_plan_in_current_head_is_corruption() -> Result<(), Error> {
+        missing_collection_plan_case("current").await
+    }
+
+    #[tokio::test]
+    async fn missing_collection_plan_still_required_by_newer_head_is_corruption()
+    -> Result<(), Error> {
+        missing_collection_plan_case("advanced").await
+    }
+
+    #[tokio::test]
+    async fn missing_collection_plan_superseded_by_next_fence_expires() -> Result<(), Error> {
+        missing_collection_plan_case("superseded").await
+    }
+
+    async fn missing_collection_plan_case(case: &str) -> Result<(), Error> {
+        let (log, faults, _) = staged_read_log(case, Options::default()).await?;
+        let source = log.load().await?;
+        log.put_object(&source, Bytes::from_static(b"orphan"))
+            .await?;
+        let CollectionStart::Installed(fenced, _) = log.start_collection(&source).await? else {
+            return Err(Error::InvalidFormat(
+                "test collection did not install".into(),
+            ));
+        };
+        if matches!(case, "completed" | "superseded") {
+            assert!(matches!(
+                log.resume_collection(&fenced).await?,
+                CollectionFinish::Complete(..)
+            ));
+        } else {
+            if case == "advanced" {
+                fold_append(&log, &fenced, Bytes::from_static(b"accepted")).await?;
+            }
+            let reference = fenced
+                .head()
+                .active_plan
+                .as_ref()
+                .ok_or_else(|| Error::InvalidFormat("test plan is missing".into()))?;
+            log.store
+                .delete_immutable_batch(std::iter::once(Log::collection_plan_key(
+                    log.incarnation,
+                    reference,
+                )))
+                .await?;
+        }
+        if case == "superseded" {
+            let fresh = log.load().await?;
+            log.put_object(&fresh, Bytes::from_static(b"next orphan"))
+                .await?;
+            assert!(matches!(
+                log.start_collection(&fresh).await?,
+                CollectionStart::Installed(..)
+            ));
+        }
+        let current = log.load().await?;
+        faults.reset();
+        let result = log
+            .put_object(&fenced, Bytes::from_static(b"stale writer"))
+            .await;
+        if matches!(case, "completed" | "superseded") {
+            assert!(matches!(result, Err(Error::ViewExpired)), "{result:?}");
+        } else {
+            assert!(matches!(result, Err(Error::InvalidFormat(_))), "{result:?}");
+        }
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 2);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+        assert_eq!(
+            log.load().await?.storage_version(),
+            current.storage_version()
+        );
+        Ok(())
     }
 
     #[tokio::test]
