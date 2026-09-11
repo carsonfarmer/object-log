@@ -22,6 +22,10 @@ func (s *store) loadBucket(root *wal.Object) (radixNode[indexed, *wal.Object], e
 	if err != nil {
 		return node, err
 	}
+	if err := s.limits.chargeCatalog(len(entry.Data)); err != nil {
+		s.observeRead(err)
+		return node, err
+	}
 	var meta bucketMeta
 	if err = json.Unmarshal(entry.Data, &meta); err != nil {
 		return node, err

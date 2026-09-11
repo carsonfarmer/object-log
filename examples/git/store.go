@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -458,7 +459,7 @@ type pendingError struct{ token []byte }
 func (*pendingError) Error() string { return "publication pending" }
 
 func (s *store) observeRead(err error) {
-	if s.failure == nil && (err == errExpired || err == errObjectLimit) {
+	if s.failure == nil && (errors.Is(err, errExpired) || errors.Is(err, errObjectLimit)) {
 		s.failure = err
 	}
 }

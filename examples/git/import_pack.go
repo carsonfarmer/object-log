@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"math"
@@ -54,7 +55,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 	}
 	count := binary.BigEndian.Uint32(header[8:])
 	if int64(count) > limits.packObjects {
-		return errObjectLimit
+		return fmt.Errorf("%w: GIT_MAX_PACK_OBJECTS", errObjectLimit)
 	}
 	var entries []*packEntry
 	byOffset := make(map[int64][]*packEntry)
