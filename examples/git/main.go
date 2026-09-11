@@ -9,18 +9,18 @@ import (
 	"github.com/go-git/go-git/v6/backend"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
-	"github.com/go-git/go-git/v6/plumbing/format/pktline"
+	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
+	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/storage"
+	gitio "github.com/go-git/go-git/v6/utils/ioutil"
 	"go.bytecodealliance.org/pkg/wasihttp"
 	"io"
 	"log"
-	"maps"
 	"net/http"
 	"net/url"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 	"os"
-	"slices"
 	"strings"
 )
 
@@ -28,45 +28,19 @@ type loader struct{ s storage.Storer }
 
 func (l loader) Load(*url.URL) (storage.Storer, error) { return l.s, nil }
 
-type frozen struct{ *store }
-
-func (*frozen) SetReference(*plumbing.Reference) error       { return nil }
-func (*frozen) RemoveReference(plumbing.ReferenceName) error { return nil }
-
-type writeCloser struct{ io.Writer }
-
-func (writeCloser) Close() error { return nil }
-
 func advertise(w io.Writer, s *store) error {
-	if _, e := pktline.WriteString(w, "# service=git-receive-pack\n"); e != nil {
-		return e
+	if err := (&packp.SmartReply{Service: transport.ReceivePackService}).Encode(w); err != nil {
+		return err
 	}
-	if e := pktline.WriteFlush(w); e != nil {
-		return e
+	adv := &packp.AdvRefs{}
+	for _, feature := range []string{capability.ReportStatus, capability.DeleteRefs, capability.OFSDelta, capability.Atomic} {
+		adv.Capabilities.Add(feature)
 	}
-	caps := "report-status delete-refs ofs-delta atomic object-format=" + s.meta.Format.String()
-	first := true
-	for _, name := range slices.Sorted(maps.Keys(s.meta.Refs)) {
-		id := s.meta.Refs[name]
-		suffix := ""
-		if first {
-			suffix = "\x00" + caps
-			first = false
-		}
-		if _, e := pktline.Writef(w, "%s %s%s\n", id, name, suffix); e != nil {
-			return e
-		}
+	adv.Capabilities.Set(capability.ObjectFormat, s.meta.Format.String())
+	for name, id := range s.meta.Refs {
+		adv.References = append(adv.References, plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
 	}
-	if first {
-		size := 40
-		if s.meta.Format == config.SHA256 {
-			size = 64
-		}
-		if _, e := pktline.Writef(w, "%s capabilities^{}\x00%s\n", strings.Repeat("0", size), caps); e != nil {
-			return e
-		}
-	}
-	return pktline.WriteFlush(w)
+	return adv.Encode(w)
 }
 func init() { wasihttp.HandleFunc(serve) }
 func main() {}
@@ -237,7 +211,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		e = advertise(w, s)
 	} else if service == transport.ReceivePackService {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-		e = receive(r.Context(), &frozen{s}, r.Body, writeCloser{w}, &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
+		e = transport.ReceivePack(r.Context(), s, r.Body, gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
 			refs, e := validate(s, info.Commands)
 			if e != nil {
 				return e
