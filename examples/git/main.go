@@ -116,13 +116,13 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if os.Getenv("GIT_READ_ONLY") == "true" && (service == transport.ReceivePackService || maintenance) {
-		http.Error(response, "repository is read-only", http.StatusForbidden)
-		return
-	}
 	limits, e := loadLimits(os.Getenv)
 	if e != nil {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
+		return
+	}
+	if limits.readOnly && (service == transport.ReceivePackService || maintenance) {
+		http.Error(response, "repository is read-only", http.StatusForbidden)
 		return
 	}
 	r, cancel, e := limitedRequest(response, r, limits, service == transport.ReceivePackService && method == http.MethodPost)
@@ -167,7 +167,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if service == transport.UploadPackService {
 		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
-			s, err := openStore(r.Context(), session, format, limits.objectBytes)
+			s, err := openStore(r.Context(), session, format, limits)
 			if err != nil {
 				return err
 			}
@@ -208,7 +208,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s, e := openStore(r.Context(), session, format, limits.objectBytes)
+	s, e := openStore(r.Context(), session, format, limits)
 	if e != nil {
 		http.Error(response, e.Error(), operationStatus(e))
 		return
@@ -226,7 +226,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 				return
 			}
-			fresh, err := openStore(r.Context(), session, format, limits.objectBytes)
+			fresh, err := openStore(r.Context(), session, format, limits)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusServiceUnavailable)
 				return

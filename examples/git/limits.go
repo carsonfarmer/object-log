@@ -8,17 +8,21 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 var errObjectLimit = errors.New("object exceeds configured size limit")
 
 type requestLimits struct {
 	pushBytes, negotiationBytes, objectBytes int64
+	packObjects, metadataBytes               int64
 	timeout                                  time.Duration
+	readOnly                                 bool
 }
 
 func loadLimits(getenv func(string) string) (requestLimits, error) {
-	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, timeout: 5 * time.Minute}
+	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, timeout: 5 * time.Minute}
 	for _, setting := range []struct {
 		name  string
 		value *int64
@@ -26,11 +30,13 @@ func loadLimits(getenv func(string) string) (requestLimits, error) {
 		{"GIT_MAX_PUSH_BYTES", &limits.pushBytes},
 		{"GIT_MAX_NEGOTIATION_BYTES", &limits.negotiationBytes},
 		{"GIT_MAX_OBJECT_BYTES", &limits.objectBytes},
+		{"GIT_MAX_PACK_OBJECTS", &limits.packObjects},
+		{"GIT_MAX_METADATA_BYTES", &limits.metadataBytes},
 	} {
 		if text := getenv(setting.name); text != "" {
 			value, err := strconv.ParseInt(text, 10, 64)
 			if err != nil || value <= 0 {
-				return limits, fmt.Errorf("%s must be a positive byte count", setting.name)
+				return limits, fmt.Errorf("%s must be a positive count", setting.name)
 			}
 			*setting.value = value
 		}
@@ -41,6 +47,13 @@ func loadLimits(getenv func(string) string) (requestLimits, error) {
 			return limits, fmt.Errorf("GIT_REQUEST_TIMEOUT must be a positive duration")
 		}
 		limits.timeout = value
+	}
+	if value := getenv("GIT_READ_ONLY"); value != "" {
+		var err error
+		limits.readOnly, err = strconv.ParseBool(value)
+		if err != nil {
+			return limits, fmt.Errorf("GIT_READ_ONLY must be a boolean")
+		}
 	}
 	return limits, nil
 }
@@ -87,4 +100,15 @@ func operationStatus(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+// Structured objects are decoded into Go fields; blobs remain streamed.
+func (l requestLimits) checkObject(kind plumbing.ObjectType, size int64) error {
+	if size < 0 {
+		return fmt.Errorf("invalid object size")
+	}
+	if size > l.objectBytes || (kind != plumbing.BlobObject && size > l.metadataBytes) {
+		return errObjectLimit
+	}
+	return nil
 }

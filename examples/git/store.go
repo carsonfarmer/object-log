@@ -36,10 +36,10 @@ type indexed struct {
 	root *wal.Object
 }
 type store struct {
-	ctx            context.Context // Request-scoped; go-git storage methods do not accept contexts.
-	maxObjectBytes int64
-	owned          []*wal.Object
-	writers        []*byteWriter
+	ctx     context.Context // Request-scoped; go-git storage methods do not accept contexts.
+	limits  requestLimits
+	owned   []*wal.Object
+	writers []*byteWriter
 	storage.Storer
 	failure     error
 	tailEntries uint64
@@ -50,7 +50,7 @@ type store struct {
 	pending     map[string]indexed
 }
 
-func openStore(ctx context.Context, session *wal.Session, format config.ObjectFormat, maxObjectBytes int64) (result *store, err error) {
+func openStore(ctx context.Context, session *wal.Session, format config.ObjectFormat, limits requestLimits) (result *store, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	if e = mem.SetConfig(cfg); e != nil {
 		return nil, e
 	}
-	s := &store{ctx: ctx, maxObjectBytes: maxObjectBytes, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
+	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
 			s.Close()
@@ -151,6 +151,10 @@ func (s *store) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) (plumb
 	if kind != plumbing.AnyObject && kind != item.Kind {
 		return nil, plumbing.ErrObjectNotFound
 	}
+	if err := s.limits.checkObject(item.Kind, item.Size); err != nil {
+		s.observeRead(err)
+		return nil, err
+	}
 	return &storedObject{s, item}, nil
 }
 func (s *store) HasEncodedObject(id plumbing.Hash) error { _, e := s.lookup(id); return e }
@@ -178,12 +182,11 @@ func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteC
 	if err := s.ctx.Err(); err != nil {
 		return nil, err
 	}
-	if size > s.maxObjectBytes {
-		s.failure = errObjectLimit
-		return nil, errObjectLimit
-	}
-	if size < 0 {
-		return nil, fmt.Errorf("invalid object size")
+	if err := s.limits.checkObject(kind, size); err != nil {
+		if s.failure == nil {
+			s.failure = err
+		}
+		return nil, err
 	}
 	sink := &objectSink{s: s}
 	codec := objfile.NewWriter(sink, s.meta.Format)
@@ -322,6 +325,11 @@ func (o *storedObject) SetType(plumbing.ObjectType)     { panic("immutable objec
 func (o *storedObject) SetSize(int64)                   { panic("immutable object") }
 func (o *storedObject) Writer() (io.WriteCloser, error) { return nil, fmt.Errorf("immutable object") }
 func (o *storedObject) Reader() (io.ReadCloser, error) {
+	if err := o.s.limits.checkObject(o.item.Kind, o.item.Size); err != nil {
+		o.s.observeRead(err)
+		return nil, err
+	}
+
 	if err := o.s.ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -450,7 +458,7 @@ type pendingError struct{ token []byte }
 func (*pendingError) Error() string { return "publication pending" }
 
 func (s *store) observeRead(err error) {
-	if err == errExpired {
+	if s.failure == nil && (err == errExpired || err == errObjectLimit) {
 		s.failure = err
 	}
 }

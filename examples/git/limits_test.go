@@ -13,10 +13,10 @@ import (
 
 func TestRequestLimits(t *testing.T) {
 	defaults, err := loadLimits(func(string) string { return "" })
-	if err != nil || defaults.pushBytes != 2<<30 || defaults.objectBytes != 1<<30 {
+	if err != nil || defaults.pushBytes != 2<<30 || defaults.objectBytes != 1<<30 || defaults.metadataBytes != 16<<20 || defaults.packObjects != 1_000_000 {
 		t.Fatalf("defaults: %+v %v", defaults, err)
 	}
-	for _, key := range []string{"GIT_MAX_PUSH_BYTES", "GIT_MAX_NEGOTIATION_BYTES", "GIT_MAX_OBJECT_BYTES", "GIT_REQUEST_TIMEOUT"} {
+	for _, key := range []string{"GIT_MAX_PUSH_BYTES", "GIT_MAX_NEGOTIATION_BYTES", "GIT_MAX_OBJECT_BYTES", "GIT_MAX_METADATA_BYTES", "GIT_MAX_PACK_OBJECTS", "GIT_REQUEST_TIMEOUT"} {
 		for _, value := range []string{"0", "-1", "invalid", "9223372036854775808"} {
 			_, err := loadLimits(func(name string) string {
 				if name == key {
@@ -69,5 +69,26 @@ func TestRequestDeadline(t *testing.T) {
 	body := &requestBody{ReadCloser: io.NopCloser(strings.NewReader("data")), ctx: expired}
 	if _, err := io.ReadAll(body); !errors.Is(err, context.DeadlineExceeded) || operationStatus(err) != http.StatusRequestTimeout {
 		t.Fatalf("expired body: %v", err)
+	}
+}
+
+func TestReadOnlyConfiguration(t *testing.T) {
+	for _, value := range []string{"true", "TRUE", "1", "false", "FALSE", "0", "tru"} {
+		limits, err := loadLimits(func(key string) string {
+			if key == "GIT_READ_ONLY" {
+				return value
+			}
+			return ""
+		})
+		if value == "tru" {
+			if err == nil {
+				t.Fatal("invalid read-only setting accepted")
+			}
+			continue
+		}
+		want := value == "true" || value == "TRUE" || value == "1"
+		if err != nil || limits.readOnly != want {
+			t.Fatalf("%s: %v %v", value, limits.readOnly, err)
+		}
 	}
 }

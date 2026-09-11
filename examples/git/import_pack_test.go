@@ -148,7 +148,7 @@ func TestImportPackStreaming(t *testing.T) {
 						expected = nil
 					}
 					packed := fixturePack(t, f, entries)
-					if err := importPack(context.Background(), bytes.NewReader(packed), s, f, 1024); err != nil {
+					if err := importPack(context.Background(), bytes.NewReader(packed), s, f, testPackLimits(1024)); err != nil {
 						t.Fatal(err)
 					}
 					o, err := s.EncodedObject(plumbing.BlobObject, blobID(f, expected))
@@ -205,7 +205,7 @@ func TestImportPackRejectsInvalid(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newImportStorage(f)
 			packed := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: tc.delta, ref: blobID(f, base)}, {kind: plumbing.BlobObject, data: base}})
-			if err := importPack(context.Background(), bytes.NewReader(packed), s, f, 1024); err == nil {
+			if err := importPack(context.Background(), bytes.NewReader(packed), s, f, testPackLimits(1024)); err == nil {
 				t.Fatal("accepted malformed delta")
 			}
 			if (tc.name == "oversized-result" || tc.name == "oversized-base") && s.writes != 0 {
@@ -233,7 +233,7 @@ func TestImportPackRejectsInvalid(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			err := importPack(ctx, bytes.NewReader(p), newImportStorage(f), f, 1024)
+			err := importPack(ctx, bytes.NewReader(p), newImportStorage(f), f, testPackLimits(1024))
 			if err == nil {
 				t.Fatal("accepted invalid pack")
 			}
@@ -313,7 +313,7 @@ func TestImportPackStreamsLargeDelta(t *testing.T) {
 			delta = append(delta, 0xc0, 0x80, 0xc0, 0x80)
 			packed := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: delta, ref: blobID(f, []byte("base"))}})
 			s := &streamingStorage{base: &repeatedObject{size: size, actual: size}}
-			if err := importPack(context.Background(), bytes.NewReader(packed), s, f, size); err != nil {
+			if err := importPack(context.Background(), bytes.NewReader(packed), s, f, testPackLimits(size)); err != nil {
 				t.Fatal(err)
 			}
 			if s.writes != size || s.largest > 32<<10 || s.base.opens != 2 || s.base.largestRead > 32<<10 {
@@ -338,7 +338,7 @@ func TestImportPackBaseAndSinkFailures(t *testing.T) {
 				s.base.size = 1025
 			}
 			packed := fixturePack(t, format.SHA1, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: []byte{3, 3, 0x90, 3}, ref: blobID(format.SHA1, []byte("base"))}})
-			err := importPack(context.Background(), bytes.NewReader(packed), s, format.SHA1, 1024)
+			err := importPack(context.Background(), bytes.NewReader(packed), s, format.SHA1, testPackLimits(1024))
 			if err == nil {
 				t.Fatal("accepted failed object read/write")
 			}
@@ -356,7 +356,7 @@ func TestImportPackRejectsInvalidOFS(t *testing.T) {
 	for _, distance := range []int64{1, 1 << 20} {
 		t.Run(fmt.Sprint(distance), func(t *testing.T) {
 			packed := fixturePack(t, format.SHA1, []packFixtureEntry{{kind: plumbing.BlobObject, data: []byte("a")}, {kind: plumbing.OFSDeltaObject, data: []byte{1, 0}, distance: distance}})
-			if err := importPack(context.Background(), bytes.NewReader(packed), newImportStorage(format.SHA1), format.SHA1, 1024); err == nil {
+			if err := importPack(context.Background(), bytes.NewReader(packed), newImportStorage(format.SHA1), format.SHA1, testPackLimits(1024)); err == nil {
 				t.Fatal("accepted OFS reference outside entry boundaries")
 			}
 		})
@@ -368,7 +368,7 @@ func TestImportPackBoundsDeltaDepth(t *testing.T) {
 		entries = append(entries, packFixtureEntry{kind: plumbing.OFSDeltaObject, data: []byte{1, 1, 0x90, 1}, ofs: i})
 	}
 	packed := fixturePack(t, format.SHA1, entries)
-	if err := importPack(context.Background(), bytes.NewReader(packed), newImportStorage(format.SHA1), format.SHA1, 1024); !errors.Is(err, packfile.ErrMalformedPackfile) {
+	if err := importPack(context.Background(), bytes.NewReader(packed), newImportStorage(format.SHA1), format.SHA1, testPackLimits(1024)); !errors.Is(err, packfile.ErrMalformedPackfile) {
 		t.Fatalf("depth error: %v", err)
 	}
 }
@@ -396,9 +396,74 @@ func TestImportPackObjectFraming(t *testing.T) {
 			}
 			digest := sha1.Sum(packed[:len(packed)-f.Size()])
 			copy(packed[len(packed)-f.Size():], digest[:])
-			err := importPack(context.Background(), bytes.NewReader(packed), newImportStorage(f), f, 1024)
+			err := importPack(context.Background(), bytes.NewReader(packed), newImportStorage(f), f, testPackLimits(1024))
 			if (err == nil) != (mode == "empty-pack") {
 				t.Fatalf("result: %v", err)
+			}
+		})
+	}
+}
+
+func testPackLimits(size int64) requestLimits {
+	return requestLimits{objectBytes: size, metadataBytes: size, packObjects: 1_000_000}
+}
+
+func TestPackEntryAndMetadataBounds(t *testing.T) {
+	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
+		t.Run(f.String(), func(t *testing.T) {
+			limits := testPackLimits(1024)
+			limits.packObjects, limits.metadataBytes = 2, 16
+			for _, n := range []int{2, 3} {
+				entries := make([]packFixtureEntry, n)
+				for i := range entries {
+					entries[i].kind = plumbing.BlobObject
+				}
+				s := newImportStorage(f)
+				err := importPack(context.Background(), bytes.NewReader(fixturePack(t, f, entries)), s, f, limits)
+				if n == 2 {
+					if err != nil || s.writes != n {
+						t.Fatalf("boundary: %v writes=%d", err, s.writes)
+					}
+				} else if !errors.Is(err, errObjectLimit) || s.writes != 0 {
+					t.Fatalf("count overflow: %v writes=%d", err, s.writes)
+				}
+			}
+			// Reject an excessive declaration before trying to read an entry.
+			oversized := []byte("PACK\x00\x00\x00\x02\xff\xff\xff\xff")
+			if err := importPack(context.Background(), bytes.NewReader(oversized), newImportStorage(f), f, limits); !errors.Is(err, errObjectLimit) {
+				t.Fatalf("header count: %v", err)
+			}
+			for _, kind := range []plumbing.ObjectType{plumbing.CommitObject, plumbing.TreeObject, plumbing.TagObject, plumbing.BlobObject} {
+				for _, size := range []int{16, 17} {
+					s := newImportStorage(f)
+					packed := fixturePack(t, f, []packFixtureEntry{{kind: kind, data: bytes.Repeat([]byte{'x'}, size)}})
+					err := importPack(context.Background(), bytes.NewReader(packed), s, f, limits)
+					if kind == plumbing.BlobObject || size == 16 {
+						if err != nil {
+							t.Fatalf("%s size%d: %v", kind, size, err)
+						}
+					} else if !errors.Is(err, errObjectLimit) || s.writes != 0 {
+						t.Fatalf("metadata overflow %s: %v writes=%d", kind, err, s.writes)
+					}
+				}
+				// Both delta encodings inherit their base type; neither bypasses metadata limits.
+				for _, deltaKind := range []plumbing.ObjectType{plumbing.REFDeltaObject, plumbing.OFSDeltaObject} {
+					baseData := []byte("x")
+					hasher := plumbing.NewHasher(f, kind, int64(len(baseData)))
+					_, _ = hasher.Write(baseData)
+					base := hasher.Sum()
+					delta := append([]byte{1, 17, 17}, bytes.Repeat([]byte{'y'}, 17)...)
+					packed := fixturePack(t, f, []packFixtureEntry{{kind: kind, data: baseData}, {kind: deltaKind, ref: base, ofs: 0, data: delta}})
+					s := newImportStorage(f)
+					err := importPack(context.Background(), bytes.NewReader(packed), s, f, limits)
+					if kind == plumbing.BlobObject {
+						if err != nil || s.writes != 2 {
+							t.Fatalf("blob delta: %v writes=%d", err, s.writes)
+						}
+					} else if !errors.Is(err, errObjectLimit) || s.writes != 1 {
+						t.Fatalf("metadata delta %s %s: %v writes=%d", kind, deltaKind, err, s.writes)
+					}
+				}
 			}
 		})
 	}

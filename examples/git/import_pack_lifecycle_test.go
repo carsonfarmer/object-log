@@ -94,7 +94,7 @@ func TestImportPackWaitsForBaseClose(t *testing.T) {
 				s.sink = sink
 				packed := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: []byte{3, 1, 0x90, 1}, ref: o.Hash()}})
 				done := make(chan error, 1)
-				go func() { done <- importPack(ctx, bytes.NewReader(packed), s, f, 1024) }()
+				go func() { done <- importPack(ctx, bytes.NewReader(packed), s, f, testPackLimits(1024)) }()
 				synctest.Wait()
 				select {
 				case <-entered:
@@ -142,7 +142,7 @@ func TestImportPackDuplicateIDsWithREFAndOFSChildren(t *testing.T) {
 				{kind: plumbing.OFSDeltaObject, data: []byte{1, 1, 1, 'c'}, ofs: 2},
 			}
 			s := newImportStorage(f)
-			if err := importPack(context.Background(), bytes.NewReader(fixturePack(t, f, entries)), s, f, 1024); err != nil {
+			if err := importPack(context.Background(), bytes.NewReader(fixturePack(t, f, entries)), s, f, testPackLimits(1024)); err != nil {
 				t.Fatal(err)
 			}
 			for _, value := range []string{"abc", "a", "b", "c"} {
@@ -175,7 +175,7 @@ func TestImportPackFailedBackwardReopen(t *testing.T) {
 	_ = w.Close()
 	s := lifecycleStorage{base: &failedReopenObject{EncodedObject: o}, sink: streamSink{&streamingStorage{}}}
 	p := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: []byte{3, 2, 0x91, 2, 1, 0x90, 1}, ref: o.Hash()}})
-	if err := importPack(context.Background(), bytes.NewReader(p), s, f, 1024); err == nil {
+	if err := importPack(context.Background(), bytes.NewReader(p), s, f, testPackLimits(1024)); err == nil {
 		t.Fatal("accepted failed reopen")
 	}
 }

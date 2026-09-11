@@ -36,8 +36,8 @@ type packEntry struct {
 
 // importPack retains entry metadata, never inflated objects or delta instructions.
 // The framing pass authenticates the pack before unresolved deltas are applied.
-func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, objectFormat format.ObjectFormat, maxObjectBytes int64) error {
-	if maxObjectBytes <= 0 {
+func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, objectFormat format.ObjectFormat, limits requestLimits) error {
+	if limits.objectBytes <= 0 || limits.metadataBytes <= 0 || limits.packObjects <= 0 {
 		return errObjectLimit
 	}
 	digest, err := githash.FromObjectFormat(objectFormat)
@@ -52,9 +52,13 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 	if string(header[:4]) != "PACK" || (binary.BigEndian.Uint32(header[4:8]) != 2 && binary.BigEndian.Uint32(header[4:8]) != 3) {
 		return packfile.ErrMalformedPackfile
 	}
+	count := binary.BigEndian.Uint32(header[8:])
+	if int64(count) > limits.packObjects {
+		return errObjectLimit
+	}
 	var entries []*packEntry
 	byOffset := make(map[int64][]*packEntry)
-	for remaining := binary.BigEndian.Uint32(header[8:]); remaining > 0; remaining-- {
+	for remaining := count; remaining > 0; remaining-- {
 		entry := &packEntry{offset: input.offset}
 		first, err := input.ReadByte()
 		if err != nil {
@@ -71,8 +75,8 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 		entry.size = int64(size)
 		switch entry.kind {
 		case plumbing.CommitObject, plumbing.TreeObject, plumbing.BlobObject, plumbing.TagObject:
-			if entry.size > maxObjectBytes {
-				return errObjectLimit
+			if err := limits.checkObject(entry.kind, entry.size); err != nil {
+				return err
 			}
 		case plumbing.OFSDeltaObject:
 			distance, err := gitbinary.ReadVariableWidthInt(input)
@@ -97,7 +101,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 			return packfile.ErrMalformedPackfile
 		}
 		entry.content = input.offset
-		if err := scanPackEntry(ctx, input, entry, storage, objectFormat, maxObjectBytes); err != nil {
+		if err := scanPackEntry(ctx, input, entry, storage, objectFormat, limits.objectBytes); err != nil {
 			return err
 		}
 		entries = append(entries, entry)
@@ -140,8 +144,8 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 		if err != nil {
 			return err
 		}
-		if object.Size() < 0 || object.Size() > maxObjectBytes {
-			return errObjectLimit
+		if err := limits.checkObject(object.Type(), object.Size()); err != nil {
+			return err
 		}
 		ready = append(ready, &packEntry{id: base})
 	}
@@ -164,8 +168,11 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 			if err != nil {
 				return err
 			}
-			if base.Size() < 0 || base.Size() > maxObjectBytes {
-				return errObjectLimit
+			if err := limits.checkObject(base.Type(), base.Size()); err != nil {
+				return err
+			}
+			if err := limits.checkObject(base.Type(), entry.target); err != nil {
+				return err
 			}
 			if _, err := source.Seek(entry.content, io.SeekStart); err != nil {
 				return err

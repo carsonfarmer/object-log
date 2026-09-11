@@ -55,7 +55,7 @@ func (p *incomingPack) Close() error {
 		return err
 	}
 	defer reader.Close()
-	p.err = importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.maxObjectBytes)
+	p.err = importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits)
 	if p.err == nil {
 		p.err = p.s.failure
 	}
