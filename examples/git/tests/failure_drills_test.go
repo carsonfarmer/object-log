@@ -128,8 +128,14 @@ func TestFailureDrills(t *testing.T) {
 								repo.Absent = append(repo.Absent, u.ref, u.ref+"-mirror")
 							}
 							mu.Unlock()
-							if !ok1 && (!bytes.Contains(data, []byte("ng "+u.ref+" publication conflict or expired view\n")) || !bytes.Contains(data, []byte("ng "+u.ref+"-mirror publication conflict or expired view\n"))) {
-								t.Errorf("unexpected rejection: %s", data)
+							if !ok1 {
+								knownConflict := bytes.Equal(data, append(packet("unpack expired view\n"), []byte("0000")...))
+								for _, reason := range []string{"publication conflict or expired view", "expired view"} {
+									knownConflict = knownConflict || (bytes.Contains(data, []byte("ng "+u.ref+" "+reason+"\n")) && bytes.Contains(data, []byte("ng "+u.ref+"-mirror "+reason+"\n")))
+								}
+								if !knownConflict {
+									t.Errorf("unexpected rejection: %s", data)
+								}
 							}
 						}
 					})

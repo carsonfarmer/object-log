@@ -53,7 +53,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 		return packfile.ErrMalformedPackfile
 	}
 	var entries []*packEntry
-	offsets := make(map[int64]*packEntry)
+	offsets := make(map[int64]bool)
 	for remaining := binary.BigEndian.Uint32(header[8:]); remaining > 0; remaining-- {
 		entry := &packEntry{offset: input.offset}
 		first, err := input.ReadByte()
@@ -83,7 +83,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 				return err
 			}
 			entry.baseOffset = entry.offset - distance
-			if offsets[entry.baseOffset] == nil {
+			if !offsets[entry.baseOffset] {
 				return packfile.ErrMalformedPackfile
 			}
 		case plumbing.REFDeltaObject:
@@ -98,7 +98,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 		if err := scanPackEntry(ctx, input, entry, storage, objectFormat, maxObjectBytes); err != nil {
 			return err
 		}
-		offsets[entry.offset] = entry
+		offsets[entry.offset] = true
 		entries = append(entries, entry)
 	}
 	expected := digest.Sum(nil)
@@ -203,11 +203,11 @@ func scanPackEntry(ctx context.Context, input io.Reader, entry *packEntry, stora
 	if err != nil {
 		return err
 	}
-	defer compressed.Close()
 	if !entry.kind.IsDelta() {
 		entry.id, err = writePackObject(storage, objectFormat, entry.kind, entry.size, compressed)
 		return err
 	}
+	defer compressed.Close()
 	// Count the complete inflated instruction stream without retaining it.
 	counted := &packInput{reader: bufio.NewReader(compressed), ctx: ctx}
 	sourceSize, err := packutil.DecodeLEB128FromReader(counted)

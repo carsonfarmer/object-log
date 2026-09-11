@@ -252,7 +252,7 @@ func (w *objectWriter) Close() (err error) {
 	}()
 	defer func() {
 		w.err = err
-		if err != nil {
+		if err != nil && w.s.failure == nil {
 			w.s.failure = err
 		}
 	}()

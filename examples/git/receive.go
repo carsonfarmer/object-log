@@ -1,11 +1,8 @@
 package main
 
-import (
-	"io"
-)
+import "io"
 
 // Incoming packs are staged as seekable WAL bytes before streaming import.
-func (s *store) LowMemoryMode() bool { return true }
 func (s *store) PackfileWriter() (io.WriteCloser, error) {
 	writer, err := s.newByteWriter()
 	if err != nil {

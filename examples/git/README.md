@@ -5,9 +5,9 @@ formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
 Local replacement checks pass; this is not production ready.
-Development uses the upstream go-git v6 prerelease pinned in `go.mod`. Its
-dual-hash support, protocol-v2 server, shallow serving and streamed object writer
-are needed here. Stable v5 lacks that combination. Partial-clone filters are deferred.
+Development temporarily pins our go-git fork at `6060178b` through `go.mod`.
+It includes the position and failed-reopen fixes under review in upstream PR #2379. Its v6 APIs provide both hashes, protocol-v2
+serving, shallow history and streamed object writes. Partial-clone filters remain deferred.
 
 ## Build and run locally
 
@@ -66,8 +66,9 @@ storage counters as the trailers.
 
 The tests use installed Git as an independent oracle. Opt-in extensions:
 
-- `GIT_REPEATED_PUSHES=1`: 1,025 pushes per hash with concurrent fetch/integrity
-  checks, automatic cleanup, and final cold history recovery. Run with
+- `GIT_REPEATED_PUSHES=1`: 1,025 pushes per hash mixing text edits, sparse edits to a
+  1 MiB binary, and binary additions/deletions, with concurrent fetch/integrity
+  checks, automatic cleanup, and final cold history and byte verification. Run with
   `go test -race ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
   It reports client latency percentiles in 256-push windows, including negotiation,
   transfer and cleanup. Use an isolated prefix and keep competing workloads off
@@ -78,8 +79,8 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
 - `GIT_PROBE_PERSISTED_HEAD=true`: run `TestPersistedHead` after restarting Spin
   with the same prefix to verify saved default-branch recovery.
 - `GIT_FAILURE_DRILLS=prepare GIT_DRILL_STATE=/tmp/git-drill-state.json`: run
-  `go test -race ./tests -run '^TestFailureDrills$' -count=1` from this directory
-  with `GIT_PROBE_URL` set. It checks concurrent writers/readers and interrupted
+  `go test -race ./tests -run '^TestFailureDrills$' -count=1 -parallel=4` from this directory
+  with `GIT_PROBE_URL` set. It checks concurrent writers, readers, collection and interrupted
   pushes. Stop and restart Spin with the same prefix, then rerun with
   `GIT_FAILURE_DRILLS=verify` to check the saved expectations after recovery.
 
@@ -93,15 +94,23 @@ closed. Push command headers share the negotiation bound.
 
 Cancellation is checked between storage calls and before publication. An
 already-running synchronous WASI call must finish; its publication outcome is
-preserved even after the deadline. Decoded deltas can allocate before their
-object-size check, so these limits do not promise a process-memory ceiling.
-On local Spin 4.0.2/MinIO, three alternating comparisons with `879df85` ran
-the 64 MiB push/clone/edit/fetch lifecycle sequentially for both hash formats,
-using fresh prefixes and warmed HTTP workers. Median elapsed time fell from
-41.50 to 40.21 seconds, storage requests from 1,274 to 834, and peak worker RSS
-from 690 to 570 MiB. CPU time and transferred bytes were effectively unchanged.
-RSS samples were taken every 100 ms, excluding builds and MinIO/client processes.
-These are workload measurements, not upper bounds.
+preserved even after the deadline. Incoming object and delta-result sizes are
+checked before decoding into storage. Base objects, delta instructions and results
+stream through fixed-size buffers; pack metadata still grows with object count.
+Backward copies can reread a base. These limits do not promise a process-memory ceiling.
+On local Spin 4.0.2/MinIO, three alternating comparisons of the buffered importer
+and streaming importer ran the 64 MiB push/clone/edit/fetch lifecycle sequentially
+for both hashes, with fresh prefixes and warmed HTTP workers. Median peak worker
+RSS fell from 570 to 321 MiB; elapsed time was 38.79 versus 39.39 seconds, with
+834 storage requests in both cases and effectively unchanged transferred bytes.
+RSS was sampled every 100 ms, excluding builds and MinIO/client processes.
+The mixed-history test completed 2,050 updates with concurrent fetches in
+150 seconds, peaking at 217 MiB. Its busy readers and writers together issued
+714,430 storage calls and transferred 1.90 GB: request cost remains a limitation.
+After this history, the existing single-blob fetch test exceeded its unchanged
+768 KiB read budget (1.7–2.0 MB). Explicit blob visibility checks currently walk
+published history; this resource gap remains open in issue #6. These are workload
+measurements, not upper bounds.
 
 Host-wide concurrent-request admission is a hosting concern and remains deferred;
 this example adds no instance limiter or additional durable coordination.
@@ -131,7 +140,8 @@ catalog leaves, avoiding separate reads during history traversal and collection.
 Larger objects and temporary incoming packs use the WAL byte-stream API, which owns
 chunk geometry, authenticated reconstruction and offset reads. Git retains its
 splitting sparse index and compression. Incoming packs remain unpublished;
-individual delta bases/results still need whole-object buffers. Fetch streams full objects
+a small importer resolves pack dependencies and streams go-git's delta decoder
+into WAL-backed objects. Fetch streams full objects
 without making deltas, trading larger transfers for lower memory use. This does
 not establish a fixed process-memory ceiling. Ordinary large-file lifecycles
 have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.

@@ -3,6 +3,7 @@ module object-log-git-proof
 go 1.26.3
 
 require (
+	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
 	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260903224701-e9e5820fe0d2
 	go.bytecodealliance.org/pkg v0.2.4-0.20260806154504-91f6c4863e67
 )
@@ -14,7 +15,6 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/go-git/gcfg/v2 v2.0.2 // indirect
-	github.com/go-git/go-billy/v6 v6.0.0-alpha.2 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
@@ -25,3 +25,5 @@ require (
 )
 
 tool github.com/bytecodealliance/componentize-go
+
+replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260911034131-6060178b73cf
