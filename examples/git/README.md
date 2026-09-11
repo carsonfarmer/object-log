@@ -4,12 +4,13 @@ A Go Git service backed by the existing Rust WAL. go-git handles Git protocols,
 formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
-Local qualification remains open while an intermittent native Git object-loss
-failure is investigated. Remote provider and deployment testing remain before
-a production rollout.
-Development temporarily pins our go-git fork at `6060178b` through `go.mod`.
-It includes the position and failed-reopen fixes under review in upstream PR #2379. Its v6 APIs provide both hashes, protocol-v2
-serving, shallow history and streamed object writes. Partial-clone filters remain deferred.
+Local Spin/MinIO qualification passes. Remote provider and deployment testing
+remain before a production rollout. Development pins our go-git fork at
+`50e833b0` through `go.mod`. Its v6 APIs provide both hashes, protocol-v2 serving,
+shallow history and streamed object writes. The streaming work is represented
+by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); two additional
+small fixes remain only on our fork pending owner review. Partial-clone filters
+remain deferred.
 
 ## Build and run locally
 
@@ -72,8 +73,9 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
   1 MiB binary, and binary additions/deletions, with concurrent fetch/integrity
   checks, automatic cleanup, and final cold history and byte verification. Failed
   writer clients and packet diagnostics are retained with `-artifacts`. Each
-  client currently waits for its own maintenance before subsequent commands;
-  this workaround does not resolve the open native Git investigation. Run with
+  client runs its own maintenance synchronously before subsequent commands. This
+  avoids an independently reproduced lock bug in installed Git 2.54 while still
+  exercising client maintenance. Run with
   `go test -race -artifacts ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
   It reports client latency percentiles in 256-push windows, including negotiation,
   transfer and cleanup. Use an isolated prefix and keep competing workloads off

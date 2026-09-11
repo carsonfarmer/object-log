@@ -92,11 +92,11 @@ API:
 The Git consumer replaces the custom Rust Git engine and native maintenance
 command. Installed Git remains the independent client and correctness oracle.
 See [its README](examples/git/README.md) for build and local `MinIO` instructions,
-current limitations, and opt-in provider tests. Local tests cover
+current limitations, and opt-in provider tests. Local qualification covers
 concurrent clients and cleanup, malformed inputs, resource limits and recovery
-after a forced restart. Qualification remains open while an intermittent native
-Git object-loss failure is investigated. Remote provider and deployment testing remain before
-a production rollout.
+after a forced restart. A prior endurance-test failure was traced to installed
+Git 2.54 background maintenance and reproduced without this service. Remote
+provider and deployment testing remain before a production rollout.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md).

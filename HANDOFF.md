@@ -33,7 +33,10 @@ a rejected replay preserves the first uncertain outcome. Git pushes never replay
 ## Dependencies and operation
 
 Use ordinary Spin and unmodified local MinIO. No instance, pooling or memory
-wrapper. go-git is pinned to our streaming-fix fork at `6060178b` (upstream #2379).
+wrapper. go-git is pinned to our fork at `50e833b0`. It contains the streamed
+parser work in [go-git PR #2379](https://github.com/go-git/go-git/pull/2379)
+plus small receive-pack and empty SHA-256 advertisement fixes retained only on
+our fork pending owner review.
 The adapter builds directly from our reviewed Wasmtime commit
 `c8e24c308754f784fbb4a08205a2a9c08c461d00` (upstream #14319), with an archive
 checksum; the redundant local patch is removed. componentize-go remains upstream
@@ -47,24 +50,23 @@ commits, not new evidence archives. Do not restart shared Docker or MinIO.
 
 ## Qualification
 
-Issue #43 tracks the final local qualification. Workspace/native/WASIp2 gates,
+Issue #43 records the completed local qualification. Workspace/native/WASIp2 gates,
 the full core MinIO matrix, 1,025 mixed-history pushes per hash with concurrent
 fetch/fsck, malformed-input rejection, access controls, small configured limits,
 concurrent writes/reads/collection and forced-restart recovery have passed.
 Concurrent 513 MiB push/clone/edit/fetch lifecycles pass for both hashes, with
 exact contents and native Git integrity checks.
-An intermittent native-client rejection occurred before upload. The retained
-source could not read its newest commit; the server's advertised prior commit
-was valid. A subsequent native HTTP control using Apple Git 2.54.0 lost an
-acknowledged server commit during repeated pushes, without the WAL or moving
-the server directory. Its pack files remain valid but omit the missing commit.
-The exact cause and relationship between these failures remain unproven.
-The repeated-push test waits for each client's own maintenance to finish before
-subsequent commands and artifact relocation; maintenance remains enabled.
-This workaround is not a fix. Local qualification remains open under issue #43.
+The earlier native-client rejection was traced outside the service. In installed
+Git 2.54, detached maintenance drops its lock while work continues. Concurrent
+cleanup can then treat an unfinished pack as durable, remove a loose object, and
+lose the only copy when that unfinished pack is discarded. Two deterministic
+native tests fail on the installed binary and pass with a small local Git fix;
+the current upstream source still has both paths. The endurance test sets
+`maintenance.autoDetach=false`, preserving normal maintenance while avoiding
+that client-side race. No Git patch has been submitted upstream.
 Failure artifacts remain available with `go test -artifacts`.
-Remote latency, provider behavior, deployment
-security, aggregate admission and operational recovery still need remote testing.
+Remote latency, provider behavior, deployment security, aggregate admission and
+operational recovery remain for remote qualification under issue #10.
 
 Root alone integrates main. Implement in exclusive worktrees, request independent
 correctness/simplification reviews, and run applicable gates before integration.
