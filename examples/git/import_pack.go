@@ -10,6 +10,7 @@ import (
 	"hash"
 	"io"
 	"math"
+	"sort"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
@@ -28,7 +29,6 @@ type packStorage interface {
 type packEntry struct {
 	offset, content int64
 	size, target    int64
-	baseOffset      int64
 	base, id        plumbing.Hash
 	kind            plumbing.ObjectType
 	depth           int
@@ -53,7 +53,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 		return packfile.ErrMalformedPackfile
 	}
 	var entries []*packEntry
-	offsets := make(map[int64]bool)
+	byOffset := make(map[int64][]*packEntry)
 	for remaining := binary.BigEndian.Uint32(header[8:]); remaining > 0; remaining-- {
 		entry := &packEntry{offset: input.offset}
 		first, err := input.ReadByte()
@@ -82,10 +82,12 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 			if err := packfile.ValidateOFSDeltaBase(entry.offset, distance); err != nil {
 				return err
 			}
-			entry.baseOffset = entry.offset - distance
-			if !offsets[entry.baseOffset] {
+			baseOffset := entry.offset - distance
+			i := sort.Search(len(entries), func(i int) bool { return entries[i].offset >= baseOffset })
+			if i == len(entries) || entries[i].offset != baseOffset {
 				return packfile.ErrMalformedPackfile
 			}
+			byOffset[baseOffset] = append(byOffset[baseOffset], entry)
 		case plumbing.REFDeltaObject:
 			entry.base.ResetBySize(objectFormat.Size())
 			if _, err := entry.base.ReadFrom(input); err != nil {
@@ -98,7 +100,6 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 		if err := scanPackEntry(ctx, input, entry, storage, objectFormat, maxObjectBytes); err != nil {
 			return err
 		}
-		offsets[entry.offset] = true
 		entries = append(entries, entry)
 	}
 	expected := digest.Sum(nil)
@@ -118,7 +119,6 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 	}
 	// A ready queue visits each dependency once, including forward REF deltas.
 	byHash := make(map[plumbing.Hash][]*packEntry)
-	byOffset := make(map[int64][]*packEntry)
 	var ready []*packEntry
 	unresolved := 0
 	for _, entry := range entries {
@@ -127,9 +127,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 			continue
 		}
 		unresolved++
-		if entry.kind == plumbing.OFSDeltaObject {
-			byOffset[entry.baseOffset] = append(byOffset[entry.baseOffset], entry)
-		} else {
+		if entry.kind == plumbing.REFDeltaObject {
 			byHash[entry.base] = append(byHash[entry.base], entry)
 		}
 	}
