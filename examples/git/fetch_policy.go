@@ -7,15 +7,15 @@ import (
 	"io"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
-	"github.com/go-git/go-git/v6/plumbing/revlist"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
 // filterFetch checks against the same published refs and object view used by
 // upload-pack. Ref-tip requests need no object reads; ordinary haves only walk
-// commits. Explicit noncommit wants may require the library's full graph walk.
+// commits. Explicit noncommit wants also inspect trees until visibility is proven.
 func filterFetch(s storer.EncodedObjectStorer, tips []plumbing.Hash, body io.Reader, v2 bool) (io.Reader, error) {
 	var output bytes.Buffer
 	if v2 {
@@ -93,7 +93,7 @@ func visibleFetch(s storer.EncodedObjectStorer, tips, wants, haves []plumbing.Ha
 	for _, tip := range tips {
 		visible[tip] = true
 	}
-	commits := map[plumbing.Hash]bool{}
+	needed := map[plumbing.Hash]bool{}
 	fullWalk := false
 	for group, ids := range [][]plumbing.Hash{wants, haves} {
 		for _, id := range ids {
@@ -107,53 +107,71 @@ func visibleFetch(s storer.EncodedObjectStorer, tips, wants, haves []plumbing.Ha
 			if err != nil {
 				return nil, err
 			}
-			if o.Type() == plumbing.CommitObject {
-				commits[id] = true
-			} else if group == 0 {
+			if group == 0 && o.Type() != plumbing.CommitObject {
 				fullWalk = true
+			}
+			if group == 0 || fullWalk || o.Type() == plumbing.CommitObject {
+				needed[id] = true
 			}
 		}
 	}
-	if fullWalk {
-		ids, err := revlist.Objects(s, tips, nil)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			visible[id] = true
-		}
-	} else {
-		seen := map[plumbing.Hash]bool{}
-		for _, tip := range tips {
-			if len(commits) == 0 {
-				break
-			}
-			o, err := object.GetObject(s, tip)
-			for err == nil {
-				tag, ok := o.(*object.Tag)
-				if !ok {
-					break
-				}
-				o, err = tag.Object()
-			}
+	seen := map[plumbing.Hash]bool{}
+	queue := append([]plumbing.Hash(nil), tips...)
+	var parents []plumbing.Hash
+	for len(queue) > 0 && len(needed) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if !seen[id] {
+			seen[id] = true
+			o, err := s.EncodedObject(plumbing.AnyObject, id)
 			if err != nil {
 				return nil, err
 			}
-			if commit, ok := o.(*object.Commit); ok {
-				iter := object.NewCommitPreorderIter(commit, seen, nil)
-				err = iter.ForEach(func(c *object.Commit) error {
-					seen[c.Hash], visible[c.Hash] = true, true
-					delete(commits, c.Hash)
-					if len(commits) == 0 {
-						return storer.ErrStop
-					}
-					return nil
-				})
-				iter.Close()
+			if fullWalk || o.Type() == plumbing.CommitObject {
+				visible[id] = true
+				delete(needed, id)
+			}
+			if len(needed) == 0 {
+				break
+			}
+			switch o.Type() {
+			case plumbing.CommitObject:
+				commit, err := object.DecodeCommit(s, o)
 				if err != nil {
 					return nil, err
 				}
+				parents = append(parents, commit.ParentHashes...)
+				if fullWalk {
+					queue = append(queue, commit.TreeHash)
+				}
+			case plumbing.TagObject:
+				tag, err := object.DecodeTag(s, o)
+				if err != nil {
+					return nil, err
+				}
+				queue = append(queue, tag.Target)
+			case plumbing.TreeObject:
+				if fullWalk {
+					tree, err := object.DecodeTree(s, o)
+					if err != nil {
+						return nil, err
+					}
+					for _, entry := range tree.Entries {
+						if entry.Mode == filemode.Submodule {
+							continue
+						}
+						visible[entry.Hash] = true
+						delete(needed, entry.Hash)
+						if entry.Mode == filemode.Dir {
+							queue = append(queue, entry.Hash)
+						}
+					}
+				}
 			}
+		}
+		// Inspect every tip's trees before reading an older generation of commits.
+		if len(queue) == 0 {
+			queue, parents = parents, nil
 		}
 	}
 	for _, id := range wants {

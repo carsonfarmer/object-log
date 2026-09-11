@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"testing"
@@ -17,9 +18,11 @@ import (
 
 type policyStore struct {
 	*memory.Storage
-	reads   int
-	failure error
-	kinds   map[plumbing.ObjectType]int
+	reads       int
+	failure     error
+	kinds       map[plumbing.ObjectType]int
+	payloads    map[plumbing.Hash]int
+	readFailure map[plumbing.Hash]error
 }
 
 func (s *policyStore) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) (plumbing.EncodedObject, error) {
@@ -31,7 +34,27 @@ func (s *policyStore) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) 
 	if err == nil {
 		s.kinds[o.Type()]++
 	}
+	if err == nil {
+		return &policyObject{EncodedObject: o, store: s, id: id}, nil
+	}
 	return o, err
+}
+
+type policyObject struct {
+	plumbing.EncodedObject
+	store *policyStore
+	id    plumbing.Hash
+}
+
+func (o *policyObject) Reader() (io.ReadCloser, error) {
+	if o.store.payloads == nil {
+		o.store.payloads = map[plumbing.Hash]int{}
+	}
+	o.store.payloads[o.id]++
+	if err := o.store.readFailure[o.id]; err != nil {
+		return nil, err
+	}
+	return o.EncodedObject.Reader()
 }
 
 func policyFixture(t *testing.T, format config.ObjectFormat) (*policyStore, map[string]plumbing.Hash) {
@@ -182,5 +205,69 @@ func TestFilterFetchPreservesOtherCommands(t *testing.T) {
 	encoded, err := io.ReadAll(got)
 	if err != nil || !bytes.Equal(encoded, input.Bytes()) {
 		t.Fatalf("ls-refs changed: %v", err)
+	}
+}
+
+func TestVisibleFetchStopsBeforeUnrelatedHistory(t *testing.T) {
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		t.Run(format.String(), func(t *testing.T) {
+			s, ids := policyFixture(t, format)
+			put := func(value interface {
+				Encode(plumbing.EncodedObject) error
+			}) plumbing.Hash {
+				t.Helper()
+				o := s.NewEncodedObject()
+				if err := value.Encode(o); err != nil {
+					t.Fatal(err)
+				}
+				id, err := s.SetEncodedObject(o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			empty := put(&object.Tree{})
+			parent := ids["base"]
+			history := []plumbing.Hash{parent}
+			for i := range 1025 {
+				parent = put(&object.Commit{TreeHash: empty, ParentHashes: []plumbing.Hash{parent}, Message: fmt.Sprint(i)})
+				history = append(history, parent)
+			}
+			tips := []plumbing.Hash{parent, ids["tip"]}
+			if _, err := visibleFetch(s, tips, []plumbing.Hash{ids["blob"]}, nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range history[:len(history)-1] {
+				if s.payloads[id] != 0 {
+					t.Fatal("read unrelated parent history")
+				}
+			}
+			if s.payloads[ids["blob"]] != 0 {
+				t.Fatal("opened blob payload for visibility")
+			}
+			// An older tree remains visible when it is absent from the current tree.
+			if _, err := visibleFetch(s, []plumbing.Hash{parent}, []plumbing.Hash{ids["blob"]}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if s.payloads[ids["base"]] == 0 {
+				t.Fatal("did not verify historical commit")
+			}
+			failure := errors.New("expired tree read")
+			s.readFailure = map[plumbing.Hash]error{ids["tree"]: failure}
+			if _, err := visibleFetch(s, []plumbing.Hash{ids["tip"]}, []plumbing.Hash{ids["blob"]}, nil); !errors.Is(err, failure) {
+				t.Fatalf("lost payload error: %v", err)
+			}
+			s.readFailure = nil
+			linkTree := put(&object.Tree{Entries: []object.TreeEntry{{Name: "submodule", Mode: filemode.Submodule, Hash: ids["dead"]}}})
+			linkTip := put(&object.Commit{TreeHash: linkTree})
+			if _, err := visibleFetch(s, []plumbing.Hash{linkTip}, []plumbing.Hash{linkTree, ids["dead"]}, nil); err == nil {
+				t.Fatal("accepted gitlink as local reachability")
+			}
+			treeTag := put(&object.Tag{Name: "tree", Target: ids["tree"], TargetType: plumbing.TreeObject})
+			got, err := visibleFetch(s, []plumbing.Hash{treeTag}, []plumbing.Hash{ids["blob"]}, []plumbing.Hash{ids["tree"], ids["dead"]})
+			if err != nil || !reflect.DeepEqual(got, []plumbing.Hash{ids["tree"]}) {
+				t.Fatalf("tree-tag haves: %v, %v", got, err)
+			}
+		})
 	}
 }
