@@ -80,16 +80,33 @@ func TestFailureDrills(t *testing.T) {
 					batches[writer] = append(batches[writer], makeUpdate(fmt.Sprintf("%s-w%d-%d", prefix, writer, round)))
 				}
 			}
+			client := filepath.Join(t.TempDir(), "reader")
+			git(t, nil, "init", "--bare", "--object-format="+format, client)
+			git(t, nil, "-C", client, "config", "maintenance.autoDetach", "false")
 			var mu sync.Mutex
 			accepted, conflicts := 0, 0
+			var active [4]bool
+			var overlap [3]bool
+			markActive := func(worker int, running bool) {
+				mu.Lock()
+				defer mu.Unlock()
+				active[worker] = running
+				if active[3] {
+					for other := range overlap {
+						overlap[other] = overlap[other] || active[other]
+					}
+				}
+			}
 			t.Run("concurrent", func(t *testing.T) {
 				for writer := range batches {
 					t.Run(fmt.Sprintf("writer-%d", writer), func(t *testing.T) {
 						t.Parallel()
 						for _, u := range batches[writer] {
+							markActive(writer, true)
 							response := drillRequest(t, context.Background(), repo.URL+"/git-receive-pack", u.body)
 							data, err := io.ReadAll(response.Body)
 							response.Body.Close()
+							markActive(writer, false)
 							if err != nil {
 								t.Fatal(err)
 							}
@@ -111,7 +128,7 @@ func TestFailureDrills(t *testing.T) {
 								repo.Absent = append(repo.Absent, u.ref, u.ref+"-mirror")
 							}
 							mu.Unlock()
-							if !ok1 && !bytes.Contains(data, []byte("publication conflict or expired view")) {
+							if !ok1 && (!bytes.Contains(data, []byte("ng "+u.ref+" publication conflict or expired view\n")) || !bytes.Contains(data, []byte("ng "+u.ref+"-mirror publication conflict or expired view\n"))) {
 								t.Errorf("unexpected rejection: %s", data)
 							}
 						}
@@ -119,18 +136,37 @@ func TestFailureDrills(t *testing.T) {
 				}
 				t.Run("reader", func(t *testing.T) {
 					t.Parallel()
-					client := filepath.Join(t.TempDir(), "reader")
-					git(t, nil, "init", "--bare", "--object-format="+format, client)
 					for round := 0; round < 8; round++ {
+						markActive(2, true)
 						git(t, nil, "-C", client, "fetch", repo.URL, "+refs/heads/"+prefix+"*:refs/heads/"+prefix+"*")
+						markActive(2, false)
 						git(t, nil, "-C", client, "fsck", "--full")
 					}
 				})
+				t.Run("collector", func(t *testing.T) {
+					t.Parallel()
+					for round := 0; round < 8; round++ {
+						markActive(3, true)
+						collectDrillStep(t, repo.URL)
+						markActive(3, false)
+					}
+				})
 			})
-			if accepted < 16 {
-				t.Errorf("only %d of 32 independent publications accepted", accepted)
+			for worker, name := range []string{"writer-0", "writer-1", "reader"} {
+				if !overlap[worker] {
+					t.Errorf("collector did not overlap %s", name)
+				}
 			}
-			t.Logf("accepted %d atomic updates, rejected %d conflicts; reader completed 8 fetch/fsck cycles", accepted, conflicts)
+			// Collection is a third publisher and can legitimately fence either
+			// writer; every accepted or rejected update is still checked exactly.
+			if accepted == 0 {
+				t.Error("no concurrent publication was acknowledged")
+			}
+			t.Logf("accepted %d atomic updates, rejected %d conflicts; reader completed 8 fetch/fsck cycles and collector completed 8 maintenance calls", accepted, conflicts)
+			after := makeUpdate(prefix + "-after-contention")
+			git(t, nil, "-C", source, "push", "--atomic", repo.URL, after.tip+":"+after.ref, after.tip+":"+after.ref+"-mirror")
+			repo.Refs[after.ref], repo.Refs[after.ref+"-mirror"] = after.tip, after.tip
+			repo.Blobs[after.blob] = after.value
 			canceled := makeUpdate(prefix + "-canceled")
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
@@ -235,24 +271,32 @@ func drillRequest(t *testing.T, ctx context.Context, url string, body []byte) *h
 func collectDrill(t *testing.T, url string) {
 	t.Helper()
 	for attempt := 0; attempt < 32; attempt++ {
-		response := drillRequest(t, context.Background(), url+"/maintenance", nil)
-		var result struct {
-			State string `json:"state"`
-		}
-		err := json.NewDecoder(response.Body).Decode(&result)
-		response.Body.Close()
-		if err != nil || response.StatusCode != 200 {
-			t.Fatalf("maintenance HTTP %d: %v", response.StatusCode, err)
-		}
-		switch result.State {
-		case "complete":
+		if collectDrillStep(t, url) == "complete" {
 			return
-		case "more", "conflict", "pending":
-		default:
-			t.Fatalf("unexpected maintenance state %q", result.State)
 		}
 	}
 	t.Fatal("maintenance did not complete in 32 requests")
+}
+
+// A concurrent collector performs one bounded step; conflicts and pending fences
+// are valid outcomes. After writers stop, collectDrill still requires completion.
+func collectDrillStep(t *testing.T, url string) string {
+	t.Helper()
+	response := drillRequest(t, context.Background(), url+"/maintenance", nil)
+	var result struct {
+		State string `json:"state"`
+	}
+	err := json.NewDecoder(response.Body).Decode(&result)
+	response.Body.Close()
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("maintenance HTTP %d: %v", response.StatusCode, err)
+	}
+	switch result.State {
+	case "complete", "more", "conflict", "pending":
+	default:
+		t.Fatalf("unexpected maintenance state %q", result.State)
+	}
+	return result.State
 }
 
 func verifyDrill(t *testing.T, repo drillRepository) {
