@@ -211,7 +211,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		e = advertise(w, s)
 	} else if service == transport.ReceivePackService {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-		e = transport.ReceivePack(r.Context(), s, r.Body, gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
+		e = transport.ReceivePack(r.Context(), s, r.Body, gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, MaxCommandBytes: limits.negotiationBytes, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
 			refs, e := validate(s, info.Commands)
 			if e != nil {
 				return e

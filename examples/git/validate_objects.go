@@ -25,32 +25,30 @@ func verifyObjects(st storer.EncodedObjectStorer, ids []plumbing.Hash) error {
 		if err != nil {
 			return err
 		}
-		switch o.Type() {
-		case plumbing.CommitObject:
+		if o.Type() == plumbing.CommitObject || o.Type() == plumbing.TagObject {
 			if err := validateObjectHeaders(o); err != nil {
 				return err
 			}
-			c, e := object.DecodeCommit(st, o)
-			if e != nil {
-				return e
+		}
+		decoded, err := object.DecodeObject(st, o)
+		if err != nil {
+			return err
+		}
+		switch v := decoded.(type) {
+		case *object.Commit:
+			if err := check(v.TreeHash, plumbing.TreeObject); err != nil {
+				return err
 			}
-			if e = check(c.TreeHash, plumbing.TreeObject); e != nil {
-				return e
-			}
-			for _, p := range c.ParentHashes {
-				if e = check(p, plumbing.CommitObject); e != nil {
-					return e
+			for _, p := range v.ParentHashes {
+				if err := check(p, plumbing.CommitObject); err != nil {
+					return err
 				}
 			}
-		case plumbing.TreeObject:
-			tree, e := object.DecodeTree(st, o)
-			if e != nil {
-				return e
+		case *object.Tree:
+			if err := v.Validate(); err != nil {
+				return err
 			}
-			if e = tree.Validate(); e != nil {
-				return e
-			}
-			for _, entry := range tree.Entries {
+			for _, entry := range v.Entries {
 				kind := plumbing.BlobObject
 				switch entry.Mode {
 				case filemode.Submodule:
@@ -58,22 +56,15 @@ func verifyObjects(st storer.EncodedObjectStorer, ids []plumbing.Hash) error {
 				case filemode.Dir:
 					kind = plumbing.TreeObject
 				}
-				if e = check(entry.Hash, kind); e != nil {
-					return e
+				if err := check(entry.Hash, kind); err != nil {
+					return err
 				}
 			}
-		case plumbing.TagObject:
-			if err := validateObjectHeaders(o); err != nil {
+		case *object.Tag:
+			if err := check(v.Target, v.TargetType); err != nil {
 				return err
 			}
-			tag, e := object.DecodeTag(st, o)
-			if e != nil {
-				return e
-			}
-			if e = check(tag.Target, tag.TargetType); e != nil {
-				return e
-			}
-		case plumbing.BlobObject:
+		case *object.Blob:
 		default:
 			return fmt.Errorf("invalid object kind")
 		}

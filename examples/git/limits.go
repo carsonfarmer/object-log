@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/transport"
 )
 
 var errObjectLimit = errors.New("configured Git resource limit exceeded")
@@ -95,7 +96,7 @@ func limitedRequest(w http.ResponseWriter, r *http.Request, limits requestLimits
 func operationStatus(err error) int {
 	var tooLarge *http.MaxBytesError
 	switch {
-	case errors.As(err, &tooLarge), errors.Is(err, errObjectLimit):
+	case errors.As(err, &tooLarge), errors.Is(err, errObjectLimit), errors.Is(err, transport.ErrUpdateRequestTooLarge):
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return http.StatusRequestTimeout

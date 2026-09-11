@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -54,6 +55,33 @@ func TestConfiguredLimits(t *testing.T) {
 				if err != nil || response.StatusCode != http.StatusRequestEntityTooLarge {
 					t.Fatalf("expanded negotiation: status=%d body=%s err=%v", response.StatusCode, data, err)
 				}
+			}
+			width := 40
+			if format == "sha256" {
+				width = 64
+			}
+			var commands bytes.Buffer
+			for i := range 100 {
+				caps := ""
+				if i == 0 {
+					caps = "\x00report-status object-format=" + format
+				}
+				commands.Write(packet(fmt.Sprintf("%s %s refs/heads/limit-%d%s\n", strings.Repeat("1", width), strings.Repeat("0", width), i, caps)))
+			}
+			commands.WriteString("0000")
+			req, err := http.NewRequest(http.MethodPost, url+"/git-receive-pack", &commands)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+			response, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil || response.StatusCode != http.StatusRequestEntityTooLarge {
+				t.Fatalf("push negotiation: status=%d body=%s err=%v", response.StatusCode, data, readErr)
 			}
 			source := filepath.Join(t.TempDir(), "source")
 			git(t, nil, "init", "--object-format="+format, "-b", "limits", source)

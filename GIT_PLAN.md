@@ -52,8 +52,9 @@ Collection, checkpoint safety and uncertain outcomes remain core responsibilitie
 
 ## Limits and tradeoffs
 
-Incoming delta bases and results stream through go-git's decoder into WAL byte
-streams. A small importer checks framing, lengths, checksums and dependencies.
+Incoming delta bases and results stream through go-git's parser and decoder into
+WAL byte streams. go-git checks pack framing, lengths and checksums; the importer
+coordinates dependency resolution and publication.
 Pack metadata remains proportional to object count; backward copies may reread bases.
 Outgoing packs stream full objects without creating deltas, so transfer sizes
 can exceed a delta-compressed server's. There is no fixed process-memory promise.

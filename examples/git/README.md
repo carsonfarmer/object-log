@@ -6,10 +6,10 @@ storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
 Local Spin/MinIO qualification passes. Remote provider and deployment testing
 remain before a production rollout. Development pins our go-git fork at
-`50e833b0` through `go.mod`. Its v6 APIs provide both hashes, protocol-v2 serving,
+`a37a9c5b` through `go.mod`. Its v6 APIs provide both hashes, protocol-v2 serving,
 shallow history and streamed object writes. The streaming work is represented
-by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); two additional
-small fixes remain only on our fork pending owner review. Partial-clone filters
+by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); additional
+small server fixes remain only on our fork pending owner review. Partial-clone filters
 remain deferred.
 
 ## Build and run locally
@@ -166,8 +166,8 @@ catalog leaves, avoiding separate reads during history traversal and collection.
 Larger objects and temporary incoming packs use the WAL byte-stream API, which owns
 chunk geometry, authenticated reconstruction and offset reads. Git retains its
 splitting sparse index and compression. Incoming packs remain unpublished;
-a small importer resolves pack dependencies and streams go-git's delta decoder
-into WAL-backed objects. Fetch streams full objects
+go-git checks and decodes them while a small importer coordinates dependency
+resolution and streams decoded objects into the WAL. Fetch streams full objects
 without making deltas, trading larger transfers for lower memory use. This does
 not establish a fixed process-memory ceiling. Ordinary large-file lifecycles
 have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-git/go-git/v6/plumbing/transport"
 )
 
 func TestRequestLimits(t *testing.T) {
@@ -48,6 +50,9 @@ func TestRequestLimits(t *testing.T) {
 				t.Fatalf("size=%d chunked=%v: %v", size, chunked, err)
 			}
 		}
+	}
+	if operationStatus(transport.ErrUpdateRequestTooLarge) != http.StatusRequestEntityTooLarge {
+		t.Fatal("receive command limit has wrong HTTP status")
 	}
 }
 

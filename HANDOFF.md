@@ -33,10 +33,10 @@ a rejected replay preserves the first uncertain outcome. Git pushes never replay
 ## Dependencies and operation
 
 Use ordinary Spin and unmodified local MinIO. No instance, pooling or memory
-wrapper. go-git is pinned to our fork at `50e833b0`. It contains the streamed
+wrapper. go-git is pinned to our fork at `a37a9c5b`. It contains the streamed
 parser work in [go-git PR #2379](https://github.com/go-git/go-git/pull/2379)
-plus small receive-pack and empty SHA-256 advertisement fixes retained only on
-our fork pending owner review.
+plus small receive-pack, empty SHA-256 advertisement and deterministic first-ref
+fixes retained only on our fork pending owner review.
 The adapter builds directly from our reviewed Wasmtime commit
 `c8e24c308754f784fbb4a08205a2a9c08c461d00` (upstream #14319), with an archive
 checksum; the redundant local patch is removed. componentize-go remains upstream
