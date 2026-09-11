@@ -147,10 +147,47 @@ func TestCatalogValidationRejectsUnreachableMalformedObjects(t *testing.T) {
 	}
 }
 
-func TestCommitIdentityValidationMatchesGit(t *testing.T) {
+func validationGit(t *testing.T, format config.ObjectFormat) func(string, ...string) (string, error) {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("native Git oracle unavailable")
 	}
+	dir := t.TempDir()
+	git := func(input string, args ...string) (string, error) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+		cmd.Stdin = strings.NewReader(input)
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	if out, err := git("", "init", "--bare", "--object-format="+format.String()); err != nil {
+		t.Fatalf("init: %s: %v", out, err)
+	}
+	return git
+}
+
+func validationRaw(t *testing.T, s *validationStore, kind plumbing.ObjectType, data string) plumbing.Hash {
+	t.Helper()
+	o := s.NewEncodedObject()
+	o.SetType(kind)
+	w, err := o.Writer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(w, data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.SetEncodedObject(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestCommitIdentityValidationMatchesGit(t *testing.T) {
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
 		for _, tc := range []struct {
 			name, identity string
@@ -181,17 +218,7 @@ func TestCommitIdentityValidationMatchesGit(t *testing.T) {
 			{"extensions", "A <> 1 +0000", true},
 		} {
 			t.Run(format.String()+"/"+tc.name, func(t *testing.T) {
-				dir := t.TempDir()
-				git := func(input string, args ...string) (string, error) {
-					cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-					cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
-					cmd.Stdin = strings.NewReader(input)
-					out, err := cmd.CombinedOutput()
-					return strings.TrimSpace(string(out)), err
-				}
-				if out, err := git("", "init", "--bare", "--object-format="+format.String()); err != nil {
-					t.Fatalf("init: %s: %v", out, err)
-				}
+				git := validationGit(t, format)
 				s := &validationStore{Storage: memory.NewStorage(memory.WithObjectFormat(format)), reads: map[plumbing.Hash]int{}}
 				tree := validationPut(t, s, &object.Tree{})
 				if out, err := git("", "mktree"); err != nil || out != tree.String() {
@@ -213,22 +240,7 @@ func TestCommitIdentityValidationMatchesGit(t *testing.T) {
 					headers += "encoding UTF-8\ngpgsig signature\n continuation\nx-custom arbitrary\n"
 				}
 				data := "tree " + tree.String() + "\n" + headers + "\nmessage\n"
-				o := s.NewEncodedObject()
-				o.SetType(plumbing.CommitObject)
-				w, err := o.Writer()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := io.WriteString(w, data); err != nil {
-					t.Fatal(err)
-				}
-				if err := w.Close(); err != nil {
-					t.Fatal(err)
-				}
-				id, err := s.SetEncodedObject(o)
-				if err != nil {
-					t.Fatal(err)
-				}
+				id := validationRaw(t, s, plumbing.CommitObject, data)
 				if err := verifyObjects(s, []plumbing.Hash{id}); (err == nil) != tc.valid {
 					t.Fatalf("validation: %v; want valid=%v", err, tc.valid)
 				}
@@ -244,9 +256,6 @@ func TestCommitIdentityValidationMatchesGit(t *testing.T) {
 }
 
 func TestTagHeaderValidationMatchesGit(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("native Git oracle unavailable")
-	}
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
 		for _, tc := range []struct {
 			name, headers string
@@ -263,43 +272,14 @@ func TestTagHeaderValidationMatchesGit(t *testing.T) {
 			{"missing tag", "type blob\n", false},
 		} {
 			t.Run(format.String()+"/"+tc.name, func(t *testing.T) {
-				dir := t.TempDir()
-				git := func(input string, args ...string) (string, error) {
-					cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-					cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
-					cmd.Stdin = strings.NewReader(input)
-					out, err := cmd.CombinedOutput()
-					return strings.TrimSpace(string(out)), err
-				}
-				if out, err := git("", "init", "--bare", "--object-format="+format.String()); err != nil {
-					t.Fatalf("init: %s: %v", out, err)
-				}
+				git := validationGit(t, format)
 				s := &validationStore{Storage: memory.NewStorage(memory.WithObjectFormat(format)), reads: map[plumbing.Hash]int{}}
-				put := func(kind plumbing.ObjectType, data string) plumbing.Hash {
-					o := s.NewEncodedObject()
-					o.SetType(kind)
-					w, err := o.Writer()
-					if err != nil {
-						t.Fatal(err)
-					}
-					if _, err := io.WriteString(w, data); err != nil {
-						t.Fatal(err)
-					}
-					if err := w.Close(); err != nil {
-						t.Fatal(err)
-					}
-					id, err := s.SetEncodedObject(o)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return id
-				}
-				blob := put(plumbing.BlobObject, "")
+				blob := validationRaw(t, s, plumbing.BlobObject, "")
 				if out, err := git("", "hash-object", "-w", "--stdin"); err != nil || out != blob.String() {
 					t.Fatalf("blob: %s: %v", out, err)
 				}
 				data := "object " + blob.String() + "\n" + tc.headers + "\nmessage\n"
-				id := put(plumbing.TagObject, data)
+				id := validationRaw(t, s, plumbing.TagObject, data)
 				if err := verifyObjects(s, []plumbing.Hash{id}); (err == nil) != tc.valid {
 					t.Fatalf("validation: %v; want valid=%v", err, tc.valid)
 				}
