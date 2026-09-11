@@ -89,3 +89,32 @@ func TestReadRetryAfterPartialRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadFailureStopsOutputWithoutRetry(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		request := httptest.NewRequest(http.MethodPost, "/git-upload-pack", strings.NewReader("request"))
+		output := httptest.NewRecorder()
+		failure := errors.New("configured catalog limit exceeded")
+		refreshes := 0
+		err := retryRead(output, request, func() error { refreshes++; return nil }, func(w *readResponse, _ *http.Request) error {
+			if started {
+				if _, err := w.Write([]byte("prefix")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.failure = &failure
+			// The backend may ignore a traversal error and still attempt to write a pack.
+			if n, err := w.Write([]byte("incomplete pack")); n != 0 || err != failure || w.sent != started {
+				t.Fatalf("write after failure: n=%d err=%v", n, err)
+			}
+			return failure
+		})
+		want := ""
+		if started {
+			want = "prefix"
+		}
+		if err != failure || refreshes != 0 || output.Body.String() != want {
+			t.Fatalf("started=%v err=%v refreshes=%d body=%q", started, err, refreshes, output.Body.String())
+		}
+	}
+}

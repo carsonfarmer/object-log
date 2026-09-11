@@ -83,8 +83,8 @@ func (w *readResponse) commit() {
 	w.ResponseWriter.WriteHeader(w.status)
 }
 func (w *readResponse) Write(p []byte) (int, error) {
-	if w.failure != nil && errors.Is(*w.failure, errExpired) {
-		return 0, errExpired
+	if w.failure != nil && *w.failure != nil {
+		return 0, *w.failure
 	}
 	w.commit()
 	return w.ResponseWriter.Write(p)
