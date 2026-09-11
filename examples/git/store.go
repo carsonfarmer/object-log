@@ -54,20 +54,11 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	mem := memory.NewStorage()
-	if e := mem.SetObjectFormat(format); e != nil {
-		return nil, e
-	}
-	cfg, e := mem.Config()
-	if e != nil {
-		return nil, e
-	}
-	// A nonzero window limits object count, not bytes: go-git buffers delta
-	// bases and targets. Keep full-object streaming until selection can bound bytes.
+	mem := memory.NewStorage(memory.WithObjectFormat(format))
+	// Memory storage returns its owned configuration; no save is needed.
+	cfg, _ := mem.Config()
+	// A nonzero window bounds object count, not buffered delta bytes.
 	cfg.Pack.Window = 0
-	if e = mem.SetConfig(cfg); e != nil {
-		return nil, e
-	}
 	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
@@ -250,14 +241,12 @@ func (w *objectWriter) Close() (err error) {
 	}
 	w.closed = true
 	defer func() {
-		if w.sink.writer != nil {
-			w.sink.writer.close()
-		}
-	}()
-	defer func() {
 		w.err = err
 		if err != nil && w.s.failure == nil {
 			w.s.failure = err
+		}
+		if w.sink.writer != nil {
+			w.sink.writer.close()
 		}
 	}()
 	closed := w.codec.Close()
