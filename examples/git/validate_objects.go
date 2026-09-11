@@ -57,9 +57,6 @@ func verifyObjects(st storer.EncodedObjectStorer, ids []plumbing.Hash) error {
 					continue
 				case filemode.Dir:
 					kind = plumbing.TreeObject
-				case filemode.Regular, filemode.Deprecated, filemode.Executable, filemode.Symlink:
-				default:
-					return fmt.Errorf("invalid tree mode")
 				}
 				if e = check(entry.Hash, kind); e != nil {
 					return e

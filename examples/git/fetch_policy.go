@@ -65,27 +65,19 @@ func filterFetch(s storer.EncodedObjectStorer, tips []plumbing.Hash, body io.Rea
 type fetchCommandArgs struct {
 	packp.FetchArgs
 	command *packp.CommandRequest
-	refs    packp.LsRefsArgs
 }
 
 func (a *fetchCommandArgs) Decode(r io.Reader) error {
-	if a.command.Command == "fetch" {
-		return a.FetchArgs.Decode(r)
+	switch a.command.Command {
+	case "fetch":
+		a.command.Args = &a.FetchArgs
+	case "ls-refs":
+		a.command.Args = &packp.LsRefsArgs{}
+	default:
+		a.command.Args = nil
+		return nil
 	}
-	if a.command.Command == "ls-refs" {
-		return a.refs.Decode(r)
-	}
-	return nil
-}
-
-func (a *fetchCommandArgs) Encode(w io.Writer) error {
-	if a.command.Command == "fetch" {
-		return a.FetchArgs.Encode(w)
-	}
-	if a.command.Command == "ls-refs" {
-		return a.refs.Encode(w)
-	}
-	return nil
+	return a.command.Args.Decode(r)
 }
 
 func visibleFetch(s storer.EncodedObjectStorer, tips, wants, haves []plumbing.Hash) ([]plumbing.Hash, error) {
