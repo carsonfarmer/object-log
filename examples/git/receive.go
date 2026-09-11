@@ -1,12 +1,10 @@
 package main
 
 import (
-	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"io"
 )
 
-// A seekable pack lets go-git release decoded objects instead of retaining the
-// entire inflated push. Delta resolution still buffers an individual base and result.
+// Incoming packs are staged as seekable WAL bytes before streaming import.
 func (s *store) LowMemoryMode() bool { return true }
 func (s *store) PackfileWriter() (io.WriteCloser, error) {
 	writer, err := s.newByteWriter()
@@ -60,7 +58,7 @@ func (p *incomingPack) Close() error {
 		return err
 	}
 	defer reader.Close()
-	_, p.err = packfile.NewParser(reader, packfile.WithStorage(p.s), packfile.WithObjectFormat(p.s.meta.Format)).Parse()
+	p.err = importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.maxObjectBytes)
 	if p.err == nil {
 		p.err = p.s.failure
 	}
