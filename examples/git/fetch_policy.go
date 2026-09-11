@@ -116,62 +116,75 @@ func visibleFetch(s storer.EncodedObjectStorer, tips, wants, haves []plumbing.Ha
 		}
 	}
 	seen := map[plumbing.Hash]bool{}
-	queue := append([]plumbing.Hash(nil), tips...)
-	var parents []plumbing.Hash
+	var queue []plumbing.Hash
+	enqueue := func(id plumbing.Hash) {
+		if !seen[id] {
+			seen[id] = true
+			queue = append(queue, id)
+		}
+	}
+	for _, tip := range tips {
+		enqueue(tip)
+	}
+	parents := map[plumbing.Hash]bool{}
 	for len(queue) > 0 && len(needed) > 0 {
 		id := queue[0]
 		queue = queue[1:]
-		if !seen[id] {
-			seen[id] = true
-			o, err := s.EncodedObject(plumbing.AnyObject, id)
+		o, err := s.EncodedObject(plumbing.AnyObject, id)
+		if err != nil {
+			return nil, err
+		}
+		if fullWalk || o.Type() == plumbing.CommitObject {
+			visible[id] = true
+			delete(needed, id)
+		}
+		if len(needed) == 0 {
+			break
+		}
+		switch o.Type() {
+		case plumbing.CommitObject:
+			commit, err := object.DecodeCommit(s, o)
 			if err != nil {
 				return nil, err
 			}
-			if fullWalk || o.Type() == plumbing.CommitObject {
-				visible[id] = true
-				delete(needed, id)
+			for _, parent := range commit.ParentHashes {
+				if !seen[parent] {
+					parents[parent] = true
+				}
 			}
-			if len(needed) == 0 {
-				break
+			if fullWalk {
+				enqueue(commit.TreeHash)
 			}
-			switch o.Type() {
-			case plumbing.CommitObject:
-				commit, err := object.DecodeCommit(s, o)
+		case plumbing.TagObject:
+			tag, err := object.DecodeTag(s, o)
+			if err != nil {
+				return nil, err
+			}
+			enqueue(tag.Target)
+		case plumbing.TreeObject:
+			if fullWalk {
+				tree, err := object.DecodeTree(s, o)
 				if err != nil {
 					return nil, err
 				}
-				parents = append(parents, commit.ParentHashes...)
-				if fullWalk {
-					queue = append(queue, commit.TreeHash)
-				}
-			case plumbing.TagObject:
-				tag, err := object.DecodeTag(s, o)
-				if err != nil {
-					return nil, err
-				}
-				queue = append(queue, tag.Target)
-			case plumbing.TreeObject:
-				if fullWalk {
-					tree, err := object.DecodeTree(s, o)
-					if err != nil {
-						return nil, err
+				for _, entry := range tree.Entries {
+					if entry.Mode == filemode.Submodule {
+						continue
 					}
-					for _, entry := range tree.Entries {
-						if entry.Mode == filemode.Submodule {
-							continue
-						}
-						visible[entry.Hash] = true
-						delete(needed, entry.Hash)
-						if entry.Mode == filemode.Dir {
-							queue = append(queue, entry.Hash)
-						}
+					visible[entry.Hash] = true
+					delete(needed, entry.Hash)
+					if entry.Mode == filemode.Dir {
+						enqueue(entry.Hash)
 					}
 				}
 			}
 		}
 		// Inspect every tip's trees before reading an older generation of commits.
 		if len(queue) == 0 {
-			queue, parents = parents, nil
+			for parent := range parents {
+				enqueue(parent)
+			}
+			clear(parents)
 		}
 	}
 	for _, id := range wants {

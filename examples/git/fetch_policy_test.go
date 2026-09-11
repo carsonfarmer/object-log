@@ -57,7 +57,7 @@ func (o *policyObject) Reader() (io.ReadCloser, error) {
 	return o.EncodedObject.Reader()
 }
 
-func policyFixture(t *testing.T, format config.ObjectFormat) (*policyStore, map[string]plumbing.Hash) {
+func policyFixture(t testing.TB, format config.ObjectFormat) (*policyStore, map[string]plumbing.Hash) {
 	t.Helper()
 	s := &policyStore{Storage: memory.NewStorage(memory.WithObjectFormat(format)), kinds: map[plumbing.ObjectType]int{}}
 	put := func(value interface {
@@ -272,6 +272,45 @@ func TestVisibleFetchStopsBeforeUnrelatedHistory(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(got, []plumbing.Hash{ids["tree"]}) {
 				t.Fatalf("tree-tag haves: %v, %v", got, err)
 			}
+			// A tag target may already be a deferred parent of another tip.
+			merge := put(&object.Commit{TreeHash: empty, ParentHashes: []plumbing.Hash{parent, ids["tip"]}})
+			s.payloads = map[plumbing.Hash]int{}
+			if _, err := visibleFetch(s, []plumbing.Hash{merge, ids["outer"]}, []plumbing.Hash{ids["blob"]}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if s.payloads[parent] != 0 {
+				t.Fatal("deferred tagged tip behind unrelated history")
+			}
+
 		})
+	}
+}
+
+func BenchmarkVisibleFetchSharedParents(b *testing.B) {
+	s, ids := policyFixture(b, config.SHA256)
+	put := func(commit *object.Commit) plumbing.Hash {
+		o := s.NewEncodedObject()
+		if err := commit.Encode(o); err != nil {
+			b.Fatal(err)
+		}
+		id, err := s.SetEncodedObject(o)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return id
+	}
+	parents := make([]plumbing.Hash, 256)
+	for i := range parents {
+		parents[i] = put(&object.Commit{TreeHash: ids["tree"], Message: fmt.Sprintf("parent-%d", i)})
+	}
+	tips := make([]plumbing.Hash, 128)
+	for i := range tips {
+		tips[i] = put(&object.Commit{TreeHash: ids["tree"], ParentHashes: parents, Message: fmt.Sprintf("tip-%d", i)})
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := visibleFetch(s.Storage, tips, []plumbing.Hash{ids["dead"]}, nil); err == nil {
+			b.Fatal("accepted unpublished commit")
+		}
 	}
 }
