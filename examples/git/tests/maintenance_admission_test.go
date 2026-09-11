@@ -40,6 +40,8 @@ func TestRepeatedPushes(t *testing.T) {
 			})
 			branch := fmt.Sprintf("repeated-%d", time.Now().UnixNano())
 			git(t, nil, "init", "--object-format="+format, "-b", branch, source)
+			// Finish maintenance before the next push or retaining a failed source.
+			git(t, nil, "-C", source, "config", "maintenance.autoDetach", "false")
 			write(t, filepath.Join(source, "value"), []byte("base"))
 			binary := make([]byte, 1<<20)
 			random := rand.New(rand.NewSource(1))

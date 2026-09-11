@@ -3,3 +3,4 @@
 /.minio-data/
 /.env
 *.profraw
+/examples/git/_artifacts/
