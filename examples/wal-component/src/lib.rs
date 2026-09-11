@@ -18,9 +18,6 @@ struct CandidateState {
     log: Log,
     prepared: object_log::PreparedCommit,
 }
-struct ObjectState {
-    staged: StagedObject,
-}
 
 fn failure(error: object_log::Error) -> Failure {
     match error {
@@ -31,16 +28,13 @@ fn failure(error: object_log::Error) -> Failure {
 fn entry((data, objects): (Bytes, Vec<StagedObject>)) -> Entry {
     Entry {
         data: data.into(),
-        objects: objects
-            .into_iter()
-            .map(|staged| Object::new(ObjectState { staged }))
-            .collect(),
+        objects: objects.into_iter().map(Object::new).collect(),
     }
 }
 fn proofs(objects: &[ObjectBorrow<'_>]) -> Vec<StagedObject> {
     objects
         .iter()
-        .map(|object| object.get::<ObjectState>().staged.clone())
+        .map(|object| object.get::<StagedObject>().clone())
         .collect()
 }
 // Each record represents a complete state. Delta consumers must fold differently.
@@ -81,7 +75,7 @@ impl GuestByteWriter for WriterState {
             .take()
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
         spin_executor::run(writer.finish())
-            .map(|staged| Object::new(ObjectState { staged }))
+            .map(Object::new)
             .map_err(failure)
     }
 }
@@ -95,7 +89,7 @@ impl GuestByteReader for ReaderState {
             .map_err(failure)
     }
 }
-impl GuestObject for ObjectState {}
+impl GuestObject for StagedObject {}
 impl GuestSession for SessionState {
     fn write_bytes(&self) -> Result<ByteWriter, Failure> {
         self.log
@@ -104,8 +98,8 @@ impl GuestSession for SessionState {
             .map_err(failure)
     }
     fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
-        let value = value.get::<ObjectState>();
-        spin_executor::run(self.log.open_bytes(&self.view, value.staged.reference()))
+        let value = value.get::<StagedObject>();
+        spin_executor::run(self.log.open_bytes(&self.view, value.reference()))
             .map(|reader| ByteReader::new(ReaderState(RefCell::new(reader))))
             .map_err(failure)
     }
@@ -147,8 +141,8 @@ impl GuestSession for SessionState {
         })
     }
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
-        let value = value.get::<ObjectState>();
-        spin_executor::run(self.log.read_staged_node(&self.view, &value.staged))
+        let value = value.get::<StagedObject>();
+        spin_executor::run(self.log.read_staged_node(&self.view, value))
             .map(entry)
             .map_err(failure)
     }
@@ -157,7 +151,7 @@ impl GuestSession for SessionState {
             self.log
                 .put_node(&self.view, Bytes::from(data), proofs(&children)),
         )
-        .map(|staged| Object::new(ObjectState { staged }))
+        .map(Object::new)
         .map_err(failure)
     }
     fn prepare(&self, data: Vec<u8>, roots: Vec<ObjectBorrow<'_>>) -> Result<Candidate, Failure> {
@@ -193,7 +187,7 @@ impl Guest for Component {
     type ByteReader = ReaderState;
     type Candidate = CandidateState;
     type Session = SessionState;
-    type Object = ObjectState;
+    type Object = StagedObject;
     fn open(settings: Config) -> Result<Session, Failure> {
         spin_executor::run(async {
             let transport = transport::Transport::default();

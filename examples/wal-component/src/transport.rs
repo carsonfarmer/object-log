@@ -24,16 +24,9 @@ use std::{
 const HTTP_CALLS: usize = 1024 + 24 * (1040 * 1024 * 1024_usize).div_ceil(1024 * 1024);
 const HTTP_BYTES: u64 = 24 * (1040 * 1024 * 1024_usize) as u64 + 8 * 1024 * 1024;
 
-#[derive(Debug)]
-pub(crate) struct QuotaExceeded;
-
-impl std::fmt::Display for QuotaExceeded {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Git HTTP storage quota exceeded")
-    }
+fn quota_exceeded() -> HttpError {
+    http_error("Git HTTP storage quota exceeded")
 }
-
-impl std::error::Error for QuotaExceeded {}
 
 // One budget per incoming Git handler, including bootstrap and engine retries.
 #[derive(Debug, Default)]
@@ -48,10 +41,10 @@ impl Budget {
                 current.checked_add(1).filter(|&next| next <= HTTP_CALLS)
             })
             .map(|_| ())
-            .map_err(|_| http_error(QuotaExceeded))
+            .map_err(|_| quota_exceeded())
     }
     fn transfer(&self, bytes: impl TryInto<u64>) -> Result<(), HttpError> {
-        let bytes = bytes.try_into().map_err(|_| http_error(QuotaExceeded))?;
+        let bytes = bytes.try_into().map_err(|_| quota_exceeded())?;
         self.bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current
@@ -59,7 +52,7 @@ impl Budget {
                     .filter(|&next| next <= HTTP_BYTES)
             })
             .map(|_| ())
-            .map_err(|_| http_error(QuotaExceeded))
+            .map_err(|_| quota_exceeded())
     }
 }
 
@@ -100,37 +93,33 @@ fn http_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Htt
     HttpError::new_boxed(HttpErrorKind::Unknown, error.into())
 }
 
-#[async_trait]
-impl HttpService for Service {
-    async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        retry_request(request, |request| self.call_once(request)).await
-    }
-}
-
 #[path = "request_retry.rs"]
 mod request_retry;
 
-async fn retry_request<F, Fut>(request: HttpRequest, attempt: F) -> Result<HttpResponse, HttpError>
-where
-    F: FnMut(HttpRequest) -> Fut,
-    Fut: std::future::Future<Output = Result<HttpResponse, HttpError>>,
-{
-    // Retry before exposing a response; failed conditional replays remain uncertain.
-    // Each attempt retains the same transport budget and configured deadlines.
-    request_retry::retry_request(request, attempt, |error| {
-        std::error::Error::source(error)
-            .and_then(|source| source.downcast_ref::<spin_sdk::http::ErrorCode>())
-            .is_some_and(|code| {
-                matches!(
-                    code,
-                    spin_sdk::http::ErrorCode::ConnectionTerminated
-                        | spin_sdk::http::ErrorCode::ConnectionReadTimeout
-                        | spin_sdk::http::ErrorCode::HttpResponseIncomplete
-                        | spin_sdk::http::ErrorCode::HttpProtocolError
-                )
-            })
-    })
-    .await
+#[async_trait]
+impl HttpService for Service {
+    async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        // Retry before exposing a response; failed conditional replays remain uncertain.
+        // Each attempt retains the same transport budget and configured deadlines.
+        request_retry::retry_request(
+            request,
+            |request| self.call_once(request),
+            |error| {
+                std::error::Error::source(error)
+                    .and_then(|source| source.downcast_ref::<spin_sdk::http::ErrorCode>())
+                    .is_some_and(|code| {
+                        matches!(
+                            code,
+                            spin_sdk::http::ErrorCode::ConnectionTerminated
+                                | spin_sdk::http::ErrorCode::ConnectionReadTimeout
+                                | spin_sdk::http::ErrorCode::HttpResponseIncomplete
+                                | spin_sdk::http::ErrorCode::HttpProtocolError
+                        )
+                    })
+            },
+        )
+        .await
+    }
 }
 
 impl Service {
@@ -338,5 +327,34 @@ impl Transport {
             self.0.calls.load(Ordering::Relaxed) as u64,
             self.0.bytes.load(Ordering::Relaxed),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_transfers_preserve_the_shared_budget() {
+        let transport = Transport::default();
+        let shared = transport.clone();
+        shared.0.transfer(HTTP_BYTES).unwrap();
+        let error = transport.0.transfer(1_u64).unwrap_err();
+        assert_eq!(transport.usage(), (0, HTTP_BYTES));
+        assert!(
+            error
+                .to_string()
+                .contains("Git HTTP storage quota exceeded")
+        );
+        assert!(
+            !std::error::Error::source(&error)
+                .unwrap()
+                .is::<spin_sdk::http::ErrorCode>()
+        );
+        assert!(shared.0.transfer(-1_i32).is_err());
+        transport.0.calls.store(HTTP_CALLS - 1, Ordering::Relaxed);
+        shared.0.call().unwrap();
+        assert!(transport.0.call().is_err());
+        assert_eq!(shared.usage(), (HTTP_CALLS as u64, HTTP_BYTES));
     }
 }
