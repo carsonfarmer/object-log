@@ -37,22 +37,6 @@ type writeCloser struct{ io.Writer }
 
 func (writeCloser) Close() error { return nil }
 
-type httpWriter struct {
-	http.ResponseWriter
-	sent bool
-}
-
-func (w *httpWriter) strip() { w.Header().Del("Connection"); w.Header().Del("Transfer-Encoding") }
-func (w *httpWriter) Write(p []byte) (int, error) {
-	w.strip()
-	w.sent = true
-	return w.ResponseWriter.Write(p)
-}
-func (w *httpWriter) WriteHeader(status int) {
-	w.strip()
-	w.sent = true
-	w.ResponseWriter.WriteHeader(status)
-}
 func advertise(w io.Writer, s *store) error {
 	if _, e := pktline.WriteString(w, "# service=git-receive-pack\n"); e != nil {
 		return e
@@ -146,7 +130,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { session.Drop() }()
-	w := &httpWriter{ResponseWriter: response}
+	w := &readResponse{ResponseWriter: response}
+	defer w.commit()
 	w.Header().Set("Trailer", "X-Wal-Calls, X-Wal-Bytes")
 	defer func() {
 		u := session.Usage()
@@ -210,7 +195,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	s, e := openStore(r.Context(), session, format, limits)
 	if e != nil {
-		http.Error(response, e.Error(), operationStatus(e))
+		http.Error(w, e.Error(), operationStatus(e))
 		return
 	}
 	defer func() { s.Close() }()

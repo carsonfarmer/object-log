@@ -137,3 +137,26 @@ func TestObservedStorageFailureStopsOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestResponseHeadersAndTrailersSurviveReadAttempt(t *testing.T) {
+	output := httptest.NewRecorder()
+	response := &readResponse{ResponseWriter: output}
+	response.Header().Set("Trailer", "X-Wal-Calls")
+	attempt := &readResponse{ResponseWriter: response, header: response.Header().Clone()}
+	attempt.Header().Set("Connection", "close")
+	attempt.Header().Set("Transfer-Encoding", "chunked")
+	attempt.WriteHeader(http.StatusAccepted)
+	if _, err := attempt.Write([]byte("pack")); err != nil {
+		t.Fatal(err)
+	}
+	response.Header().Set("X-Wal-Calls", "7")
+	response.commit()
+	result := output.Result()
+	defer result.Body.Close()
+	if result.StatusCode != http.StatusAccepted || output.Body.String() != "pack" || result.Trailer.Get("X-Wal-Calls") != "7" {
+		t.Fatalf("status=%d body=%q trailers=%v", result.StatusCode, output.Body.String(), result.Trailer)
+	}
+	if result.Header.Get("Connection") != "" || result.Header.Get("Transfer-Encoding") != "" {
+		t.Fatalf("hop-by-hop headers leaked: %v", result.Header)
+	}
+}

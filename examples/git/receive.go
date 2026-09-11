@@ -28,36 +28,32 @@ func (p *incomingPack) Write(data []byte) (int, error) {
 	p.err = err
 	return n, err
 }
-func (p *incomingPack) Close() error {
+func (p *incomingPack) Close() (err error) {
 	if p.closed {
 		return p.err
 	}
 	p.closed = true
 	defer p.close()
 	defer func() {
-		if p.err != nil && p.s.failure == nil {
-			p.s.failure = p.err
-		}
+		p.err = err
+		observeRead(&p.s.failure, err)
 	}()
 	if p.err != nil {
 		return p.err
 	}
 	root, err := p.finish()
 	if err != nil {
-		p.err = err
 		return err
 	}
 	// This stream remains temporary: its root is never published.
 	defer root.Drop()
 	reader, err := p.s.openBytes(root)
 	if err != nil {
-		p.err = err
 		return err
 	}
 	defer reader.Close()
-	p.err = importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits)
-	if p.err == nil {
-		p.err = p.s.failure
+	if err := importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits); err != nil {
+		return err
 	}
-	return p.err
+	return p.s.failure
 }

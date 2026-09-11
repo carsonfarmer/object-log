@@ -60,7 +60,12 @@ type readResponse struct {
 	failure *error
 }
 
-func (w *readResponse) Header() http.Header { return w.header }
+func (w *readResponse) Header() http.Header {
+	if w.header == nil {
+		return w.ResponseWriter.Header()
+	}
+	return w.header
+}
 func (w *readResponse) WriteHeader(status int) {
 	if w.status == 0 {
 		w.status = status
@@ -71,12 +76,14 @@ func (w *readResponse) commit() {
 		return
 	}
 	w.sent = true
-	for key := range w.ResponseWriter.Header() {
-		w.ResponseWriter.Header().Del(key)
+	if w.header != nil {
+		clear(w.ResponseWriter.Header())
+		for key, values := range w.header {
+			w.ResponseWriter.Header()[key] = values
+		}
 	}
-	for key, values := range w.header {
-		w.ResponseWriter.Header()[key] = values
-	}
+	w.ResponseWriter.Header().Del("Connection")
+	w.ResponseWriter.Header().Del("Transfer-Encoding")
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
