@@ -28,6 +28,16 @@ func TestRepeatedPushes(t *testing.T) {
 			t.Parallel()
 			url := strings.TrimRight(endpoint, "/") + "/" + format + ".git"
 			source := filepath.Join(t.TempDir(), "source")
+			t.Cleanup(func() {
+				if t.Failed() {
+					path := filepath.Join(t.ArtifactDir(), "source")
+					if err := os.Rename(source, path); err != nil {
+						t.Errorf("preserve failed source: %v", err)
+					} else {
+						t.Logf("failed source: %s (retain with go test -artifacts)", path)
+					}
+				}
+			})
 			branch := fmt.Sprintf("repeated-%d", time.Now().UnixNano())
 			git(t, nil, "init", "--object-format="+format, "-b", branch, source)
 			write(t, filepath.Join(source, "value"), []byte("base"))
@@ -69,7 +79,7 @@ func TestRepeatedPushes(t *testing.T) {
 						git(t, nil, "-C", source, "add", ".")
 						git(t, nil, "-C", source, "commit", "-m", fmt.Sprint(i))
 						started := time.Now()
-						git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
+						gitWithEnv(t, nil, []string{"GIT_TRACE_PACKET=1"}, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
 						samples = append(samples, time.Since(started))
 						if len(samples) == 256 || i == 1024 {
 							logDurations(t, fmt.Sprintf("pushes ending at %d", i+1), samples)

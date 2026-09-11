@@ -202,12 +202,17 @@ func TestWALGit(t *testing.T) {
 }
 func git(t *testing.T, input []byte, args ...string) []byte {
 	t.Helper()
+	return gitWithEnv(t, input, nil, args...)
+}
+func gitWithEnv(t *testing.T, input []byte, extraEnv []string, args ...string) []byte {
+	t.Helper()
 	if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
 		args = append([]string{"-c", "http.extraHeader=Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("git:"+password))}, args...)
 	}
 	cmd := exec.Command("git", args...)
 	cmd.Stdin = bytes.NewReader(input)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_AUTHOR_NAME=Probe", "GIT_AUTHOR_EMAIL=probe@example.invalid", "GIT_COMMITTER_NAME=Probe", "GIT_COMMITTER_EMAIL=probe@example.invalid")
+	cmd.Env = append(cmd.Env, extraEnv...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, e := cmd.Output()
