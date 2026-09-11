@@ -55,9 +55,13 @@ Concurrent 513 MiB push/clone/edit/fetch lifecycles pass for both hashes, with
 exact contents and native Git integrity checks.
 An intermittent native-client rejection occurred before upload. The retained
 source could not read its newest commit; the server's advertised prior commit
-was valid. Native-only controls passed, so the exact cause remains unproven.
+was valid. A subsequent native HTTP control using Apple Git 2.54.0 lost an
+acknowledged server commit during repeated pushes, without the WAL or moving
+the server directory. Its pack files remain valid but omit the missing commit.
+The exact cause and relationship between these failures remain unproven.
 The repeated-push test waits for each client's own maintenance to finish before
 subsequent commands and artifact relocation; maintenance remains enabled.
+This workaround is not a fix. Local qualification remains open under issue #43.
 Failure artifacts remain available with `go test -artifacts`.
 Remote latency, provider behavior, deployment
 security, aggregate admission and operational recovery still need remote testing.

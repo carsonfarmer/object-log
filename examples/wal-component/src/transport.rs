@@ -24,9 +24,7 @@ use std::{
 const HTTP_CALLS: usize = 1024 + 24 * (1040 * 1024 * 1024_usize).div_ceil(1024 * 1024);
 const HTTP_BYTES: u64 = 24 * (1040 * 1024 * 1024_usize) as u64 + 8 * 1024 * 1024;
 
-fn quota_exceeded() -> HttpError {
-    http_error("Git HTTP storage quota exceeded")
-}
+const QUOTA_EXCEEDED: &str = "Git HTTP storage quota exceeded";
 
 // One budget per incoming Git handler, including bootstrap and engine retries.
 #[derive(Debug, Default)]
@@ -41,10 +39,10 @@ impl Budget {
                 current.checked_add(1).filter(|&next| next <= HTTP_CALLS)
             })
             .map(|_| ())
-            .map_err(|_| quota_exceeded())
+            .map_err(|_| http_error(QUOTA_EXCEEDED))
     }
     fn transfer(&self, bytes: impl TryInto<u64>) -> Result<(), HttpError> {
-        let bytes = bytes.try_into().map_err(|_| quota_exceeded())?;
+        let bytes = bytes.try_into().map_err(|_| http_error(QUOTA_EXCEEDED))?;
         self.bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current
@@ -52,7 +50,7 @@ impl Budget {
                     .filter(|&next| next <= HTTP_BYTES)
             })
             .map(|_| ())
-            .map_err(|_| quota_exceeded())
+            .map_err(|_| http_error(QUOTA_EXCEEDED))
     }
 }
 

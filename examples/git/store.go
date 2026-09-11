@@ -175,9 +175,7 @@ func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteC
 		return nil, err
 	}
 	if err := s.limits.checkObject(kind, size); err != nil {
-		if s.failure == nil {
-			s.failure = err
-		}
+		observeRead(&s.failure, err)
 		return nil, err
 	}
 	sink := &objectSink{s: s}
@@ -242,9 +240,7 @@ func (w *objectWriter) Close() (err error) {
 	w.closed = true
 	defer func() {
 		w.err = err
-		if err != nil && w.s.failure == nil {
-			w.s.failure = err
-		}
+		observeRead(&w.s.failure, err)
 		if w.sink.writer != nil {
 			w.sink.writer.close()
 		}

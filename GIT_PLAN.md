@@ -17,7 +17,8 @@ unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
 - Shallow clone, deepen and unshallow, checked with ordinary Git clients.
 
 The custom Rust Git engine and its native maintenance command are retired. Installed Git remains the independent test oracle.
-Local provider and workspace qualification passes for this implementation;
+Local provider and workspace checks pass, but an intermittent native Git
+object-loss failure remains under investigation;
 remote provider and deployment qualification remain before production rollout.
 Advanced partial filters and packfile URIs are not required for acceptance;
 add them only when useful and supported without bespoke protocol machinery.

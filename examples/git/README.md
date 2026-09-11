@@ -4,8 +4,9 @@ A Go Git service backed by the existing Rust WAL. go-git handles Git protocols,
 formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
-The supported Git workflow is locally qualified on Spin/MinIO. Remote provider
-and deployment qualification remain before a production rollout.
+Local qualification remains open while an intermittent native Git object-loss
+failure is investigated. Remote provider and deployment testing remain before
+a production rollout.
 Development temporarily pins our go-git fork at `6060178b` through `go.mod`.
 It includes the position and failed-reopen fixes under review in upstream PR #2379. Its v6 APIs provide both hashes, protocol-v2
 serving, shallow history and streamed object writes. Partial-clone filters remain deferred.
@@ -71,7 +72,8 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
   1 MiB binary, and binary additions/deletions, with concurrent fetch/integrity
   checks, automatic cleanup, and final cold history and byte verification. Failed
   writer clients and packet diagnostics are retained with `-artifacts`. Each
-  client waits for its own maintenance before subsequent commands. Run with
+  client currently waits for its own maintenance before subsequent commands;
+  this workaround does not resolve the open native Git investigation. Run with
   `go test -race -artifacts ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
   It reports client latency percentiles in 256-push windows, including negotiation,
   transfer and cleanup. Use an isolated prefix and keep competing workloads off
