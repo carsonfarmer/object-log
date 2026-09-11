@@ -70,7 +70,8 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
 - `GIT_REPEATED_PUSHES=1`: 1,025 pushes per hash mixing text edits, sparse edits to a
   1 MiB binary, and binary additions/deletions, with concurrent fetch/integrity
   checks, automatic cleanup, and final cold history and byte verification. Failed
-  writer clients and packet diagnostics are retained with `-artifacts`. Run with
+  writer clients and packet diagnostics are retained with `-artifacts`. Each
+  client waits for its own maintenance before subsequent commands. Run with
   `go test -race -artifacts ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
   It reports client latency percentiles in 256-push windows, including negotiation,
   transfer and cleanup. Use an isolated prefix and keep competing workloads off

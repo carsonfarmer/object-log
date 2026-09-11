@@ -53,9 +53,13 @@ fetch/fsck, malformed-input rejection, access controls, small configured limits,
 concurrent writes/reads/collection and forced-restart recovery have passed.
 Concurrent 513 MiB push/clone/edit/fetch lifecycles pass for both hashes, with
 exact contents and native Git integrity checks.
-The earlier isolated client-side rejection has not reproduced; failed repeated-
-push clients and packet traces are now retained with `go test -artifacts`.
-Do not claim a proven cause for it. Remote latency, provider behavior, deployment
+An intermittent native-client rejection occurred before upload. The retained
+source could not read its newest commit; the server's advertised prior commit
+was valid. Native-only controls passed, so the exact cause remains unproven.
+The repeated-push test waits for each client's own maintenance to finish before
+subsequent commands and artifact relocation; maintenance remains enabled.
+Failure artifacts remain available with `go test -artifacts`.
+Remote latency, provider behavior, deployment
 security, aggregate admission and operational recovery still need remote testing.
 
 Root alone integrates main. Implement in exclusive worktrees, request independent
