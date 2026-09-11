@@ -245,6 +245,10 @@ func TestVisibleFetchStopsBeforeUnrelatedHistory(t *testing.T) {
 			if s.payloads[ids["blob"]] != 0 {
 				t.Fatal("opened blob payload for visibility")
 			}
+			gotHistory, err := visibleFetch(s, tips, []plumbing.Hash{ids["blob"]}, []plumbing.Hash{ids["base"]})
+			if err != nil || !reflect.DeepEqual(gotHistory, []plumbing.Hash{ids["base"]}) {
+				t.Fatalf("stopped before historical have: %v, %v", gotHistory, err)
+			}
 			// An older tree remains visible when it is absent from the current tree.
 			if _, err := visibleFetch(s, []plumbing.Hash{parent}, []plumbing.Hash{ids["blob"]}, nil); err != nil {
 				t.Fatal(err)
