@@ -53,6 +53,24 @@ func TestManyObjects(t *testing.T) {
 			if refs := git(t, nil, "ls-remote", url, badRef); len(refs) != 0 {
 				t.Fatalf("damaged pack published a ref: %s", refs)
 			}
+			// A valid pack containing a malformed identity must also abort all refs.
+			tree := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD^{tree}")))
+			malformed := strings.TrimSpace(string(git(t, []byte("tree "+tree+"\n\nmissing identities\n"), "-C", source, "hash-object", "-t", "commit", "-w", "--stdin", "--literally")))
+			objects := git(t, nil, "-C", source, "rev-list", "--objects", "--no-object-names", "HEAD")
+			objects = append(objects, []byte(malformed+"\n")...)
+			invalidPack := git(t, objects, "-C", source, "pack-objects", "--stdout")
+			badRef += "-identity"
+			goodRef := badRef + "-valid"
+			zero := strings.Repeat("0", len(tip))
+			request = append(packet(zero+" "+malformed+" "+badRef+"\x00report-status atomic object-format="+format+"\n"), packet(zero+" "+tip+" "+goodRef+"\n")...)
+			request = append(request, []byte("0000")...)
+			result, _ = post(t, url+"/git-receive-pack", "git-receive-pack", append(request, invalidPack...))
+			if !bytes.Contains(result, []byte("invalid author header")) {
+				t.Fatalf("malformed identity was not rejected: %s", result)
+			}
+			if refs := git(t, nil, "ls-remote", url, badRef, goodRef); len(refs) != 0 {
+				t.Fatalf("malformed identity published atomic refs: %s", refs)
+			}
 			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
 			clone := filepath.Join(root, "clone")
 			git(t, nil, "-c", "protocol.version=2", "clone", "--single-branch", "--branch", branch, url, clone)
