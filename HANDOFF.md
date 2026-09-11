@@ -7,8 +7,8 @@ the only mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 The library-backed Go Git consumer lives at `examples/git`, with the Rust WAL
 component at `examples/wal-component`. The custom Rust Git engine, native
 maintenance command and old Git harnesses are removed.
-Standard local replacement checks pass; larger-history resource qualification
-remains open. The old implementation remains available in Git history.
+The combined local replacement and larger-history sparse-read checks pass.
+The old implementation remains available in Git history.
 
 Local development temporarily replaces go-git with our fork at `6060178b` in
 `go.mod`. Both its position fix and failed-reopen cleanup guard are submitted
@@ -48,15 +48,17 @@ with published refs visible after refresh. Both attempts retain the same budget.
 Conditional uploads also send `Expect: 100-continue`, making early MinIO
 rejections advertise connection closure while successful connections remain
 reusable. Use default Spin HTTP pooling; no extra bootstrap retry or provider
-patch is required. Git pushes are never replayed. No upstream report or
-submission is authorized.
+patch is required. Git pushes are never replayed.
 Outgoing delta tests show smaller packs but much more
 allocation; the released library exposes no byte-bounded selection through its
 transport, so full-object streaming remains the default.
 The independent maintenance model, immutable-create fault points, golden bytes
 and complete supported-backend MinIO protocol matrix now cover issue #5.
-Follow `examples/git/README.md`; use ordinary Spin and isolated local MinIO. No remote
-deployment or upstream posts are authorized. Do not restart shared Docker.
+Follow `examples/git/README.md`; use ordinary Spin and isolated local MinIO.
+No remote deployment is authorized. Do not restart shared Docker.
+Upstream go-git #2379 and Wasmtime #14319 await review; componentize-go #78 is
+a draft regression that depends on the adapter fix. New upstream work needs
+owner approval.
 
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
 explicit uncertain outcomes and cumulative retry counters. Keep reports short;
@@ -104,10 +106,13 @@ corruption. Four deterministic tests cover these cases without writes or counter
 resets. Spin crash and storage-response-loss checks preserve acknowledged refs
 and bytes; no MinIO or Spin patch is involved in those checks.
 
-Keep the streaming candidate on `cf/git-streaming-review` until its extended
-resource gate passes. Running `TestRepeatedPushes` then `TestWALGit` on the same
-fresh prefix exceeded the unchanged 768 KiB single-blob read budget (1.7–2.0 MB).
-`visibleFetch` walks all published history for a noncommit want; investigate
-metadata amplification without weakening visibility or sparse-read assertions.
-The ordinary isolated suite and varied-history integrity checks run separately;
-passing either does not clear the combined resource failure.
+Fetch visibility now checks current ref trees before older parents and stops
+once requested objects and relevant haves are proven, without opening blob
+payloads. After 1,025 mixed-history pushes per hash, the full local provider suite
+read 498,846 bytes (SHA-1) and 503,559 bytes (SHA-256) for the existing sparse blob
+fetch, below its unchanged 768 KiB budget. Concurrent 64 MiB lifecycles also pass.
+The importer reuses its ordered entries for offset validation, removing a map
+and a per-entry offset field. Receive-pack advertisements now sort ref names.
+Independent reviews, full workspace checks, component builds and the five-target
+core MinIO matrix pass. Request cost and total memory remain workload-dependent;
+issue #6 retains broader resource qualification.

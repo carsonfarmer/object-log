@@ -104,13 +104,17 @@ for both hashes, with fresh prefixes and warmed HTTP workers. Median peak worker
 RSS fell from 570 to 321 MiB; elapsed time was 38.79 versus 39.39 seconds, with
 834 storage requests in both cases and effectively unchanged transferred bytes.
 RSS was sampled every 100 ms, excluding builds and MinIO/client processes.
-The mixed-history test completed 2,050 updates with concurrent fetches in
+An earlier mixed-history run completed 2,050 updates with concurrent fetches in
 150 seconds, peaking at 217 MiB. Its busy readers and writers together issued
 714,430 storage calls and transferred 1.90 GB: request cost remains a limitation.
-After this history, the existing single-blob fetch test exceeded its unchanged
-768 KiB read budget (1.7–2.0 MB). Explicit blob visibility checks currently walk
-published history; this resource gap remains open in issue #6. These are workload
-measurements, not upper bounds.
+Fetch visibility now checks current ref trees before older history and stops
+when the requested objects and relevant haves are proven, without opening blob
+payloads. A fresh combined run of 1,025 pushes per hash followed by the ordinary
+suite read 498,846 bytes (SHA-1) and 503,559 bytes (SHA-256), with 28 storage calls
+each, for the existing sparse blob fetch. Both pass its unchanged 768 KiB budget;
+the prior traversal read 1.7–2.0 MB. Reproduce with `GIT_REPEATED_PUSHES=1`
+set for the full provider suite on a fresh prefix. Broader request cost remains
+open in issue #6. These are workload measurements, not upper bounds.
 
 Host-wide concurrent-request admission is a hosting concern and remains deferred;
 this example adds no instance limiter or additional durable coordination.

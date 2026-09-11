@@ -36,6 +36,9 @@ explicit; ordinary Git clients refresh refs after a lost response. Pushes are
 never automatically replayed. Expired reads may reopen once before response
 bytes are sent, with at most 1 MiB of request replay and cumulative storage
 counters. A late failure stops the response rather than restarting it.
+Fetch visibility checks current ref trees before older history and stops when
+requested objects and relevant haves are proven. Blob payload readers stay
+unopened until pack generation; unreachable objects remain unavailable.
 The storage bridge can retry one identical conditional write after a connection
 failure. A rejected retry preserves the original uncertain outcome for recovery.
 
