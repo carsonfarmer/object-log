@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 )
 
 // GIT_PROBE_URL must point to an ordinary local Spin host with a fresh MinIO prefix.
@@ -47,6 +49,34 @@ func TestWALGit(t *testing.T) {
 			old := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
 			base := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD:changing.bin")))
 			git(t, nil, "-C", source, "push", "--atomic", url, "HEAD:refs/heads/"+branch, "HEAD:refs/heads/other")
+			advertisement, err := http.NewRequest(http.MethodGet, url+"/info/refs?service=git-receive-pack", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			advertisement.SetBasicAuth("git", os.Getenv("GIT_PROBE_PASSWORD"))
+			response, err := http.DefaultClient.Do(advertisement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scanner := pktline.NewScanner(response.Body)
+			previous, count := "", 0
+			for scanner.Scan() {
+				line := scanner.Text()
+				_, name, ok := strings.Cut(line, " ")
+				if !ok || strings.HasPrefix(line, "#") {
+					continue
+				}
+				name, _, _ = strings.Cut(name, "\x00")
+				name = strings.TrimSpace(name)
+				if name <= previous {
+					t.Errorf("advertised refs out of order: %q after %q", name, previous)
+				}
+				previous, count = name, count+1
+			}
+			response.Body.Close()
+			if scanner.Err() != nil || response.StatusCode != http.StatusOK || count < 2 {
+				t.Fatalf("invalid ref advertisement: status=%d refs=%d error=%v", response.StatusCode, count, scanner.Err())
+			}
 			// Library decoding is permissive; malformed trees must fail before publication.
 			blobID, err := hex.DecodeString(base)
 			if err != nil {

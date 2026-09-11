@@ -15,10 +15,12 @@ import (
 	"go.bytecodealliance.org/pkg/wasihttp"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -60,7 +62,8 @@ func advertise(w io.Writer, s *store) error {
 	}
 	caps := "report-status delete-refs ofs-delta atomic object-format=" + s.meta.Format.String()
 	first := true
-	for name, id := range s.meta.Refs {
+	for _, name := range slices.Sorted(maps.Keys(s.meta.Refs)) {
+		id := s.meta.Refs[name]
 		suffix := ""
 		if first {
 			suffix = "\x00" + caps
