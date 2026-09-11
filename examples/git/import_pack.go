@@ -17,6 +17,7 @@ import (
 	packutil "github.com/go-git/go-git/v6/plumbing/format/packfile/util"
 	githash "github.com/go-git/go-git/v6/plumbing/hash"
 	gitbinary "github.com/go-git/go-git/v6/utils/binary"
+	gitioutil "github.com/go-git/go-git/v6/utils/ioutil"
 )
 
 type packStorage interface {
@@ -175,19 +176,14 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage packStorage, 
 			if err != nil {
 				return err
 			}
-			delta, err := packfile.ReaderFromDelta(base, compressed)
+			trackedBase := &packBase{EncodedObject: base}
+			delta, err := packfile.ReaderFromDelta(trackedBase, compressed)
 			if err != nil {
 				_ = compressed.Close()
 				return err
 			}
 			entry.kind = base.Type()
-			entry.id, err = writePackObject(storage, objectFormat, entry.kind, entry.target, delta)
-			// ReaderFromDelta owns a goroutine: finish its reads before releasing the
-			// pack/base resources, even when the destination rejected a write.
-			if err != nil {
-				_, _ = io.Copy(io.Discard, delta)
-			}
-			_ = delta.Close()
+			entry.id, err = writePackObject(storage, objectFormat, entry.kind, entry.target, &packDeltaReader{ReadCloser: delta, base: trackedBase})
 			_ = compressed.Close()
 			if err != nil {
 				return err
@@ -254,9 +250,10 @@ func scanPackEntry(ctx context.Context, input io.Reader, entry *packEntry, stora
 	return nil
 }
 
-func writePackObject(storage packStorage, objectFormat format.ObjectFormat, kind plumbing.ObjectType, size int64, source io.Reader) (plumbing.Hash, error) {
+func writePackObject(storage packStorage, objectFormat format.ObjectFormat, kind plumbing.ObjectType, size int64, source io.ReadCloser) (plumbing.Hash, error) {
 	writer, err := storage.RawObjectWriter(kind, size)
 	if err != nil {
+		_ = source.Close()
 		return plumbing.ZeroHash, err
 	}
 	digest := plumbing.NewHasher(objectFormat, kind, size)
@@ -275,9 +272,13 @@ func writePackObject(storage packStorage, objectFormat format.ObjectFormat, kind
 			}
 		}
 	}
+	readClosed := source.Close()
 	closed := writer.Close()
 	if err != nil {
 		return plumbing.ZeroHash, err
+	}
+	if readClosed != nil {
+		return plumbing.ZeroHash, readClosed
 	}
 	if closed != nil {
 		return plumbing.ZeroHash, closed
@@ -309,4 +310,38 @@ func (r *packInput) ReadByte() (byte, error) {
 	var one [1]byte
 	_, err := io.ReadFull(r, one[:])
 	return one[0], err
+}
+
+// The decoder signals pipe EOF before its deferred base Close. Waiting for the
+// last reader's Close keeps WAL resource destruction ahead of destination Close
+// and session cleanup. Earlier readers close synchronously on backward copies.
+type packBase struct {
+	plumbing.EncodedObject
+	done chan struct{}
+}
+
+func (b *packBase) Reader() (io.ReadCloser, error) {
+	reader, err := b.EncodedObject.Reader()
+	if err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	b.done = done
+	return gitioutil.NewReadCloserWithCloser(reader, func() error { close(done); return nil }), nil
+}
+
+type packDeltaReader struct {
+	io.ReadCloser
+	base *packBase
+}
+
+func (r *packDeltaReader) Close() error {
+	// Drain on a destination error to unblock the decoder's pipe writes. Terminal
+	// reads synchronize all Reader calls, so no later reopen can change base.done.
+	_, err := io.Copy(io.Discard, r.ReadCloser)
+	closed := r.ReadCloser.Close()
+	if r.base.done != nil {
+		<-r.base.done
+	}
+	return errors.Join(err, closed)
 }
