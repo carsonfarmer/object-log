@@ -162,12 +162,10 @@ advertise connection closure. This avoids reusing MinIO connections whose
 request bodies were not consumed; successful connections remain reusable.
 See [issue #41](https://github.com/carsonfarmer/object-log/issues/41).
 
-`make build` applies `adapter.patch` to checksum-verified upstream source. This
-temporary build-tool fix handles Go GC clock and immediate timer calls during
-canonical allocation. Spin and Go's collector are unchanged. Remove it when the
-standard adapter passes the retained regression and frequent-GC tests. No
-upstream post has been made. Retesting the stock pinned adapter with the current
-inline catalog still traps on 16 MiB pushes at default GC settings, for both
-hashes. `GODEBUG=gctrace=1` also traps because GC logging calls the host during
-canonical allocation; sample host RSS instead. No Spin pooling or memory-limit
-wrapper is used.
+`make build` builds the adapter from a checksum-verified commit in our Wasmtime
+fork, containing [the fix under review](https://github.com/bytecodealliance/wasmtime/pull/14319).
+It handles GC clock and immediate timer calls during canonical allocation.
+There is no local patch file; Spin and Go remain unchanged. Return to a standard
+adapter once it passes the retained regression and frequent-GC tests.
+`GODEBUG=gctrace=1` can itself call the host during canonical allocation; sample
+host RSS instead. No Spin pooling or memory-limit wrapper is used.

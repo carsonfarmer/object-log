@@ -8,14 +8,14 @@ Dependency licenses remain their own.
 
 ## Retained source
 
-[examples/git/adapter.patch](examples/git/adapter.patch) modifies Wasmtime's
-`crates/wasi-preview1-component-adapter/src/lib.rs` at commit
-[`668016926adfd1b8a79dbce894f1e203d8892599`](https://github.com/bytecodealliance/wasmtime/tree/668016926adfd1b8a79dbce894f1e203d8892599).
-It changes cached clock reads and immediate timer polling during canonical
-allocation. Its upstream license is Apache-2.0 WITH LLVM-exception, reproduced
-in [licenses/wasmtime.txt](licenses/wasmtime.txt). The build script pins and
-verifies the source archive before applying this patch. Keep that attribution
-and license with the patch and any redistributed modified source.
+The Git build uses Wasmtime's `wasi-preview1-component-adapter` from
+[our pinned fix](https://github.com/carsonfarmer/wasmtime/tree/c8e24c308754f784fbb4a08205a2a9c08c461d00),
+submitted as [Wasmtime #14319](https://github.com/bytecodealliance/wasmtime/pull/14319).
+It handles cached clocks and immediate timer polling during canonical allocation.
+The build script verifies the source archive checksum. Its license is
+Apache-2.0 WITH LLVM-exception, reproduced in
+[licenses/wasmtime.txt](licenses/wasmtime.txt); retain it with redistributed
+adapter source and binaries.
 
 The Git proof uses go-git (Apache-2.0) and Bytecode Alliance's Go/WASI packages
 (Apache-2.0 WITH LLVM-exception) as dependencies. Generated WIT bindings use the

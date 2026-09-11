@@ -28,8 +28,8 @@ Large-file lifecycles have passed at 16, 64 and 513 MiB for both hashes on local
 Spin/MinIO. Request byte/object limits and cooperative deadlines are documented
 in the Git README. They do not bound total memory or cross-instance concurrency.
 Incoming delta bases/results stream; metadata still grows with object count,
-and backward copies may reread bases. Outgoing packs omit delta compression. The temporary pinned component-build adapter patch
-fixes Go GC host calls; Spin and the Go collector remain unchanged. Do not claim
+and backward copies may reread bases. Outgoing packs omit delta compression. The component-build adapter is pinned to our reviewed Wasmtime fork fix for
+Go GC host calls; Spin and the Go collector remain unchanged. Do not claim
 a fixed memory ceiling or production readiness. Use a fresh prefix because the
 old Git catalog format is incompatible.
 
@@ -63,7 +63,8 @@ owner approval.
 Use exclusive worktrees; root alone integrates main. Preserve sparse reads,
 explicit uncertain outcomes and cumulative retry counters. Keep reports short;
 verification belongs in tests and Git history rather than new evidence archives.
-After Git settles, return to the KV design scoped in issue #39.
+Focus only on local Git readiness under issue #43. KV, SQLite and the Go WAL
+experiment are deferred; do not resume them without owner direction.
 
 Mature-tail checkpointing reuses complete verification on an exact local view;
 reopened handles and recovery tokens still verify. SQLite recovery uses one

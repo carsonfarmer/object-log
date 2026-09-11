@@ -62,9 +62,9 @@ Host-wide request admission remains a deferred hosting concern.
 Normal Spin settings are used; no instance-count, pooling or host-memory wrapper.
 The service temporarily pins our go-git fork with streaming-decoder fixes and
 requires its v6 prerelease APIs for both hashes, v2
-serving, shallow history and streamed writes. A temporary, pinned component-build
-adapter patch is currently necessary for Go
-GC host calls. Spin and Go's collector are unchanged.
+serving, shallow history and streamed writes. The component build uses a pinned
+Wasmtime adapter fix from our fork for Go GC host calls. Spin and Go's
+collector are unchanged.
 
 Use a fresh storage prefix: the prior custom Git catalog is incompatible, and
 there is no development-format migration tool. Original array leaves and
