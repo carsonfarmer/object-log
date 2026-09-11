@@ -69,7 +69,7 @@ func TestConfiguredLimits(t *testing.T) {
 			body := append(packet(command), []byte("0000")...)
 			body = append(body, pack...)
 			reply, _ := post(t, url+"/git-receive-pack", "git-receive-pack", body)
-			if !bytes.Contains(reply, []byte("object exceeds configured size limit")) {
+			if !bytes.Contains(reply, []byte("GIT_MAX_OBJECT_BYTES")) {
 				t.Fatalf("missing object-limit rejection: %s", reply)
 			}
 			if refs := git(t, nil, "ls-remote", url, "refs/heads/limits"); len(refs) != 0 {

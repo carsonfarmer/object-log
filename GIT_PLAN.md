@@ -16,9 +16,9 @@ unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
 - Sparse object lookup and streamed chunk reads; cleanup preserves live history.
 - Shallow clone, deepen and unshallow, checked with ordinary Git clients.
 
-The custom Rust Git engine and its native maintenance command are retired in
-this replacement branch. Installed Git remains the independent test oracle.
-Local provider and workspace qualification passes for this replacement.
+The custom Rust Git engine and its native maintenance command are retired. Installed Git remains the independent test oracle.
+Local provider and workspace qualification passes for this implementation;
+remote provider and deployment qualification remain before production rollout.
 Advanced partial filters and packfile URIs are not required for acceptance;
 add them only when useful and supported without bespoke protocol machinery.
 
@@ -42,8 +42,8 @@ unopened until pack generation; unreachable objects remain unavailable.
 The storage bridge can retry one identical conditional write after a connection
 failure. A rejected retry preserves the original uncertain outcome for recovery.
 
-Before a push fills a long tail, existing maintenance checkpoints the reachable
-catalog. The HTTP maintenance endpoint also prunes unreachable objects and runs
+At 64 tail entries, existing maintenance checkpoints the reachable catalog
+before admitting another push. The HTTP maintenance endpoint also prunes unreachable objects and runs
 one bounded fenced deletion batch. Repeat until complete to drain old data.
 Collection, checkpoint safety and uncertain outcomes remain core responsibilities.
 
@@ -55,8 +55,9 @@ Pack metadata remains proportional to object count; backward copies may reread b
 Outgoing packs stream full objects without creating deltas, so transfer sizes
 can exceed a delta-compressed server's. There is no fixed process-memory promise.
 The generic WAL's configured object, reference and tail limits still apply.
-The Git example also bounds request bytes and accepted object sizes, with
-cooperative cancellation before storage operations. These checks cannot stop
+The Git example also bounds request bytes, pack entry counts, structured-object
+sizes and cumulative catalog decoding, with cooperative cancellation before
+storage operations. These checks cannot stop
 an already-running synchronous WASI import or bound total metadata memory.
 Host-wide request admission remains a deferred hosting concern.
 Normal Spin settings are used; no instance-count, pooling or host-memory wrapper.

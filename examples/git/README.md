@@ -4,7 +4,8 @@ A Go Git service backed by the existing Rust WAL. go-git handles Git protocols,
 formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
-Local replacement checks pass; this is not production ready.
+The supported Git workflow is locally qualified on Spin/MinIO. Remote provider
+and deployment qualification remain before a production rollout.
 Development temporarily pins our go-git fork at `6060178b` through `go.mod`.
 It includes the position and failed-reopen fixes under review in upstream PR #2379. Its v6 APIs provide both hashes, protocol-v2
 serving, shallow history and streamed object writes. Partial-clone filters remain deferred.
@@ -68,8 +69,9 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
 
 - `GIT_REPEATED_PUSHES=1`: 1,025 pushes per hash mixing text edits, sparse edits to a
   1 MiB binary, and binary additions/deletions, with concurrent fetch/integrity
-  checks, automatic cleanup, and final cold history and byte verification. Run with
-  `go test -race ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
+  checks, automatic cleanup, and final cold history and byte verification. Failed
+  writer clients and packet diagnostics are retained with `-artifacts`. Run with
+  `go test -race -artifacts ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
   It reports client latency percentiles in 256-push windows, including negotiation,
   transfer and cleanup. Use an isolated prefix and keep competing workloads off
   the host when measuring. These timings do not include component compilation.
@@ -86,35 +88,50 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
 
 ## Request limits
 
-Defaults are 2 GiB per push, 8 MiB per negotiation (including expanded gzip),
-1 GiB per accepted object, and a five-minute request deadline. Override with
-`GIT_MAX_PUSH_BYTES`, `GIT_MAX_NEGOTIATION_BYTES`, `GIT_MAX_OBJECT_BYTES` (positive
-byte counts), and `GIT_REQUEST_TIMEOUT` (for example `2m`). Invalid settings fail
-closed. Push command headers share the negotiation bound.
+Each request has explicit limits. Invalid settings fail closed.
+
+| Setting | Default | What it limits |
+| --- | --- | --- |
+| `GIT_MAX_PUSH_BYTES` | 2 GiB | Incoming push body |
+| `GIT_MAX_NEGOTIATION_BYTES` | 8 MiB | Negotiation, push commands and expanded gzip |
+| `GIT_MAX_OBJECT_BYTES` | 1 GiB | Each decoded Git object |
+| `GIT_MAX_METADATA_BYTES` | 16 MiB | Each commit, tree or tag |
+| `GIT_MAX_PACK_OBJECTS` | 1,000,000 | Entries declared by an incoming pack |
+| `GIT_MAX_CATALOG_BYTES` | 64 MiB | Catalog bucket JSON decoded across the request |
+| `GIT_REQUEST_TIMEOUT` | `5m` | Cooperative request deadline |
+
+Use positive byte/count values and a positive duration. Blobs stream; structured
+objects need the smaller decoding limit. Pack counts are checked before entry
+allocation or decoded-object writes. The incoming pack is staged temporarily
+first. Catalog cache hits are free, and refreshed stores retain the request's
+charges. WAL envelopes, object proofs and Go allocation overhead are additional;
+these settings do not promise a total-process memory ceiling.
 
 Cancellation is checked between storage calls and before publication. An
 already-running synchronous WASI call must finish; its publication outcome is
-preserved even after the deadline. Incoming object and delta-result sizes are
-checked before decoding into storage. Base objects, delta instructions and results
-stream through fixed-size buffers; pack metadata still grows with object count.
-Backward copies can reread a base. These limits do not promise a process-memory ceiling.
-On local Spin 4.0.2/MinIO, three alternating comparisons of the buffered importer
-and streaming importer ran the 64 MiB push/clone/edit/fetch lifecycle sequentially
-for both hashes, with fresh prefixes and warmed HTTP workers. Median peak worker
-RSS fell from 570 to 321 MiB; elapsed time was 38.79 versus 39.39 seconds, with
-834 storage requests in both cases and effectively unchanged transferred bytes.
-RSS was sampled every 100 ms, excluding builds and MinIO/client processes.
-An earlier mixed-history run completed 2,050 updates with concurrent fetches in
-150 seconds, peaking at 217 MiB. Its busy readers and writers together issued
-714,430 storage calls and transferred 1.90 GB: request cost remains a limitation.
-Fetch visibility now checks current ref trees before older history and stops
-when the requested objects and relevant haves are proven, without opening blob
-payloads. A fresh combined run of 1,025 pushes per hash followed by the ordinary
-suite read 498,846 bytes (SHA-1) and 503,559 bytes (SHA-256), with 28 storage calls
-each, for the existing sparse blob fetch. Both pass its unchanged 768 KiB budget;
-the prior traversal read 1.7–2.0 MB. Reproduce with `GIT_REPEATED_PUSHES=1`
-set for the full provider suite on a fresh prefix. Broader request cost remains
-open in issue #6. These are workload measurements, not upper bounds.
+preserved even after the deadline. Delta bases, instructions and results stream;
+backward copies can reread a base. A recorded read failure stops further pack
+output, including when a library traversal suppresses the original error.
+
+On local Spin 4.0.2/MinIO, three alternating, sequential 64 MiB lifecycle
+comparisons reduced median peak worker RSS from 570 to 321 MiB with streaming.
+Time and storage traffic were similar. RSS was sampled every 100 ms, excluding
+builds and MinIO/client processes; this is a workload measurement, not a bound.
+
+Automatic checkpointing now runs after 64 tail entries. Sequential comparisons
+of 1,025 mixed-history pushes per hash, with concurrent readers, used 478,139
+storage calls and 2.17 GB versus 720,654 calls and 1.91 GB at 128 entries.
+For the same 1,027 receive requests per hash, calls averaged 80 instead of 108;
+more frequent cleanup increases transferred bytes. Reader request counts varied,
+and shared-host timings are observational. The tests check exact cold history
+and file contents, not only throughput. See issue #6 for broader benchmark work.
+
+Fetch visibility checks current ref trees before older history, deduplicates
+shared work and stops when wants and relevant haves are proven. The sparse blob
+fetch remains subject to the unchanged 768 KiB read budget after mature history.
+Run the full provider suite with `GIT_REPEATED_PUSHES=1` on a fresh prefix to
+exercise that combined check. Shared-parent traversal allocated 10.70 MB instead
+of 18.94 MB in the retained 128-tip/256-parent benchmark.
 
 Host-wide concurrent-request admission is a hosting concern and remains deferred;
 this example adds no instance limiter or additional durable coordination.
@@ -131,7 +148,7 @@ from this directory. The ordinary suite uses the defaults.
 
 ## Cleanup and limits
 
-Push admission checkpoints long tails automatically. Send an authenticated
+Push admission checkpoints after 64 tail entries, including safe cleanup. Send an authenticated
 `POST /sha1.git/maintenance` (or `/sha256.git/maintenance`) to prune unreachable
 objects and collect one bounded batch. Repeat `more` until `complete`; retry
 `pending` or `conflict` with a fresh request. `retained` means a WAL retention
