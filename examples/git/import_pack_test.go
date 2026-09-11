@@ -280,10 +280,12 @@ func (r *repeatReader) Read(p []byte) (int, error) {
 }
 
 type streamingStorage struct {
+	*memory.Storage
 	base      *repeatedObject
 	writes    int64
 	largest   int
 	sinkError error
+	cancel    context.CancelFunc
 }
 
 func (s *streamingStorage) EncodedObject(plumbing.ObjectType, plumbing.Hash) (plumbing.EncodedObject, error) {
@@ -298,6 +300,9 @@ type streamSink struct{ s *streamingStorage }
 func (w streamSink) Write(p []byte) (int, error) {
 	if w.s.sinkError != nil {
 		return 0, w.s.sinkError
+	}
+	if w.s.cancel != nil {
+		w.s.cancel()
 	}
 	w.s.writes += int64(len(p))
 	w.s.largest = max(w.s.largest, len(p))
@@ -466,5 +471,43 @@ func TestPackEntryAndMetadataBounds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func (s *importStorage) LowMemoryMode() bool    { return true }
+func (s *streamingStorage) LowMemoryMode() bool { return true }
+
+func TestImportPackTrailingBytesDoNotResolveDeltas(t *testing.T) {
+	t.Parallel()
+	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
+		t.Run(string(f), func(t *testing.T) {
+			t.Parallel()
+			packed := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: []byte{3, 1, 0x90, 1}, ref: blobID(f, []byte("abc"))}})
+			s := &streamingStorage{base: &repeatedObject{size: 3, actual: 3}}
+			err := importPack(t.Context(), bytes.NewReader(append(packed, 0)), s, f, testPackLimits(1024))
+			if err == nil || s.base.opens != 0 || s.writes != 0 {
+				t.Fatalf("trailing pack: err=%v, base reads=%d, writes=%d", err, s.base.opens, s.writes)
+			}
+		})
+	}
+}
+
+func TestImportPackCancellationDuringInflation(t *testing.T) {
+	t.Parallel()
+	data := make([]byte, 1<<20)
+	var state uint32 = 1
+	for i := range data {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		data[i] = byte(state)
+	}
+	packed := fixturePack(t, format.SHA1, []packFixtureEntry{{kind: plumbing.BlobObject, data: data}})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s := &streamingStorage{cancel: cancel}
+	err := importPack(ctx, bytes.NewReader(packed), s, format.SHA1, testPackLimits(int64(len(data))))
+	if !errors.Is(err, context.Canceled) || s.writes == 0 || s.writes >= int64(len(data)) {
+		t.Fatalf("canceled inflation: err=%v, wrote %d/%d bytes", err, s.writes, len(data))
 	}
 }
