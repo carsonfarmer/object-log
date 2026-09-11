@@ -1,8 +1,10 @@
 package tests
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,6 +31,10 @@ func TestRepeatedPushes(t *testing.T) {
 			branch := fmt.Sprintf("repeated-%d", time.Now().UnixNano())
 			git(t, nil, "init", "--object-format="+format, "-b", branch, source)
 			write(t, filepath.Join(source, "value"), []byte("base"))
+			binary := make([]byte, 1<<20)
+			random := rand.New(rand.NewSource(1))
+			_, _ = random.Read(binary)
+			write(t, filepath.Join(source, "asset.bin"), binary)
 			git(t, nil, "-C", source, "add", ".")
 			git(t, nil, "-C", source, "commit", "-m", "base")
 			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
@@ -45,6 +51,21 @@ func TestRepeatedPushes(t *testing.T) {
 					samples := make([]time.Duration, 0, 256)
 					for i := 0; i < 1025; i++ {
 						write(t, filepath.Join(source, "value"), []byte(fmt.Sprint(i)))
+						write(t, filepath.Join(source, fmt.Sprintf("note-%d.txt", i%8)),
+							[]byte(fmt.Sprintf("Small text file %d\nRevision %d\n", i%8, i)))
+						if i%32 == 0 {
+							// Sparse edits keep most of this incompressible object unchanged.
+							offset := (i / 32 * 7919) % (len(binary) - 1024)
+							_, _ = random.Read(binary[offset : offset+1024])
+							write(t, filepath.Join(source, "asset.bin"), binary)
+						}
+						if i%64 == 0 {
+							write(t, filepath.Join(source, "temporary.bin"), binary[:64<<10])
+						} else if i%64 == 32 {
+							if err := os.Remove(filepath.Join(source, "temporary.bin")); err != nil {
+								t.Fatal(err)
+							}
+						}
 						git(t, nil, "-C", source, "add", ".")
 						git(t, nil, "-C", source, "commit", "-m", fmt.Sprint(i))
 						started := time.Now()
@@ -84,13 +105,23 @@ func TestRepeatedPushes(t *testing.T) {
 			cold := filepath.Join(t.TempDir(), "cold")
 			git(t, nil, "clone", "--single-branch", "--branch", branch, url, cold)
 			git(t, nil, "-C", cold, "fsck", "--full")
-			want := string(git(t, nil, "-C", source, "rev-list", "HEAD"))
-			if got := string(git(t, nil, "-C", cold, "rev-list", "HEAD")); got != want {
+			want := string(git(t, nil, "-C", source, "rev-list", "--objects", "HEAD"))
+			if got := string(git(t, nil, "-C", cold, "rev-list", "--objects", "HEAD")); got != want {
 				t.Fatal("repeated pushes lost history")
 			}
-			data, err := os.ReadFile(filepath.Join(cold, "value"))
-			if err != nil || string(data) != "1024" {
-				t.Fatalf("wrong latest content: %q %v", data, err)
+			files := git(t, nil, "-C", source, "ls-files", "-z")
+			if !bytes.Equal(files, git(t, nil, "-C", cold, "ls-files", "-z")) {
+				t.Fatal("cold clone has different files")
+			}
+			for _, name := range strings.Split(strings.TrimSuffix(string(files), "\x00"), "\x00") {
+				want, err := os.ReadFile(filepath.Join(source, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := os.ReadFile(filepath.Join(cold, name))
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("wrong latest content for %s: %v", name, err)
+				}
 			}
 		})
 	}
