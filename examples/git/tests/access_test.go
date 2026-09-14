@@ -14,6 +14,7 @@ func TestAccess(t *testing.T) {
 		t.Skip("set GIT_PROBE_URL")
 	}
 	password := os.Getenv("GIT_PROBE_PASSWORD")
+	bootID := os.Getenv("GIT_PROBE_BOOT_ID")
 	receiveStatus := http.StatusOK
 	if os.Getenv("GIT_PROBE_READ_ONLY") == "true" {
 		receiveStatus = http.StatusForbidden
@@ -56,6 +57,9 @@ func TestAccess(t *testing.T) {
 		}
 		if response.StatusCode != c.status {
 			t.Errorf("%s %s: got %d, want %d", c.method, c.path, response.StatusCode, c.status)
+		}
+		if bootID != "" && response.Header.Get("X-Git-Boot-ID") != bootID {
+			t.Errorf("%s %s: boot ID differs from %q", c.method, c.path, bootID)
 		}
 	}
 }

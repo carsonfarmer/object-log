@@ -206,12 +206,8 @@ func git(t *testing.T, input []byte, args ...string) []byte {
 }
 func gitWithEnv(t *testing.T, input []byte, extraEnv []string, args ...string) []byte {
 	t.Helper()
-	if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
-		args = append([]string{"-c", "http.extraHeader=Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("git:"+password))}, args...)
-	}
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Stdin = bytes.NewReader(input)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_AUTHOR_NAME=Probe", "GIT_AUTHOR_EMAIL=probe@example.invalid", "GIT_COMMITTER_NAME=Probe", "GIT_COMMITTER_EMAIL=probe@example.invalid")
 	cmd.Env = append(cmd.Env, extraEnv...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -220,6 +216,24 @@ func gitWithEnv(t *testing.T, input []byte, extraEnv []string, args ...string) [
 		t.Fatalf("git %v: %v\n%s", args, e, stderr.Bytes())
 	}
 	return out
+}
+func gitCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_AUTHOR_NAME=Probe", "GIT_AUTHOR_EMAIL=probe@example.invalid", "GIT_COMMITTER_NAME=Probe", "GIT_COMMITTER_EMAIL=probe@example.invalid")
+	if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("git:"+password)))
+	}
+	return cmd
+}
+func TestGitCommandKeepsCredentialsOutOfArguments(t *testing.T) {
+	t.Setenv("GIT_PROBE_PASSWORD", "temporary-secret")
+	cmd := gitCommand("status")
+	if strings.Contains(strings.Join(cmd.Args, " "), "Authorization") {
+		t.Fatal("Git command arguments contain the password")
+	}
+	if !strings.Contains(strings.Join(cmd.Env, "\n"), "GIT_CONFIG_VALUE_0=Authorization: Basic ") {
+		t.Fatal("Git command environment is missing authentication")
+	}
 }
 func write(t *testing.T, path string, b []byte) {
 	t.Helper()

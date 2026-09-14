@@ -34,23 +34,28 @@ mc alias set local-git http://127.0.0.1:19090 objectlog local-test-secret
 mc mb --ignore-existing local-git/wal-proof
 ```
 
-Then start ordinary Spin, using a new prefix for each isolated test run:
+Then create a protected Spin 4 variables file and use a new prefix and boot ID
+for each isolated test run:
 
 ```sh
+cat >/tmp/object-log-git-vars.toml <<'EOF'
+wal_prefix = "your-fresh-test-prefix"
+wal_access_key = "objectlog"
+wal_secret_key = "local-test-secret"
+git_boot_id = "local-boot-1"
+EOF
+chmod 600 /tmp/object-log-git-vars.toml
 cd examples/git
-spin up --listen 127.0.0.1:19100 \
-  --env WAL_PREFIX=your-fresh-test-prefix \
-  --env WAL_ACCESS_KEY=objectlog --env WAL_SECRET_KEY=local-test-secret
+spin up --listen 127.0.0.1:19100 --variable @/tmp/object-log-git-vars.toml
 ```
 
 Repositories are `/sha1.git` and `/sha256.git`. The manifest defaults to the
-local endpoint, bucket and region. Override all three together with
-`--variable wal_endpoint=...`, `--variable wal_bucket=...`, and
-`--variable wal_region=...`; the endpoint also narrows the outbound allowlist.
-Temporary AWS credentials additionally use `--env WAL_SESSION_TOKEN=...`.
-Use `--env GIT_PASSWORD=...` for HTTP Basic authentication (any username),
-`--env GIT_READ_ONLY=true` to reject pushes and maintenance, and
-`--env WAL_DEFAULT_BRANCH=...` for a new repository's persisted default branch.
+local endpoint, bucket and region. Put `wal_endpoint`, `wal_bucket`, and
+`wal_region` in the same file to override all three; the endpoint also narrows
+the outbound allowlist. The file accepts `wal_session_token`, `git_password`,
+`git_read_only`, and `wal_default_branch`. Its credential variables are marked
+secret in the manifest. Keep the file mode at 0600 and pass only its path to
+Spin.
 Authentication is off by default; keep this configuration on loopback.
 Branches require fast-forward updates; force and force-with-lease cannot rewrite them.
 Use a fresh prefix: previous chunk-list objects, retired custom catalogs and
@@ -169,8 +174,11 @@ access beneath the prefix; it must not grant access to production data.
 Run `make git-remote-qualification REMOTE_QUALIFICATION_PHASE=...` with these
 phases in order: `start`, `backend`, `protocol`, `standard`, `recovery`,
 `read-only`, `limits`, `performance`, and `teardown`. Restart the unchanged
-standard profile before `recovery`; redeploy the read-only and limits profiles
-before their phases; then restore standard before performance.
+standard profile with a new boot ID before `recovery`; redeploy the read-only
+and limits profiles before their phases; then restore standard before
+performance. Set `GIT_PROBE_BOOT_ID` to the active profile's `git_boot_id`.
+`TestAccess` checks the response header, and recovery requires the saved
+standard boot ID to change.
 
 Standard, recovery, read-only and performance use
 `WAL_PREFIX=$GIT_QUALIFICATION_PREFIX/git`; limits uses the fresh
@@ -181,30 +189,43 @@ endpoint, bucket and region, all three temporary credential values, and
 `GIT_MAX_OBJECT_BYTES=65536`. Keep `WAL_DEFAULT_BRANCH` equal to
 `GIT_PROBE_BRANCH` across the standard restart.
 
-For local Spin connected to live S3, the standard profile is:
+Create a 0600 Spin 4 TOML variables file outside the repository containing:
 
-```sh
-spin up --listen 127.0.0.1:19100 \
-  --variable wal_endpoint="$GIT_QUALIFICATION_S3_ENDPOINT" \
-  --variable wal_bucket="$GIT_QUALIFICATION_BUCKET" \
-  --variable wal_region="$GIT_QUALIFICATION_REGION" \
-  --env WAL_PREFIX="$GIT_QUALIFICATION_PREFIX/git" \
-  --env WAL_ACCESS_KEY="$AWS_ACCESS_KEY_ID" \
-  --env WAL_SECRET_KEY="$AWS_SECRET_ACCESS_KEY" \
-  --env WAL_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
-  --env WAL_DEFAULT_BRANCH="$GIT_PROBE_BRANCH" \
-  --env GIT_PASSWORD="$GIT_PROBE_PASSWORD"
+```toml
+wal_endpoint = "https://s3.REGION.amazonaws.com"
+wal_bucket = "DEDICATED-BUCKET"
+wal_region = "REGION"
+wal_prefix = "CAMPAIGN-PREFIX/git"
+wal_access_key = "TEMPORARY-ACCESS-KEY"
+wal_secret_key = "TEMPORARY-SECRET-KEY"
+wal_session_token = "TEMPORARY-SESSION-TOKEN"
+wal_default_branch = "main"
+git_password = "TEMPORARY-GIT-PASSWORD"
+git_boot_id = "standard-boot-1"
+git_read_only = "false"
+git_max_push_bytes = "2147483648"
+git_max_negotiation_bytes = "8388608"
+git_max_object_bytes = "1073741824"
 ```
 
-The read-only profile adds `--env GIT_READ_ONLY=true`. The limits profile uses
-the `git-limits` prefix and adds the three limit values above. Apply those same
-component variables and environment values in a deployed host.
+For local Spin connected to live S3, pass only that protected path:
 
-The runner enforces the 08:00–20:00 Pacific window, one campaign per day,
-ordered tests, failure lockout, and exact-prefix teardown with a zero residual
-check. Capture provider billing totals and Spin's `wal ... calls=N bytes=N`
-lines using the declared counter source, and stop before the recorded request,
-cost or time ceiling. The repeated-history test reports p50/p95/p99 client
+```sh
+spin up --listen 127.0.0.1:19100 --variable @/absolute/path/qualification-spin.toml
+```
+
+For recovery, change `git_boot_id` and restart or redeploy. The read-only
+profile sets `git_read_only = "true"`. The limits profile uses the `git-limits`
+prefix and sets push=131072, negotiation=4096, and object=65536. Apply the same
+variables through the deployment host's secret/config facility.
+
+The runner enforces the 08:00–20:00 Pacific window, credential and campaign
+deadlines, one campaign per day, ordered tests, failure lockout, exact-prefix
+teardown, and a zero residual check. It writes one concise log per phase in the
+protected state directory. The configured campaign duration must fit entirely
+before 20:00 Pacific. Review request counts and provider cost at each
+manual phase stop using the declared counter source; no counter API is wired,
+so the runner cannot enforce those two ceilings. The repeated-history test reports p50/p95/p99 client
 latency and durable push throughput. A loopback Git URL qualifies live S3
 behavior; only a deployed HTTPS URL adds inbound TLS, authentication and host
 admission evidence. After a failed phase, run teardown and do not start another

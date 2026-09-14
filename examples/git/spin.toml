@@ -7,6 +7,17 @@ version = "0.0.0"
 wal_endpoint = { default = "http://127.0.0.1:19090" }
 wal_bucket = { default = "wal-proof" }
 wal_region = { default = "us-east-1" }
+wal_prefix = { default = "" }
+wal_access_key = { default = "", secret = true }
+wal_secret_key = { default = "", secret = true }
+wal_session_token = { default = "", secret = true }
+wal_default_branch = { default = "" }
+git_password = { default = "", secret = true }
+git_boot_id = { default = "local-boot" }
+git_read_only = { default = "false" }
+git_max_push_bytes = { default = "2147483648" }
+git_max_negotiation_bytes = { default = "8388608" }
+git_max_object_bytes = { default = "1073741824" }
 
 [[trigger.http]]
 route = "/..."
@@ -19,3 +30,14 @@ allowed_outbound_hosts = ["{{ wal_endpoint }}"]
 WAL_ENDPOINT = "{{ wal_endpoint }}"
 WAL_BUCKET = "{{ wal_bucket }}"
 WAL_REGION = "{{ wal_region }}"
+WAL_PREFIX = "{{ wal_prefix }}"
+WAL_ACCESS_KEY = "{{ wal_access_key }}"
+WAL_SECRET_KEY = "{{ wal_secret_key }}"
+WAL_SESSION_TOKEN = "{{ wal_session_token }}"
+WAL_DEFAULT_BRANCH = "{{ wal_default_branch }}"
+GIT_PASSWORD = "{{ git_password }}"
+GIT_BOOT_ID = "{{ git_boot_id }}"
+GIT_READ_ONLY = "{{ git_read_only }}"
+GIT_MAX_PUSH_BYTES = "{{ git_max_push_bytes }}"
+GIT_MAX_NEGOTIATION_BYTES = "{{ git_max_negotiation_bytes }}"
+GIT_MAX_OBJECT_BYTES = "{{ git_max_object_bytes }}"

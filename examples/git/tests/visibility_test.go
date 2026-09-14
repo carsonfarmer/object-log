@@ -1,10 +1,8 @@
 package tests
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,13 +36,8 @@ func TestFetchVisibility(t *testing.T) {
 			for _, version := range []string{"0", "2"} {
 				client := filepath.Join(t.TempDir(), "hidden")
 				git(t, nil, "init", "--object-format="+format, client)
-				args := []string{"-C", client, "-c", "protocol.version=" + version}
-				if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
-					args = append(args, "-c", "http.extraHeader=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("git:"+password)))
-				}
-				args = append(args, "fetch", url, id)
-				command := exec.Command("git", args...)
-				command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
+				command := gitCommand("-C", client, "-c", "protocol.version="+version, "fetch", url, id)
+				command.Env = append(command.Env, "GIT_TERMINAL_PROMPT=0")
 				if output, err := command.CombinedOutput(); err == nil {
 					t.Fatalf("protocol %s fetched unreachable commit before cleanup: %s", version, output)
 				}

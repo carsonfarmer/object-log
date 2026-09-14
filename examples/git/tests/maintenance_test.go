@@ -1,11 +1,9 @@
 package tests
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,13 +73,7 @@ func TestMaintenance(t *testing.T) {
 			if got := strings.TrimSpace(string(git(t, nil, "-C", cold, "rev-parse", "HEAD"))); got != live {
 				t.Fatal("maintenance changed live tip")
 			}
-			args := []string{"-C", cold}
-			if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
-				args = append(args, "-c", "http.extraHeader=Authorization: Basic "+base64.StdEncoding.EncodeToString([]byte("git:"+password)))
-			}
-			args = append(args, "fetch", url, dead)
-			command := exec.Command("git", args...)
-			command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+			command := gitCommand("-C", cold, "fetch", url, dead)
 			if output, err := command.CombinedOutput(); err == nil {
 				t.Fatalf("unreachable commit survived pruning: %s", output)
 			}
