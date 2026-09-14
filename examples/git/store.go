@@ -57,8 +57,8 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	mem := memory.NewStorage(memory.WithObjectFormat(format))
 	// Memory storage returns its owned configuration; no save is needed.
 	cfg, _ := mem.Config()
-	// Delta candidate bytes are bounded by outgoingObjectSelector.
-	cfg.Pack.Window = outgoingDeltaWindow
+	// A nonzero window bounds object count, not buffered delta bytes.
+	cfg.Pack.Window = 0
 	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {

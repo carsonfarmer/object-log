@@ -6,7 +6,7 @@ storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
 Local Spin/MinIO qualification passes. Remote provider and deployment testing
 remain before a production rollout. Development pins our go-git fork at
-`5052e672` through `go.mod`. Its v6 APIs provide both hashes, protocol-v2 serving,
+`a37a9c5b` through `go.mod`. Its v6 APIs provide both hashes, protocol-v2 serving,
 shallow history and streamed object writes. The streaming work is represented
 by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); additional
 small server fixes remain only on our fork pending owner review. Partial-clone filters
@@ -252,23 +252,27 @@ Larger objects and temporary incoming packs use the WAL byte-stream API, which o
 chunk geometry, authenticated reconstruction and offset reads. Git retains its
 splitting sparse index and compression. Incoming packs remain unpublished;
 go-git checks and decodes them while a small importer coordinates dependency
-resolution and streams decoded objects into the WAL. Fetch considers only blob
-and tree objects of at most 1 MiB for delta generation, stops admitting candidates
-at 16 MiB per request and uses window 2. Other objects stay lazy full-object
-streams. This bounds candidate source bytes; go-git may reread them and allocate
-indexes and delta output, so it is not a total process-memory bound. Ordinary
-large-file lifecycles have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.
+resolution and streams decoded objects into the WAL. Fetch streams full objects
+without making deltas, trading larger transfers for lower memory and CPU use.
+Have-aware negotiation still omits objects the client already has, so this changes
+the encoding of required objects rather than fetch correctness. Clones and fetches
+can be slower and incur more network-egress cost, and bandwidth limits can reduce
+concurrent throughput. Repositories with many similar revisions of large files are
+most affected; already-compressed or substantially different files may see little
+change. Remote qualification must measure response-pack bytes, latency and throughput
+on representative histories. This does not establish a fixed process-memory ceiling.
+Ordinary large-file lifecycles
+have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.
 Both hashes pass shallow clone, deepen, unshallow, annotated tags and 1,025
 consecutive pushes with automatic cleanup and cold recovery. Partial filters
 and packfile URIs are not replacement requirements.
 
-`make git-check` checks the bounded selector against Git for both hashes, including
-delta generation, the candidate budget and lazy fallback.
-`go test ./tests -run TestDeltaEncoderGitCompatibility` compares the underlying
-go-git encoder's full and unbounded delta packs against Git;
-`go test ./tests -run '^$' -bench BenchmarkOutgoingDeltas -benchmem` compares size
-and allocation costs. Those benchmarks exercise the library directly rather than
-the service's bounded policy.
+`go test ./tests -run TestDeltaEncoderGitCompatibility` checks go-git's full and
+delta encoders against Git; `go test ./tests -run '^$' -bench
+BenchmarkOutgoingDeltas -benchmem` demonstrates the size and allocation tradeoff.
+These tests compare library behavior; the service uses full-object pack entries.
+go-git's HTTP upload-pack path does not expose a byte-bounded delta selector, and
+the service does not carry a private transport hook for one.
 Conditional S3 uploads use `Expect: 100-continue` so early rejections can
 advertise connection closure. This avoids reusing MinIO connections whose
 request bodies were not consumed; successful connections remain reusable.

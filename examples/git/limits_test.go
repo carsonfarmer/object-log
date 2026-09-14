@@ -15,7 +15,7 @@ import (
 
 func TestRequestLimits(t *testing.T) {
 	defaults, err := loadLimits(func(string) string { return "" })
-	if err != nil || defaults.pushBytes != 2<<30 || defaults.objectBytes != 1<<30 || defaults.metadataBytes != 16<<20 || defaults.packObjects != 1_000_000 || defaults.catalogBytes != 64<<20 || defaults.deltaBytes == nil || defaults.deltaBytes.Load() != 0 {
+	if err != nil || defaults.pushBytes != 2<<30 || defaults.objectBytes != 1<<30 || defaults.metadataBytes != 16<<20 || defaults.packObjects != 1_000_000 || defaults.catalogBytes != 64<<20 {
 		t.Fatalf("defaults: %+v %v", defaults, err)
 	}
 	for _, key := range []string{"GIT_MAX_PUSH_BYTES", "GIT_MAX_NEGOTIATION_BYTES", "GIT_MAX_OBJECT_BYTES", "GIT_MAX_METADATA_BYTES", "GIT_MAX_CATALOG_BYTES", "GIT_MAX_PACK_OBJECTS", "GIT_REQUEST_TIMEOUT"} {

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -22,11 +21,10 @@ type requestLimits struct {
 	timeout                                  time.Duration
 	readOnly                                 bool
 	catalogRead                              *int64
-	deltaBytes                               *atomic.Int64
 }
 
 func loadLimits(getenv func(string) string) (requestLimits, error) {
-	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, catalogRead: new(int64), deltaBytes: new(atomic.Int64), timeout: 5 * time.Minute}
+	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, catalogRead: new(int64), timeout: 5 * time.Minute}
 	for _, setting := range []struct {
 		name  string
 		value *int64
@@ -129,18 +127,4 @@ func (l requestLimits) chargeCatalog(size int) error {
 	}
 	*l.catalogRead += int64(size)
 	return nil
-}
-
-// Selector copies share this counter across expired-view retries. Admission is
-// not refunded after delta generation starts, even if that attempt fails.
-func (l requestLimits) admitDelta(size int64) bool {
-	for {
-		used := l.deltaBytes.Load()
-		if size > outgoingDeltaCandidateBytes-used {
-			return false
-		}
-		if l.deltaBytes.CompareAndSwap(used, used+size) {
-			return true
-		}
-	}
 }

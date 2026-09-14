@@ -85,9 +85,10 @@ API:
   A small [Rust component](examples/wal-component) connects it to the same WAL.
   Refs and a sparse object catalog publish together through one head update.
   Small compressed objects fit in catalog leaves; larger objects use WAL byte streams.
-  Incoming deltas stream through go-git into the WAL. Fetch reachability checks
-  do not open blob payloads; later delta generation admits at most 16 MiB of
-  small blob and tree candidate source bytes per request.
+  Incoming deltas stream through go-git into the WAL. Fetch checks reachability
+  from published refs without opening blob payloads. Have-aware negotiation avoids
+  objects the client already has; objects that must be sent use full-object pack
+  entries, which can increase transfer size while avoiding delta-generation buffering.
   Spin supplies HTTP; the core has no Spin dependency or Git rules.
 
 The Git consumer replaces the custom Rust Git engine and native maintenance
