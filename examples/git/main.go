@@ -46,6 +46,7 @@ func init() { wasihttp.HandleFunc(serve) }
 func main() {}
 func serve(response http.ResponseWriter, r *http.Request) {
 	response.Header().Set("X-Git-Boot-ID", os.Getenv("GIT_BOOT_ID"))
+	response.Header().Set("X-Git-Target-ID", targetID(os.Getenv))
 	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 2)
 	if len(parts) != 2 || (parts[0] != "sha1.git" && parts[0] != "sha256.git") {
 		http.NotFound(response, r)

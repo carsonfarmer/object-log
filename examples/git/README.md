@@ -177,8 +177,9 @@ phases in order: `start`, `backend`, `protocol`, `standard`, `recovery`,
 standard profile with a new boot ID before `recovery`; redeploy the read-only
 and limits profiles before their phases; then restore standard before
 performance. Set `GIT_PROBE_BOOT_ID` to the active profile's `git_boot_id`.
-`TestAccess` checks the response header, and recovery requires the saved
-standard boot ID to change.
+`TestAccess` checks the response boot ID and the service-computed fingerprint
+of the endpoint, region, bucket and exact profile prefix. Recovery requires the
+saved standard boot ID to change.
 
 Standard, recovery, read-only and performance use
 `WAL_PREFIX=$GIT_QUALIFICATION_PREFIX/git`; limits uses the fresh
@@ -222,8 +223,9 @@ variables through the deployment host's secret/config facility.
 The runner enforces the 08:00–20:00 Pacific window, credential and campaign
 deadlines, one campaign per day, ordered tests, failure lockout, exact-prefix
 teardown, and a zero residual check. It writes one concise log per phase in the
-protected state directory. The configured campaign duration must fit entirely
-before 20:00 Pacific. Review request counts and provider cost at each
+protected state directory, including the frozen plan digest, timestamps,
+status, and start-time tool versions. The configured campaign duration must fit
+entirely before 20:00 Pacific. Review request counts and provider cost at each
 manual phase stop using the declared counter source; no counter API is wired,
 so the runner cannot enforce those two ceilings. The repeated-history test reports p50/p95/p99 client
 latency and durable push throughput. A loopback Git URL qualifies live S3

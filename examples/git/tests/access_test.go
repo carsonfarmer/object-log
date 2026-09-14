@@ -15,6 +15,7 @@ func TestAccess(t *testing.T) {
 	}
 	password := os.Getenv("GIT_PROBE_PASSWORD")
 	bootID := os.Getenv("GIT_PROBE_BOOT_ID")
+	targetID := os.Getenv("GIT_PROBE_TARGET_ID")
 	receiveStatus := http.StatusOK
 	if os.Getenv("GIT_PROBE_READ_ONLY") == "true" {
 		receiveStatus = http.StatusForbidden
@@ -60,6 +61,9 @@ func TestAccess(t *testing.T) {
 		}
 		if bootID != "" && response.Header.Get("X-Git-Boot-ID") != bootID {
 			t.Errorf("%s %s: boot ID differs from %q", c.method, c.path, bootID)
+		}
+		if targetID != "" && response.Header.Get("X-Git-Target-ID") != targetID {
+			t.Errorf("%s %s: storage target differs from the campaign", c.method, c.path)
 		}
 	}
 }
