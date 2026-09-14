@@ -10,13 +10,15 @@ case "${0##*/}:$*" in
   date:*"-j -f"*|date:*"-d "*) echo 2000000000 ;;
   date:*"+%Y-%m-%dT%H:%M:%SZ"*) echo 2030-03-17T10:00:00Z ;;
   date:*"+%H"*) echo 10 ;; date:*"+%F"*) echo 2030-03-17 ;; date:*"+%s"*) echo 1900000000 ;;
-  git:*"rev-parse HEAD"*) echo fake-revision ;; git:*"status --porcelain"*) : ;; aws:*) : ;;
+  git:*"rev-parse HEAD"*) echo fake-revision ;; git:*"status --porcelain"*) : ;;
+  aws:*list-objects-v2*) if [ "${AWS_MODE:-}" = hang ]; then sh -c 'trap "" TERM; sleep 30' & echo $! >"${AWS_CHILD_PID_FILE}"; wait; fi; echo null ;;
+  aws:*) echo null ;;
   go:*test*) for test in TestAccess TestLargeBlob TestMaintenance TestWALGit TestManyObjects TestShallowAndTags TestFetchVisibility TestFailureDrills; do echo "--- PASS: ${test} (0.00s)"; done; echo PASS; echo ok ;;
   shasum:*) cat >/dev/null; echo 'planhash  -' ;;
   *) exit 1 ;;
 esac
 EOF
-for command in date git aws shasum; do ln -s mock "${scratch}/bin/${command}"; done
+for command in date git go aws shasum; do ln -s mock "${scratch}/bin/${command}"; done
 cat >"${scratch}/bin/cargo" <<'EOF'
 #!/bin/sh
 if [ "${CARGO_MODE:-}" = hang ]; then
@@ -93,4 +95,39 @@ if kill -0 "${child_pid}" 2>/dev/null; then
 fi
 grep -q '^result=failed$' "${scratch}/state/phase-timeout.state"
 grep -q 'phase=protocol status=failed' "${scratch}/state/phase-timeout-protocol.log"
-echo "phase failure propagation and deadline cleanup rehearsal passed"
+sed 's/phase-timeout/phase-signal/g' "${scratch}/state/phase-timeout.state" |
+  sed -e 's/phase=protocol/phase=backend/' -e 's/result=failed/result=active/' >"${scratch}/state/phase-signal.state"
+export GIT_QUALIFICATION_ID=phase-signal GIT_QUALIFICATION_PREFIX=qualification/phase-signal
+export GIT_QUALIFICATION_TIME_LIMIT_SECONDS=35000 CHILD_PID_FILE="${scratch}/signal-child"
+"${root}/scripts/qualify-git-remote.sh" protocol >/dev/null 2>&1 &
+runner_pid=$!
+for _ in {1..100}; do [[ -s "${CHILD_PID_FILE}" ]] && break; /bin/sleep .05; done
+[[ -s "${CHILD_PID_FILE}" ]] || { echo "deadline child did not start" >&2; exit 1; }
+kill -TERM "${runner_pid}"
+if wait "${runner_pid}"; then echo "externally terminated deadline succeeded" >&2; exit 1; fi
+child_pid="$(cat "${CHILD_PID_FILE}")"
+if kill -0 "${child_pid}" 2>/dev/null; then echo "external termination left a child running" >&2; exit 1; fi
+grep -q '^result=failed$' "${scratch}/state/phase-signal.state"
+sed 's/phase-failure/aws-signal/g' "${scratch}/state/phase-failure.state" |
+  sed 's/result=failed/result=active/' >"${scratch}/state/aws-signal.state"
+export GIT_QUALIFICATION_ID=aws-signal GIT_QUALIFICATION_PREFIX=qualification/aws-signal
+export AWS_MODE=hang AWS_CHILD_PID_FILE="${scratch}/aws-child"
+"${root}/scripts/qualify-git-remote.sh" standard >/dev/null 2>&1 &
+runner_pid=$!
+for _ in {1..100}; do [[ -s "${AWS_CHILD_PID_FILE}" ]] && break; /bin/sleep .05; done
+[[ -s "${AWS_CHILD_PID_FILE}" ]] || { echo "deadline AWS child did not start" >&2; exit 1; }
+kill -TERM "${runner_pid}"
+if wait "${runner_pid}"; then echo "externally terminated AWS deadline succeeded" >&2; exit 1; fi
+child_pid="$(cat "${AWS_CHILD_PID_FILE}")"
+if kill -0 "${child_pid}" 2>/dev/null; then echo "external termination left AWS child running" >&2; exit 1; fi
+if compgen -G "${scratch}/state/.qualification-aws.*" >/dev/null; then echo "AWS output file survived termination" >&2; exit 1; fi
+grep -q '^result=failed$' "${scratch}/state/aws-signal.state"
+sed 's/phase-failure/cleanup/g' "${scratch}/state/phase-failure.state" |
+  sed -e 's/epoch=1900000000/epoch=1899990000/' >"${scratch}/state/cleanup.state"
+export GIT_QUALIFICATION_ID=cleanup GIT_QUALIFICATION_PREFIX=qualification/cleanup
+export GIT_QUALIFICATION_TIME_LIMIT_SECONDS=1 CARGO_MODE='' AWS_MODE=''
+"${root}/scripts/qualify-git-remote.sh" teardown >/dev/null
+grep -q '^result=failed-cleaned$' "${scratch}/state/cleanup.state"
+"${root}/scripts/qualify-git-remote.sh" review >/dev/null
+grep -q '^result=failed-reviewed$' "${scratch}/state/cleanup.state"
+echo "phase failures, deadline cleanup, teardown, and review rehearsal passed"

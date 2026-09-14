@@ -2,14 +2,9 @@
 set -euo pipefail
 phase="${1:-rehearse}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-contents_query="length(Contents || \`[]\`)"
-versions_query="length(Versions || \`[]\`)"
-markers_query="length(DeleteMarkers || \`[]\`)"
-fail() { echo "remote qualification: $*" >&2; return 1; }
-need() { [[ -n "${!1:-}" ]] || fail "set $1"; }
-hash_values() {
-  if command -v shasum >/dev/null; then shasum -a 256; else sha256sum; fi | awk '{print $1}'
-}
+contents_query='Contents[0].Key'; versions_query='Versions[0].Key'; markers_query='DeleteMarkers[0].Key'
+fail() { echo "remote qualification: $*" >&2; return 1; }; need() { [[ -n "${!1:-}" ]] || fail "set $1"; }
+hash_values() { if command -v shasum >/dev/null; then shasum -a 256; else sha256sum; fi | awk '{print $1}'; }
 expiry_epoch() {
   local value="$1" offset normalized
   [[ "${value}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$ ]] || fail "credential expiry must be RFC3339"
@@ -19,30 +14,34 @@ expiry_epoch() {
   if date -j -f '%Y-%m-%dT%H:%M:%S%z' "${normalized}" +%s 2>/dev/null; then return; fi
   date -d "${value}" +%s 2>/dev/null || fail "could not parse credential expiry"
 }
-aws_s3api() {
-  if [[ -n "${running_phase:-}" ]]; then
-    deadline aws --region "${target_region:-${GIT_QUALIFICATION_REGION}}" --endpoint-url "${target_endpoint:-${GIT_QUALIFICATION_S3_ENDPOINT}}" s3api "$@"
-  else aws --region "${target_region:-${GIT_QUALIFICATION_REGION}}" --endpoint-url "${target_endpoint:-${GIT_QUALIFICATION_S3_ENDPOINT}}" s3api "$@"; fi
+aws_output=""; aws_output_file=""; aws_s3api() {
+  local code=0 base="${state_dir:-${TMPDIR:-/tmp}}"
+  aws_output_file="$(mktemp "${base}/.qualification-aws.XXXXXX")" || return; chmod 600 "${aws_output_file}" || return
+  if [[ -n "${running_phase:-}" ]]; then deadline aws --region "${target_region:-${GIT_QUALIFICATION_REGION}}" --endpoint-url "${target_endpoint:-${GIT_QUALIFICATION_S3_ENDPOINT}}" s3api "$@" >"${aws_output_file}" 2>&1 || code=$?; else aws --region "${target_region:-${GIT_QUALIFICATION_REGION}}" --endpoint-url "${target_endpoint:-${GIT_QUALIFICATION_S3_ENDPOINT}}" s3api "$@" >"${aws_output_file}" 2>&1 || code=$?; fi
+  aws_output="$(cat "${aws_output_file}")"; rm -f "${aws_output_file}"; aws_output_file=""; return "${code}"
+}
+exists() {
+  local query="$1"; shift
+  aws_s3api "$@" --no-paginate --max-keys 1 --query "${query}" --output json || return
+  case "${aws_output}" in null) exists_result=0 ;; \"*\") exists_result=1 ;; *) fail "unexpected S3 existence result" ;; esac
 }
 counts() {
   local bucket="${1:-${GIT_QUALIFICATION_BUCKET}}" prefix="${2:-${GIT_QUALIFICATION_PREFIX}}" target_region="${3:-${GIT_QUALIFICATION_REGION}}" target_endpoint="${4:-${GIT_QUALIFICATION_S3_ENDPOINT}}"
-  local current versions markers
-  current="$(aws_s3api list-objects-v2 --bucket "${bucket}" --prefix "${prefix}/" --max-items 1 --query "${contents_query}" --output text)" || return
-  versions="$(aws_s3api list-object-versions --bucket "${bucket}" --prefix "${prefix}/" --max-items 1 --query "${versions_query}" --output text)" || return
-  markers="$(aws_s3api list-object-versions --bucket "${bucket}" --prefix "${prefix}/" --max-items 1 --query "${markers_query}" --output text)" || return
-  printf '%s %s %s\n' "${current}" "${versions}" "${markers}"
+  exists "${contents_query}" list-objects-v2 --bucket "${bucket}" --prefix "${prefix}/" || return; current="${exists_result}"
+  exists "${versions_query}" list-object-versions --bucket "${bucket}" --prefix "${prefix}/" || return; versions="${exists_result}"
+  exists "${markers_query}" list-object-versions --bucket "${bucket}" --prefix "${prefix}/" || return; markers="${exists_result}"
 }
 empty_list_self_test() {
   local GIT_QUALIFICATION_REGION=test GIT_QUALIFICATION_S3_ENDPOINT=https://s3.example.invalid
-  local GIT_QUALIFICATION_BUCKET=test GIT_QUALIFICATION_PREFIX=test result
+  local GIT_QUALIFICATION_BUCKET=test GIT_QUALIFICATION_PREFIX=test current versions markers
   aws() {
     case "$*" in
-      *"--max-items 1"*"--query ${contents_query}"*|*"--max-items 1"*"--query ${versions_query}"*|*"--max-items 1"*"--query ${markers_query}"*) echo 0 ;;
+      *"--no-paginate"*"--max-keys 1"*"--query ${contents_query}"*"--output json"*|*"--no-paginate"*"--max-keys 1"*"--query ${versions_query}"*"--output json"*|*"--no-paginate"*"--max-keys 1"*"--query ${markers_query}"*"--output json"*) echo null ;;
       *) return 1 ;;
     esac
   }
-  result="$(counts)" || return
-  [[ "${result}" == "0 0 0" ]] || fail "null-safe empty-list count rehearsal failed"
+  counts || return
+  [[ "${current} ${versions} ${markers}" == "0 0 0" ]] || fail "null-safe empty-list count rehearsal failed"
 }
 rehearse() {
   empty_list_self_test
@@ -58,14 +57,14 @@ Offline rehearsal; no network or state changes:
   limits      verify the fresh small-limit service profile
   performance run 1,025 pushes/hash and concurrent 513 MiB lifecycles last
   teardown    delete the exact prefix and require zero residual objects
-
+  review      owner-record review after teardown of a failed campaign
 Standard/recovery/read-only/performance use PREFIX/git. Limits uses
 PREFIX/git-limits. Core tests use PREFIX/core. HTTP loopback proves live S3
 behavior only; an HTTPS deployment also exercises inbound TLS and auth.
 EOF
 }
 if [[ "${phase}" == rehearse ]]; then rehearse; exit 0; fi
-case "${phase}" in start|backend|protocol|standard|recovery|read-only|limits|performance|teardown|status) ;; *) echo "unknown qualification phase: ${phase}" >&2; exit 2 ;; esac
+case "${phase}" in start|backend|protocol|standard|recovery|read-only|limits|performance|teardown|review|status) ;; *) echo "unknown qualification phase: ${phase}" >&2; exit 2 ;; esac
 for name in \
   GIT_QUALIFICATION_ID GIT_QUALIFICATION_REVISION GIT_QUALIFICATION_REGION \
   GIT_QUALIFICATION_S3_ENDPOINT GIT_QUALIFICATION_BUCKET GIT_QUALIFICATION_PREFIX \
@@ -142,14 +141,14 @@ guard() {
 }
 observed_service_id=""
 phase_log=""
-record_status() {
-  [[ -z "${phase_log}" ]] || printf 'timestamp=%s phase=%s status=%s plan=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${plan_digest}" >>"${phase_log}"
-}
+deadline_pid=""
+record_status() { [[ -z "${phase_log}" ]] || printf 'timestamp=%s phase=%s status=%s plan=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${plan_digest}" >>"${phase_log}"; }
 deadline() {
-  local remaining=$((GIT_QUALIFICATION_TIME_LIMIT_SECONDS - ($(date +%s) - $(value epoch))))
-  (( remaining > 0 )) || fail "campaign time limit elapsed" || return
+  local end="${command_deadline_epoch:-$(($(value epoch) + GIT_QUALIFICATION_TIME_LIMIT_SECONDS))}" remaining code=0
+  remaining=$((end - $(date +%s))); (( remaining > 0 )) || fail "command deadline elapsed" || return
   command -v perl >/dev/null || fail "perl is required for command deadlines" || return
-  perl -MPOSIX=:sys_wait_h -e 'my $end=time+shift; my $pid=fork; die "fork: $!" unless defined $pid; if (!$pid) { setpgrp 0,0; exec @ARGV; exit 127 } while (waitpid($pid,WNOHANG)==0) { if (time >= $end) { kill "TERM", -$pid; select undef,undef,undef,.2; kill "KILL", -$pid; waitpid($pid,0); exit 124 } select undef,undef,undef,.05 } my $s=$?; exit(($s&127) ? 128+($s&127) : $s>>8)' "${remaining}" "$@"
+  perl -MPOSIX=:sys_wait_h -e 'my $end=time+shift; my $pid=fork; die "fork: $!" unless defined $pid; if (!$pid) { setpgrp 0,0; exec @ARGV; exit 127 } my $stop=sub { my($sig,$code)=@_; kill $sig,-$pid; select undef,undef,undef,.2; kill "KILL",-$pid; waitpid($pid,0); exit $code }; $SIG{TERM}=sub{$stop->("TERM",143)}; $SIG{INT}=sub{$stop->("INT",130)}; $SIG{HUP}=sub{$stop->("HUP",129)}; while (waitpid($pid,WNOHANG)==0) { $stop->("TERM",124) if time >= $end; select undef,undef,undef,.05 } my $s=$?; exit(($s&127) ? 128+($s&127) : $s>>8)' "${remaining}" "$@" &
+  deadline_pid=$!; wait "${deadline_pid}" || code=$?; deadline_pid=""; return "${code}"
 }
 advance() {
   save "$1" active "$(value date)" "$(value epoch)" "${observed_service_id:-$(value service)}" || return
@@ -158,14 +157,15 @@ advance() {
 }
 finish() {
   local code=$?
+  [[ -z "${aws_output_file:-}" ]] || rm -f "${aws_output_file}"
   if (( code != 0 )) && [[ -n "${running_phase:-}" && -f "${state}" ]]; then
     if [[ "$(value result)" == running ]]; then save "${running_phase}" failed "$(value date)" "$(value epoch)" "$(value service)"; fi
     record_status "${running_phase}" failed
   fi
 }
 trap finish EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
+stop_runner() { local sig="$1" code="$2"; trap - INT TERM HUP; [[ -z "${deadline_pid}" ]] || { kill -"${sig}" "${deadline_pid}" 2>/dev/null || :; wait "${deadline_pid}" 2>/dev/null || :; }; exit "${code}"; }
+trap 'stop_runner INT 130' INT; trap 'stop_runner TERM 143' TERM; trap 'stop_runner HUP 129' HUP
 run_phase() {
   local expected="$1" next="$2"; shift 2
   guard "${expected}" || return
@@ -184,21 +184,16 @@ run_phase() {
 rust_test() {
   local target="$1" test="$2" code
   set +e
-  deadline cargo test -p object-log --features aws,test-util --test "${target}" "${test}" -- --ignored --exact --nocapture 2>&1 | tee -a "${phase_log}"
-  code=${PIPESTATUS[0]}
+  deadline cargo test -p object-log --features aws,test-util --test "${target}" "${test}" -- --ignored --exact --nocapture > >(tee -a "${phase_log}") 2>&1
+  code=$?; wait || :
   set -e
   if [[ "${code}" != 0 ]] || ! grep -Fq "test ${test} ... ok" "${phase_log}" || ! grep -Fq '1 passed; 0 failed' "${phase_log}"; then code=1; else code=0; fi
   return "${code}"
 }
 core_env() {
   aws_credentials || return
-  export OBJECT_LOG_MINIO_ENDPOINT="${GIT_QUALIFICATION_S3_ENDPOINT}"
-  export OBJECT_LOG_MINIO_ACCESS_KEY="${AWS_ACCESS_KEY_ID}"
-  export OBJECT_LOG_MINIO_SECRET_KEY="${AWS_SECRET_ACCESS_KEY}"
-  export OBJECT_LOG_MINIO_SESSION_TOKEN="${AWS_SESSION_TOKEN}"
-  export OBJECT_LOG_MINIO_BUCKET="${GIT_QUALIFICATION_BUCKET}"
-  export OBJECT_LOG_MINIO_REGION="${GIT_QUALIFICATION_REGION}"
-  export OBJECT_LOG_MINIO_PREFIX="${GIT_QUALIFICATION_PREFIX}/core"
+  export OBJECT_LOG_MINIO_ENDPOINT="${GIT_QUALIFICATION_S3_ENDPOINT}" OBJECT_LOG_MINIO_BUCKET="${GIT_QUALIFICATION_BUCKET}" OBJECT_LOG_MINIO_REGION="${GIT_QUALIFICATION_REGION}" OBJECT_LOG_MINIO_PREFIX="${GIT_QUALIFICATION_PREFIX}/core"
+  export OBJECT_LOG_MINIO_ACCESS_KEY="${AWS_ACCESS_KEY_ID}" OBJECT_LOG_MINIO_SECRET_KEY="${AWS_SECRET_ACCESS_KEY}" OBJECT_LOG_MINIO_SESSION_TOKEN="${AWS_SESSION_TOKEN}"
 }
 backend() { core_env || return; rust_test store_conformance minio_backend_conformance || return; }
 protocol() {
@@ -212,17 +207,16 @@ go_tests() {
   local pattern="$1" code expected remaining; shift
   remaining=$((GIT_QUALIFICATION_TIME_LIMIT_SECONDS - ($(date +%s) - $(value epoch))))
   set +e
-  (cd "${root}/examples/git" && deadline go test -race -artifacts -count=1 -parallel=4 -timeout="${remaining}s" -run "${pattern}" -v ./tests) 2>&1 | tee -a "${phase_log}"
-  code=${PIPESTATUS[0]}
+  deadline go -C "${root}/examples/git" test -race -artifacts -count=1 -parallel=4 -timeout="${remaining}s" -run "${pattern}" -v ./tests > >(tee -a "${phase_log}") 2>&1
+  code=$?; wait || :
   set -e
   if [[ "${code}" != 0 ]] || grep -Fq -- '--- SKIP:' "${phase_log}"; then return 1; fi
   for expected in "$@"; do grep -Fq -- "--- PASS: ${expected} " "${phase_log}" || return 1; done
 }
 prefix_has_objects() {
   aws_credentials || return
-  local count
-  count="$(aws_s3api list-objects-v2 --bucket "${GIT_QUALIFICATION_BUCKET}" --prefix "${GIT_QUALIFICATION_PREFIX}/$1/" --max-items 1 --query "${contents_query}" --output text)" || return
-  [[ "${count}" == 1 ]] || fail "Git profile wrote no objects under ${GIT_QUALIFICATION_PREFIX}/$1/"
+  exists "${contents_query}" list-objects-v2 --bucket "${GIT_QUALIFICATION_BUCKET}" --prefix "${GIT_QUALIFICATION_PREFIX}/$1/" || return
+  [[ "${exists_result}" == 1 ]] || fail "Git profile wrote no objects under ${GIT_QUALIFICATION_PREFIX}/$1/"
 }
 git_target() { GIT_PROBE_TARGET_ID="$(target_id "$1")" || return; export GIT_PROBE_TARGET_ID; }
 standard() {
@@ -259,7 +253,6 @@ performance() {
   export GIT_LARGE_OBJECT_MIB=513 GIT_CONCURRENT_LARGE=1
   go_tests '^TestLargeBlob$' TestLargeBlob || return
 }
-
 case "${phase}" in
   status) [[ -f "${state}" ]] || fail "campaign state does not exist"; cat "${state}" ;;
   start)
@@ -270,20 +263,21 @@ case "${phase}" in
     mkdir -p "${state_dir}"; [[ ! -e "${state}" ]] || fail "campaign ID already exists"
     day="$(TZ=America/Vancouver date +%F)"
     (( credential_expiry_epoch > $(date +%s) + GIT_QUALIFICATION_TIME_LIMIT_SECONDS )) || fail "temporary credentials expire before the time limit"
-    if grep -lEq '^result=(active|running)$' "${state_dir}"/*.state 2>/dev/null; then fail "another campaign still requires teardown"; fi
+    if grep -lEq '^result=(active|running|failed|failed-cleaned)$' "${state_dir}"/*.state 2>/dev/null; then fail "another campaign requires teardown or owner review"; fi
     mkdir "${state_dir}/day-${day}" 2>/dev/null || fail "one campaign already started today"
     running_phase=start; save start running "${day}" "$(date +%s)" ""
     phase_log="${state_dir}/${id}-start.log"; : >"${phase_log}"; chmod 600 "${phase_log}"; record_status start running
     deadline sh -c 'git --version; cargo --version; go version; aws --version; perl -e '\''printf "perl v%vd\n", $^V'\''; spin --version 2>/dev/null || echo "spin unavailable"' >>"${phase_log}" 2>&1
-    actual_version="$(aws_s3api get-bucket-versioning --bucket "${GIT_QUALIFICATION_BUCKET}" --query Status --output text)"
+    aws_s3api get-bucket-versioning --bucket "${GIT_QUALIFICATION_BUCKET}" --query Status --output text; actual_version="${aws_output}"
     [[ "${actual_version}" == None ]] || fail "use a dedicated bucket with versioning disabled"
-    actual_encryption="$(aws_s3api get-bucket-encryption --bucket "${GIT_QUALIFICATION_BUCKET}" --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' --output text)"
+    aws_s3api get-bucket-encryption --bucket "${GIT_QUALIFICATION_BUCKET}" --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' --output text; actual_encryption="${aws_output}"
     [[ "${actual_encryption}" == "${GIT_QUALIFICATION_ENCRYPTION}" ]] || fail "bucket encryption differs from plan"
-    if lifecycle="$(aws_s3api get-bucket-lifecycle-configuration --bucket "${GIT_QUALIFICATION_BUCKET}" 2>&1)"; then
+    if aws_s3api get-bucket-lifecycle-configuration --bucket "${GIT_QUALIFICATION_BUCKET}"; then
       fail "use a dedicated bucket without lifecycle rules"
     fi
+    lifecycle="${aws_output}"
     [[ "${lifecycle}" == *NoSuchLifecycleConfiguration* ]] || fail "could not verify bucket lifecycle settings"
-    read -r current versions markers <<<"$(counts)"
+    counts
     [[ "${current}" == 0 && "${versions}" == 0 && "${markers}" == 0 ]] || fail "prefix is not empty"
     advance start
     printf 'campaign=%s revision=%s region=%s bucket=%s prefix=%s\n' "${id}" "${GIT_QUALIFICATION_REVISION}" "${GIT_QUALIFICATION_REGION}" "${GIT_QUALIFICATION_BUCKET}" "${GIT_QUALIFICATION_PREFIX}" | tee -a "${phase_log}"
@@ -303,12 +297,12 @@ case "${phase}" in
     case "$(value result)" in active|running|failed) ;; *) fail "campaign is already closed" ;; esac
     saved_revision="$(value revision)"; saved_region="$(value region)"; saved_endpoint="$(value endpoint)"; saved_bucket="$(value bucket)"; saved_prefix="$(value prefix)"; saved_scope="$(value scope)"
     [[ "${plan_digest}" == "$(value plan)" && "${GIT_QUALIFICATION_REVISION}" == "${saved_revision}" && "${GIT_QUALIFICATION_REGION}" == "${saved_region}" && "${GIT_QUALIFICATION_S3_ENDPOINT}" == "${saved_endpoint}" && "${GIT_QUALIFICATION_BUCKET}" == "${saved_bucket}" && "${GIT_QUALIFICATION_PREFIX}" == "${saved_prefix}" && "${scope}" == "${saved_scope}" ]] || fail "plan differs from the saved teardown target"
-    running_phase=teardown; phase_log="${state_dir}/${id}-teardown.log"; : >"${phase_log}"; chmod 600 "${phase_log}"; record_status teardown running
+    running_phase=teardown; command_deadline_epoch="${credential_expiry_epoch}"; phase_log="${state_dir}/${id}-teardown.log"; : >"${phase_log}"; chmod 600 "${phase_log}"; record_status teardown running
     aws_credentials
     if [[ "$(value phase)" != start || "$(value result)" == active ]]; then
-      aws --region "${saved_region}" --endpoint-url "${saved_endpoint}" s3 rm "s3://${saved_bucket}/${saved_prefix}/" --recursive
+      deadline aws --region "${saved_region}" --endpoint-url "${saved_endpoint}" s3 rm "s3://${saved_bucket}/${saved_prefix}/" --recursive
     fi
-    read -r current versions markers <<<"$(counts "${saved_bucket}" "${saved_prefix}" "${saved_region}" "${saved_endpoint}")"
+    counts "${saved_bucket}" "${saved_prefix}" "${saved_region}" "${saved_endpoint}"
     [[ "${current}" == 0 && "${versions}" == 0 && "${markers}" == 0 ]] || fail "teardown left current=${current} versions=${versions} markers=${markers}"
     result=failed-cleaned
     if [[ "$(value result)" == active && "$(value phase)" == performance ]]; then result=complete; fi
@@ -316,5 +310,11 @@ case "${phase}" in
     if [[ "${scope}" == live-s3-only && "${result}" == complete ]]; then result=complete-live-s3; fi
     save complete "${result}" "$(value date)" "$(value epoch)" "$(value service)"; record_status teardown "${result}"; rm -f "${state_dir}/${id}-drill.json"
     echo "teardown residual current=0 versions=0 markers=0" | tee -a "${phase_log}"
+    ;;
+  review)
+    [[ -f "${state}" && "$(value result)" == failed-cleaned ]] || fail "review requires a cleaned failed campaign"
+    [[ "$(value plan)" == "${plan_digest}" ]] || fail "qualification plan changed"
+    save review failed-reviewed "$(value date)" "$(value epoch)" "$(value service)"
+    echo "owner review recorded for ${id}"
     ;;
 esac

@@ -230,8 +230,11 @@ manual phase stop using the declared counter source; no counter API is wired,
 so the runner cannot enforce those two ceilings. The repeated-history test reports p50/p95/p99 client
 latency and durable push throughput. A loopback Git URL qualifies live S3
 behavior; only a deployed HTTPS URL adds inbound TLS, authentication and host
-admission evidence. After a failed phase, run teardown and do not start another
-campaign until the owner has reviewed it.
+admission evidence. Teardown has its own deadline at credential expiry, so it
+remains available after the campaign deadline. After a failed phase, inspect
+the phase log, run `teardown`, and have the owner run `review`; that persists a
+`failed-reviewed` state. A later campaign cannot start while a failed campaign
+still needs teardown or this explicit review.
 
 ## Cleanup and limits
 
