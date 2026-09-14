@@ -43,6 +43,7 @@ func TestConfiguredLimits(t *testing.T) {
 				req.Header.Set("Git-Protocol", "version=2")
 				req.Header.Set("Content-Encoding", "gzip")
 				req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+				authenticateProbeRequest(req)
 				if chunked {
 					req.ContentLength = -1
 				}
@@ -74,6 +75,7 @@ func TestConfiguredLimits(t *testing.T) {
 				t.Fatal(err)
 			}
 			req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+			authenticateProbeRequest(req)
 			response, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -104,5 +106,24 @@ func TestConfiguredLimits(t *testing.T) {
 				t.Fatalf("rejected object published: %s", refs)
 			}
 		})
+	}
+}
+
+func authenticateProbeRequest(request *http.Request) {
+	if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
+		request.SetBasicAuth("git", password)
+	}
+}
+
+func TestAuthenticateProbeRequest(t *testing.T) {
+	t.Setenv("GIT_PROBE_PASSWORD", "temporary-password")
+	request, err := http.NewRequest(http.MethodGet, "https://git.example.invalid", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticateProbeRequest(request)
+	username, password, ok := request.BasicAuth()
+	if !ok || username != "git" || password != "temporary-password" {
+		t.Fatalf("BasicAuth() = %q, %q, %t", username, password, ok)
 	}
 }

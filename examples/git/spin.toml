@@ -3,14 +3,19 @@ spin_manifest_version = 2
 name = "wal-git"
 version = "0.0.0"
 
+[variables]
+wal_endpoint = { default = "http://127.0.0.1:19090" }
+wal_bucket = { default = "wal-proof" }
+wal_region = { default = "us-east-1" }
+
 [[trigger.http]]
 route = "/..."
 component = "git"
 
 [component.git]
 source = "git.wasm"
-allowed_outbound_hosts = ["http://127.0.0.1:19090"]
+allowed_outbound_hosts = ["{{ wal_endpoint }}"]
 [component.git.environment]
-WAL_ENDPOINT = "http://127.0.0.1:19090"
-WAL_BUCKET = "wal-proof"
-WAL_REGION = "us-east-1"
+WAL_ENDPOINT = "{{ wal_endpoint }}"
+WAL_BUCKET = "{{ wal_bucket }}"
+WAL_REGION = "{{ wal_region }}"

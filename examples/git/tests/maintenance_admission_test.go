@@ -60,6 +60,7 @@ func TestRepeatedPushes(t *testing.T) {
 				t.Run("writer", func(t *testing.T) {
 					t.Parallel()
 					defer close(done)
+					started := time.Now()
 					samples := make([]time.Duration, 0, 256)
 					for i := 0; i < 1025; i++ {
 						write(t, filepath.Join(source, "value"), []byte(fmt.Sprint(i)))
@@ -88,6 +89,8 @@ func TestRepeatedPushes(t *testing.T) {
 							samples = samples[:0]
 						}
 					}
+					elapsed := time.Since(started)
+					t.Logf("durable pushes: n=1025 elapsed=%s throughput=%.2f pushes/s", elapsed, 1025/elapsed.Seconds())
 				})
 				t.Run("reader", func(t *testing.T) {
 					t.Parallel()

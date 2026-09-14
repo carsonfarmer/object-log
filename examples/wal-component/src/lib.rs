@@ -19,6 +19,37 @@ struct CandidateState {
     prepared: object_log::PreparedCommit,
 }
 
+fn s3_builder(
+    settings: &Config,
+    transport: transport::Transport,
+) -> object_store::aws::AmazonS3Builder {
+    let mut builder = object_store::aws::AmazonS3Builder::new()
+        .with_endpoint(settings.endpoint.as_str())
+        .with_bucket_name(settings.bucket.as_str())
+        .with_region(settings.region.as_str())
+        .with_access_key_id(settings.access_key.as_str())
+        .with_secret_access_key(settings.secret_key.as_str())
+        .with_virtual_hosted_style_request(false)
+        .with_disable_bulk_delete(false)
+        .with_client_options(
+            object_store::ClientOptions::new()
+                .with_allow_http(settings.endpoint.starts_with("http://"))
+                .with_timeout_disabled()
+                .with_connect_timeout(std::time::Duration::from_secs(5))
+                .with_read_timeout(std::time::Duration::from_secs(30)),
+        )
+        .with_http_connector(transport)
+        .with_crypto_provider(Arc::new(transport::Crypto))
+        .with_retry(object_store::RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        });
+    if let Some(token) = settings.session_token.as_deref() {
+        builder = builder.with_token(token);
+    }
+    builder
+}
+
 fn failure(error: object_log::Error) -> Failure {
     match error {
         object_log::Error::ViewExpired => Failure::Expired,
@@ -191,27 +222,7 @@ impl Guest for Component {
     fn open(settings: Config) -> Result<Session, Failure> {
         spin_executor::run(async {
             let transport = transport::Transport::default();
-            let store = object_store::aws::AmazonS3Builder::new()
-                .with_endpoint(&settings.endpoint)
-                .with_bucket_name(settings.bucket)
-                .with_region(settings.region)
-                .with_access_key_id(settings.access_key)
-                .with_secret_access_key(settings.secret_key)
-                .with_virtual_hosted_style_request(false)
-                .with_disable_bulk_delete(false)
-                .with_client_options(
-                    object_store::ClientOptions::new()
-                        .with_allow_http(settings.endpoint.starts_with("http://"))
-                        .with_timeout_disabled()
-                        .with_connect_timeout(std::time::Duration::from_secs(5))
-                        .with_read_timeout(std::time::Duration::from_secs(30)),
-                )
-                .with_http_connector(transport.clone())
-                .with_crypto_provider(Arc::new(transport::Crypto))
-                .with_retry(object_store::RetryConfig {
-                    max_retries: 0,
-                    ..Default::default()
-                })
+            let store = s3_builder(&settings, transport.clone())
                 .build()
                 .map_err(|error| Failure::Other(error.to_string()))?;
             let backend = object_log::ValidatedBackend::new(
@@ -237,6 +248,43 @@ impl Guest for Component {
                 transport,
             }))
         })
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use object_store::aws::AmazonS3ConfigKey;
+
+    fn settings(session_token: Option<&str>) -> Config {
+        Config {
+            endpoint: "https://s3.us-west-2.amazonaws.com".into(),
+            bucket: "qualification".into(),
+            region: "us-west-2".into(),
+            access_key: "temporary-access-key".into(),
+            secret_key: "temporary-secret-key".into(),
+            session_token: session_token.map(str::to_owned),
+            prefix: "isolated-prefix".into(),
+            log_id: "repo-sha1".into(),
+        }
+    }
+
+    #[test]
+    fn supplies_temporary_credential_token_to_s3_signing() {
+        let builder = s3_builder(
+            &settings(Some("temporary-session-token")),
+            transport::Transport::default(),
+        );
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::Token),
+            Some("temporary-session-token".into())
+        );
+    }
+
+    #[test]
+    fn leaves_session_token_unset_for_long_lived_credentials() {
+        let builder = s3_builder(&settings(None), transport::Transport::default());
+        assert_eq!(builder.get_config_value(&AmazonS3ConfigKey::Token), None);
     }
 }
 export!(Component);

@@ -7,6 +7,7 @@ interface wal {
         region: string,
         access-key: string,
         secret-key: string,
+        session-token: option<string>,
         prefix: string,
         log-id: string,
     }

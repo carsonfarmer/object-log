@@ -43,8 +43,11 @@ spin up --listen 127.0.0.1:19100 \
   --env WAL_ACCESS_KEY=objectlog --env WAL_SECRET_KEY=local-test-secret
 ```
 
-Repositories are `/sha1.git` and `/sha256.git`. `spin.toml` contains the local S3
-endpoint, bucket and region; edit its outbound host when changing the endpoint.
+Repositories are `/sha1.git` and `/sha256.git`. The manifest defaults to the
+local endpoint, bucket and region. Override all three together with
+`--variable wal_endpoint=...`, `--variable wal_bucket=...`, and
+`--variable wal_region=...`; the endpoint also narrows the outbound allowlist.
+Temporary AWS credentials additionally use `--env WAL_SESSION_TOKEN=...`.
 Use `--env GIT_PASSWORD=...` for HTTP Basic authentication (any username),
 `--env GIT_READ_ONLY=true` to reject pushes and maintenance, and
 `--env WAL_DEFAULT_BRANCH=...` for a new repository's persisted default branch.
@@ -150,6 +153,62 @@ To check small limits, start a fresh-prefix host with push=131072,
 negotiation=4096 and object=65536, then run
 `GIT_PROBE_LIMITS=1 GIT_PROBE_URL=http://127.0.0.1:19100 go test ./tests -run TestConfiguredLimits`
 from this directory. The ordinary suite uses the defaults.
+
+## Live S3 qualification
+
+`make git-remote-rehearse` prints the complete offline sequence. For a live
+campaign, copy `remote-qualification.env.example` outside the repository, fill
+in its non-secret record, source it, and export fresh `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `GIT_PROBE_PASSWORD` values.
+Use the recorded least-privilege STS role. The runner requires a dedicated
+bucket with versioning disabled, no lifecycle rules, reviewed default
+encryption, and an empty campaign prefix. Its policy needs bucket configuration
+reads and list/list-versions on that prefix, plus get, put and delete object
+access beneath the prefix; it must not grant access to production data.
+
+Run `make git-remote-qualification REMOTE_QUALIFICATION_PHASE=...` with these
+phases in order: `start`, `backend`, `protocol`, `standard`, `recovery`,
+`read-only`, `limits`, `performance`, and `teardown`. Restart the unchanged
+standard profile before `recovery`; redeploy the read-only and limits profiles
+before their phases; then restore standard before performance.
+
+Standard, recovery, read-only and performance use
+`WAL_PREFIX=$GIT_QUALIFICATION_PREFIX/git`; limits uses the fresh
+`$GIT_QUALIFICATION_PREFIX/git-limits` prefix. Every profile sets the recorded
+endpoint, bucket and region, all three temporary credential values, and
+`GIT_PASSWORD`. Read-only additionally sets `GIT_READ_ONLY=true`. Limits sets
+`GIT_MAX_PUSH_BYTES=131072`, `GIT_MAX_NEGOTIATION_BYTES=4096`, and
+`GIT_MAX_OBJECT_BYTES=65536`. Keep `WAL_DEFAULT_BRANCH` equal to
+`GIT_PROBE_BRANCH` across the standard restart.
+
+For local Spin connected to live S3, the standard profile is:
+
+```sh
+spin up --listen 127.0.0.1:19100 \
+  --variable wal_endpoint="$GIT_QUALIFICATION_S3_ENDPOINT" \
+  --variable wal_bucket="$GIT_QUALIFICATION_BUCKET" \
+  --variable wal_region="$GIT_QUALIFICATION_REGION" \
+  --env WAL_PREFIX="$GIT_QUALIFICATION_PREFIX/git" \
+  --env WAL_ACCESS_KEY="$AWS_ACCESS_KEY_ID" \
+  --env WAL_SECRET_KEY="$AWS_SECRET_ACCESS_KEY" \
+  --env WAL_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+  --env WAL_DEFAULT_BRANCH="$GIT_PROBE_BRANCH" \
+  --env GIT_PASSWORD="$GIT_PROBE_PASSWORD"
+```
+
+The read-only profile adds `--env GIT_READ_ONLY=true`. The limits profile uses
+the `git-limits` prefix and adds the three limit values above. Apply those same
+component variables and environment values in a deployed host.
+
+The runner enforces the 08:00–20:00 Pacific window, one campaign per day,
+ordered tests, failure lockout, and exact-prefix teardown with a zero residual
+check. Capture provider billing totals and Spin's `wal ... calls=N bytes=N`
+lines using the declared counter source, and stop before the recorded request,
+cost or time ceiling. The repeated-history test reports p50/p95/p99 client
+latency and durable push throughput. A loopback Git URL qualifies live S3
+behavior; only a deployed HTTPS URL adds inbound TLS, authentication and host
+admission evidence. After a failed phase, run teardown and do not start another
+campaign until the owner has reviewed it.
 
 ## Cleanup and limits
 

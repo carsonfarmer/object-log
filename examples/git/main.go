@@ -98,7 +98,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
-	session, e := unwrap(wal.Open(wal.Config{Endpoint: os.Getenv("WAL_ENDPOINT"), Bucket: os.Getenv("WAL_BUCKET"), Region: os.Getenv("WAL_REGION"), AccessKey: os.Getenv("WAL_ACCESS_KEY"), SecretKey: os.Getenv("WAL_SECRET_KEY"), Prefix: os.Getenv("WAL_PREFIX"), LogId: "repo-" + format.String()}))
+	session, e := unwrap(wal.Open(wal.Config{Endpoint: os.Getenv("WAL_ENDPOINT"), Bucket: os.Getenv("WAL_BUCKET"), Region: os.Getenv("WAL_REGION"), AccessKey: os.Getenv("WAL_ACCESS_KEY"), SecretKey: os.Getenv("WAL_SECRET_KEY"), SessionToken: sessionToken(os.Getenv), Prefix: os.Getenv("WAL_PREFIX"), LogId: "repo-" + format.String()}))
 	if e != nil {
 		http.Error(response, e.Error(), operationStatus(e))
 		return

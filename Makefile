@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-check git-build git-provider-test
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-check git-build git-provider-test git-remote-rehearse git-remote-qualification
 
 check:
 	cargo fmt --all --check
@@ -31,7 +31,7 @@ gc-acceptance:
 
 GIT_EXAMPLE_DIR = examples/git
 WAL_COMPONENT = examples/wal-component/Cargo.toml
-GIT_TEST_FILES = import_pack.go import_pack_test.go import_pack_lifecycle_test.go limits.go limits_test.go index.go index_test.go prune_index.go prune_index_test.go codec.go codec_test.go read_retry.go read_retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go
+GIT_TEST_FILES = credentials.go credentials_test.go import_pack.go import_pack_test.go import_pack_lifecycle_test.go limits.go limits_test.go index.go index_test.go prune_index.go prune_index_test.go codec.go codec_test.go read_retry.go read_retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go
 
 git-check:
 	test -z "$$(gofmt -l $(GIT_EXAMPLE_DIR)/*.go $(GIT_EXAMPLE_DIR)/tests/*.go)"
@@ -53,3 +53,10 @@ git-build:
 git-provider-test:
 	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to your local Spin/MinIO service"; exit 1)
 	cd $(GIT_EXAMPLE_DIR) && go test ./tests -v -timeout 15m
+
+git-remote-rehearse:
+	./scripts/qualify-git-remote.sh rehearse
+
+REMOTE_QUALIFICATION_PHASE ?= status
+git-remote-qualification:
+	./scripts/qualify-git-remote.sh $(REMOTE_QUALIFICATION_PHASE)
