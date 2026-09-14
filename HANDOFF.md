@@ -19,9 +19,11 @@ partial filters and packfile URIs are deferred.
 
 The WAL owns authenticated chunking and sparse byte reads. Git stores small
 compressed objects in catalog leaves and streams larger objects. Incoming delta
-bases/results stream through go-git; outgoing packs use full objects because its
-delta selector does not bound bytes. Automatic checkpoint/cleanup runs at 64 tail
-entries. Collection retains the existing fencing and uncertain-outcome protocol.
+bases/results stream through go-git. Outgoing delta selection admits only blob
+and tree objects of at most 1 MiB, up to 16 MiB of candidate source bytes per
+request, with window 2; all other objects remain lazy full-object streams. Automatic
+checkpoint/cleanup runs at 64 tail entries. Collection retains the existing
+fencing and uncertain-outcome protocol.
 
 Request limits cover input bytes, object and metadata sizes, pack entry counts,
 catalog decoding and cooperative deadlines. They are not a process-memory limit.
@@ -33,10 +35,10 @@ a rejected replay preserves the first uncertain outcome. Git pushes never replay
 ## Dependencies and operation
 
 Use ordinary Spin and unmodified local MinIO. No instance, pooling or memory
-wrapper. go-git is pinned to our fork at `a37a9c5b`. It contains the streamed
+wrapper. go-git is pinned to our fork at `5052e672`. It contains the streamed
 parser work in [go-git PR #2379](https://github.com/go-git/go-git/pull/2379)
-plus small receive-pack, empty SHA-256 advertisement and deterministic first-ref
-fixes retained only on our fork pending owner review.
+plus small receive-pack, empty SHA-256 advertisement, deterministic first-ref
+and upload-pack selector fixes retained only on our fork pending owner review.
 The adapter builds directly from our reviewed Wasmtime commit
 `c8e24c308754f784fbb4a08205a2a9c08c461d00` (upstream #14319), with an archive
 checksum; the redundant local patch is removed. componentize-go remains upstream

@@ -158,6 +158,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			}
 			b := backend.New(loader{s})
 			b.ErrorLog = log.Default()
+			b.UploadPackObjectSelectorFactory = outgoingObjectSelectorFactory(limits)
 			b.ServeHTTP(attempt, request)
 			return s.failure
 		})

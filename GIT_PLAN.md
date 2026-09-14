@@ -56,8 +56,10 @@ Incoming delta bases and results stream through go-git's parser and decoder into
 WAL byte streams. go-git checks pack framing, lengths and checksums; the importer
 coordinates dependency resolution and publication.
 Pack metadata remains proportional to object count; backward copies may reread bases.
-Outgoing packs stream full objects without creating deltas, so transfer sizes
-can exceed a delta-compressed server's. There is no fixed process-memory promise.
+Outgoing packs generate deltas only among blob and tree objects of at most 1 MiB,
+with at most 16 MiB of candidate source bytes per request and a window of 2.
+Other objects remain lazy full-object streams. go-git may reread candidates and
+allocate indexes and delta output, so this is not a total process-memory bound.
 The generic WAL's configured object, reference and tail limits still apply.
 The Git example also bounds request bytes, pack entry counts, structured-object
 sizes and cumulative catalog decoding, with cooperative cancellation before
