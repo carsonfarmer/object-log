@@ -4,9 +4,10 @@ A Go Git service backed by the existing Rust WAL. go-git handles Git protocols,
 formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
-Local Spin/MinIO qualification passes. Remote provider and deployment testing
-remain before a production rollout. Development pins our go-git fork at
-`a37a9c5b` through `go.mod`. Its v6 APIs provide both hashes, protocol-v2 serving,
+Local Spin/MinIO and loopback-Spin/live AWS S3 qualification pass. Deployed HTTPS
+remains a hosting qualification before public rollout. Development pins our
+go-git fork at `a37a9c5b` through `go.mod`. Its v6 APIs provide both hashes,
+protocol-v2 serving,
 shallow history and streamed object writes. The streaming work is represented
 by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); additional
 small server fixes remain only on our fork pending owner review. Partial-clone filters
@@ -191,8 +192,9 @@ campaign, copy `remote-qualification.env.example` outside the repository, fill
 in its non-secret record, source it, and export fresh `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `GIT_PROBE_PASSWORD` values.
 The reusable [AWS qualification setup](qualification/aws) provisions the
-dedicated bucket and least-privilege identity and issues a four-hour temporary
-session without placing credential values in Terraform state. The runner
+dedicated bucket and least-privilege identity and issues temporary credentials
+with a four-hour expiry ceiling. Their values do not enter Terraform state. The
+runner
 requires a dedicated bucket with versioning disabled, no lifecycle rules,
 reviewed default encryption, and an empty campaign prefix. Its policy needs
 bucket configuration reads and list/list-versions on that prefix, plus get, put
@@ -239,6 +241,7 @@ git_max_metadata_bytes = "16777216"
 git_max_pack_objects = "1000000"
 git_max_catalog_bytes = "67108864"
 git_request_timeout = "5m"
+wal_max_collection_objects = "100000"
 ```
 
 For local Spin connected to live S3, pass only that protected path:
@@ -252,9 +255,9 @@ profile sets `git_read_only = "true"`. The limits profile uses the `git-limits`
 prefix and sets push=131072, negotiation=4096, and object=65536. Apply the same
 variables through the deployment host's secret/config facility.
 
-The runner enforces credential and campaign deadlines, one campaign per Pacific
-date, ordered tests, failure lockout, exact-prefix teardown, and a zero residual
-check. Live phases must finish on their Pacific start date. It writes one
+The runner enforces credential expiry and a three-hour campaign safety ceiling,
+ordered tests, failure lockout, exact-prefix teardown, and a zero residual check.
+Tests start immediately; there is no soak or scheduled run window. It writes one
 concise log per phase in the protected state directory, including the frozen
 plan digest, timestamps, status, and start-time tool versions. Review request
 counts and provider cost at each manual phase stop using the declared counter
@@ -262,8 +265,8 @@ source; no counter API is wired, so the runner cannot enforce those two
 ceilings. The repeated-history test reports p50/p95/p99 client latency and
 durable push throughput. A loopback Git URL qualifies live S3
 behavior; only a deployed HTTPS URL adds inbound TLS, authentication and host
-admission evidence. Teardown has its own deadline at credential expiry, so it
-remains available after the campaign deadline. After a failed phase, inspect
+admission evidence. Teardown remains available until credential expiry. After a
+failed phase, inspect
 the phase log, run `teardown`, and have the owner run `review`; that persists a
 `failed-reviewed` state. A later campaign cannot start while a failed campaign
 still needs teardown or this explicit review.
@@ -291,8 +294,9 @@ the encoding of required objects rather than fetch correctness. Clones and fetch
 can be slower and incur more network-egress cost, and bandwidth limits can reduce
 concurrent throughput. Repositories with many similar revisions of large files are
 most affected; already-compressed or substantially different files may see little
-change. Remote qualification must measure response-pack bytes, latency and throughput
-on representative histories. This does not establish a fixed process-memory ceiling.
+change. The completed live S3 qualification measured response behavior, latency
+and throughput on its representative histories. This does not establish a fixed
+process-memory ceiling or predict every repository's egress.
 Ordinary large-file lifecycles
 have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.
 Both hashes pass shallow clone, deepen, unshallow, annotated tags and 1,025
@@ -317,3 +321,19 @@ There is no local patch file; Spin and Go remain unchanged. Return to a standard
 adapter once it passes the retained regression and frequent-GC tests.
 `GODEBUG=gctrace=1` can itself call the host during canonical allocation; sample
 host RSS instead. No Spin pooling or memory-limit wrapper is used.
+
+## Completed live S3 run
+
+Campaign `2026-09-15-aws-us-west-2-b` qualified revision `de87149` against AWS
+S3 in `us-west-2` using ordinary Spin on loopback. Both hashes passed the full
+ordered suite, including restart recovery, read-only and small-limit profiles,
+collection-capacity admission, a cold sparse-catalog update, 1,025 pushes with
+concurrent fetch/integrity checks, and concurrent 513 MiB lifecycles.
+
+The service logged 8,182 Git requests, 536,268 admitted storage calls and 12.86
+GiB transferred through the WAL boundary. The final repeated-push window ran at
+0.35 durable pushes/s for each hash; concurrent-fetch p95 was 5.78s for SHA-1
+and 5.79s for SHA-256. The exact prefix was removed with zero current objects,
+versions or delete markers, then Terraform destroyed the dedicated bucket and
+IAM user. These results qualify the Git/WAL path against live S3. A public host
+still needs its own HTTPS, authentication, routing and host-wide admission tests.

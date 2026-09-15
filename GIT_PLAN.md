@@ -17,11 +17,11 @@ unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
 - Shallow clone, deepen and unshallow, checked with ordinary Git clients.
 
 The custom Rust Git engine and its native maintenance command are retired.
-Installed Git remains the independent test oracle. Local provider and workspace
-qualification passes. A failure in the endurance test was traced to installed
-Git 2.54 background maintenance; deterministic native tests reproduce it, and
-the client test keeps maintenance synchronous. Remote provider and deployment
-qualification remain before production rollout.
+Installed Git remains the independent test oracle. Local provider, workspace and
+loopback-Spin/live AWS S3 qualification pass. A failure in the endurance test was
+traced to installed Git 2.54 background maintenance; deterministic native tests
+reproduce it, and the client test keeps maintenance synchronous. Deployed HTTPS
+remains a hosting qualification before public rollout.
 Advanced partial filters and packfile URIs are not required for acceptance;
 add them only when useful and supported without bespoke protocol machinery.
 
@@ -59,9 +59,10 @@ Pack metadata remains proportional to object count; backward copies may reread b
 Outgoing packs stream full objects without creating deltas, so transfer sizes
 can exceed a delta-compressed server's. Have-aware negotiation still omits objects
 the client already has, but missing objects can take more time and network egress to
-deliver, especially when large files have many similar revisions. Remote qualification
-must measure pack bytes, latency and throughput for representative histories. There is
-no fixed process-memory promise.
+deliver, especially when large files have many similar revisions. The live S3
+campaign measured mixed histories and concurrent 513 MiB lifecycles; deployments
+must still measure egress for their own repository mix. There is no fixed
+process-memory promise.
 The generic WAL's configured object, reference and tail limits still apply.
 The Git example also bounds request bytes, pack entry counts, structured-object
 sizes and cumulative catalog decoding, with cooperative cancellation before

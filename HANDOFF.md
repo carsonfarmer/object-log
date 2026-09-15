@@ -7,8 +7,7 @@ mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 The accepted implementation is `examples/git` (go-git consumer) and
 `examples/wal-component` (Rust WAL bridge). The custom Rust Git engine and native
 maintenance service are removed. Installed Git remains the independent oracle.
-KV, SQLite and the Go WAL experiment are deferred. Do not resume them. Live AWS
-qualification is owner-authorized and tracked by issue #10.
+KV, SQLite and the Go WAL experiment are deferred. Do not resume them.
 
 ## Current behavior
 
@@ -27,9 +26,9 @@ Full-object outgoing packs do not change Git correctness or negotiation: have-aw
 fetch still omits objects the client already has. They can make clones and fetches
 larger and slower, increase network-egress cost, and reduce concurrency when network
 bandwidth is the bottleneck. Repositories with many similar revisions of large files
-are most affected. They avoid the memory and CPU cost of generating deltas. Remote
-qualification must record response-pack bytes, latency and throughput for realistic
-histories before production rollout.
+are most affected. They avoid the memory and CPU cost of generating deltas. The
+live S3 qualification exercised long mixed histories and 513 MiB lifecycles; a
+deployed service should still measure network egress for its own repositories.
 
 Request limits cover input bytes, object and metadata sizes, pack entry counts,
 catalog decoding and cooperative deadlines. They are not a process-memory limit.
@@ -75,12 +74,19 @@ the current upstream source still has both paths. The endurance test sets
 `maintenance.autoDetach=false`, preserving normal maintenance while avoiding
 that client-side race. No Git patch has been submitted upstream.
 Failure artifacts remain available with `go test -artifacts`.
-A focused live AWS S3 failure/restart drill passed for both hashes and removed
-its exact prefix afterward. The reusable Terraform and temporary-credential
-workflow is in `examples/git/qualification/aws`; managed state, plans and
-credentials stay outside the repository. The complete live phase sequence,
-deployed HTTPS, aggregate admission and operational recovery remain under issue
-#10.
+The full live AWS S3 campaign passed at `de87149` in `us-west-2`: backend and
+protocol suites, standard clients, restart recovery, read-only serving, small
+configured limits, authenticated collection capacity, cold sparse catalog
+updates, 1,025 pushes per hash with concurrent fetches, and concurrent 513 MiB
+lifecycles. The run made 8,182 Git requests and the service admitted 536,268
+storage calls carrying 12.86 GiB. Final repeated-push throughput was 0.35 pushes/s
+for each hash; concurrent-fetch p95 was 5.78s for SHA-1 and 5.79s for SHA-256.
+Teardown removed the exact prefix and verified zero current objects, versions and
+delete markers; Terraform state is empty and the dedicated bucket and IAM user no
+longer exist. The reusable Terraform and temporary-credential workflow is in
+`examples/git/qualification/aws`; managed state, plans and credentials stay
+outside the repository. Deployed HTTPS, host admission and TLS remain for the
+chosen production host rather than the WAL or Git engine.
 
 Root alone integrates main. Implement in exclusive worktrees, request independent
 correctness/simplification reviews, and run applicable gates before integration.

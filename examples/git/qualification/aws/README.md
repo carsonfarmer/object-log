@@ -9,8 +9,10 @@ that prefix.
 The administrator profile used for this campaign is an IAM Identity Center
 role session. AWS caps a role assumed from that session at one hour because it
 is [role chaining](https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_roles.html#troubleshoot_roles_cant-assume-role).
-For the four-hour qualification session, `issue-session.sh` briefly creates an
-IAM user access key, calls
+`issue-session.sh` creates temporary credentials with a four-hour expiry ceiling.
+The qualification starts immediately and uses a three-hour safety ceiling; there
+is no four-hour run or soak period. To issue the credentials, the helper briefly
+creates an IAM user access key, calls
 [`GetSessionToken`](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetSessionToken.html),
 deletes the long-lived key, and writes the temporary credentials to a protected
 file. Terraform never receives or outputs credential values.
