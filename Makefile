@@ -35,8 +35,8 @@ GIT_TEST_FILES = credentials.go credentials_test.go target_id.go target_id_test.
 
 git-check:
 	test -z "$$(gofmt -l $(GIT_EXAMPLE_DIR)/*.go $(GIT_EXAMPLE_DIR)/tests/*.go)"
-	cd $(GIT_EXAMPLE_DIR) && go test -race $(GIT_TEST_FILES)
 	$(MAKE) -C $(GIT_EXAMPLE_DIR) bindings
+	cd $(GIT_EXAMPLE_DIR) && go test -race $(GIT_TEST_FILES)
 	# Canonical ABI bindings use uintptr conversions; type-check the complete WASI app.
 	cd $(GIT_EXAMPLE_DIR) && GOOS=wasip1 GOARCH=wasm go vet -unsafeptr=false .
 	cd $(GIT_EXAMPLE_DIR) && go vet $(GIT_TEST_FILES) && go vet ./tests && go test ./tests

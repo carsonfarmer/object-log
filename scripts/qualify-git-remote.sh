@@ -220,8 +220,8 @@ git_target() { GIT_PROBE_TARGET_ID="$(target_id "$1")" || return; export GIT_PRO
 standard() {
   git_target git || return
   unset GIT_PROBE_READ_ONLY GIT_PROBE_LIMITS GIT_REPEATED_PUSHES GIT_LARGE_OBJECT_MIB GIT_CONCURRENT_LARGE GIT_PROBE_PERSISTED_HEAD
-  go_tests '^(TestAccess|TestLargeBlob|TestMaintenance|TestWALGit|TestManyObjects|TestShallowAndTags|TestFetchVisibility)$' \
-    TestAccess TestLargeBlob TestMaintenance TestWALGit TestManyObjects TestShallowAndTags TestFetchVisibility || return
+  go_tests '^(TestAccess|TestLargeBlob|TestMaintenance|TestWALGit|TestManyObjects|TestShallowAndTags|TestFetchVisibility|TestFetchRetentionSurvivesDestructiveCollection)$' \
+    TestAccess TestLargeBlob TestMaintenance TestWALGit TestManyObjects TestShallowAndTags TestFetchVisibility TestFetchRetentionSurvivesDestructiveCollection || return
   export GIT_FAILURE_DRILLS=prepare GIT_DRILL_STATE="${state_dir}/${id}-drill.json"
   go_tests '^TestFailureDrills$' TestFailureDrills || return
   prefix_has_objects git || return

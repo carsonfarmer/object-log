@@ -13,7 +13,7 @@ case "${0##*/}:$*" in
   git:*"rev-parse HEAD"*) echo fake-revision ;; git:*"status --porcelain"*) : ;;
   aws:*list-objects-v2*) if [ "${AWS_MODE:-}" = hang ]; then sh -c 'trap "" TERM; sleep 30' & echo $! >"${AWS_CHILD_PID_FILE}"; wait; fi; echo null ;;
   aws:*) echo null ;;
-  go:*test*) for test in TestAccess TestLargeBlob TestMaintenance TestWALGit TestManyObjects TestShallowAndTags TestFetchVisibility TestFailureDrills; do echo "--- PASS: ${test} (0.00s)"; done; echo PASS; echo ok ;;
+  go:*test*) for test in TestAccess TestLargeBlob TestMaintenance TestWALGit TestManyObjects TestShallowAndTags TestFetchVisibility TestFetchRetentionSurvivesDestructiveCollection TestFailureDrills; do echo "--- PASS: ${test} (0.00s)"; done; echo PASS; echo ok ;;
   shasum:*) cat >/dev/null; echo 'planhash  -' ;;
   *) exit 1 ;;
 esac
