@@ -108,7 +108,8 @@ provider-test instructions. Local qualification covers concurrent clients and
 cleanup, malformed inputs, resource limits and recovery after a forced restart.
 A prior endurance-test failure was traced to installed Git 2.54 background
 maintenance and reproduced without this service. The complete loopback-Spin/live
-AWS S3 qualification passed at `de87149`; deployed HTTPS remains a hosting test.
+AWS S3 qualification is being repeated for the current revision in issue #10;
+deployed HTTPS remains a hosting test.
 
 The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
 [SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md).

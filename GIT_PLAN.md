@@ -17,11 +17,12 @@ unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
 - Shallow clone, deepen and unshallow, checked with ordinary Git clients.
 
 The custom Rust Git engine and its native maintenance command are retired.
-Installed Git remains the independent test oracle. Local provider, workspace and
-loopback-Spin/live AWS S3 qualification pass. A failure in the endurance test was
-traced to installed Git 2.54 background maintenance; deterministic native tests
-reproduce it, and the client test keeps maintenance synchronous. Deployed HTTPS
-remains a hosting qualification before public rollout.
+Installed Git remains the independent test oracle. Local provider and workspace
+qualification pass. Issue #10 tracks fresh loopback-Spin/live AWS S3 qualification
+for the current revision. A failure in the endurance test was traced to installed
+Git 2.54 background maintenance; deterministic native tests reproduce it, and the
+client test keeps maintenance synchronous. Deployed HTTPS remains a hosting
+qualification before public rollout.
 Advanced partial filters and packfile URIs are not required for acceptance;
 add them only when useful and supported without bespoke protocol machinery.
 
@@ -49,10 +50,13 @@ unopened until pack generation; unreachable objects remain unavailable.
 The storage bridge can retry one identical conditional write after a connection
 failure. A rejected retry preserves the original uncertain outcome for recovery.
 
-At 64 tail entries, existing maintenance checkpoints the reachable catalog
-before admitting another push. The HTTP maintenance endpoint also prunes unreachable objects and runs
-one bounded fenced deletion batch. Repeat until complete to drain old data.
-Collection, checkpoint safety and uncertain outcomes remain core responsibilities.
+At 64 tail entries, push admission checkpoints the current authenticated catalog
+before receiving another pack. This bounds the tail without walking Git history
+or deleting objects. The HTTP maintenance endpoint prunes unreachable Git objects
+and runs one bounded fenced deletion batch. Operators run it periodically and
+after ref deletion, repeating `more` until `complete`. Retry `pending` and
+`conflict`; `retained` means an active reader blocks collection. Collection,
+checkpoint safety and uncertain outcomes remain core responsibilities.
 
 ## Limits and tradeoffs
 

@@ -4,12 +4,12 @@ A Go Git service backed by the existing Rust WAL. go-git handles Git protocols,
 formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
-Local Spin/MinIO and loopback-Spin/live AWS S3 qualification pass. Deployed HTTPS
+Local Spin/MinIO qualification passes. Issue #10 tracks fresh
+loopback-Spin/live AWS S3 qualification for the current revision. Deployed HTTPS
 remains a hosting qualification before public rollout. Development pins our
 go-git fork at `a37a9c5b` through `go.mod`. Its v6 APIs provide both hashes,
-protocol-v2 serving,
-shallow history and streamed object writes. The streaming work is represented
-by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); additional
+protocol-v2 serving, shallow history and streamed object writes. The streaming
+work is represented by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); additional
 small server fixes remain only on our fork pending owner review. Partial-clone filters
 remain deferred.
 
@@ -85,15 +85,17 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
 
 - `GIT_REPEATED_PUSHES=1`: 1,025 pushes per hash mixing text edits, sparse edits to a
   1 MiB binary, and binary additions/deletions, with concurrent fetch/integrity
-  checks, automatic cleanup, and final cold history and byte verification. Failed
-  writer clients and packet diagnostics are retained with `-artifacts`. Each
+  checks, automatic tail checkpointing, and final cold history and byte
+  verification. Failed writer clients and packet diagnostics are retained with
+  `-artifacts`. Each
   client runs its own maintenance synchronously before subsequent commands. This
   avoids an independently reproduced lock bug in installed Git 2.54 while still
   exercising client maintenance. Run with
   `go test -race -artifacts ./tests -run '^TestRepeatedPushes$' -count=1 -parallel=4 -v -timeout=20m`.
-  It reports client latency percentiles in 256-push windows, including negotiation,
-  transfer and cleanup. Use an isolated prefix and keep competing workloads off
-  the host when measuring. These timings do not include component compilation.
+  It reports client latency percentiles in 256-push windows, including
+  negotiation, transfer and tail checkpointing. Use an isolated prefix and keep
+  competing workloads off the host when measuring. These timings do not include
+  component compilation.
 - `GIT_LARGE_OBJECT_MIB=513`: larger push/clone/edit/fetch lifecycle.
 - `GIT_COLLECTION_CAPACITY=1`: against a fresh host configured with
   `wal_max_collection_objects=32`, grows each repository to its authenticated
@@ -156,13 +158,12 @@ comparisons reduced median peak worker RSS from 570 to 321 MiB with streaming.
 Time and storage traffic were similar. RSS was sampled every 100 ms, excluding
 builds and MinIO/client processes; this is a workload measurement, not a bound.
 
-Automatic checkpointing now runs after 64 tail entries. Sequential comparisons
-of 1,025 mixed-history pushes per hash, with concurrent readers, used 478,139
-storage calls and 2.17 GB versus 720,654 calls and 1.91 GB at 128 entries.
-For the same 1,027 receive requests per hash, calls averaged 80 instead of 108;
-more frequent cleanup increases transferred bytes. Reader request counts varied,
-and shared-host timings are observational. The tests check exact cold history
-and file contents, not only throughput. See issue #6 for broader benchmark work.
+Automatic checkpointing runs after 64 tail entries. It checkpoints the current
+authenticated catalog without walking Git history or deleting objects. The
+1,025-push test crosses this boundary repeatedly and checks exact cold history
+and file contents. `TestMaintenance` separately exercises Git pruning and bounded
+WAL collection on the mature repositories. See issue #6 for broader benchmark
+work.
 
 Fetch visibility checks current ref trees before older history, deduplicates
 shared work and stops when wants and relevant haves are proven. The sparse blob
@@ -210,7 +211,9 @@ and limits profiles before their phases; then restore standard before
 performance. Set `GIT_PROBE_BOOT_ID` to the active profile's `git_boot_id`.
 `TestAccess` checks the response boot ID and the service-computed fingerprint
 of the endpoint, region, bucket and exact profile prefix. Recovery requires the
-saved standard boot ID to change.
+saved standard boot ID to change. The performance phase runs `TestMaintenance`
+to completion on both mature repositories after repeated pushes and before the
+concurrent 513 MiB lifecycles.
 
 Standard, recovery, read-only and performance use
 `wal_prefix=$GIT_QUALIFICATION_PREFIX/git`; limits uses the fresh
@@ -278,13 +281,15 @@ still needs teardown or this explicit review.
 
 ## Cleanup and limits
 
-Push admission checkpoints after 64 tail entries, including safe cleanup. Send an authenticated
-`POST /sha1.git/maintenance` (or `/sha256.git/maintenance`) to prune unreachable
-objects and collect one bounded batch. Repeat `more` until `complete`; retry
-`pending` or `conflict` with a fresh request. `retained` means a WAL retention
-blocks collection. Counts are deletion candidates, not unique deleted objects.
-Maintenance still walks reachable history. Unchanged catalog nodes reuse their
-original proofs and maps; filtering copies maps only when needed.
+Push admission checkpoints the current authenticated catalog after 64 tail
+entries. This bounds the WAL tail; it does not prune Git objects or collect old
+storage. Operators must send an authenticated `POST /sha1.git/maintenance` and
+`POST /sha256.git/maintenance` periodically and after ref deletion. Each request
+prunes unreachable Git objects and collects one bounded batch. Repeat `more` until
+`complete`; retry `pending` or `conflict` with a fresh request. `retained` means a
+WAL retention blocks collection. Counts are deletion candidates, not unique
+deleted objects. Unchanged catalog nodes reuse their original proofs and maps;
+filtering copies maps only when needed.
 
 Every upload-pack request acquires WAL retention before reading its catalog and
 releases it after its last response write. If an instance ends before confirming
@@ -314,14 +319,14 @@ the encoding of required objects rather than fetch correctness. Clones and fetch
 can be slower and incur more network-egress cost, and bandwidth limits can reduce
 concurrent throughput. Repositories with many similar revisions of large files are
 most affected; already-compressed or substantially different files may see little
-change. The completed live S3 qualification measured response behavior, latency
-and throughput on its representative histories. This does not establish a fixed
-process-memory ceiling or predict every repository's egress.
+change. Live qualification records response behavior, latency and throughput on
+its representative histories. This does not establish a fixed process-memory
+ceiling or predict every repository's egress.
 Ordinary large-file lifecycles
 have passed at 16, 64 and 513 MiB for both hashes on local Spin/MinIO.
 Both hashes pass shallow clone, deepen, unshallow, annotated tags and 1,025
-consecutive pushes with automatic cleanup and cold recovery. Partial filters
-and packfile URIs are not replacement requirements.
+consecutive pushes with automatic tail checkpointing and cold recovery. Partial
+filters and packfile URIs are not replacement requirements.
 
 `go test ./tests -run TestDeltaEncoderGitCompatibility` checks go-git's full and
 delta encoders against Git; `go test ./tests -run '^$' -bench
@@ -342,18 +347,9 @@ adapter once it passes the retained regression and frequent-GC tests.
 `GODEBUG=gctrace=1` can itself call the host during canonical allocation; sample
 host RSS instead. No Spin pooling or memory-limit wrapper is used.
 
-## Completed live S3 run
+## Live S3 evidence
 
-Campaign `2026-09-15-aws-us-west-2-b` qualified revision `de87149` against AWS
-S3 in `us-west-2` using ordinary Spin on loopback. Both hashes passed the full
-ordered suite, including restart recovery, read-only and small-limit profiles,
-collection-capacity admission, a cold sparse-catalog update, 1,025 pushes with
-concurrent fetch/integrity checks, and concurrent 513 MiB lifecycles.
-
-The service logged 8,182 Git requests, 536,268 admitted storage calls and 12.86
-GiB transferred through the WAL boundary. The final repeated-push window ran at
-0.35 durable pushes/s for each hash; concurrent-fetch p95 was 5.78s for SHA-1
-and 5.79s for SHA-256. The exact prefix was removed with zero current objects,
-versions or delete markers, then Terraform destroyed the dedicated bucket and
-IAM user. These results qualify the Git/WAL path against live S3. A public host
-still needs its own HTTPS, authentication, routing and host-wide admission tests.
+Issue #10 tracks the current live S3 campaign. Do not claim remote qualification
+until the full ordered run, mature-repository maintenance, and exact-prefix
+teardown pass at the current revision. A public host still needs its own HTTPS,
+authentication, routing and host-wide admission tests.

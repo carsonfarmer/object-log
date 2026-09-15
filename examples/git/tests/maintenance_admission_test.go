@@ -142,7 +142,7 @@ func TestRepeatedPushes(t *testing.T) {
 	}
 }
 
-// End-to-end client latency includes negotiation, transfer and automatic cleanup.
+// End-to-end client latency includes negotiation, transfer and tail checkpointing.
 func logDurations(t *testing.T, label string, samples []time.Duration) {
 	t.Helper()
 	slices.Sort(samples)

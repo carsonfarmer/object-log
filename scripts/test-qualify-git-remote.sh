@@ -14,7 +14,12 @@ case "${0##*/}:$*" in
   git:*"rev-parse HEAD"*) echo fake-revision ;; git:*"status --porcelain"*) : ;;
   aws:*list-objects-v2*) if [ "${AWS_MODE:-}" = hang ]; then sh -c 'trap "" TERM; sleep 30' & echo $! >"${AWS_CHILD_PID_FILE}"; wait; fi; echo null ;;
   aws:*) echo null ;;
-  go:*test*) for test in TestAccess TestLargeBlob TestMaintenance TestWALGit TestManyObjects TestShallowAndTags TestFetchVisibility TestFetchRetentionSurvivesDestructiveCollection TestFetchRetentionDoesNotRejectSingleWriter TestFailureDrills; do echo "--- PASS: ${test} (0.00s)"; done; echo PASS; echo ok ;;
+  go:*test*)
+    if [ -n "${FAKE_GO_LOG:-}" ]; then printf '%s\n' "$*" >>"${FAKE_GO_LOG}"; fi
+    for test in TestAccess TestLargeBlob TestMaintenance TestRepeatedPushes TestWALGit TestManyObjects TestShallowAndTags TestFetchVisibility TestFetchRetentionSurvivesDestructiveCollection TestFetchRetentionDoesNotRejectSingleWriter TestFailureDrills; do echo "--- PASS: ${test} (0.00s)"; done
+    echo PASS
+    echo ok
+    ;;
   shasum:*) cat >/dev/null; echo 'planhash  -' ;;
   *) exit 1 ;;
 esac
@@ -63,6 +68,19 @@ export GIT_PROBE_URL=http://127.0.0.1:19100 GIT_PROBE_PASSWORD=test
 export GIT_PROBE_LOG="${scratch}/spin.log"
 export GIT_PROBE_BRANCH=main GIT_PROBE_BOOT_ID=boot-1
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_SESSION_TOKEN=test
+sed 's/phase-failure/performance/g' "${scratch}/state/phase-failure.state" |
+  sed 's/phase=backend/phase=limits/' >"${scratch}/state/performance.state"
+export GIT_QUALIFICATION_ID=performance GIT_QUALIFICATION_PREFIX=qualification/performance
+export FAKE_GO_LOG="${scratch}/performance-go.log"
+"${root}/scripts/qualify-git-remote.sh" performance >/dev/null
+[[ "$(wc -l <"${FAKE_GO_LOG}" | tr -d ' ')" == 3 ]]
+sed -n '1p' "${FAKE_GO_LOG}" | grep -Fq 'TestAccess|TestRepeatedPushes'
+sed -n '2p' "${FAKE_GO_LOG}" | grep -Fq -- '-run ^TestMaintenance$'
+sed -n '3p' "${FAKE_GO_LOG}" | grep -Fq -- '-run ^TestLargeBlob$'
+grep -q '^phase=performance$' "${scratch}/state/performance.state"
+grep -q '^result=active$' "${scratch}/state/performance.state"
+unset FAKE_GO_LOG
+export GIT_QUALIFICATION_ID=phase-failure GIT_QUALIFICATION_PREFIX=qualification/phase-failure
 if "${root}/scripts/qualify-git-remote.sh" protocol >/dev/null 2>&1; then
   echo "protocol phase masked its first failed command" >&2
   exit 1

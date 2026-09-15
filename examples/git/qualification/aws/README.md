@@ -84,6 +84,8 @@ start → backend → protocol → standard → recovery → read-only → limit
 
 Follow the [Git README](../../README.md#live-s3-qualification) for the required
 profile changes, recovery restart, prefix split, and failure-review flow.
+The performance phase runs maintenance to completion on both mature repositories
+after repeated pushes and before the concurrent 513 MiB lifecycles.
 
 After runner teardown, capture the Terraform outputs, unset the temporary
 session, use the administrator profile to abort incomplete uploads under the

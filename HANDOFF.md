@@ -19,16 +19,20 @@ partial filters and packfile URIs are deferred.
 The WAL owns authenticated chunking and sparse byte reads. Git stores small
 compressed objects in catalog leaves and streams larger objects. Incoming delta
 bases/results stream through go-git; outgoing packs use full objects because its
-delta selector does not bound bytes. Automatic checkpoint/cleanup runs at 64 tail
-entries. Collection retains the existing fencing and uncertain-outcome protocol.
+delta selector does not bound bytes. At 64 tail entries, push admission
+checkpoints the current authenticated catalog without walking Git history or
+deleting objects. The maintenance endpoint prunes unreachable Git objects and
+runs one bounded collection batch. Operators run it periodically and after ref
+deletion, repeating `more` until `complete` and retrying `pending` or `conflict`;
+`retained` means a reader still blocks collection. Collection retains the
+existing fencing and uncertain-outcome protocol.
 
 Full-object outgoing packs do not change Git correctness or negotiation: have-aware
 fetch still omits objects the client already has. They can make clones and fetches
 larger and slower, increase network-egress cost, and reduce concurrency when network
 bandwidth is the bottleneck. Repositories with many similar revisions of large files
-are most affected. They avoid the memory and CPU cost of generating deltas. The
-live S3 qualification exercised long mixed histories and 513 MiB lifecycles; a
-deployed service should still measure network egress for its own repositories.
+are most affected. They avoid the memory and CPU cost of generating deltas. Live
+qualification must measure network egress for its own repository mix.
 
 Request limits cover input bytes, object and metadata sizes, pack entry counts,
 catalog decoding and cooperative deadlines. They are not a process-memory limit.
@@ -74,19 +78,13 @@ the current upstream source still has both paths. The endurance test sets
 `maintenance.autoDetach=false`, preserving normal maintenance while avoiding
 that client-side race. No Git patch has been submitted upstream.
 Failure artifacts remain available with `go test -artifacts`.
-The full live AWS S3 campaign passed at `de87149` in `us-west-2`: backend and
-protocol suites, standard clients, restart recovery, read-only serving, small
-configured limits, authenticated collection capacity, cold sparse catalog
-updates, 1,025 pushes per hash with concurrent fetches, and concurrent 513 MiB
-lifecycles. The run made 8,182 Git requests and the service admitted 536,268
-storage calls carrying 12.86 GiB. Final repeated-push throughput was 0.35 pushes/s
-for each hash; concurrent-fetch p95 was 5.78s for SHA-1 and 5.79s for SHA-256.
-Teardown removed the exact prefix and verified zero current objects, versions and
-delete markers; Terraform state is empty and the dedicated bucket and IAM user no
-longer exist. The reusable Terraform and temporary-credential workflow is in
-`examples/git/qualification/aws`; managed state, plans and credentials stay
-outside the repository. Deployed HTTPS, host admission and TLS remain for the
-chosen production host rather than the WAL or Git engine.
+Issue #10 tracks fresh live AWS S3 qualification for the current revision. Its
+performance phase drains explicit maintenance on the mature repositories after
+the repeated-push run and before the 513 MiB lifecycles. Do not carry forward an
+older campaign's final metrics. The reusable Terraform and temporary-credential
+workflow is in `examples/git/qualification/aws`; managed state, plans and
+credentials stay outside the repository. Deployed HTTPS, host admission and TLS
+remain for the chosen production host rather than the WAL or Git engine.
 
 Root alone integrates main. Implement in exclusive worktrees, request independent
 correctness/simplification reviews, and run applicable gates before integration.

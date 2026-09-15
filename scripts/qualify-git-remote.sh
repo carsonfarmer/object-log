@@ -55,7 +55,8 @@ Offline rehearsal; no network or state changes:
   recovery    verify restart with the same standard prefix
   read-only   verify the same prefix under the read-only service profile
   limits      verify the fresh small-limit service profile
-  performance run 1,025 pushes/hash and concurrent 513 MiB lifecycles last
+  performance run 1,025 pushes/hash, drain mature maintenance, then run
+              concurrent 513 MiB lifecycles last
   teardown    delete the exact prefix and require zero residual objects
   review      owner-record review after teardown of a failed campaign
 Standard/recovery/read-only/performance use PREFIX/git. Limits uses
@@ -252,6 +253,7 @@ performance() {
   export GIT_REPEATED_PUSHES=1
   go_tests '^(TestAccess|TestRepeatedPushes)$' TestAccess TestRepeatedPushes || return
   unset GIT_REPEATED_PUSHES
+  go_tests '^TestMaintenance$' TestMaintenance || return
   export GIT_LARGE_OBJECT_MIB=513 GIT_CONCURRENT_LARGE=1
   go_tests '^TestLargeBlob$' TestLargeBlob || return
 }
