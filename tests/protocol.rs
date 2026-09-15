@@ -68,7 +68,7 @@ backend_cases! {
     view_is_bound_to_one_durable_log_incarnation,
     open_rejects_options_that_differ_from_the_durable_contract,
     log_exposes_its_durable_options,
-    stale_view_is_rejected_without_publishing_its_candidate,
+    provider_shaped_stale_view_conflict_is_definite,
     referenced_objects_are_durable_before_head_publication,
     tail_replay_leaves_referenced_objects_lazy,
     object_read_rejects_a_changed_referenced_object,
@@ -82,6 +82,7 @@ backend_cases! {
 const FAIL_NONE: u8 = 0;
 const FAIL_BEFORE_UPDATE: u8 = 1;
 const FAIL_AFTER_UPDATE: u8 = 2;
+const REPORT_CONFLICT_AS_ALREADY_EXISTS: u8 = 3;
 
 #[test]
 fn log_ids_reject_unsafe_namespace_forms() {
@@ -338,10 +339,11 @@ async fn log_exposes_its_durable_options(
     Ok(())
 }
 
-async fn stale_view_is_rejected_without_publishing_its_candidate(
+async fn provider_shaped_stale_view_conflict_is_definite(
     new_store: &StoreFactory,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let backend: Arc<dyn ObjectStore> = new_store()?;
+    let observed = Arc::new(InstrumentedStore::new(new_store()?));
+    let backend: Arc<dyn ObjectStore> = observed.clone();
     let log = open(backend, "stale-view").await?;
     let stale = log.load().await?;
     let first = log.prepare(
@@ -362,6 +364,7 @@ async fn stale_view_is_rejected_without_publishing_its_candidate(
     let CommitStatus::Committed(current) = log.commit(first).await? else {
         return Err("the first candidate did not commit".into());
     };
+    observed.report_update_conflict_as_already_exists();
     let CommitStatus::Conflict(conflict) = log.commit(stale_candidate).await? else {
         return Err("the stale candidate did not return a conflict".into());
     };
@@ -768,6 +771,11 @@ impl InstrumentedStore {
         self.fail_head_get.store(true, Ordering::SeqCst);
     }
 
+    fn report_update_conflict_as_already_exists(&self) {
+        self.failure
+            .store(REPORT_CONFLICT_AS_ALREADY_EXISTS, Ordering::SeqCst);
+    }
+
     fn pause_next_update_after_success(&self) {
         self.pause_after_update.store(true, Ordering::SeqCst);
     }
@@ -817,6 +825,23 @@ impl ObjectStore for InstrumentedStore {
         }
 
         let result = self.inner.put_opts(location, payload, options).await;
+        let result = match result {
+            Err(object_store::Error::Precondition { path, source })
+                if is_update
+                    && self
+                        .failure
+                        .compare_exchange(
+                            REPORT_CONFLICT_AS_ALREADY_EXISTS,
+                            FAIL_NONE,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok() =>
+            {
+                Err(object_store::Error::AlreadyExists { path, source })
+            }
+            result => result,
+        };
         if result.is_ok() && is_object && self.order_check_armed.load(Ordering::SeqCst) {
             self.object_created.store(true, Ordering::SeqCst);
         }

@@ -464,7 +464,10 @@ impl ScopedStore {
             Ok(result) => Ok(UpdateResult::Updated {
                 version: result.into(),
             }),
-            Err(object_store::Error::Precondition { .. }) => Ok(UpdateResult::PreconditionFailed),
+            Err(
+                object_store::Error::Precondition { .. }
+                | object_store::Error::AlreadyExists { .. },
+            ) => Ok(UpdateResult::PreconditionFailed),
             Err(error) => Err(error.into()),
         }
     }
