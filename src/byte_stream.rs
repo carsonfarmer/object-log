@@ -122,6 +122,16 @@ fn invalid() -> Error {
 }
 
 impl ByteWriter {
+    /// Returns the number of immutable WAL objects a finish at the current length owns.
+    ///
+    /// This includes the authenticated stream root, completed chunks, and a
+    /// final partial chunk when one is buffered. The value lets adapters budget
+    /// a larger object graph without depending on the WAL's chunk geometry.
+    #[must_use]
+    pub const fn storage_objects(&self) -> usize {
+        1 + self.children.len() + if self.buffer.is_empty() { 0 } else { 1 }
+    }
+
     /// Appends bytes. Success accepts all input; on error or cancellation discard the writer.
     ///
     /// # Errors

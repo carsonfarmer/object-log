@@ -94,6 +94,13 @@ The tests use installed Git as an independent oracle. Opt-in extensions:
   transfer and cleanup. Use an isolated prefix and keep competing workloads off
   the host when measuring. These timings do not include component compilation.
 - `GIT_LARGE_OBJECT_MIB=513`: larger push/clone/edit/fetch lifecycle.
+- `GIT_COLLECTION_CAPACITY=1`: against a fresh host configured with
+  `wal_max_collection_objects=32`, grows each repository to its authenticated
+  physical-object boundary, verifies the rejected push does not change the ref,
+  then completes maintenance and a cold clone.
+- `GIT_COLD_CATALOG=1`: against a fresh host configured with
+  `git_max_catalog_bytes=16384`, creates a split catalog bucket and proves a
+  cold update reads only its changed path and publishes the requested tip.
 - `GIT_CONCURRENT_LARGE=1`: overlap that lifecycle for both hashes; use
   `go test ./tests -run '^TestLargeBlob$' -parallel=2 -count=1 -v`.
 - `GIT_PROBE_PERSISTED_HEAD=true`: run `TestPersistedHead` after restarting Spin
@@ -117,6 +124,7 @@ Each request has explicit limits. Invalid settings fail closed.
 | `git_max_pack_objects` | 1,000,000 | Entries declared by an incoming pack |
 | `git_max_catalog_bytes` | 64 MiB | Catalog bucket JSON decoded across the request |
 | `git_request_timeout` | `5m` | Cooperative request deadline |
+| `wal_max_collection_objects` | 100,000 | Physical WAL objects retained by one repository, including its checkpoint |
 
 Use positive byte/count values and a positive duration. Blobs stream; structured
 objects need the smaller decoding limit. Pack counts are checked before entry
@@ -124,6 +132,16 @@ allocation or decoded-object writes. The incoming pack is staged temporarily
 first. Catalog cache hits are free, and refreshed stores retain the request's
 charges. WAL envelopes, object proofs and Go allocation overhead are additional;
 these settings do not promise a total-process memory ceiling.
+
+`git_max_pack_objects` limits one incoming pack. Separately,
+`wal_max_collection_objects` limits the physical graph retained by one
+repository. Streamed objects can own several WAL chunks, so these counts are not
+interchangeable. The WAL reports a finished stream's storage-object count and
+the authenticated Git catalog rolls it up without knowing the chunk geometry.
+An update that would leave no room for the checkpoint required by collection is
+rejected before publication. The collection limit is durable, and changing it
+requires a fresh prefix. This count-aware catalog also requires a fresh prefix;
+earlier development catalogs are rejected rather than migrated.
 
 Cancellation is checked between storage calls and before publication. An
 already-running synchronous WASI call must finish; its publication outcome is

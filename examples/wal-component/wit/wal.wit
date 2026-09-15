@@ -10,12 +10,14 @@ interface wal {
         session-token: option<string>,
         prefix: string,
         log-id: string,
+        max-collection-objects: u64,
     }
     variant failure { expired, other(string) }
     variant outcome { committed, conflict, pending(list<u8>), expired }
     enum maintenance-state { complete, more, conflict, pending, retained }
     record collection-result { state: maintenance-state, objects: u64, bytes: u64 }
     record usage { calls: u64, bytes: u64 }
+    record byte-stream { root: own<object>, storage-objects: u64 }
     resource object;
     record entry { data: list<u8>, objects: list<own<object>> }
     record recovered-state { latest: option<entry>, tail-entries: u64 }
@@ -24,7 +26,7 @@ interface wal {
     }
     resource byte-writer {
         write: func(data: list<u8>) -> result<_, failure>;
-        finish: func() -> result<own<object>, failure>;
+        finish: func() -> result<byte-stream, failure>;
     }
     resource byte-reader {
         length: func() -> u64;

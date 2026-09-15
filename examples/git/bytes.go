@@ -39,15 +39,16 @@ func (w *byteWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
-func (w *byteWriter) finish() (*wal.Object, error) {
+func (w *byteWriter) finish() (*wal.Object, uint64, error) {
 	defer w.close()
 	if err := w.s.ctx.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if w.writer == nil {
-		return nil, io.ErrClosedPipe
+		return nil, 0, io.ErrClosedPipe
 	}
-	return unwrap(w.writer.Finish())
+	stream, err := unwrap(w.writer.Finish())
+	return stream.Root, stream.StorageObjects, err
 }
 func (w *byteWriter) close() {
 	if w.writer != nil {

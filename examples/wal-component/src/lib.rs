@@ -99,14 +99,18 @@ impl GuestByteWriter for WriterState {
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
         spin_executor::run(writer.write(&data)).map_err(failure)
     }
-    fn finish(&self) -> Result<Object, Failure> {
+    fn finish(&self) -> Result<ByteStream, Failure> {
         let writer = self
             .0
             .borrow_mut()
             .take()
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
+        let storage_objects = writer.storage_objects() as u64;
         spin_executor::run(writer.finish())
-            .map(Object::new)
+            .map(|root| ByteStream {
+                root: Object::new(root),
+                storage_objects,
+            })
             .map_err(failure)
     }
 }
@@ -236,6 +240,8 @@ impl Guest for Component {
                 &object_log::LogId::new(settings.log_id).map_err(failure)?,
                 object_log::Options {
                     max_object_bytes: 2 * 1024 * 1024,
+                    max_collection_objects: usize::try_from(settings.max_collection_objects)
+                        .map_err(|_| Failure::Other("invalid collection object limit".into()))?,
                     ..Default::default()
                 },
             )
@@ -266,6 +272,7 @@ mod credential_tests {
             session_token: session_token.map(str::to_owned),
             prefix: "isolated-prefix".into(),
             log_id: "repo-sha1".into(),
+            max_collection_objects: 100_000,
         }
     }
 

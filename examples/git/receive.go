@@ -41,7 +41,7 @@ func (p *incomingPack) Close() (err error) {
 	if p.err != nil {
 		return p.err
 	}
-	root, err := p.finish()
+	root, _, err := p.finish()
 	if err != nil {
 		return err
 	}

@@ -60,8 +60,10 @@ async fn geometry_capacity_and_tiny_limits() -> TestResult {
     assert_eq!(writer.chunk_bytes, 2 * 1024 * 1024);
     let (log, view) = setup(Arc::new(InMemory::new()), small()).await?;
     let mut writer = log.byte_writer(&view)?;
+    assert_eq!(writer.storage_objects(), 1);
     assert_eq!(writer.capacity, 3 * 256);
     writer.write(&vec![1; 768]).await?;
+    assert_eq!(writer.storage_objects(), 4);
     let root = writer.finish().await?;
     assert!(root.reference().len() <= 256);
     assert_eq!(log.open_bytes(&view, root.reference()).await?.len(), 768);
@@ -94,8 +96,10 @@ async fn reads_are_short_authenticated_and_cache_one_chunk() -> TestResult {
     let mut writer = log.byte_writer(&view)?;
     drop(writer.write(b"not polled"));
     writer.write(&payload[..17]).await?;
+    assert_eq!(writer.storage_objects(), 2);
     writer.write(&[]).await?;
     writer.write(&payload[17..]).await?;
+    assert_eq!(writer.storage_objects(), 4);
     let root = writer.finish().await?;
     let mut reader = log.open_bytes(&view, root.reference()).await?;
     assert_eq!(reader.len(), 600);

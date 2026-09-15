@@ -18,13 +18,14 @@ var errObjectLimit = errors.New("configured Git resource limit exceeded")
 type requestLimits struct {
 	pushBytes, negotiationBytes, objectBytes int64
 	packObjects, metadataBytes, catalogBytes int64
+	collectionObjects                        int64
 	timeout                                  time.Duration
 	readOnly                                 bool
 	catalogRead                              *int64
 }
 
 func loadLimits(getenv func(string) string) (requestLimits, error) {
-	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, catalogRead: new(int64), timeout: 5 * time.Minute}
+	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, collectionObjects: 100_000, catalogRead: new(int64), timeout: 5 * time.Minute}
 	for _, setting := range []struct {
 		name  string
 		value *int64
@@ -35,6 +36,7 @@ func loadLimits(getenv func(string) string) (requestLimits, error) {
 		{"GIT_MAX_PACK_OBJECTS", &limits.packObjects},
 		{"GIT_MAX_METADATA_BYTES", &limits.metadataBytes},
 		{"GIT_MAX_CATALOG_BYTES", &limits.catalogBytes},
+		{"WAL_MAX_COLLECTION_OBJECTS", &limits.collectionObjects},
 	} {
 		if text := getenv(setting.name); text != "" {
 			value, err := strconv.ParseInt(text, 10, 64)

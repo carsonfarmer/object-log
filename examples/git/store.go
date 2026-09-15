@@ -44,8 +44,8 @@ type store struct {
 	tailEntries uint64
 	session     *wal.Session
 	meta        rootMeta
-	buckets     map[string]*wal.Object
-	loaded      map[*wal.Object]radixNode[indexed, *wal.Object]
+	buckets     map[string]catalogRoot
+	loaded      map[*wal.Object]radixNode[indexed, catalogRoot]
 	pending     map[string]indexed
 }
 
@@ -58,7 +58,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	cfg, _ := mem.Config()
 	// A nonzero window bounds object count, not buffered delta bytes.
 	cfg.Pack.Window = 0
-	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
+	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]catalogRoot{}, loaded: map[*wal.Object]radixNode[indexed, catalogRoot]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
 			s.Close()
@@ -84,7 +84,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 			return nil, e
 		}
 		for i, key := range s.meta.Buckets {
-			s.buckets[key] = root.Objects[i]
+			s.buckets[key] = catalogRoot{root: root.Objects[i], objects: s.meta.BucketWALObjects[i]}
 		}
 		for name, id := range s.meta.Refs {
 			_ = s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
@@ -259,7 +259,7 @@ func (w *objectWriter) Close() (err error) {
 	if w.sink.writer == nil {
 		item.Inline = w.sink.prefix
 	} else {
-		item.root, err = w.sink.writer.finish()
+		item.root, item.WALObjects, err = w.sink.writer.finish()
 		if err != nil {
 			return err
 		}
@@ -349,7 +349,7 @@ func (s *store) publish(refs map[string]string) error {
 		return e
 	}
 	for key, updates := range changed {
-		node := radixNode[indexed, *wal.Object]{}
+		node := radixNode[indexed, catalogRoot]{}
 		if root, ok := s.buckets[key]; ok {
 			node, e = s.loadBucket(root)
 			if e != nil {
@@ -395,11 +395,22 @@ func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
 	keys := slices.AppendSeq(make([]string, 0, len(s.buckets)), maps.Keys(s.buckets))
 	slices.Sort(keys)
 	children := make([]*wal.Object, 0, len(keys))
+	counts := make([]uint64, 0, len(keys))
 	for _, key := range keys {
-		children = append(children, s.buckets[key])
+		children = append(children, s.buckets[key].root)
+		counts = append(counts, s.buckets[key].objects)
+	}
+	objects, e := sumObjects(1, counts)
+	if e != nil {
+		return nil, e
+	}
+	// Collection also retains one immutable checkpoint.
+	if objects >= uint64(s.limits.collectionObjects) {
+		return nil, fmt.Errorf("%w: WAL live object capacity", errObjectLimit)
 	}
 	s.meta.Refs = refs
 	s.meta.Buckets = keys
+	s.meta.BucketWALObjects = counts
 	data, e := json.Marshal(s.meta)
 	if e != nil {
 		return nil, e

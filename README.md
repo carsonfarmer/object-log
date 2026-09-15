@@ -45,7 +45,9 @@ unpublished for temporary storage. `open_bytes(&view, root.reference())` exposes
 the logical length and authenticated `read_at` calls. Reads may be short; callers
 advance their offset as with an ordinary reader. The WAL chooses chunk geometry
 and enforces its object/reference limits. Discard a writer after a failed or
-cancelled write.
+cancelled write. `ByteWriter::storage_objects` reports how many immutable WAL
+objects a successful finish at the current length will own, so consumers can
+enforce a graph budget without reproducing that geometry.
 
 Successful immutable creation has one required storage property: the exact
 bytes remain at the same physical key until object-log garbage collection
