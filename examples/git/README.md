@@ -172,11 +172,14 @@ from this directory. The ordinary suite uses the defaults.
 campaign, copy `remote-qualification.env.example` outside the repository, fill
 in its non-secret record, source it, and export fresh `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `GIT_PROBE_PASSWORD` values.
-Use the recorded least-privilege STS role. The runner requires a dedicated
-bucket with versioning disabled, no lifecycle rules, reviewed default
-encryption, and an empty campaign prefix. Its policy needs bucket configuration
-reads and list/list-versions on that prefix, plus get, put and delete object
-access beneath the prefix; it must not grant access to production data.
+The reusable [AWS qualification setup](qualification/aws) provisions the
+dedicated bucket and least-privilege identity and issues a 12-hour temporary
+session without placing credential values in Terraform state. The runner
+requires a dedicated bucket with versioning disabled, no lifecycle rules,
+reviewed default encryption, and an empty campaign prefix. Its policy needs
+bucket configuration reads and list/list-versions on that prefix, plus get, put
+and delete object access beneath the prefix; it must not grant access to
+production data.
 
 Run `make git-remote-qualification REMOTE_QUALIFICATION_PHASE=...` with these
 phases in order: `start`, `backend`, `protocol`, `standard`, `recovery`,

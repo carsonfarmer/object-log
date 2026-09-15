@@ -58,6 +58,7 @@ git-provider-test:
 	cd $(GIT_EXAMPLE_DIR) && go test ./tests -v -timeout 15m
 
 git-remote-rehearse:
+	./examples/git/qualification/aws/test-issue-session.sh
 	./scripts/test-qualify-git-remote.sh
 	./scripts/qualify-git-remote.sh rehearse
 

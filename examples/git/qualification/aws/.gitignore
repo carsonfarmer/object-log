@@ -1,0 +1,8 @@
+.terraform/
+*.tfplan
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+qualification-spin.toml
+session-credentials.json
