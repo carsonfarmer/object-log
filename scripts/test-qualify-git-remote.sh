@@ -4,6 +4,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scratch="$(mktemp -d)"
 trap 'rm -rf "${scratch}"' EXIT
 mkdir -p "${scratch}/bin" "${scratch}/state"
+: >"${scratch}/spin.log"
 cat >"${scratch}/bin/mock" <<'EOF'
 #!/bin/sh
 case "${0##*/}:$*" in
@@ -59,6 +60,7 @@ export GIT_QUALIFICATION_REQUEST_LIMIT=1 GIT_QUALIFICATION_COST_LIMIT_USD=1
 export GIT_QUALIFICATION_TIME_LIMIT_SECONDS=35000 GIT_QUALIFICATION_COUNTER_SOURCE=manual
 export GIT_QUALIFICATION_ADMISSION=reviewed GIT_QUALIFICATION_STATE_DIR="${scratch}/state"
 export GIT_PROBE_URL=http://127.0.0.1:19100 GIT_PROBE_PASSWORD=test
+export GIT_PROBE_LOG="${scratch}/spin.log"
 export GIT_PROBE_BRANCH=main GIT_PROBE_BOOT_ID=boot-1
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_SESSION_TOKEN=test
 if "${root}/scripts/qualify-git-remote.sh" protocol >/dev/null 2>&1; then

@@ -252,6 +252,9 @@ For local Spin connected to live S3, pass only that protected path:
 spin up --listen 127.0.0.1:19100 --variable @/absolute/path/qualification-spin.toml
 ```
 
+Set `GIT_PROBE_LOG` to the absolute `.spin/logs/git_stderr.txt` path for this
+loopback qualification so the runner can read Spin's cumulative WAL counters.
+
 For recovery, change `git_boot_id` and restart or redeploy. The read-only
 profile sets `git_read_only = "true"`. The limits profile uses the `git-limits`
 prefix and sets push=131072, negotiation=4096, and object=65536. Apply the same

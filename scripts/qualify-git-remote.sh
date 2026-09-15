@@ -98,9 +98,13 @@ if [[ "${GIT_PROBE_URL}" != https://* ]]; then
 fi
 scope=live-s3-only
 [[ "${GIT_PROBE_URL}" != https://* ]] || scope=deployed-https
+probe_log="${GIT_PROBE_LOG:-}"
+if [[ "${scope}" == live-s3-only ]]; then
+  [[ "${probe_log}" == /* && -f "${probe_log}" ]] || fail "loopback qualification requires an existing absolute GIT_PROBE_LOG"
+fi
 credential_expiry_epoch="$(expiry_epoch "${GIT_QUALIFICATION_CREDENTIAL_EXPIRES_AT}")"
 [[ "${GIT_PROBE_BOOT_ID}" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "boot ID must be state-safe"
-plan_digest="$(printf '%s\0' "${id}" "${GIT_QUALIFICATION_REVISION}" "${GIT_QUALIFICATION_REGION}" "${GIT_QUALIFICATION_S3_ENDPOINT}" "${GIT_QUALIFICATION_BUCKET}" "${GIT_QUALIFICATION_PREFIX}" "${GIT_QUALIFICATION_ENCRYPTION}" "${GIT_QUALIFICATION_CREDENTIAL_SOURCE}" "${GIT_QUALIFICATION_CREDENTIAL_EXPIRES_AT}" "${GIT_QUALIFICATION_REQUEST_LIMIT}" "${GIT_QUALIFICATION_COST_LIMIT_USD}" "${GIT_QUALIFICATION_TIME_LIMIT_SECONDS}" "${GIT_QUALIFICATION_COUNTER_SOURCE}" "${GIT_QUALIFICATION_ADMISSION}" "${GIT_QUALIFICATION_STATE_DIR}" "${GIT_PROBE_URL}" "${GIT_PROBE_BRANCH}" "${scope}" | hash_values)"
+plan_digest="$(printf '%s\0' "${id}" "${GIT_QUALIFICATION_REVISION}" "${GIT_QUALIFICATION_REGION}" "${GIT_QUALIFICATION_S3_ENDPOINT}" "${GIT_QUALIFICATION_BUCKET}" "${GIT_QUALIFICATION_PREFIX}" "${GIT_QUALIFICATION_ENCRYPTION}" "${GIT_QUALIFICATION_CREDENTIAL_SOURCE}" "${GIT_QUALIFICATION_CREDENTIAL_EXPIRES_AT}" "${GIT_QUALIFICATION_REQUEST_LIMIT}" "${GIT_QUALIFICATION_COST_LIMIT_USD}" "${GIT_QUALIFICATION_TIME_LIMIT_SECONDS}" "${GIT_QUALIFICATION_COUNTER_SOURCE}" "${GIT_QUALIFICATION_ADMISSION}" "${GIT_QUALIFICATION_STATE_DIR}" "${GIT_PROBE_URL}" "${GIT_PROBE_BRANCH}" "${probe_log}" "${scope}" | hash_values)"
 target_id() { printf '%s\0' "${GIT_QUALIFICATION_S3_ENDPOINT}" "${GIT_QUALIFICATION_BUCKET}" "${GIT_QUALIFICATION_REGION}" "${GIT_QUALIFICATION_PREFIX}/$1" | hash_values; }
 [[ "$(git -C "${root}" rev-parse HEAD)" == "${GIT_QUALIFICATION_REVISION}" ]] || fail "checked-out revision differs from plan"
 [[ -z "$(git -C "${root}" status --porcelain)" ]] || fail "qualification requires a clean revision"
