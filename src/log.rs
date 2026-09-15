@@ -2399,9 +2399,11 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
     use crate::{LogId, ValidatedBackend};
+    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
 
@@ -2443,10 +2445,30 @@ mod tests {
     #[derive(Debug, Default)]
     struct ReadProbeStore {
         inner: InMemory,
-        body_polls: Arc<std::sync::atomic::AtomicUsize>,
+        body_polls: Arc<AtomicUsize>,
+        body_failures: AtomicUsize,
+        body_reads: AtomicUsize,
+        retryable_body_failure: AtomicBool,
+        replacement: std::sync::Mutex<Option<Bytes>>,
         oversize_commits: bool,
-        delay_heads: std::sync::atomic::AtomicBool,
-        head_reads: std::sync::atomic::AtomicUsize,
+        delay_heads: AtomicBool,
+        head_reads: AtomicUsize,
+    }
+
+    impl ReadProbeStore {
+        fn fail_bodies(&self, count: usize, retryable: bool, replacement: Option<Bytes>) {
+            self.body_failures.store(count, Ordering::Relaxed);
+            self.retryable_body_failure
+                .store(retryable, Ordering::Relaxed);
+            *self
+                .replacement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = replacement;
+        }
+
+        fn body_reads(&self) -> usize {
+            self.body_reads.load(Ordering::Relaxed)
+        }
     }
 
     impl std::fmt::Display for ReadProbeStore {
@@ -2479,11 +2501,11 @@ mod tests {
             location: &Path,
             options: object_store::GetOptions,
         ) -> object_store::Result<object_store::GetResult> {
+            self.body_reads.fetch_add(1, Ordering::Relaxed);
             if location.as_ref().ends_with("/index.cbor")
-                && self.delay_heads.load(std::sync::atomic::Ordering::Relaxed)
+                && self.delay_heads.load(Ordering::Relaxed)
             {
-                self.head_reads
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.head_reads.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             let mut result = self.inner.get_opts(location, options).await?;
@@ -2504,9 +2526,37 @@ mod tests {
                 result.payload = object_store::GetResultPayload::Stream(
                     body.chain(stream::once(async { Ok(Bytes::from_static(b"x")) }))
                         .inspect(move |_| {
-                            polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            polls.fetch_add(1, Ordering::Relaxed);
                         })
                         .boxed(),
+                );
+            }
+            if self
+                .body_failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                let replacement = self
+                    .replacement
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(bytes) = replacement {
+                    self.inner.put(location, bytes.into()).await?;
+                }
+                let source = Box::new(std::io::Error::other("injected body failure"));
+                let error = if self.retryable_body_failure.load(Ordering::Relaxed) {
+                    object_store::Error::Generic {
+                        store: "read probe",
+                        source,
+                    }
+                } else {
+                    object_store::Error::NotSupported { source }
+                };
+                result.payload = object_store::GetResultPayload::Stream(
+                    stream::iter([Ok(Bytes::from_static(b"prefix")), Err(error)]).boxed(),
                 );
             }
             Ok(result)
@@ -2544,6 +2594,109 @@ mod tests {
         }
     }
 
+    async fn read_retry_log(
+        name: &str,
+    ) -> Result<(Arc<ReadProbeStore>, Log), Box<dyn std::error::Error>> {
+        let store = Arc::new(ReadProbeStore::default());
+        let backend = ValidatedBackend::new(store.clone(), Path::from("read-retry")).await?;
+        let log = Log::open(&backend, &LogId::new(name)?, Options::default()).await?;
+        Ok((store, log))
+    }
+
+    #[tokio::test]
+    async fn safe_read_restarts_failed_bodies_and_charges_every_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, log) = read_retry_log("body-retry").await?;
+        let expected = Bytes::from_static(b"prefix and complete body");
+        let view = log.load().await?;
+        let object = log.put_object(&view, expected.clone()).await?;
+        let key = log.object_key(object.reference());
+        let before = store.body_reads();
+        store.fail_bodies(2, true, None);
+        let guard = Guard::new(3);
+
+        let stored = log
+            .store
+            .with_request_guard(guard.clone())
+            .read(key, expected.len())
+            .await?
+            .ok_or("missing object")?;
+
+        assert_eq!(stored.bytes, expected);
+        assert_eq!(store.body_reads() - before, 3);
+        assert_eq!(guard.requests().len(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn safe_read_resets_derived_state_and_stops_on_permanent_results()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, log) = read_retry_log("derived-retry").await?;
+        let view = log.load().await?;
+        let expected = Bytes::from_static(b"prefix and complete body");
+        let object = log.put_object(&view, expected.clone()).await?;
+        store.fail_bodies(1, true, None);
+        let (digest, len) = log
+            .store
+            .read_integrity(log.object_key(object.reference()), expected.len())
+            .await?
+            .ok_or("missing object")?;
+        assert_eq!(
+            (digest, len),
+            (Digest::of(&expected), u64::try_from(expected.len())?)
+        );
+
+        let observed = log
+            .store
+            .read(StoreKey::Head, log.options.max_head_bytes)
+            .await?
+            .ok_or("missing head")?;
+        let UpdateResult::Updated { .. } = log
+            .store
+            .update(
+                StoreKey::Head,
+                Bytes::from_static(b"middle"),
+                observed.version.clone(),
+            )
+            .await?
+        else {
+            return Err("head update lost its CAS".into());
+        };
+        let newest = Bytes::from_static(b"newest");
+        store.fail_bodies(1, true, Some(newest.clone()));
+        let ConditionalRead::Modified(modified) = log
+            .store
+            .read_if_changed(StoreKey::Head, &observed.version, 16)
+            .await?
+        else {
+            return Err("conditional read missed the update".into());
+        };
+        let latest = log
+            .store
+            .read(StoreKey::Head, 16)
+            .await?
+            .ok_or("missing head")?;
+        assert_eq!(modified.bytes, newest);
+        assert_eq!(
+            (modified.bytes, modified.version),
+            (latest.bytes, latest.version)
+        );
+
+        let before = store.body_reads();
+        store.fail_bodies(1, false, None);
+        assert!(matches!(
+            log.store.read(StoreKey::Head, 16).await,
+            Err(Error::Store(object_store::Error::NotSupported { .. }))
+        ));
+        let denied = log.store.with_request_guard(Guard::new(0));
+        assert!(matches!(
+            denied.read(StoreKey::Head, 16).await,
+            Err(Error::RequestDenied)
+        ));
+        assert_eq!(store.body_reads() - before, 1);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn oversized_commit_is_rejected_without_polling_its_body()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2569,10 +2722,7 @@ mod tests {
             log.read_tail(&view).await,
             Err(Error::CorruptObject)
         ));
-        assert_eq!(
-            store.body_polls.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(store.body_polls.load(Ordering::Relaxed), 0);
         Ok(())
     }
 
@@ -3650,11 +3800,13 @@ mod tests {
         let second = log.put_object(&view, Bytes::from_static(b"second")).await?;
         faults.reset();
         let pause = faults.pause_next_get(FailurePhase::Before);
-        faults.schedule(Failure {
-            operation: Operation::Get,
-            occurrence: 2,
-            phase: FailurePhase::Before,
-        });
+        for occurrence in 2..=4 {
+            faults.schedule(Failure {
+                operation: Operation::Get,
+                occurrence,
+                phase: FailurePhase::Before,
+            });
+        }
         assert!(
             log.verify_object_graph(&[first.reference().clone(), second.reference().clone()])
                 .await
@@ -3831,18 +3983,13 @@ mod tests {
                     .map(|record| log.commit_immutable_key(record)),
             )
             .await?;
-        store
-            .delay_heads
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        store.delay_heads.store(true, Ordering::Relaxed);
         let result = crate::materialize(&log, view, &FoldProbe::default()).await;
         assert!(matches!(
             result,
             Err(crate::MaterializeError::Log(Error::CorruptObject))
         ));
-        assert_eq!(
-            store.head_reads.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(store.head_reads.load(Ordering::Relaxed), 1);
         Ok(())
     }
 
@@ -4249,11 +4396,16 @@ mod tests {
         use crate::sim::{FailurePhase, Operation};
         let (log, faults, backend) = staged_read_log("tail-proof", Options::default()).await?;
         let mut view = log.load().await?;
-        for _ in 0..3 {
-            view = fold_append(&log, &view, Bytes::from_static(&[1])).await?;
-        }
+        view = fold_append(&log, &view, Bytes::from_static(&[1])).await?;
         assert!(!log.tail_is_verified(&view));
-        faults.fail_next(Operation::Get, FailurePhase::Before);
+        faults.reset();
+        for occurrence in 1..=3 {
+            faults.schedule(crate::sim::Failure {
+                operation: Operation::Get,
+                occurrence,
+                phase: FailurePhase::Before,
+            });
+        }
         assert!(log.read_tail(&view).await.is_err());
         assert!(!log.tail_is_verified(&view));
 
@@ -4277,7 +4429,7 @@ mod tests {
         assert!(!other.tail_is_verified(&next));
         faults.reset();
         other.verify_tail(&next).await?;
-        assert_eq!(faults.metrics().operation(Operation::Get).requests, 4);
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 2);
         faults.reset();
         log.verify_tail(&next).await?;
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);

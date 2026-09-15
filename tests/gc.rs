@@ -871,9 +871,13 @@ async fn resume_propagates_a_read_failure_before_any_delete() -> TestResult {
         .await?;
     let fenced = install_collection(&fixture.log, &source).await?;
     fixture.store.reset();
-    fixture
-        .store
-        .fail_next(Operation::Get, FailurePhase::Before);
+    for occurrence in 1..=3 {
+        fixture.store.schedule(Failure {
+            operation: Operation::Get,
+            occurrence,
+            phase: FailurePhase::Before,
+        });
+    }
 
     let error = fixture
         .log

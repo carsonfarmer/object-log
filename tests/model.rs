@@ -15,6 +15,23 @@ use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn StdError>>;
 
+fn fail_safe_read_at(store: &FaultStore, first: u64) {
+    for occurrence in first..first + 3 {
+        store.schedule(Failure {
+            operation: Operation::Get,
+            occurrence,
+            phase: FailurePhase::Before,
+        });
+    }
+}
+
+fn fail_next_safe_read(store: &FaultStore) {
+    fail_safe_read_at(
+        store,
+        store.metrics().operation(Operation::Get).requests + 1,
+    );
+}
+
 struct ProofMachine;
 
 impl Materializer for ProofMachine {
@@ -342,7 +359,7 @@ async fn pending_evidence_survives_reopen_and_failed_resolution_read() -> TestRe
     drop(log);
 
     let reopened = reopen_model_log(&store, &log_id).await?;
-    store.fail_next(Operation::Get, FailurePhase::Before);
+    fail_next_safe_read(&store);
     match reopened.resume(&recovery_token).await? {
         Resolution::StillPending(_) => {}
         Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
@@ -416,11 +433,7 @@ async fn recovery_token_survives_failed_referenced_object_validation() -> TestRe
     }
 
     store.reset();
-    store.schedule(Failure {
-        operation: Operation::Get,
-        occurrence: 2,
-        phase: FailurePhase::Before,
-    });
+    fail_safe_read_at(&store, 2);
     match log.resume(&token).await? {
         Resolution::StillPending(_) => {}
         Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
@@ -834,11 +847,7 @@ async fn pending_evidence_survives_failed_published_commit_verification() -> Tes
     let reopened = reopen_model_log(&store, &log_id).await?;
 
     store.reset();
-    store.schedule(Failure {
-        operation: Operation::Get,
-        occurrence: 2,
-        phase: FailurePhase::Before,
-    });
+    fail_safe_read_at(&store, 2);
     let pending = match reopened.resolve(pending).await? {
         Resolution::StillPending(pending) => pending,
         Resolution::Committed(_) | Resolution::NotCommitted(_) | Resolution::Expired(_) => {
@@ -1187,7 +1196,7 @@ impl Scenario {
             "not committed"
         };
         if fail_read {
-            self.store.fail_next(Operation::Get, FailurePhase::Before);
+            fail_next_safe_read(&self.store);
         }
         let resolution = if self.writers[writer].view.is_none() {
             let token = pending.recovery_token()?;

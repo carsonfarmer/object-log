@@ -14,6 +14,17 @@ use object_store::path::Path;
 
 type TestResult = Result<(), Box<dyn StdError>>;
 
+fn fail_next_safe_read(store: &FaultStore) {
+    let first = store.metrics().operation(Operation::Get).requests + 1;
+    for occurrence in first..first + 3 {
+        store.schedule(Failure {
+            operation: Operation::Get,
+            occurrence,
+            phase: FailurePhase::Before,
+        });
+    }
+}
+
 #[tokio::test]
 async fn cancelled_external_staging_discards_the_unpublished_local_write() -> TestResult {
     let options = Options {
@@ -88,7 +99,7 @@ async fn resume_read_failure_stays_pending_then_resolves() -> TestResult {
     )
     .await?;
 
-    store.fail_next(Operation::Get, FailurePhase::Before);
+    fail_next_safe_read(&store);
     assert!(matches!(
         database.resume(&token).await?,
         Resolution::StillPending(_)
@@ -254,7 +265,7 @@ async fn pending_checkpoint_read_failure_stays_pending_then_resolves() -> TestRe
     let mut database = seeded_database(&log, directory.path().join("cache.sqlite3")).await?;
 
     leave_pending_checkpoint(&store, &mut database).await?;
-    store.fail_next(Operation::Get, FailurePhase::Before);
+    fail_next_safe_read(&store);
     expect_checkpoint(&mut database, ExpectedCheckpoint::Pending).await?;
     expect_checkpoint(&mut database, ExpectedCheckpoint::Published).await?;
     assert_eq!(sum(&mut database).await?, 1);
@@ -283,7 +294,7 @@ async fn refresh_failure_happens_before_the_write_callback() -> TestResult {
     let mut database = Database::open(log, directory.path().join("cache.sqlite3")).await?;
     let mut calls = 0;
 
-    store.fail_next(Operation::Get, FailurePhase::Before);
+    fail_next_safe_read(&store);
     let result = database
         .stage_write(TransactionId::new(), |transaction| {
             calls += 1;

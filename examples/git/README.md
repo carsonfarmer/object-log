@@ -154,10 +154,12 @@ of 18.94 MB in the retained 128-tip/256-parent benchmark.
 Host-wide concurrent-request admission is a hosting concern and remains deferred;
 this example adds no instance limiter or additional durable coordination.
 
-A connection failure may retry one bodyless storage read or one identical
-conditional storage write. A rejected write retry preserves the first uncertain
-outcome for WAL recovery; it cannot turn a lost success into a definite conflict.
-Both attempts count toward the same storage budget. Git pushes are never replayed.
+A complete object read may be restarted by the core at most twice after its
+initial attempt. For each core attempt, the Spin HTTP adapter may retry one
+bodyless request, allowing at most six HTTP attempts for one logical read. Every
+core admission and HTTP attempt remains cumulative. A rejected conditional-write
+retry preserves the first uncertain outcome for WAL recovery; it cannot turn a
+lost success into a definite conflict. Git pushes are never replayed.
 
 To check small limits, start a fresh-prefix host with push=131072,
 negotiation=4096 and object=65536, then run

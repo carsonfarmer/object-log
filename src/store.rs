@@ -1,6 +1,7 @@
 //! Namespace-safe object-store operations.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -13,6 +14,7 @@ use uuid::Uuid;
 use crate::{Digest, Error, LogId, StorageId};
 
 pub(crate) const MAX_DELETE_BATCH: usize = 1_000;
+const SAFE_READ_ATTEMPTS: usize = 3;
 
 /// One logical invocation of the underlying object-store client.
 ///
@@ -325,6 +327,26 @@ impl ScopedStore {
         })
     }
 
+    async fn retry_safe_read<T, F, Fut>(&self, max_bytes: usize, mut read: F) -> Result<T, Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        self.admit(Request::Read { max_bytes })?;
+        let mut result = read().await;
+        for _ in 1..SAFE_READ_ATTEMPTS {
+            if !matches!(
+                result,
+                Err(Error::Store(object_store::Error::Generic { .. }))
+            ) {
+                return result;
+            }
+            self.admit(Request::Read { max_bytes })?;
+            result = read().await;
+        }
+        result
+    }
+
     /// Returns the validated identity bound to this namespace.
     #[must_use]
     pub(crate) const fn log_id(&self) -> &LogId {
@@ -342,12 +364,18 @@ impl ScopedStore {
         max_bytes: usize,
     ) -> Result<Option<StoredObject>, Error> {
         let location = self.location(key);
-        self.admit(Request::Read { max_bytes })?;
-        match self.store.get(&location).await {
-            Ok(result) => Ok(Some(collect_object(result, max_bytes).await?)),
-            Err(object_store::Error::NotFound { .. }) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        let store = &self.store;
+        self.retry_safe_read(max_bytes, || {
+            let location = &location;
+            async move {
+                match store.get(location).await {
+                    Ok(result) => Ok(Some(collect_object(result, max_bytes).await?)),
+                    Err(object_store::Error::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
+            }
+        })
+        .await
     }
 
     pub(crate) async fn read_integrity(
@@ -355,32 +383,19 @@ impl ScopedStore {
         key: StoreKey,
         max_bytes: usize,
     ) -> Result<Option<(Digest, u64)>, Error> {
-        self.admit(Request::Read { max_bytes })?;
-        let result = match self.store.get(&self.location(key)).await {
-            Ok(result) => result,
-            Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let max_bytes = u64::try_from(max_bytes).map_err(|_| Error::LimitExceeded("read bytes"))?;
-        if result.meta.size > max_bytes {
-            return Err(Error::LimitExceeded("read bytes"));
-        }
-        let mut digest = blake3::Hasher::new();
-        let mut len = 0_u64;
-        let mut stream = result.into_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            digest.update(&chunk);
-            len = len
-                .checked_add(
-                    u64::try_from(chunk.len()).map_err(|_| Error::LimitExceeded("read bytes"))?,
-                )
-                .ok_or(Error::LimitExceeded("read bytes"))?;
-            if len > max_bytes {
-                return Err(Error::LimitExceeded("read bytes"));
+        let location = self.location(key);
+        let store = &self.store;
+        self.retry_safe_read(max_bytes, || {
+            let location = &location;
+            async move {
+                match store.get(location).await {
+                    Ok(result) => Ok(Some(collect_integrity(result, max_bytes).await?)),
+                    Err(object_store::Error::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
             }
-        }
-        Ok(Some((Digest(*digest.finalize().as_bytes()), len)))
+        })
+        .await
     }
 
     /// Reads one protocol object only if its `ETag` changed.
@@ -399,15 +414,25 @@ impl ScopedStore {
             return Err(Error::UnsupportedBackend("conditional read"));
         };
         let options = GetOptions::new().with_if_none_match(Some(e_tag.clone()));
-        self.admit(Request::Read { max_bytes })?;
-        match self.store.get_opts(&self.location(key), options).await {
-            Ok(result) => Ok(ConditionalRead::Modified(
-                collect_object(result, max_bytes).await?,
-            )),
-            Err(object_store::Error::NotModified { .. }) => Ok(ConditionalRead::NotModified),
-            Err(object_store::Error::NotFound { .. }) => Ok(ConditionalRead::Missing),
-            Err(error) => Err(error.into()),
-        }
+        let location = self.location(key);
+        let store = &self.store;
+        self.retry_safe_read(max_bytes, || {
+            let options = options.clone();
+            let location = &location;
+            async move {
+                match store.get_opts(location, options).await {
+                    Ok(result) => Ok(ConditionalRead::Modified(
+                        collect_object(result, max_bytes).await?,
+                    )),
+                    Err(object_store::Error::NotModified { .. }) => {
+                        Ok(ConditionalRead::NotModified)
+                    }
+                    Err(object_store::Error::NotFound { .. }) => Ok(ConditionalRead::Missing),
+                    Err(error) => Err(error.into()),
+                }
+            }
+        })
+        .await
     }
 
     /// Creates one protocol object without replacing an existing object.
@@ -793,6 +818,32 @@ async fn collect_object(
     Ok(StoredObject { bytes, version })
 }
 
+async fn collect_integrity(
+    result: object_store::GetResult,
+    max_bytes: usize,
+) -> Result<(Digest, u64), Error> {
+    let max_bytes = u64::try_from(max_bytes).map_err(|_| Error::LimitExceeded("read bytes"))?;
+    if result.meta.size > max_bytes {
+        return Err(Error::LimitExceeded("read bytes"));
+    }
+    let mut digest = blake3::Hasher::new();
+    let mut len = 0_u64;
+    let mut stream = result.into_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        digest.update(&chunk);
+        len = len
+            .checked_add(
+                u64::try_from(chunk.len()).map_err(|_| Error::LimitExceeded("read bytes"))?,
+            )
+            .ok_or(Error::LimitExceeded("read bytes"))?;
+        if len > max_bytes {
+            return Err(Error::LimitExceeded("read bytes"));
+        }
+    }
+    Ok((Digest(*digest.finalize().as_bytes()), len))
+}
+
 fn is_unsupported(error: &object_store::Error) -> bool {
     matches!(
         error,
@@ -802,11 +853,10 @@ fn is_unsupported(error: &object_store::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error as StdError;
-
     use futures::TryStreamExt;
     use object_store::local::LocalFileSystem;
     use object_store::memory::InMemory;
+    use std::error::Error as StdError;
     use tempfile::TempDir;
 
     use super::*;

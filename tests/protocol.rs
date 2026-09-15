@@ -712,7 +712,7 @@ struct InstrumentedStore {
     object_created: AtomicBool,
     object_before_update: AtomicBool,
     lie_conditional_read: AtomicBool,
-    fail_head_get: AtomicBool,
+    fail_head_gets: AtomicU8,
     pause_after_update: AtomicBool,
     visible_update: Notify,
     reorder_wal_reads: AtomicBool,
@@ -729,7 +729,7 @@ impl InstrumentedStore {
             object_created: AtomicBool::new(false),
             object_before_update: AtomicBool::new(false),
             lie_conditional_read: AtomicBool::new(false),
-            fail_head_get: AtomicBool::new(false),
+            fail_head_gets: AtomicU8::new(0),
             pause_after_update: AtomicBool::new(false),
             visible_update: Notify::new(),
             reorder_wal_reads: AtomicBool::new(false),
@@ -768,7 +768,7 @@ impl InstrumentedStore {
     }
 
     fn fail_next_head_get(&self) {
-        self.fail_head_get.store(true, Ordering::SeqCst);
+        self.fail_head_gets.store(3, Ordering::SeqCst);
     }
 
     fn report_update_conflict_as_already_exists(&self) {
@@ -896,7 +896,12 @@ impl ObjectStore for InstrumentedStore {
             }
         }
         if location.to_string().ends_with("/index.cbor")
-            && self.fail_head_get.swap(false, Ordering::SeqCst)
+            && self
+                .fail_head_gets
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
         {
             return Err(Self::lost_ack_error());
         }
