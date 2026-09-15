@@ -81,3 +81,9 @@ func TestDrainedRecoveryModeIsExclusive(t *testing.T) {
 		}
 	}
 }
+
+func TestActiveCollectionIsRetryable(t *testing.T) {
+	if got := operationStatus(errCollectionActive); got != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}

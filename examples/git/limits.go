@@ -109,6 +109,8 @@ func operationStatus(err error) int {
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return http.StatusRequestTimeout
+	case errors.Is(err, errCollectionActive):
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
