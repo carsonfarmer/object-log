@@ -58,11 +58,10 @@ func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], 
 				return node, fmt.Errorf("duplicate index object")
 			}
 			value := indexed{objectMeta: item}
-			if len(item.Inline) > 0 {
-				if !item.validInline() {
-					return node, fmt.Errorf("invalid inline object")
-				}
-			} else {
+			if len(item.Inline) > 0 && !item.validInline() {
+				return node, fmt.Errorf("invalid inline object")
+			}
+			if len(item.Inline) == 0 {
 				if next == len(entry.Objects) || item.WALObjects == 0 {
 					return node, fmt.Errorf("missing index object")
 				}
@@ -75,7 +74,7 @@ func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], 
 			return node, fmt.Errorf("extra index objects")
 		}
 	}
-	objects, err := nodeObjects(node)
+	objects, err := bucketObjects(meta)
 	if err != nil || objects != value.objects {
 		return node, fmt.Errorf("invalid index object count")
 	}
@@ -83,15 +82,13 @@ func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], 
 	return node, nil
 }
 
-func nodeObjects(node radixNode[indexed, catalogRoot]) (uint64, error) {
-	counts := make([]uint64, 0, len(node.Items)+len(node.Children))
-	for _, item := range node.Items {
+func bucketObjects(meta bucketMeta) (uint64, error) {
+	counts := make([]uint64, 0, len(meta.ChildWALObjects)+len(meta.Items))
+	counts = append(counts, meta.ChildWALObjects...)
+	for _, item := range meta.Items {
 		if item.WALObjects > 0 {
 			counts = append(counts, item.WALObjects)
 		}
-	}
-	for _, child := range node.Children {
-		counts = append(counts, child.objects)
 	}
 	return sumObjects(1, counts)
 }
@@ -116,7 +113,7 @@ func (s *store) saveBucket(node radixNode[indexed, catalogRoot]) (catalogRoot, e
 			}
 		}
 	}
-	objects, err := nodeObjects(node)
+	objects, err := bucketObjects(meta)
 	if err != nil {
 		return catalogRoot{}, err
 	}
