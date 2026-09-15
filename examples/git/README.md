@@ -173,7 +173,7 @@ campaign, copy `remote-qualification.env.example` outside the repository, fill
 in its non-secret record, source it, and export fresh `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `GIT_PROBE_PASSWORD` values.
 The reusable [AWS qualification setup](qualification/aws) provisions the
-dedicated bucket and least-privilege identity and issues a 12-hour temporary
+dedicated bucket and least-privilege identity and issues a four-hour temporary
 session without placing credential values in Terraform state. The runner
 requires a dedicated bucket with versioning disabled, no lifecycle rules,
 reviewed default encryption, and an empty campaign prefix. Its policy needs
@@ -234,15 +234,15 @@ profile sets `git_read_only = "true"`. The limits profile uses the `git-limits`
 prefix and sets push=131072, negotiation=4096, and object=65536. Apply the same
 variables through the deployment host's secret/config facility.
 
-The runner enforces the 08:00–20:00 Pacific window, credential and campaign
-deadlines, one campaign per day, ordered tests, failure lockout, exact-prefix
-teardown, and a zero residual check. It writes one concise log per phase in the
-protected state directory, including the frozen plan digest, timestamps,
-status, and start-time tool versions. The configured campaign duration must fit
-entirely before 20:00 Pacific. Review request counts and provider cost at each
-manual phase stop using the declared counter source; no counter API is wired,
-so the runner cannot enforce those two ceilings. The repeated-history test reports p50/p95/p99 client
-latency and durable push throughput. A loopback Git URL qualifies live S3
+The runner enforces credential and campaign deadlines, one campaign per Pacific
+date, ordered tests, failure lockout, exact-prefix teardown, and a zero residual
+check. Live phases must finish on their Pacific start date. It writes one
+concise log per phase in the protected state directory, including the frozen
+plan digest, timestamps, status, and start-time tool versions. Review request
+counts and provider cost at each manual phase stop using the declared counter
+source; no counter API is wired, so the runner cannot enforce those two
+ceilings. The repeated-history test reports p50/p95/p99 client latency and
+durable push throughput. A loopback Git URL qualifies live S3
 behavior; only a deployed HTTPS URL adds inbound TLS, authentication and host
 admission evidence. Teardown has its own deadline at credential expiry, so it
 remains available after the campaign deadline. After a failed phase, inspect

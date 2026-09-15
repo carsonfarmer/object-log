@@ -23,8 +23,15 @@ case " $* " in
   *" sts get-session-token "*)
     [[ "${AWS_ACCESS_KEY_ID:-}" == TEST1111111111111111 ]]
     [[ "${AWS_SECRET_ACCESS_KEY:-}" == BOOTSTRAP_SECRET_MARKER ]]
-    [[ " $* " == *" --duration-seconds 43200 "* ]]
+    [[ " $* " == *" --duration-seconds 14400 "* ]]
     case "${FAKE_MODE:-success}" in
+      transient)
+        attempts=0
+        [[ ! -s "${FAKE_STS_ATTEMPTS:?}" ]] || attempts="$(<"${FAKE_STS_ATTEMPTS}")"
+        attempts=$((attempts + 1))
+        printf '%s\n' "${attempts}" >"${FAKE_STS_ATTEMPTS}"
+        if (( attempts < 3 )); then echo 'InvalidClientTokenId' >&2; exit 25; fi
+        ;;
       race) printf 'racer\n' >"${FAKE_RACE_OUTPUT:?}" ;;
       race-symlink) ln -s "${FAKE_RACE_TARGET:?}" "${FAKE_RACE_OUTPUT:?}" ;;
     esac
@@ -34,7 +41,11 @@ case " $* " in
   *) exit 24 ;;
 esac
 FAKE_AWS
-chmod +x "${test_root}/bin/aws"
+cat >"${test_root}/bin/sleep" <<'FAKE_SLEEP'
+#!/bin/sh
+exit 0
+FAKE_SLEEP
+chmod +x "${test_root}/bin/aws" "${test_root}/bin/sleep"
 
 mode() {
   stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
@@ -59,6 +70,18 @@ PATH="${test_root}/bin:${PATH}" FAKE_AWS_LOG="${success_log}" \
 jq -e '.AccessKeyId == "TEST2222222222222222"' "${success_output}" >/dev/null
 [[ "$(mode "${success_output}")" == 600 ]]
 grep -Fq -- '--access-key-id TEST1111111111111111' "${success_log}"
+[[ "$(grep -Fc ' iam delete-access-key ' "${success_log}")" == 1 ]]
+
+transient_output="${test_root}/transient.json"
+transient_log="${test_root}/transient.log"
+PATH="${test_root}/bin:${PATH}" FAKE_MODE=transient \
+  FAKE_STS_ATTEMPTS="${test_root}/transient-attempts" \
+  FAKE_AWS_LOG="${transient_log}" \
+  "${helper}" admin-profile qualification-user "${transient_output}" \
+  >/dev/null 2>"${test_root}/transient.capture"
+jq -e '.AccessKeyId == "TEST2222222222222222"' "${transient_output}" >/dev/null
+[[ "$(<"${test_root}/transient-attempts")" == 3 ]]
+[[ "$(grep -Fc ' iam delete-access-key ' "${transient_log}")" == 1 ]]
 
 failure_log="${test_root}/failure.log"
 run_failure create-failure "${test_root}/failure.json" "${failure_log}" \
@@ -99,4 +122,4 @@ for marker in BOOTSTRAP_SECRET_MARKER SESSION_SECRET_MARKER SESSION_TOKEN_MARKER
   fi
 done
 
-echo "issue-session success, failure, signal, race, symlink, and xtrace tests passed"
+echo "issue-session success, retry, failure, signal, race, symlink, and xtrace tests passed"

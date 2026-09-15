@@ -48,7 +48,7 @@ rehearse() {
   cat <<'EOF'
 Offline rehearsal; no network or state changes:
   start       validate revision, temporary credentials, reviewed limits, S3
-              settings, one-run window, and an empty isolated prefix
+              settings, campaign duration, and an empty isolated prefix
   backend     remote S3 backend conformance
   protocol    conditional-write, ambiguity, fault, recovery, and maintenance tests
   standard    authenticated Git correctness plus failure-drill preparation
@@ -119,10 +119,8 @@ aws_credentials() {
   need AWS_ACCESS_KEY_ID || return; need AWS_SECRET_ACCESS_KEY || return; need AWS_SESSION_TOKEN || return
   command -v aws >/dev/null || fail "aws CLI is required"
 }
-check_window() {
-  local hour elapsed
-  hour="$(TZ=America/Vancouver date +%H)"
-  (( 10#${hour} >= 8 && 10#${hour} < 20 )) || fail "live phases run only 08:00-20:00 Pacific" || return
+check_campaign() {
+  local elapsed
   [[ "$(value date)" == "$(TZ=America/Vancouver date +%F)" ]] || fail "campaign must finish on its Pacific start date" || return
   elapsed=$(($(date +%s) - $(value epoch)))
   (( elapsed < GIT_QUALIFICATION_TIME_LIMIT_SECONDS )) || fail "campaign time limit elapsed" || return
@@ -137,7 +135,7 @@ guard() {
   [[ "$(value bucket)" == "${GIT_QUALIFICATION_BUCKET}" && "$(value prefix)" == "${GIT_QUALIFICATION_PREFIX}" ]] || fail "state storage target changed" || return
   [[ "$(value scope)" == "${scope}" ]] || fail "qualification scope changed" || return
   [[ "$(value plan)" == "${plan_digest}" ]] || fail "qualification plan changed" || return
-  check_window
+  check_campaign
 }
 observed_service_id=""
 phase_log=""
@@ -257,9 +255,6 @@ case "${phase}" in
   status) [[ -f "${state}" ]] || fail "campaign state does not exist"; cat "${state}" ;;
   start)
     aws_credentials
-    clock="$(TZ=America/Vancouver date +%H:%M:%S)"; IFS=: read -r hour minute second <<<"${clock}"
-    (( 10#${hour} >= 8 && 10#${hour} < 20 )) || fail "campaigns start only 08:00-20:00 Pacific"
-    (( GIT_QUALIFICATION_TIME_LIMIT_SECONDS <= 20*3600 - 10#${hour}*3600 - 10#${minute}*60 - 10#${second} )) || fail "campaign time limit extends past 20:00 Pacific"
     mkdir -p "${state_dir}"; [[ ! -e "${state}" ]] || fail "campaign ID already exists"
     day="$(TZ=America/Vancouver date +%F)"
     (( credential_expiry_epoch > $(date +%s) + GIT_QUALIFICATION_TIME_LIMIT_SECONDS )) || fail "temporary credentials expire before the time limit"

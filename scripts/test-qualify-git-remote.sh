@@ -9,7 +9,7 @@ cat >"${scratch}/bin/mock" <<'EOF'
 case "${0##*/}:$*" in
   date:*"-j -f"*|date:*"-d "*) echo 2000000000 ;;
   date:*"+%Y-%m-%dT%H:%M:%SZ"*) echo 2030-03-17T10:00:00Z ;;
-  date:*"+%H"*) echo 10 ;; date:*"+%F"*) echo 2030-03-17 ;; date:*"+%s"*) echo 1900000000 ;;
+  date:*"+%F"*) echo 2030-03-17 ;; date:*"+%s"*) echo 1900000000 ;;
   git:*"rev-parse HEAD"*) echo fake-revision ;; git:*"status --porcelain"*) : ;;
   aws:*list-objects-v2*) if [ "${AWS_MODE:-}" = hang ]; then sh -c 'trap "" TERM; sleep 30' & echo $! >"${AWS_CHILD_PID_FILE}"; wait; fi; echo null ;;
   aws:*) echo null ;;

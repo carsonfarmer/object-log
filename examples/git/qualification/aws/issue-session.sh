@@ -69,18 +69,26 @@ admin_aws iam create-access-key --user-name "${iam_user}" \
 bootstrap_key_id="$(jq -er .AccessKeyId "${bootstrap_file}")"
 bootstrap_secret="$(jq -er .SecretAccessKey "${bootstrap_file}")"
 
-AWS_ACCESS_KEY_ID="${bootstrap_key_id}" \
-AWS_SECRET_ACCESS_KEY="${bootstrap_secret}" \
-AWS_SESSION_TOKEN='' AWS_SECURITY_TOKEN='' \
-  env -u BASHOPTS -u SHELLOPTS \
-    aws --no-cli-pager sts get-session-token --duration-seconds 43200 \
-    --query Credentials --output json >"${session_file}"
+issue_session() {
+  AWS_ACCESS_KEY_ID="${bootstrap_key_id}" \
+  AWS_SECRET_ACCESS_KEY="${bootstrap_secret}" \
+  AWS_SESSION_TOKEN='' AWS_SECURITY_TOKEN='' \
+    env -u BASHOPTS -u SHELLOPTS \
+      aws --no-cli-pager sts get-session-token --duration-seconds 14400 \
+      --query Credentials --output json
+}
+for attempt in 1 2 3 4 5 6; do
+  if issue_session >"${session_file}"; then break; fi
+  (( attempt < 6 )) || fail "could not issue temporary session credentials"
+  sleep 2
+done
 jq -e '.AccessKeyId and .SecretAccessKey and .SessionToken and .Expiration' \
   "${session_file}" >/dev/null
 unset bootstrap_secret
 
 admin_aws iam delete-access-key --user-name "${iam_user}" \
   --access-key-id "${bootstrap_key_id}" >/dev/null
+: >"${bootstrap_file}"
 bootstrap_key_id=""
 chmod 600 "${session_file}"
 ln -n "${session_file}" "${output}" || fail "refusing to overwrite ${output}"

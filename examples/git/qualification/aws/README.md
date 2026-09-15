@@ -9,8 +9,8 @@ that prefix.
 The administrator profile used for this campaign is an IAM Identity Center
 role session. AWS caps a role assumed from that session at one hour because it
 is [role chaining](https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_roles.html#troubleshoot_roles_cant-assume-role).
-For the required 12 hours, `issue-session.sh` briefly creates an IAM user access
-key, calls
+For the four-hour qualification session, `issue-session.sh` briefly creates an
+IAM user access key, calls
 [`GetSessionToken`](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetSessionToken.html),
 deletes the long-lived key, and writes the temporary credentials to a protected
 file. Terraform never receives or outputs credential values.
@@ -46,11 +46,12 @@ The partial local backend keeps managed state and the saved plan in the
 protected directory; `.terraform/` contains only ignored initialization data.
 
 The helper refuses an in-repository destination, an existing output, or a
-bootstrap user that already has an access key. It requests exactly 43,200
-seconds, disables shell tracing, recovers a returned key ID before cleanup, and
-publishes with a no-clobber hard link. If key creation returns no usable ID, the
-next run detects the key and stops for administrator cleanup. Keep the IAM user
-and policy until testing ends because AWS evaluates them on each session request.
+bootstrap user that already has an access key. It requests exactly 14,400
+seconds, retries new-key propagation for 10 seconds, disables shell tracing,
+recovers a returned key ID before cleanup, and publishes with a no-clobber hard
+link. If key creation returns no usable ID, the next run detects the key and
+stops for administrator cleanup. Keep the IAM user and policy until testing ends
+because AWS evaluates them on each session request.
 
 Load the session without printing it or putting values in process arguments:
 
