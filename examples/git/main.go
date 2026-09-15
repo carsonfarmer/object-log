@@ -207,9 +207,11 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s, e := openStore(r.Context(), session, format, limits)
+	open := func() (*store, error) { return openStore(r.Context(), session, format, limits) }
+	s, e := retryOpenStore(open, refresh)
 	if e != nil {
-		http.Error(w, e.Error(), operationStatus(e))
+		log.Printf("git request setup failed stage=open-store: %v", e)
+		http.Error(w, "Git storage unavailable", operationStatus(e))
 		return
 	}
 	defer func() { s.Close() }()
@@ -219,7 +221,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			if err := refresh(); err != nil {
 				return err
 			}
-			fresh, err := openStore(r.Context(), session, format, limits)
+			fresh, err := retryOpenStore(open, refresh)
 			if err != nil {
 				return err
 			}
@@ -227,7 +229,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 		if e != nil {
-			http.Error(w, e.Error(), http.StatusServiceUnavailable)
+			log.Printf("git request setup failed stage=before-push: %v", e)
+			http.Error(w, "Git maintenance unavailable", http.StatusServiceUnavailable)
 			return
 		}
 	}
