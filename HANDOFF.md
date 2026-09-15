@@ -7,8 +7,8 @@ mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 The accepted implementation is `examples/git` (go-git consumer) and
 `examples/wal-component` (Rust WAL bridge). The custom Rust Git engine and native
 maintenance service are removed. Installed Git remains the independent oracle.
-KV, SQLite and the Go WAL experiment are deferred. Do not resume them or perform
-remote provider testing without owner direction.
+KV, SQLite and the Go WAL experiment are deferred. Do not resume them. Live AWS
+qualification is owner-authorized and tracked by issue #10.
 
 ## Current behavior
 
@@ -33,10 +33,12 @@ histories before production rollout.
 
 Request limits cover input bytes, object and metadata sizes, pack entry counts,
 catalog decoding and cooperative deadlines. They are not a process-memory limit.
-Retries retain cumulative counters and decoding charges. An expired read can
-reopen once before output; a recorded storage failure stops further output.
-A single identical conditional storage PUT may retry after a connection failure;
-a rejected replay preserves the first uncertain outcome. Git pushes never replay.
+Retries retain cumulative counters and decoding charges. A complete-object read
+may make three fresh core attempts after generic storage failures; each is
+admitted and counted. Spin may make two HTTP attempts per core attempt, for six
+at most. An expired view can reopen once before output. A single identical
+conditional storage PUT may retry after a connection failure; a rejected replay
+preserves the first uncertain outcome. Git pushes never replay.
 
 ## Dependencies and operation
 
@@ -73,8 +75,12 @@ the current upstream source still has both paths. The endurance test sets
 `maintenance.autoDetach=false`, preserving normal maintenance while avoiding
 that client-side race. No Git patch has been submitted upstream.
 Failure artifacts remain available with `go test -artifacts`.
-Remote latency, provider behavior, deployment security, aggregate admission and
-operational recovery remain for remote qualification under issue #10.
+A focused live AWS S3 failure/restart drill passed for both hashes and removed
+its exact prefix afterward. The reusable Terraform and temporary-credential
+workflow is in `examples/git/qualification/aws`; managed state, plans and
+credentials stay outside the repository. The complete live phase sequence,
+deployed HTTPS, aggregate admission and operational recovery remain under issue
+#10.
 
 Root alone integrates main. Implement in exclusive worktrees, request independent
 correctness/simplification reviews, and run applicable gates before integration.
