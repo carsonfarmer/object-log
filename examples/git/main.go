@@ -214,23 +214,21 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { s.Close() }()
 	if service == transport.ReceivePackService && method == http.MethodPost {
-		reopen, err := s.beforePush()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		if reopen {
+		e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {
 			s.Close()
-			if err = refresh(); err != nil {
-				http.Error(w, err.Error(), http.StatusServiceUnavailable)
-				return
+			if err := refresh(); err != nil {
+				return err
 			}
 			fresh, err := openStore(r.Context(), session, format, limits)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusServiceUnavailable)
-				return
+				return err
 			}
 			s = fresh
+			return nil
+		})
+		if e != nil {
+			http.Error(w, e.Error(), http.StatusServiceUnavailable)
+			return
 		}
 	}
 	if maintenance {

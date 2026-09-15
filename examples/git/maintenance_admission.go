@@ -18,7 +18,11 @@ func (s *store) beforePush() (reopen bool, err error) {
 	switch result.State {
 	case wal.MaintenanceStateComplete, wal.MaintenanceStateMore, wal.MaintenanceStateRetained:
 		return true, nil
+	case wal.MaintenanceStateConflict:
+		return false, errMaintenanceConflict
+	case wal.MaintenanceStatePending:
+		return false, errMaintenancePending
 	default:
-		return false, fmt.Errorf("maintenance has not settled; retry push")
+		return false, fmt.Errorf("unknown maintenance state %d", result.State)
 	}
 }
