@@ -43,6 +43,7 @@ type store struct {
 	failure     error
 	tailEntries uint64
 	session     *wal.Session
+	stateRoot   *wal.Object
 	meta        rootMeta
 	buckets     map[string]catalogRoot
 	loaded      map[*wal.Object]radixNode[indexed, catalogRoot]
@@ -76,7 +77,8 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 		if len(last.Objects) != 1 {
 			return nil, fmt.Errorf("invalid root record")
 		}
-		root, e := s.readNode(last.Objects[0])
+		s.stateRoot = last.Objects[0]
+		root, e := s.readNode(s.stateRoot)
 		if e != nil {
 			return nil, e
 		}

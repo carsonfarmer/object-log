@@ -56,6 +56,15 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 	return s.collect()
 }
 
+// checkpointTail checkpoints the authenticated current catalog as-is. Full
+// maintenance separately prunes and reclaims unreachable Git objects.
+func (s *store) checkpointTail() (wal.MaintenanceState, error) {
+	if err := s.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return unwrap(s.session.Checkpoint(nil, []*wal.Object{s.stateRoot}))
+}
+
 func (s *store) collect() (wal.CollectionResult, error) {
 	// Refresh shares the original transport counters and observes the checkpoint
 	// or collection epoch before asking the core to resume/install a fenced plan.
