@@ -9,14 +9,14 @@ pub(super) async fn checkpoint(
     data: Vec<u8>,
     roots: Vec<StagedObject>,
 ) -> Result<MaintenanceState, Failure> {
-    let through = session
-        .view
+    let view = session.current_view();
+    let through = view
         .tail()
         .last()
         .ok_or_else(|| Failure::Other("checkpoint requires an active tail".into()))?;
     match session
         .log
-        .publish_checkpoint(&session.view, through, data.into(), roots)
+        .publish_checkpoint(&view, through, data.into(), roots)
         .await
         .map_err(failure)?
     {
@@ -41,9 +41,10 @@ pub(super) async fn checkpoint(
 
 // One durable deletion plan per call; a later call resumes an interrupted plan.
 pub(super) async fn collect(session: &SessionState) -> Result<CollectionResult, Failure> {
+    let current = session.current_view();
     let view = match session
         .log
-        .start_collection(&session.view)
+        .start_collection(&current)
         .await
         .map_err(failure)?
     {

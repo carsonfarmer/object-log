@@ -1293,6 +1293,7 @@ dependencies = [
  "spin-executor",
  "spin-sdk",
  "tokio",
+ "uuid",
  "wasi",
  "wit-bindgen 0.46.0",
 ]

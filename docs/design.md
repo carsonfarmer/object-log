@@ -259,6 +259,10 @@ A retention ID protects the full log namespace and has no automatic expiry.
 Any retention blocks plan installation. An active plan blocks a new retention.
 A caller reuses one ID only to resolve an uncertain retention update. It uses a
 new ID after a confirmed release.
+If a stopped process loses an ID, `clear_retentions_after_drain` can clear all
+retentions through the same head CAS. The caller must first stop new acquisition
+and drain every reader. Normal collection never performs this recovery because
+clearing a live reader would be unsafe.
 
 Object, node, tail, and checkpoint reads take a `View`. A missing object from a
 view in an older collection epoch returns `ViewExpired`. A missing object from

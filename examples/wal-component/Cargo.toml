@@ -23,5 +23,6 @@ sha2 = "0.10"
 spin-sdk = { version = "=5.2.0", default-features = false }
 spin-executor = "=5.2.0"
 wasi = "=0.13.1"
+uuid = { version = "1", default-features = false }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

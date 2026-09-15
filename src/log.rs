@@ -204,6 +204,46 @@ enum CheckpointEvidence {
     Retry,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RetentionChange {
+    Acquire(RetentionId),
+    Release(RetentionId),
+    ClearAfterDrain,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RetentionHeadState {
+    Applied,
+    ActiveCollection,
+    Conflict,
+}
+
+impl RetentionChange {
+    fn classify(self, head: &Head) -> RetentionHeadState {
+        match self {
+            Self::Acquire(id) if head.retention_ids.contains(&id) => RetentionHeadState::Applied,
+            Self::Acquire(_) if head.active_plan.is_some() => RetentionHeadState::ActiveCollection,
+            Self::Release(id) if !head.retention_ids.contains(&id) => RetentionHeadState::Applied,
+            Self::ClearAfterDrain if head.retention_ids.is_empty() => RetentionHeadState::Applied,
+            Self::Acquire(_) | Self::Release(_) | Self::ClearAfterDrain => {
+                RetentionHeadState::Conflict
+            }
+        }
+    }
+
+    fn apply(self, head: &mut Head) {
+        match self {
+            Self::Acquire(id) => {
+                head.retention_ids.insert(id);
+            }
+            Self::Release(id) => {
+                head.retention_ids.remove(&id);
+            }
+            Self::ClearAfterDrain => head.retention_ids.clear(),
+        }
+    }
+}
+
 /// One decoded commit joined with its ordered head reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitRecord {
@@ -435,58 +475,8 @@ impl Log {
     /// Returns an error for a foreign view, a durable limit, invalid head data,
     /// or a backend failure that cannot hide a successful update.
     pub async fn retain(&self, view: &View, id: RetentionId) -> Result<RetentionStatus, Error> {
-        self.validate_view(view)?;
-        if view.head().retention_ids.contains(&id) || view.head().active_plan.is_some() {
-            return match self.refresh(view).await? {
-                None if view.head().retention_ids.contains(&id) => {
-                    Ok(RetentionStatus::Applied(view.clone()))
-                }
-                None => Ok(RetentionStatus::ActiveCollection(view.clone())),
-                Some(current) if current.head().retention_ids.contains(&id) => {
-                    Ok(RetentionStatus::Applied(current))
-                }
-                Some(current) if current.head().active_plan.is_some() => {
-                    Ok(RetentionStatus::ActiveCollection(current))
-                }
-                Some(current) => Ok(RetentionStatus::Conflict(current)),
-            };
-        }
-        if view.head().retention_ids.len() >= self.options.max_retention_ids {
-            return Err(Error::LimitExceeded("retention IDs"));
-        }
-
-        let mut candidate = view.head().clone();
-        candidate.retention_ids.insert(id);
-        candidate.advance_generation()?;
-        let bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&bytes)?;
-        match self
-            .store
-            .update(StoreKey::Head, bytes, view.storage_version().clone())
+        self.change_retention(view, RetentionChange::Acquire(id))
             .await
-        {
-            Ok(UpdateResult::Updated { version }) => {
-                Ok(RetentionStatus::Applied(Self::view(candidate, version)))
-            }
-            Ok(UpdateResult::PreconditionFailed) => {
-                let current = match self.load().await {
-                    Ok(current) => current,
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        return Ok(RetentionStatus::Pending);
-                    }
-                    Err(error) => return Err(error),
-                };
-                if current.head().retention_ids.contains(&id) {
-                    Ok(RetentionStatus::Applied(current))
-                } else if current.head().active_plan.is_some() {
-                    Ok(RetentionStatus::ActiveCollection(current))
-                } else {
-                    Ok(RetentionStatus::Conflict(current))
-                }
-            }
-            Err(Error::Store(_)) => Ok(RetentionStatus::Pending),
-            Err(error) => Err(error),
-        }
     }
 
     /// Removes one stable retention from the supplied head view.
@@ -502,19 +492,57 @@ impl Log {
         view: &View,
         id: RetentionId,
     ) -> Result<RetentionStatus, Error> {
+        self.change_retention(view, RetentionChange::Release(id))
+            .await
+    }
+
+    /// Clears every retention after all readers have been stopped and drained.
+    ///
+    /// This is an explicit recovery operation for callers that lost a retention
+    /// ID when a process ended. The caller must first prevent new readers from
+    /// acquiring retention and confirm that every existing reader has finished.
+    /// Calling this while a reader is active can allow collection to delete data
+    /// that reader still needs. Normal collection never clears retention.
+    ///
+    /// Repeat the operation after [`RetentionStatus::Conflict`] or
+    /// [`RetentionStatus::Pending`] until the result is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign view, invalid head data, or a backend
+    /// failure that cannot hide a successful update.
+    pub async fn clear_retentions_after_drain(
+        &self,
+        view: &View,
+    ) -> Result<RetentionStatus, Error> {
+        self.change_retention(view, RetentionChange::ClearAfterDrain)
+            .await
+    }
+
+    async fn change_retention(
+        &self,
+        view: &View,
+        change: RetentionChange,
+    ) -> Result<RetentionStatus, Error> {
         self.validate_view(view)?;
-        if !view.head().retention_ids.contains(&id) {
+        let source = change.classify(view.head());
+        if source != RetentionHeadState::Conflict {
             return match self.refresh(view).await? {
-                None => Ok(RetentionStatus::Applied(view.clone())),
-                Some(current) if !current.head().retention_ids.contains(&id) => {
-                    Ok(RetentionStatus::Applied(current))
-                }
-                Some(current) => Ok(RetentionStatus::Conflict(current)),
+                None => Ok(Self::retention_status(source, view.clone())),
+                Some(current) => Ok(Self::retention_status(
+                    change.classify(current.head()),
+                    current,
+                )),
             };
+        }
+        if matches!(change, RetentionChange::Acquire(_))
+            && view.head().retention_ids.len() >= self.options.max_retention_ids
+        {
+            return Err(Error::LimitExceeded("retention IDs"));
         }
 
         let mut candidate = view.head().clone();
-        candidate.retention_ids.remove(&id);
+        change.apply(&mut candidate);
         candidate.advance_generation()?;
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
@@ -526,22 +554,24 @@ impl Log {
             Ok(UpdateResult::Updated { version }) => {
                 Ok(RetentionStatus::Applied(Self::view(candidate, version)))
             }
-            Ok(UpdateResult::PreconditionFailed) => {
-                let current = match self.load().await {
-                    Ok(current) => current,
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        return Ok(RetentionStatus::Pending);
-                    }
-                    Err(error) => return Err(error),
-                };
-                if current.head().retention_ids.contains(&id) {
-                    Ok(RetentionStatus::Conflict(current))
-                } else {
-                    Ok(RetentionStatus::Applied(current))
-                }
-            }
+            Ok(UpdateResult::PreconditionFailed) => match self.load().await {
+                Ok(current) => Ok(Self::retention_status(
+                    change.classify(current.head()),
+                    current,
+                )),
+                Err(Error::Store(_) | Error::RequestDenied) => Ok(RetentionStatus::Pending),
+                Err(error) => Err(error),
+            },
             Err(Error::Store(_)) => Ok(RetentionStatus::Pending),
             Err(error) => Err(error),
+        }
+    }
+
+    fn retention_status(state: RetentionHeadState, view: View) -> RetentionStatus {
+        match state {
+            RetentionHeadState::Applied => RetentionStatus::Applied(view),
+            RetentionHeadState::ActiveCollection => RetentionStatus::ActiveCollection(view),
+            RetentionHeadState::Conflict => RetentionStatus::Conflict(view),
         }
     }
 

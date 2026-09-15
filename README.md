@@ -49,6 +49,13 @@ cancelled write. `ByteWriter::storage_objects` reports how many immutable WAL
 objects a successful finish at the current length will own, so consumers can
 enforce a graph budget without reproducing that geometry.
 
+Long reads can call `retain` before opening application data and
+`release_retention` after their last byte. Both operations reuse one stable ID
+to resolve uncertain head updates. Retention has no expiry. If a stopped process
+loses an ID, `clear_retentions_after_drain` is available only after the caller
+has stopped new readers and drained every existing reader; normal collection
+never clears retention.
+
 Successful immutable creation has one required storage property: the exact
 bytes remain at the same physical key until object-log garbage collection
 deletes them. External lifecycle expiry, deletion, or overwrite violates this

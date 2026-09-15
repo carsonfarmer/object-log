@@ -39,6 +39,10 @@ explicit; ordinary Git clients refresh refs after a lost response. Pushes are
 never automatically replayed. Expired reads may reopen once before response
 bytes are sent, with at most 1 MiB of request replay and cumulative storage
 counters. A late failure stops the response rather than restarting it.
+Upload-pack acquires WAL retention before reading the catalog and releases it
+after the last response write, including error and disconnect paths. Lost IDs
+can be cleared only in explicitly enabled drained-reader recovery mode; that
+mode rejects normal traffic and normal maintenance never clears retention.
 Fetch visibility checks current ref trees before older history and stops when
 requested objects and relevant haves are proven. Blob payload readers stay
 unopened until pack generation; unreachable objects remain unavailable.

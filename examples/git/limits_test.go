@@ -78,22 +78,28 @@ func TestRequestDeadline(t *testing.T) {
 }
 
 func TestReadOnlyConfiguration(t *testing.T) {
-	for _, value := range []string{"true", "TRUE", "1", "false", "FALSE", "0", "tru"} {
-		limits, err := loadLimits(func(key string) string {
-			if key == "GIT_READ_ONLY" {
-				return value
+	for _, key := range []string{"GIT_READ_ONLY", "WAL_RECOVER_RETENTIONS_AFTER_DRAIN"} {
+		for _, value := range []string{"true", "TRUE", "1", "false", "FALSE", "0", "tru"} {
+			limits, err := loadLimits(func(name string) string {
+				if name == key {
+					return value
+				}
+				return ""
+			})
+			if value == "tru" {
+				if err == nil {
+					t.Fatalf("invalid %s setting accepted", key)
+				}
+				continue
 			}
-			return ""
-		})
-		if value == "tru" {
-			if err == nil {
-				t.Fatal("invalid read-only setting accepted")
+			want := value == "true" || value == "TRUE" || value == "1"
+			got := limits.readOnly
+			if key == "WAL_RECOVER_RETENTIONS_AFTER_DRAIN" {
+				got = limits.recoverRetentions
 			}
-			continue
-		}
-		want := value == "true" || value == "TRUE" || value == "1"
-		if err != nil || limits.readOnly != want {
-			t.Fatalf("%s: %v %v", value, limits.readOnly, err)
+			if err != nil || got != want {
+				t.Fatalf("%s=%s: %v %v", key, value, got, err)
+			}
 		}
 	}
 }

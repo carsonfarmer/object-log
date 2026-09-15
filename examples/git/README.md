@@ -126,6 +126,7 @@ Each request has explicit limits. Invalid settings fail closed.
 | `git_max_catalog_bytes` | 64 MiB | Catalog bucket JSON decoded across the request |
 | `git_request_timeout` | `5m` | Cooperative request deadline |
 | `wal_max_collection_objects` | 100,000 | Physical WAL objects retained by one repository, including its checkpoint |
+| `wal_recover_retentions_after_drain` | `false` | Exclusive recovery mode for IDs lost by stopped instances |
 
 Use positive byte/count values and a positive duration. Blobs stream; structured
 objects need the smaller decoding limit. Pack counts are checked before entry
@@ -242,6 +243,7 @@ git_max_pack_objects = "1000000"
 git_max_catalog_bytes = "67108864"
 git_request_timeout = "5m"
 wal_max_collection_objects = "100000"
+wal_recover_retentions_after_drain = "false"
 ```
 
 For local Spin connected to live S3, pass only that protected path:
@@ -280,6 +282,16 @@ objects and collect one bounded batch. Repeat `more` until `complete`; retry
 blocks collection. Counts are deletion candidates, not unique deleted objects.
 Maintenance still walks reachable history. Unchanged catalog nodes reuse their
 original proofs and maps; filtering copies maps only when needed.
+
+Every upload-pack request acquires WAL retention before reading its catalog and
+releases it after its last response write. If an instance ends before confirming
+release, stop ingress and wait for every reader to finish. Then start one
+authenticated instance with `wal_recover_retentions_after_drain = "true"`.
+This exclusive mode rejects Git and normal maintenance requests. Send
+authenticated `POST` requests to `/sha1.git/recover-retentions-after-drain` and
+`/sha256.git/recover-retentions-after-drain`, stop that instance, disable the
+setting, and resume service. Never use this action while a reader may still be
+running.
 
 Compressed loose objects of at most 512 bytes live directly in authenticated
 catalog leaves, avoiding separate reads during history traversal and collection.

@@ -24,15 +24,16 @@ async fn session_on(store: Arc<dyn ObjectStore>) -> SessionState {
     let view = log.load().await.unwrap();
     SessionState {
         log,
-        view,
+        view: RefCell::new(view),
         transport: transport::Transport::default(),
     }
 }
 async fn append(s: &mut SessionState, roots: Vec<StagedObject>) {
+    let source = s.current_view();
     let prepared = s
         .log
         .prepare(
-            &s.view,
+            &source,
             TransactionId::new(),
             Bytes::new(),
             Bytes::new(),
@@ -42,19 +43,19 @@ async fn append(s: &mut SessionState, roots: Vec<StagedObject>) {
     let CommitStatus::Committed(view) = s.log.commit(prepared).await.unwrap() else {
         panic!("append failed")
     };
-    s.view = view;
+    s.view.replace(view);
 }
 #[tokio::test]
 async fn checkpoint_and_resumed_batches_keep_live_objects() {
     let mut s = session().await;
     let live = s
         .log
-        .put_object(&s.view, Bytes::from_static(b"keep"))
+        .put_object(&s.current_view(), Bytes::from_static(b"keep"))
         .await
         .unwrap();
     let old = s
         .log
-        .put_object(&s.view, Bytes::from_static(b"remove"))
+        .put_object(&s.current_view(), Bytes::from_static(b"remove"))
         .await
         .unwrap();
     append(&mut s, vec![live.clone(), old.clone()]).await;
@@ -64,21 +65,21 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
             .unwrap(),
         MaintenanceState::Complete
     ));
-    s.view = s.log.load().await.unwrap();
+    s.view.replace(s.log.load().await.unwrap());
     for i in 0..8 {
         s.log
-            .put_object(&s.view, Bytes::from(vec![i]))
+            .put_object(&s.current_view(), Bytes::from(vec![i]))
             .await
             .unwrap();
     }
     // Leave an installed plan behind, as a stopped process would.
     assert!(matches!(
-        s.log.start_collection(&s.view).await.unwrap(),
+        s.log.start_collection(&s.current_view()).await.unwrap(),
         CollectionStart::Installed(..)
     ));
     let mut complete = false;
     for _ in 0..8 {
-        s.view = s.log.load().await.unwrap();
+        s.view.replace(s.log.load().await.unwrap());
         let report = maintenance::collect(&s).await.unwrap();
         if matches!(report.state, MaintenanceState::Complete) {
             complete = true;
@@ -87,21 +88,29 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
         assert!(matches!(report.state, MaintenanceState::More));
     }
     assert!(complete);
-    s.view = s.log.load().await.unwrap();
+    s.view.replace(s.log.load().await.unwrap());
     assert_eq!(
-        s.log.read_object(&s.view, live.reference()).await.unwrap(),
+        s.log
+            .read_object(&s.current_view(), live.reference())
+            .await
+            .unwrap(),
         b"keep"[..]
     );
-    assert!(s.log.read_object(&s.view, old.reference()).await.is_err());
+    assert!(
+        s.log
+            .read_object(&s.current_view(), old.reference())
+            .await
+            .is_err()
+    );
 }
 #[tokio::test]
 async fn checkpoint_does_not_overwrite_a_concurrent_append() {
     let mut s = session().await;
     append(&mut s, vec![]).await;
-    let stale = s.view.clone();
+    let stale = s.current_view();
     append(&mut s, vec![]).await;
-    let current = s.view.clone();
-    s.view = stale;
+    let current = s.current_view();
+    s.view.replace(stale);
     assert!(matches!(
         maintenance::checkpoint(&s, vec![], vec![]).await.unwrap(),
         MaintenanceState::Conflict
@@ -112,9 +121,43 @@ async fn checkpoint_does_not_overwrite_a_concurrent_append() {
     );
 }
 
+#[tokio::test]
+async fn session_retention_blocks_collection_and_drained_recovery_clears_it() {
+    let s = session().await;
+    s.log
+        .put_object(&s.current_view(), Bytes::from_static(b"orphan"))
+        .await
+        .unwrap();
+    assert_eq!(
+        GuestSession::retain(&s, vec![7; 16]).unwrap(),
+        RetentionState::Applied
+    );
+    assert!(matches!(
+        maintenance::collect(&s).await.unwrap().state,
+        MaintenanceState::Retained
+    ));
+    assert_eq!(
+        GuestSession::release_retention(&s, vec![7; 16]).unwrap(),
+        RetentionState::Applied
+    );
+    assert_eq!(
+        GuestSession::retain(&s, vec![9; 16]).unwrap(),
+        RetentionState::Applied
+    );
+    assert_eq!(
+        GuestSession::clear_retentions_after_drain(&s).unwrap(),
+        RetentionState::Applied
+    );
+    assert!(matches!(
+        maintenance::collect(&s).await.unwrap().state,
+        MaintenanceState::More
+    ));
+    assert!(GuestSession::retain(&s, vec![0; 15]).is_err());
+}
+
 // Exercise raw materializer state: native tests cannot allocate WIT resources.
 async fn latest(s: &SessionState) -> (View, Option<(Bytes, Vec<StagedObject>)>) {
-    object_log::materialize(&s.log, s.view.clone(), &LatestCompleteState)
+    object_log::materialize(&s.log, s.current_view(), &LatestCompleteState)
         .await
         .unwrap()
         .into_parts()
@@ -128,13 +171,13 @@ async fn latest_complete_state_preserves_empty_tail_checkpoint_and_proofs() {
     assert!(state.is_none());
     let first = s
         .log
-        .put_object(&s.view, Bytes::from_static(b"old"))
+        .put_object(&s.current_view(), Bytes::from_static(b"old"))
         .await
         .unwrap();
     append(&mut s, vec![first]).await;
     let last = s
         .log
-        .put_object(&s.view, Bytes::from_static(b"latest"))
+        .put_object(&s.current_view(), Bytes::from_static(b"latest"))
         .await
         .unwrap();
     append(&mut s, vec![last.clone()]).await;
@@ -159,7 +202,7 @@ async fn latest_complete_state_preserves_empty_tail_checkpoint_and_proofs() {
     else {
         panic!("checkpoint failed")
     };
-    s.view = view;
+    s.view.replace(view);
     let (view, state) = latest(&s).await;
     assert_eq!(view.tail().len(), 0);
     let (data, roots) = state.unwrap();
@@ -167,7 +210,7 @@ async fn latest_complete_state_preserves_empty_tail_checkpoint_and_proofs() {
     assert_eq!(roots[0].reference(), last.reference());
     let newer = s
         .log
-        .put_object(&s.view, Bytes::from_static(b"newer"))
+        .put_object(&s.current_view(), Bytes::from_static(b"newer"))
         .await
         .unwrap();
     append(&mut s, vec![newer.clone()]).await;
@@ -192,7 +235,7 @@ async fn latest_state_does_not_skip_corrupt_older_commit_or_checkpoint() {
                     .unwrap(),
                 MaintenanceState::Complete
             ));
-            s.view = s.log.load().await.unwrap();
+            s.view.replace(s.log.load().await.unwrap());
         }
         let suffix = if checkpoint {
             "/checkpoints/"
@@ -213,7 +256,7 @@ async fn latest_state_does_not_skip_corrupt_older_commit_or_checkpoint() {
             .await
             .unwrap();
         assert!(matches!(
-            object_log::materialize(&s.log, s.view.clone(), &LatestCompleteState).await,
+            object_log::materialize(&s.log, s.current_view(), &LatestCompleteState).await,
             Err(object_log::MaterializeError::Log(
                 object_log::Error::CorruptObject
             ))

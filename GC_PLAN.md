@@ -65,6 +65,7 @@ RetentionId::new() -> RetentionId
 View::collection_epoch() -> u64
 Log::retain(view, id) -> RetentionStatus
 Log::release_retention(view, id) -> RetentionStatus
+Log::clear_retentions_after_drain(view) -> RetentionStatus
 Log::start_collection(view) -> CollectionStart
 Log::resume_collection(view) -> CollectionFinish
 Log::read_object(view, reference) -> bytes
@@ -88,6 +89,9 @@ pending-operation or plan-ID type is required.
 No API accepts a raw object path. No deletion type can represent the mutable
 head. The core does not add a collector trait, background task, distributed
 lease, mutable deletion bitmap, Bloom filter, or provider-specific branch.
+`clear_retentions_after_drain` recovers from lost retention IDs. Its caller must
+first stop retention acquisition and drain every reader; normal collection
+never invokes it.
 
 ## Required evidence
 

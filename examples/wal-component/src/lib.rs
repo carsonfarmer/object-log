@@ -1,7 +1,9 @@
 //! Feasibility binding of the existing WAL; no Git rules or new authority.
 use bytes::Bytes;
 use exports::object_log::storage::wal::*;
-use object_log::{CommitStatus, Log, Materializer, StagedObject, View};
+use object_log::{
+    CommitStatus, Log, Materializer, RetentionId, RetentionStatus, StagedObject, View,
+};
 use std::cell::RefCell;
 use std::sync::Arc;
 mod maintenance;
@@ -11,12 +13,32 @@ wit_bindgen::generate!({ path: "wit", world: "storage" });
 struct Component;
 struct SessionState {
     log: Log,
-    view: View,
+    view: RefCell<View>,
     transport: transport::Transport,
 }
 struct CandidateState {
     log: Log,
     prepared: object_log::PreparedCommit,
+}
+impl SessionState {
+    fn current_view(&self) -> View {
+        self.view.borrow().clone()
+    }
+
+    fn accept_retention(&self, status: RetentionStatus) -> RetentionState {
+        let (state, view) = match status {
+            RetentionStatus::Applied(view) => (RetentionState::Applied, Some(view)),
+            RetentionStatus::ActiveCollection(view) => {
+                (RetentionState::ActiveCollection, Some(view))
+            }
+            RetentionStatus::Conflict(view) => (RetentionState::Conflict, Some(view)),
+            RetentionStatus::Pending => (RetentionState::Pending, None),
+        };
+        if let Some(view) = view {
+            self.view.replace(view);
+        }
+        state
+    }
 }
 
 fn s3_builder(
@@ -67,6 +89,12 @@ fn proofs(objects: &[ObjectBorrow<'_>]) -> Vec<StagedObject> {
         .iter()
         .map(|object| object.get::<StagedObject>().clone())
         .collect()
+}
+fn retention_id(value: Vec<u8>) -> Result<RetentionId, Failure> {
+    let bytes = value
+        .try_into()
+        .map_err(|_| Failure::Other("retention ID must contain 16 bytes".into()))?;
+    Ok(RetentionId::from_uuid(uuid::Uuid::from_bytes(bytes)))
 }
 // Each record represents a complete state. Delta consumers must fold differently.
 struct LatestCompleteState;
@@ -126,15 +154,35 @@ impl GuestByteReader for ReaderState {
 }
 impl GuestObject for StagedObject {}
 impl GuestSession for SessionState {
+    fn retain(&self, id: Vec<u8>) -> Result<RetentionState, Failure> {
+        let view = self.current_view();
+        let status =
+            spin_executor::run(self.log.retain(&view, retention_id(id)?)).map_err(failure)?;
+        Ok(self.accept_retention(status))
+    }
+    fn release_retention(&self, id: Vec<u8>) -> Result<RetentionState, Failure> {
+        let view = self.current_view();
+        let status = spin_executor::run(self.log.release_retention(&view, retention_id(id)?))
+            .map_err(failure)?;
+        Ok(self.accept_retention(status))
+    }
+    fn clear_retentions_after_drain(&self) -> Result<RetentionState, Failure> {
+        let view = self.current_view();
+        let status =
+            spin_executor::run(self.log.clear_retentions_after_drain(&view)).map_err(failure)?;
+        Ok(self.accept_retention(status))
+    }
     fn write_bytes(&self) -> Result<ByteWriter, Failure> {
+        let view = self.view.borrow();
         self.log
-            .byte_writer(&self.view)
+            .byte_writer(&view)
             .map(|writer| ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
             .map_err(failure)
     }
     fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
         let value = value.get::<StagedObject>();
-        spin_executor::run(self.log.open_bytes(&self.view, value.reference()))
+        let view = self.view.borrow().clone();
+        spin_executor::run(self.log.open_bytes(&view, value.reference()))
             .map(|reader| ByteReader::new(ReaderState(RefCell::new(reader))))
             .map_err(failure)
     }
@@ -156,14 +204,15 @@ impl GuestSession for SessionState {
         let view = spin_executor::run(self.log.load()).map_err(failure)?;
         Ok(Session::new(Self {
             log: self.log.clone(),
-            view,
+            view: RefCell::new(view),
             transport: self.transport.clone(),
         }))
     }
 
     fn latest_complete_state(&self) -> Result<RecoveredState, Failure> {
+        let view = self.current_view();
         spin_executor::run(async {
-            object_log::materialize(&self.log, self.view.clone(), &LatestCompleteState)
+            object_log::materialize(&self.log, view, &LatestCompleteState)
                 .await
                 .map(|value| RecoveredState {
                     tail_entries: value.view().tail().len() as u64,
@@ -177,23 +226,26 @@ impl GuestSession for SessionState {
     }
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<StagedObject>();
-        spin_executor::run(self.log.read_staged_node(&self.view, value))
+        let view = self.current_view();
+        spin_executor::run(self.log.read_staged_node(&view, value))
             .map(entry)
             .map_err(failure)
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {
+        let view = self.current_view();
         spin_executor::run(
             self.log
-                .put_node(&self.view, Bytes::from(data), proofs(&children)),
+                .put_node(&view, Bytes::from(data), proofs(&children)),
         )
         .map(Object::new)
         .map_err(failure)
     }
     fn prepare(&self, data: Vec<u8>, roots: Vec<ObjectBorrow<'_>>) -> Result<Candidate, Failure> {
+        let view = self.current_view();
         let prepared = self
             .log
             .prepare(
-                &self.view,
+                &view,
                 object_log::TransactionId::new(),
                 Bytes::from(data),
                 Bytes::new(),
@@ -250,7 +302,7 @@ impl Guest for Component {
             let view = log.load().await.map_err(failure)?;
             Ok(Session::new(SessionState {
                 log,
-                view,
+                view: RefCell::new(view),
                 transport,
             }))
         })

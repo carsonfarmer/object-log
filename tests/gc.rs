@@ -600,6 +600,87 @@ async fn stable_retention_id_resolves_a_lost_success_response() -> TestResult {
 }
 
 #[tokio::test]
+async fn drained_recovery_clears_lost_retentions_and_unblocks_collection() -> TestResult {
+    let fixture = Fixture::new("drained-retention-recovery", Options::default()).await?;
+    let source = fixture.log.load().await?;
+    let orphan = fixture
+        .log
+        .put_object(&source, Bytes::from_static(b"orphaned data"))
+        .await?;
+    let retained = {
+        let lost_id = RetentionId::new();
+        let RetentionStatus::Applied(view) = fixture.log.retain(&source, lost_id).await? else {
+            return Err("retention was not applied".into());
+        };
+        view
+    };
+
+    assert!(matches!(
+        fixture.log.start_collection(&retained).await?,
+        CollectionStart::Retained(_)
+    ));
+    let RetentionStatus::Applied(cleared) =
+        fixture.log.clear_retentions_after_drain(&retained).await?
+    else {
+        return Err("drained recovery did not clear retention".into());
+    };
+    let RetentionStatus::Applied(repeated) =
+        fixture.log.clear_retentions_after_drain(&cleared).await?
+    else {
+        return Err("drained recovery was not idempotent".into());
+    };
+    assert_eq!(repeated.generation(), cleared.generation());
+
+    let fenced = install_collection(&fixture.log, &repeated).await?;
+    let CollectionFinish::Complete(current, _) = fixture.log.resume_collection(&fenced).await?
+    else {
+        return Err("collection did not finish after drained recovery".into());
+    };
+    assert!(matches!(
+        fixture.log.read_object(&current, orphan.reference()).await,
+        Err(Error::CorruptObject)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn drained_recovery_resolves_conflict_and_lost_success() -> TestResult {
+    let fixture = Fixture::new("drained-retention-outcomes", Options::default()).await?;
+    let source = fixture.log.load().await?;
+    let first = RetentionId::new();
+    let second = RetentionId::new();
+    let RetentionStatus::Applied(one) = fixture.log.retain(&source, first).await? else {
+        return Err("first retention was not applied".into());
+    };
+    let RetentionStatus::Applied(two) = fixture.log.retain(&one, second).await? else {
+        return Err("second retention was not applied".into());
+    };
+    assert!(matches!(
+        fixture.log.clear_retentions_after_drain(&one).await?,
+        RetentionStatus::Conflict(current) if current.generation() == two.generation()
+    ));
+
+    fixture.store.reset();
+    fixture.store.fail_next(Operation::Put, FailurePhase::After);
+    assert!(matches!(
+        fixture.log.clear_retentions_after_drain(&two).await?,
+        RetentionStatus::Pending
+    ));
+    assert!(matches!(
+        fixture.log.clear_retentions_after_drain(&two).await?,
+        RetentionStatus::Applied(_)
+    ));
+    assert!(matches!(
+        fixture
+            .log
+            .start_collection(&fixture.log.load().await?)
+            .await?,
+        CollectionStart::Empty(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn collection_recovers_lost_fence_and_clear_responses() -> TestResult {
     let fixture = Fixture::new("collection-acks", Options::default()).await?;
     let source = fixture.log.load().await?;

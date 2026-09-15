@@ -27,6 +27,14 @@ type loader struct{ s storage.Storer }
 
 func (l loader) Load(*url.URL) (storage.Storer, error) { return l.s, nil }
 
+func sessionRetention(session *wal.Session) (retentionCall, retentionCall) {
+	return func(id []byte) (wal.RetentionState, error) {
+			return unwrap(session.Retain(id))
+		}, func(id []byte) (wal.RetentionState, error) {
+			return unwrap(session.ReleaseRetention(id))
+		}
+}
+
 func advertise(w io.Writer, s *store) error {
 	if err := (&packp.SmartReply{Service: transport.ReceivePackService}).Encode(w); err != nil {
 		return err
@@ -53,12 +61,13 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	service := parts[1]
 	maintenance := service == "maintenance"
+	recoverRetentions := service == "recover-retentions-after-drain"
 	method := http.MethodPost
 	if service == "info/refs" {
 		service = r.URL.Query().Get("service")
 		method = http.MethodGet
 	}
-	if service != transport.ReceivePackService && service != transport.UploadPackService && !maintenance {
+	if service != transport.ReceivePackService && service != transport.UploadPackService && !maintenance && !recoverRetentions {
 		http.NotFound(response, r)
 		return
 	}
@@ -67,7 +76,12 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if password := getConfig("GIT_PASSWORD"); password != "" {
+	password := getConfig("GIT_PASSWORD")
+	if recoverRetentions && password == "" {
+		http.Error(response, "retention recovery requires authentication", http.StatusForbidden)
+		return
+	}
+	if password != "" {
 		_, supplied, ok := r.BasicAuth()
 		if !ok || subtle.ConstantTimeCompare([]byte(password), []byte(supplied)) != 1 {
 			response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
@@ -78,6 +92,14 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	limits, e := loadLimits(getConfig)
 	if e != nil {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
+		return
+	}
+	if status := retentionRecoveryStatus(limits.recoverRetentions, recoverRetentions); status != 0 {
+		message := "drained retention recovery is disabled"
+		if status == http.StatusServiceUnavailable {
+			message = "service is draining retained readers"
+		}
+		http.Error(response, message, status)
 		return
 	}
 	if limits.readOnly && (service == transport.ReceivePackService || maintenance) {
@@ -127,44 +149,61 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if service == transport.UploadPackService {
 		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
-			s, err := openStore(r.Context(), session, format, limits)
-			if err != nil {
-				return err
-			}
-			defer s.Close()
-			attempt.failure = &s.failure
-			if request.Method == http.MethodPost {
-				var body io.Reader = request.Body
-				if request.Header.Get("Content-Encoding") == "gzip" {
-					decoded, err := gzip.NewReader(body)
-					if err != nil {
-						return err
-					}
-					defer decoded.Close()
-					body = decoded
-					request.Header.Del("Content-Encoding")
-				}
-				tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
-				for _, id := range s.meta.Refs {
-					tips = append(tips, plumbing.NewHash(id))
-				}
-				body = http.MaxBytesReader(nil, io.NopCloser(body), limits.negotiationBytes)
-				body, err = filterFetch(s, tips, body, strings.Contains(request.Header.Get("Git-Protocol"), "version=2"))
+			retain, release := sessionRetention(session)
+			return retained(r.Context(), retain, release, func() error {
+				s, err := openStore(r.Context(), session, format, limits)
 				if err != nil {
 					return err
 				}
-				request.Body = io.NopCloser(body)
-			}
-			b := backend.New(loader{s})
-			b.ErrorLog = log.Default()
-			b.ServeHTTP(attempt, request)
-			return s.failure
+				defer s.Close()
+				attempt.failure = &s.failure
+				if request.Method == http.MethodPost {
+					var body io.Reader = request.Body
+					if request.Header.Get("Content-Encoding") == "gzip" {
+						decoded, err := gzip.NewReader(body)
+						if err != nil {
+							return err
+						}
+						defer decoded.Close()
+						body = decoded
+						request.Header.Del("Content-Encoding")
+					}
+					tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
+					for _, id := range s.meta.Refs {
+						tips = append(tips, plumbing.NewHash(id))
+					}
+					body = http.MaxBytesReader(nil, io.NopCloser(body), limits.negotiationBytes)
+					body, err = filterFetch(s, tips, body, strings.Contains(request.Header.Get("Git-Protocol"), "version=2"))
+					if err != nil {
+						return err
+					}
+					request.Body = io.NopCloser(body)
+				}
+				b := backend.New(loader{s})
+				b.ErrorLog = log.Default()
+				b.ServeHTTP(attempt, request)
+				return s.failure
+			})
 		})
 		if e != nil {
 			log.Printf("git read failed: %v", e)
 			if !w.sent {
 				http.Error(w, "Git read failed", operationStatus(e))
 			}
+		}
+		return
+	}
+	if recoverRetentions {
+		e = resolveDrainedRecovery(func() (wal.RetentionState, error) {
+			return unwrap(session.ClearRetentionsAfterDrain())
+		})
+		if e != nil {
+			http.Error(w, "drained retention recovery failed: "+e.Error(), operationStatus(e))
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			e = json.NewEncoder(w).Encode(struct {
+				State string `json:"state"`
+			}{"complete"})
 		}
 		return
 	}

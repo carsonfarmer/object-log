@@ -20,7 +20,7 @@ type requestLimits struct {
 	packObjects, metadataBytes, catalogBytes int64
 	collectionObjects                        int64
 	timeout                                  time.Duration
-	readOnly                                 bool
+	readOnly, recoverRetentions              bool
 	catalogRead                              *int64
 }
 
@@ -58,6 +58,13 @@ func loadLimits(getenv func(string) string) (requestLimits, error) {
 		limits.readOnly, err = strconv.ParseBool(value)
 		if err != nil {
 			return limits, fmt.Errorf("GIT_READ_ONLY must be a boolean")
+		}
+	}
+	if value := getenv("WAL_RECOVER_RETENTIONS_AFTER_DRAIN"); value != "" {
+		var err error
+		limits.recoverRetentions, err = strconv.ParseBool(value)
+		if err != nil {
+			return limits, fmt.Errorf("WAL_RECOVER_RETENTIONS_AFTER_DRAIN must be a boolean")
 		}
 	}
 	return limits, nil

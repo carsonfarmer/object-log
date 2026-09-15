@@ -14,6 +14,7 @@ interface wal {
     }
     variant failure { expired, other(string) }
     variant outcome { committed, conflict, pending(list<u8>), expired }
+    enum retention-state { applied, active-collection, conflict, pending }
     enum maintenance-state { complete, more, conflict, pending, retained }
     record collection-result { state: maintenance-state, objects: u64, bytes: u64 }
     record usage { calls: u64, bytes: u64 }
@@ -33,6 +34,9 @@ interface wal {
         read-at: func(offset: u64, max-len: u32) -> result<list<u8>, failure>;
     }
     resource session {
+        retain: func(id: list<u8>) -> result<retention-state, failure>;
+        release-retention: func(id: list<u8>) -> result<retention-state, failure>;
+        clear-retentions-after-drain: func() -> result<retention-state, failure>;
         write-bytes: func() -> result<own<byte-writer>, failure>;
         open-bytes: func(value: borrow<object>) -> result<own<byte-reader>, failure>;
         checkpoint: func(data: list<u8>, roots: list<borrow<object>>) -> result<maintenance-state, failure>;

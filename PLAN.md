@@ -91,6 +91,7 @@ publish_checkpoint(&view, through, snapshot, roots: Vec<StagedObject>) -> Checkp
 resolve_checkpoint(pending) -> CheckpointResolution
 retain(&view, retention_id) -> RetentionStatus
 release_retention(&view, retention_id) -> RetentionStatus
+clear_retentions_after_drain(&view) -> RetentionStatus
 start_collection(&view) -> CollectionStart
 resume_collection(&view) -> CollectionFinish
 ```

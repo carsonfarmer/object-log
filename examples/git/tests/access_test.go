@@ -30,6 +30,8 @@ func TestAccess(t *testing.T) {
 		{"POST", "/sha1.git/info/refs?service=git-upload-pack", password, 405},
 		{"GET", "/sha1.git/git-upload-pack", password, 405},
 		{"GET", "/sha1.git/maintenance", password, 405},
+		{"GET", "/sha1.git/recover-retentions-after-drain", password, 405},
+		{"POST", "/sha1.git/recover-retentions-after-drain", password, 403},
 		{"GET", "/sha1.git/info/refs?service=maintenance", password, 404},
 		{"GET", "/unknown.git/info/refs?service=git-upload-pack", password, 404},
 		{"GET", "/sha256.git-extra/info/refs?service=git-upload-pack", password, 404},

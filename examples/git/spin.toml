@@ -13,6 +13,7 @@ wal_secret_key = { default = "", secret = true }
 wal_session_token = { default = "", secret = true }
 wal_default_branch = { default = "" }
 wal_max_collection_objects = { default = "100000" }
+wal_recover_retentions_after_drain = { default = "false" }
 git_password = { default = "", secret = true }
 git_boot_id = { default = "local-boot" }
 git_read_only = { default = "false" }
@@ -41,6 +42,7 @@ wal_secret_key = "{{ wal_secret_key }}"
 wal_session_token = "{{ wal_session_token }}"
 wal_default_branch = "{{ wal_default_branch }}"
 wal_max_collection_objects = "{{ wal_max_collection_objects }}"
+wal_recover_retentions_after_drain = "{{ wal_recover_retentions_after_drain }}"
 git_password = "{{ git_password }}"
 git_boot_id = "{{ git_boot_id }}"
 git_read_only = "{{ git_read_only }}"
