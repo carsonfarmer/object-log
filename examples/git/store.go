@@ -368,18 +368,7 @@ func (s *store) publish(refs map[string]string) error {
 	if e != nil {
 		return e
 	}
-	if err := s.ctx.Err(); err != nil {
-		return err
-	}
-	candidate, e := unwrap(s.session.Prepare(nil, []*wal.Object{root}))
-	if e != nil {
-		return e
-	}
-	defer candidate.Drop()
-	if e := s.ctx.Err(); e != nil {
-		return e
-	}
-	result, e := unwrap(candidate.Publish())
+	result, e := s.publishRoot(root)
 	if e != nil {
 		return e
 	}
@@ -391,6 +380,21 @@ func (s *store) publish(refs map[string]string) error {
 	default:
 		return fmt.Errorf("publication conflict or expired view")
 	}
+}
+
+func (s *store) publishRoot(root *wal.Object) (wal.Outcome, error) {
+	if err := s.ctx.Err(); err != nil {
+		return wal.Outcome{}, err
+	}
+	candidate, e := unwrap(s.session.Prepare(nil, []*wal.Object{root}))
+	if e != nil {
+		return wal.Outcome{}, e
+	}
+	defer candidate.Drop()
+	if e := s.ctx.Err(); e != nil {
+		return wal.Outcome{}, e
+	}
+	return unwrap(candidate.Publish())
 }
 
 func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
