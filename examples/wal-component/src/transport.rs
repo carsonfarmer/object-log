@@ -91,6 +91,31 @@ fn http_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Htt
     HttpError::new_boxed(HttpErrorKind::Unknown, error.into())
 }
 
+async fn finish_exchange<U, R, T, E, F>(upload: U, response: R, is_success: F) -> Result<T, E>
+where
+    U: std::future::Future<Output = Result<(), E>>,
+    R: std::future::Future<Output = Result<T, E>>,
+    F: Fn(&T) -> bool,
+{
+    futures::pin_mut!(upload, response);
+    match futures::future::select(upload, response).await {
+        futures::future::Either::Left((uploaded, response)) => match uploaded {
+            Ok(()) => response.await,
+            Err(upload_error) => match response.await {
+                Ok(response) if !is_success(&response) => Ok(response),
+                _ => Err(upload_error),
+            },
+        },
+        futures::future::Either::Right((response, upload)) => match response {
+            Ok(response) if !is_success(&response) => Ok(response),
+            response => {
+                upload.await?;
+                response
+            }
+        },
+    }
+}
+
 #[path = "request_retry.rs"]
 mod request_retry;
 
@@ -205,20 +230,12 @@ impl Service {
             })
             .await
         };
-        let response = match futures::future::select(Box::pin(upload), Box::pin(response)).await {
-            futures::future::Either::Left((uploaded, response)) => {
-                uploaded?;
-                response.await?
-            }
-            futures::future::Either::Right((response, upload)) => {
-                let response = response?;
-                // Early rejections must not wait for the server to consume the upload.
-                if (200..300).contains(&response.status()) {
-                    upload.await?;
-                }
-                response
-            }
-        };
+        // A server can reject a conditional request while closing its upload stream.
+        // Its definite non-success response takes precedence over that closure.
+        let response = finish_exchange(upload, response, |response| {
+            (200..300).contains(&response.status())
+        })
+        .await?;
         let mut builder = http::Response::builder().status(response.status());
         for (name, value) in response.headers().entries() {
             builder = builder.header(name, value);
@@ -331,6 +348,66 @@ impl Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_once<T>(value: T) -> impl std::future::Future<Output = T> {
+        let mut value = Some(value);
+        let mut pending = true;
+        std::future::poll_fn(move |cx| {
+            if std::mem::take(&mut pending) {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(value.take().unwrap())
+            }
+        })
+    }
+
+    async fn exchange(
+        upload: Result<(), &'static str>,
+        response: Result<u16, &'static str>,
+        response_first: bool,
+    ) -> Result<u16, &'static str> {
+        if response_first {
+            finish_exchange(
+                pending_once(upload),
+                std::future::ready(response),
+                |status| (200..300).contains(status),
+            )
+            .await
+        } else {
+            finish_exchange(
+                std::future::ready(upload),
+                std::future::ready(response),
+                |status| (200..300).contains(status),
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn definite_rejection_wins_in_both_completion_orders() {
+        for response_first in [false, true] {
+            assert_eq!(
+                exchange(Err("upload closed"), Ok(412), response_first).await,
+                Ok(412)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn all_other_outcomes_wait_for_both_sides() {
+        for response_first in [false, true] {
+            for response in [Ok(200), Err("response failed")] {
+                assert_eq!(
+                    exchange(Err("upload closed"), response, response_first).await,
+                    Err("upload closed")
+                );
+            }
+            for response in [Ok(200), Ok(412), Err("response failed")] {
+                assert_eq!(exchange(Ok(()), response, response_first).await, response);
+            }
+        }
+    }
 
     #[test]
     fn rejected_transfers_preserve_the_shared_budget() {
