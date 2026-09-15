@@ -284,8 +284,9 @@ func collectDrill(t *testing.T, url string) {
 	t.Fatal("maintenance did not complete in 32 requests")
 }
 
-// A concurrent collector performs one bounded step; conflicts and pending fences
-// are valid outcomes. After writers stop, collectDrill still requires completion.
+// A concurrent collector performs one bounded step; conflicts, pending fences,
+// and active reader retention are valid outcomes. After readers and writers stop,
+// collectDrill still requires completion.
 func collectDrillStep(t *testing.T, url string) string {
 	t.Helper()
 	response := drillRequest(t, context.Background(), url+"/maintenance", nil)
@@ -298,7 +299,7 @@ func collectDrillStep(t *testing.T, url string) string {
 		t.Fatalf("maintenance HTTP %d: %v", response.StatusCode, err)
 	}
 	switch result.State {
-	case "complete", "more", "conflict", "pending":
+	case "complete", "more", "conflict", "pending", "retained":
 	default:
 		t.Fatalf("unexpected maintenance state %q", result.State)
 	}

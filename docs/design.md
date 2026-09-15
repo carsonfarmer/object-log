@@ -169,10 +169,12 @@ The result is:
   includes an ambiguous update result and a rejected update followed by a
   failed read of the winner.
 
-The core never retries a candidate against a newer view. The application must
-read the winning operations, validate its intent again, and prepare a new
-candidate. The transaction ID can remain stable. The commit digest changes
-because its expected position changes.
+The core never retries a candidate against newer application or collection
+state. It can reconcile a head revision that changed only reader-retention
+bookkeeping, as described under garbage collection. For any other newer view,
+the application must read the winning operations, validate its intent again,
+and prepare a new candidate. The transaction ID can remain stable. The commit
+digest changes because its expected position changes.
 
 ## Pending resolution
 
@@ -213,9 +215,9 @@ base checkpoint, removes the covered tail prefix, preserves the suffix,
 preserves the resolution window, and increments the generation.
 
 A definite CAS failure returns `Conflict`. An uncertain update returns a
-`PendingCheckpoint`. `resolve_checkpoint` retries only the exact original
-checkpoint against its exact source view. Later head movement can make the
-outcome `Expired`.
+`PendingCheckpoint`. `resolve_checkpoint` preserves the exact original
+checkpoint and source view; it can reconcile reader-retention-only head
+revisions. Other later head movement can make the outcome `Expired`.
 
 The core treats snapshot and node payload bytes as opaque. The adapter must put
 every durable dependency in the checkpoint roots or a reference-node edge.
