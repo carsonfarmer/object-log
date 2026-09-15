@@ -1,6 +1,6 @@
 /main.wasm
 /bindings/
-/wit/deps/
+/wit/deps/wal/
 /git.wasm
 /.spin/
 /.adapter/

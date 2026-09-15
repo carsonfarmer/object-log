@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-check git-build git-provider-test git-remote-rehearse git-remote-qualification
+.PHONY: check test bench minio-test sqlite-minio-test sqlite-recovery-acceptance staged-performance-acceptance gc-acceptance git-check git-build git-spin-config-test git-provider-test git-remote-rehearse git-remote-qualification
 
 check:
 	cargo fmt --all --check
@@ -49,6 +49,9 @@ git-build:
 	cargo build --locked --release --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2
 	$(MAKE) -C $(GIT_EXAMPLE_DIR) build
 	cd $(GIT_EXAMPLE_DIR) && wac plug --plug ../wal-component/target/wasm32-wasip2/release/wal_component_probe.wasm main.wasm -o git.wasm
+
+git-spin-config-test: git-build
+	./scripts/test-git-spin-config.sh
 
 git-provider-test:
 	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to your local Spin/MinIO service"; exit 1)

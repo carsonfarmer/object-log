@@ -1,2 +1,5 @@
 package object-log:git-proof@0.1.0;
-world client { import object-log:storage/wal@0.1.0; }
+world client {
+  import object-log:storage/wal@0.1.0;
+  import wasi:config/store@0.2.0-draft-2024-09-27;
+}

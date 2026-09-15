@@ -18,6 +18,10 @@ git_read_only = { default = "false" }
 git_max_push_bytes = { default = "2147483648" }
 git_max_negotiation_bytes = { default = "8388608" }
 git_max_object_bytes = { default = "1073741824" }
+git_max_metadata_bytes = { default = "16777216" }
+git_max_pack_objects = { default = "1000000" }
+git_max_catalog_bytes = { default = "67108864" }
+git_request_timeout = { default = "5m" }
 
 [[trigger.http]]
 route = "/..."
@@ -26,18 +30,22 @@ component = "git"
 [component.git]
 source = "git.wasm"
 allowed_outbound_hosts = ["{{ wal_endpoint }}"]
-[component.git.environment]
-WAL_ENDPOINT = "{{ wal_endpoint }}"
-WAL_BUCKET = "{{ wal_bucket }}"
-WAL_REGION = "{{ wal_region }}"
-WAL_PREFIX = "{{ wal_prefix }}"
-WAL_ACCESS_KEY = "{{ wal_access_key }}"
-WAL_SECRET_KEY = "{{ wal_secret_key }}"
-WAL_SESSION_TOKEN = "{{ wal_session_token }}"
-WAL_DEFAULT_BRANCH = "{{ wal_default_branch }}"
-GIT_PASSWORD = "{{ git_password }}"
-GIT_BOOT_ID = "{{ git_boot_id }}"
-GIT_READ_ONLY = "{{ git_read_only }}"
-GIT_MAX_PUSH_BYTES = "{{ git_max_push_bytes }}"
-GIT_MAX_NEGOTIATION_BYTES = "{{ git_max_negotiation_bytes }}"
-GIT_MAX_OBJECT_BYTES = "{{ git_max_object_bytes }}"
+[component.git.variables]
+wal_endpoint = "{{ wal_endpoint }}"
+wal_bucket = "{{ wal_bucket }}"
+wal_region = "{{ wal_region }}"
+wal_prefix = "{{ wal_prefix }}"
+wal_access_key = "{{ wal_access_key }}"
+wal_secret_key = "{{ wal_secret_key }}"
+wal_session_token = "{{ wal_session_token }}"
+wal_default_branch = "{{ wal_default_branch }}"
+git_password = "{{ git_password }}"
+git_boot_id = "{{ git_boot_id }}"
+git_read_only = "{{ git_read_only }}"
+git_max_push_bytes = "{{ git_max_push_bytes }}"
+git_max_negotiation_bytes = "{{ git_max_negotiation_bytes }}"
+git_max_object_bytes = "{{ git_max_object_bytes }}"
+git_max_metadata_bytes = "{{ git_max_metadata_bytes }}"
+git_max_pack_objects = "{{ git_max_pack_objects }}"
+git_max_catalog_bytes = "{{ git_max_catalog_bytes }}"
+git_request_timeout = "{{ git_request_timeout }}"

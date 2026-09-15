@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
 	"slices"
 	"strings"
 
@@ -96,8 +95,8 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	head := s.meta.Head
 	if head == "" {
 		branch := "main"
-		if !recovered.Latest.IsSome() && os.Getenv("WAL_DEFAULT_BRANCH") != "" {
-			branch = os.Getenv("WAL_DEFAULT_BRANCH")
+		if configured := getConfig("WAL_DEFAULT_BRANCH"); !recovered.Latest.IsSome() && configured != "" {
+			branch = configured
 		}
 		head = "refs/heads/" + branch
 	}

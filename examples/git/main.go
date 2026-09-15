@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/url"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
-	"os"
 	"strings"
 )
 
@@ -45,8 +44,8 @@ func advertise(w io.Writer, s *store) error {
 func init() { wasihttp.HandleFunc(serve) }
 func main() {}
 func serve(response http.ResponseWriter, r *http.Request) {
-	response.Header().Set("X-Git-Boot-ID", os.Getenv("GIT_BOOT_ID"))
-	response.Header().Set("X-Git-Target-ID", targetID(os.Getenv))
+	response.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
+	response.Header().Set("X-Git-Target-ID", targetID(getConfig))
 	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 2)
 	if len(parts) != 2 || (parts[0] != "sha1.git" && parts[0] != "sha256.git") {
 		http.NotFound(response, r)
@@ -68,7 +67,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if password := os.Getenv("GIT_PASSWORD"); password != "" {
+	if password := getConfig("GIT_PASSWORD"); password != "" {
 		_, supplied, ok := r.BasicAuth()
 		if !ok || subtle.ConstantTimeCompare([]byte(password), []byte(supplied)) != 1 {
 			response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
@@ -76,7 +75,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	limits, e := loadLimits(os.Getenv)
+	limits, e := loadLimits(getConfig)
 	if e != nil {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
@@ -100,7 +99,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
-	session, e := unwrap(wal.Open(wal.Config{Endpoint: os.Getenv("WAL_ENDPOINT"), Bucket: os.Getenv("WAL_BUCKET"), Region: os.Getenv("WAL_REGION"), AccessKey: os.Getenv("WAL_ACCESS_KEY"), SecretKey: os.Getenv("WAL_SECRET_KEY"), SessionToken: sessionToken(os.Getenv), Prefix: os.Getenv("WAL_PREFIX"), LogId: "repo-" + format.String()}))
+	session, e := unwrap(wal.Open(wal.Config{Endpoint: getConfig("WAL_ENDPOINT"), Bucket: getConfig("WAL_BUCKET"), Region: getConfig("WAL_REGION"), AccessKey: getConfig("WAL_ACCESS_KEY"), SecretKey: getConfig("WAL_SECRET_KEY"), SessionToken: sessionToken(getConfig), Prefix: getConfig("WAL_PREFIX"), LogId: "repo-" + format.String()}))
 	if e != nil {
 		http.Error(response, e.Error(), operationStatus(e))
 		return

@@ -24,7 +24,9 @@ make git-build
 ```
 
 The Go Makefile generates bindings and builds the component. Dependencies and
-the build adapter are pinned; generated files and binaries are ignored.
+the build adapter are pinned; generated files and binaries are ignored. The
+component reads its mapped application variables through the standard
+`wasi:config/store` interface supplied by Spin 4.
 Start a disposable local MinIO instance in another terminal:
 
 ```sh
@@ -63,6 +65,9 @@ unvalidated experimental roots are unsupported. Catalogs contain inline objects
 and WAL byte streams.
 
 ## Test
+
+Run `make git-spin-config-test` from the repository root to build the component
+and verify Spin passes the boot ID, storage target and password to the guest.
 
 From the root, against the running local host:
 
@@ -105,13 +110,13 @@ Each request has explicit limits. Invalid settings fail closed.
 
 | Setting | Default | What it limits |
 | --- | --- | --- |
-| `GIT_MAX_PUSH_BYTES` | 2 GiB | Incoming push body |
-| `GIT_MAX_NEGOTIATION_BYTES` | 8 MiB | Negotiation, push commands and expanded gzip |
-| `GIT_MAX_OBJECT_BYTES` | 1 GiB | Each decoded Git object |
-| `GIT_MAX_METADATA_BYTES` | 16 MiB | Each commit, tree or tag |
-| `GIT_MAX_PACK_OBJECTS` | 1,000,000 | Entries declared by an incoming pack |
-| `GIT_MAX_CATALOG_BYTES` | 64 MiB | Catalog bucket JSON decoded across the request |
-| `GIT_REQUEST_TIMEOUT` | `5m` | Cooperative request deadline |
+| `git_max_push_bytes` | 2 GiB | Incoming push body |
+| `git_max_negotiation_bytes` | 8 MiB | Negotiation, push commands and expanded gzip |
+| `git_max_object_bytes` | 1 GiB | Each decoded Git object |
+| `git_max_metadata_bytes` | 16 MiB | Each commit, tree or tag |
+| `git_max_pack_objects` | 1,000,000 | Entries declared by an incoming pack |
+| `git_max_catalog_bytes` | 64 MiB | Catalog bucket JSON decoded across the request |
+| `git_request_timeout` | `5m` | Cooperative request deadline |
 
 Use positive byte/count values and a positive duration. Blobs stream; structured
 objects need the smaller decoding limit. Pack counts are checked before entry
@@ -182,12 +187,12 @@ of the endpoint, region, bucket and exact profile prefix. Recovery requires the
 saved standard boot ID to change.
 
 Standard, recovery, read-only and performance use
-`WAL_PREFIX=$GIT_QUALIFICATION_PREFIX/git`; limits uses the fresh
+`wal_prefix=$GIT_QUALIFICATION_PREFIX/git`; limits uses the fresh
 `$GIT_QUALIFICATION_PREFIX/git-limits` prefix. Every profile sets the recorded
 endpoint, bucket and region, all three temporary credential values, and
-`GIT_PASSWORD`. Read-only additionally sets `GIT_READ_ONLY=true`. Limits sets
-`GIT_MAX_PUSH_BYTES=131072`, `GIT_MAX_NEGOTIATION_BYTES=4096`, and
-`GIT_MAX_OBJECT_BYTES=65536`. Keep `WAL_DEFAULT_BRANCH` equal to
+`git_password`. Read-only additionally sets `git_read_only=true`. Limits sets
+`git_max_push_bytes=131072`, `git_max_negotiation_bytes=4096`, and
+`git_max_object_bytes=65536`. Keep `wal_default_branch` equal to
 `GIT_PROBE_BRANCH` across the standard restart.
 
 Create a 0600 Spin 4 TOML variables file outside the repository containing:
@@ -207,6 +212,10 @@ git_read_only = "false"
 git_max_push_bytes = "2147483648"
 git_max_negotiation_bytes = "8388608"
 git_max_object_bytes = "1073741824"
+git_max_metadata_bytes = "16777216"
+git_max_pack_objects = "1000000"
+git_max_catalog_bytes = "67108864"
+git_request_timeout = "5m"
 ```
 
 For local Spin connected to live S3, pass only that protected path:
