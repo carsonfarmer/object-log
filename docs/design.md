@@ -264,6 +264,12 @@ retentions through the same head CAS. The caller must first stop new acquisition
 and drain every reader. Normal collection never performs this recovery because
 clearing a live reader would be unsafe.
 
+Retention bookkeeping does not change an application's publication base. A
+commit or checkpoint whose conditional head update meets only newer retention
+revisions retries against those revisions while preserving its original
+operation and recovery evidence. A log, checkpoint, or collection change still
+produces the ordinary conflict result.
+
 Object, node, tail, and checkpoint reads take a `View`. A missing object from a
 view in an older collection epoch returns `ViewExpired`. A missing object from
 the current epoch is corruption. An epoch can advance only when the fence CAS

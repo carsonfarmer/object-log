@@ -54,7 +54,8 @@ Long reads can call `retain` before opening application data and
 to resolve uncertain head updates. Retention has no expiry. If a stopped process
 loses an ID, `clear_retentions_after_drain` is available only after the caller
 has stopped new readers and drained every existing reader; normal collection
-never clears retention.
+never clears retention. Commit and checkpoint publication preserve concurrent
+retention changes when the log and collection state are otherwise unchanged.
 
 Successful immutable creation has one required storage property: the exact
 bytes remain at the same physical key until object-log garbage collection

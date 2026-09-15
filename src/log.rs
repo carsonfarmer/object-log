@@ -204,6 +204,15 @@ enum CheckpointEvidence {
     Retry,
 }
 
+const MAX_RETENTION_PUBLICATION_ATTEMPTS: usize = 16;
+
+enum HeadPublication {
+    Updated(View),
+    Changed(View),
+    Contended(View),
+    Pending,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum RetentionChange {
     Acquire(RetentionId),
@@ -1020,9 +1029,12 @@ impl Log {
 
     /// Stages and conditionally publishes one exact prepared commit.
     ///
-    /// A definite precondition failure returns [`CommitStatus::Conflict`] when
-    /// the winning view can also be read. [`CommitStatus::Pending`] preserves
-    /// the candidate when the safe final view or classification is unavailable.
+    /// Retention-only head updates are reconciled without changing the prepared
+    /// commit or its recovery token. A definite conflicting log or collection
+    /// update returns [`CommitStatus::Conflict`] when the winning view can also
+    /// be read. Exhausting the bounded retention retry also returns conflict.
+    /// [`CommitStatus::Pending`] preserves the candidate when the safe final
+    /// view or classification is unavailable.
     /// Same-process staged proofs avoid immutable dependency reads. Reopened or
     /// decoded recovery evidence verifies its complete dependency graph.
     ///
@@ -1045,37 +1057,27 @@ impl Log {
         self.create_new_commit(self.commit_key(&commit_ref), commit_bytes)
             .await?;
         prepared.staging_domain = Arc::clone(&self.staging_domain);
-        let candidate = Self::candidate_head(&prepared, &commit_ref)?;
-        let candidate_bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&candidate_bytes)?;
-
         match self
-            .store
-            .update(
-                StoreKey::Head,
-                candidate_bytes,
-                prepared.view.storage_version().clone(),
-            )
-            .await
+            .publish_head(&prepared.view, |view| {
+                Self::candidate_head(view, &commit_ref)
+            })
+            .await?
         {
-            Ok(UpdateResult::Updated { version }) => {
-                let next = Self::view(candidate, version);
+            HeadPublication::Updated(next) => {
                 if self.tail_is_verified(&prepared.view) {
                     self.remember_tail(&next);
                 }
                 Ok(CommitStatus::Committed(next))
             }
-            Ok(UpdateResult::PreconditionFailed) => {
+            HeadPublication::Pending => Ok(CommitStatus::Pending(PendingCommit {
+                prepared: Box::new(prepared),
+                commit_ref,
+            })),
+            HeadPublication::Contended(current) => Ok(CommitStatus::Conflict(current)),
+            HeadPublication::Changed(current) => {
                 let pending = PendingCommit {
                     prepared: Box::new(prepared),
                     commit_ref,
-                };
-                let current = match self.load().await {
-                    Ok(view) => view,
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        return Ok(CommitStatus::Pending(pending));
-                    }
-                    Err(error) => return Err(error),
                 };
                 match Self::classify_resolution(&pending, current)? {
                     Some(Resolution::Committed(view)) => Ok(CommitStatus::Committed(view)),
@@ -1086,18 +1088,14 @@ impl Log {
                     )),
                 }
             }
-            Err(Error::Store(_)) => Ok(CommitStatus::Pending(PendingCommit {
-                prepared: Box::new(prepared),
-                commit_ref,
-            })),
-            Err(error) => Err(error),
         }
     }
 
     /// Resolves or safely retries one uncertain head publication.
     ///
-    /// The method retries only the original conditional update. It never
-    /// rebases the operation onto a newer head.
+    /// The method preserves the original operation and recovery token. It can
+    /// retry against a newer storage version only when the logical log and
+    /// collection state are unchanged and only retention bookkeeping moved.
     ///
     /// # Errors
     ///
@@ -1114,7 +1112,11 @@ impl Log {
             Err(error) => return Err(error),
         };
 
-        if let Some(resolution) = Self::classify_resolution(&pending, current)? {
+        let publication_view = if let Some(current) =
+            Self::retention_publication_view(&pending.prepared.view, &current)?
+        {
+            current
+        } else if let Some(resolution) = Self::classify_resolution(&pending, current)? {
             if let Resolution::Committed(view) = &resolution
                 && Self::tail_contains(view, &pending.commit_ref)
                 && !self.proof_matches(&pending.prepared.staging_domain)
@@ -1128,7 +1130,9 @@ impl Log {
                 }
             }
             return Ok(resolution);
-        }
+        } else {
+            pending.prepared.view.clone()
+        };
 
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
         match self
@@ -1159,44 +1163,32 @@ impl Log {
             }
         }
         pending.prepared.staging_domain = Arc::clone(&self.staging_domain);
-        let candidate = Self::candidate_head(&pending.prepared, &pending.commit_ref)?;
-        let candidate_bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&candidate_bytes)?;
         match self
-            .store
-            .update(
-                StoreKey::Head,
-                candidate_bytes,
-                pending.prepared.view.storage_version().clone(),
-            )
+            .publish_head(&publication_view, |view| {
+                Self::candidate_head(view, &pending.commit_ref)
+            })
             .await
         {
-            Ok(UpdateResult::Updated { version }) => {
-                Ok(Resolution::Committed(Self::view(candidate, version)))
+            Ok(HeadPublication::Updated(view)) => Ok(Resolution::Committed(view)),
+            Ok(HeadPublication::Pending) | Err(Error::Store(_) | Error::RequestDenied) => {
+                Ok(Resolution::StillPending(pending))
             }
-            Err(Error::Store(_) | Error::RequestDenied) => Ok(Resolution::StillPending(pending)),
+            Ok(HeadPublication::Contended(current)) => Ok(Resolution::NotCommitted(current)),
             Err(error) => Err(error),
-            Ok(UpdateResult::PreconditionFailed) => {
-                let current = match self.load().await {
-                    Ok(view) => view,
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        return Ok(Resolution::StillPending(pending));
-                    }
-                    Err(error) => return Err(error),
-                };
-                Self::classify_resolution(&pending, current)?.ok_or_else(|| {
+            Ok(HeadPublication::Changed(current)) => Self::classify_resolution(&pending, current)?
+                .ok_or_else(|| {
                     Error::InvalidFormat(
                         "head version changed without a monotonic head change".to_owned(),
                     )
-                })
-            }
+                }),
         }
     }
 
     /// Resumes one exact candidate from a token persisted before publication.
     ///
-    /// This can stage a missing immutable entry and retry only the original
-    /// conditional index update. It never rebases the operation.
+    /// This can stage a missing immutable entry and retry the original
+    /// operation. A newer storage version is used only to preserve retention
+    /// bookkeeping when the logical log and collection state are unchanged.
     ///
     /// # Errors
     ///
@@ -1334,9 +1326,11 @@ impl Log {
 
     /// Publishes an opaque base that covers one exact prefix of `view`.
     ///
-    /// The base object becomes durable before the index update. A concurrent
-    /// index update returns [`CheckpointStatus::Conflict`] and preserves the
-    /// current durable history.
+    /// The base object becomes durable before the index update. Retention-only
+    /// head updates are reconciled without changing the checkpoint evidence. A
+    /// conflicting log or collection update returns
+    /// [`CheckpointStatus::Conflict`] and preserves the current durable history.
+    /// Exhausting the bounded retention retry also returns conflict.
     /// Same-process staged proofs avoid immutable dependency reads. Reopened
     /// pending evidence verifies its complete dependency graph.
     ///
@@ -1385,9 +1379,6 @@ impl Log {
                 StorageId::new,
             )
             .await?;
-        let candidate = Self::checkpoint_head(view, through, object.clone())?;
-        let candidate_bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&candidate_bytes)?;
         let pending = PendingCheckpoint {
             view: view.clone(),
             staging_domain: Arc::clone(&self.staging_domain),
@@ -1400,27 +1391,16 @@ impl Log {
         };
 
         match self
-            .store
-            .update(
-                StoreKey::Head,
-                candidate_bytes,
-                view.storage_version().clone(),
-            )
-            .await
+            .publish_head(view, |publication_view| {
+                Self::checkpoint_head(publication_view, through, pending.checkpoint.object.clone())
+            })
+            .await?
         {
-            Ok(UpdateResult::Updated { version }) => {
-                let next = Self::view(candidate, version);
+            HeadPublication::Updated(next) => {
                 self.remember_tail(&next);
                 Ok(CheckpointStatus::Published(next))
             }
-            Ok(UpdateResult::PreconditionFailed) => {
-                let current = match self.load().await {
-                    Ok(view) => view,
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        return Ok(CheckpointStatus::Pending(pending));
-                    }
-                    Err(error) => return Err(error),
-                };
+            HeadPublication::Changed(current) => {
                 match Self::classify_checkpoint(&pending, current)? {
                     CheckpointEvidence::Published(view) => Ok(CheckpointStatus::Published(view)),
                     CheckpointEvidence::NotPublished(view) => Ok(CheckpointStatus::Conflict(view)),
@@ -1429,15 +1409,16 @@ impl Log {
                     }
                 }
             }
-            Err(Error::Store(_)) => Ok(CheckpointStatus::Pending(pending)),
-            Err(error) => Err(error),
+            HeadPublication::Contended(current) => Ok(CheckpointStatus::Conflict(current)),
+            HeadPublication::Pending => Ok(CheckpointStatus::Pending(pending)),
         }
     }
 
     /// Resolves or safely retries one uncertain checkpoint publication.
     ///
-    /// It retries only the original conditional index update. It never applies
-    /// the snapshot to a different log prefix.
+    /// It preserves the original checkpoint evidence. It can retry against a
+    /// newer storage version only when the logical log and collection state are
+    /// unchanged and only retention bookkeeping moved.
     ///
     /// # Errors
     ///
@@ -1448,12 +1429,12 @@ impl Log {
     ) -> Result<CheckpointResolution, Error> {
         let mut pending = pending;
         self.validate_view(&pending.view)?;
-        let candidate = Self::checkpoint_head(
+        let original_candidate = Self::checkpoint_head(
             &pending.view,
             &pending.through,
             pending.checkpoint.object.clone(),
         )?;
-        if candidate.checkpoint.as_ref() != Some(&pending.checkpoint) {
+        if original_candidate.checkpoint.as_ref() != Some(&pending.checkpoint) {
             return Err(Error::InvalidFormat(
                 "pending checkpoint evidence does not match its candidate".to_owned(),
             ));
@@ -1466,27 +1447,32 @@ impl Log {
             }
             Err(error) => return Err(error),
         };
-        match Self::classify_checkpoint(&pending, current)? {
-            CheckpointEvidence::Published(view) => {
-                if self.proof_matches(&pending.staging_domain) {
-                    return Ok(CheckpointResolution::Published(view));
-                }
-                return match self.verify_checkpoint(&pending.checkpoint).await {
-                    Ok(()) => Ok(CheckpointResolution::Published(view)),
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        Ok(CheckpointResolution::StillPending(pending))
+        let publication_view =
+            if let Some(current) = Self::retention_publication_view(&pending.view, &current)? {
+                current
+            } else {
+                match Self::classify_checkpoint(&pending, current)? {
+                    CheckpointEvidence::Published(view) => {
+                        if self.proof_matches(&pending.staging_domain) {
+                            return Ok(CheckpointResolution::Published(view));
+                        }
+                        return match self.verify_checkpoint(&pending.checkpoint).await {
+                            Ok(()) => Ok(CheckpointResolution::Published(view)),
+                            Err(Error::Store(_) | Error::RequestDenied) => {
+                                Ok(CheckpointResolution::StillPending(pending))
+                            }
+                            Err(error) => Err(error),
+                        };
                     }
-                    Err(error) => Err(error),
-                };
-            }
-            CheckpointEvidence::NotPublished(view) => {
-                return Ok(CheckpointResolution::NotPublished(view));
-            }
-            CheckpointEvidence::Expired(view) => {
-                return Ok(CheckpointResolution::Expired(view));
-            }
-            CheckpointEvidence::Retry => {}
-        }
+                    CheckpointEvidence::NotPublished(view) => {
+                        return Ok(CheckpointResolution::NotPublished(view));
+                    }
+                    CheckpointEvidence::Expired(view) => {
+                        return Ok(CheckpointResolution::Expired(view));
+                    }
+                    CheckpointEvidence::Retry => pending.view.clone(),
+                }
+            };
 
         match self.verify_tail(&pending.view).await {
             Ok(()) => {}
@@ -1503,32 +1489,21 @@ impl Log {
             Err(error) => return Err(error),
         }
         pending.staging_domain = Arc::clone(&self.staging_domain);
-        let candidate_bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&candidate_bytes)?;
         match self
-            .store
-            .update(
-                StoreKey::Head,
-                candidate_bytes,
-                pending.view.storage_version().clone(),
-            )
+            .publish_head(&publication_view, |view| {
+                Self::checkpoint_head(view, &pending.through, pending.checkpoint.object.clone())
+            })
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(CheckpointResolution::Published(
-                Self::view(candidate, version),
-            )),
-            Err(Error::Store(_) | Error::RequestDenied) => {
+            Ok(HeadPublication::Updated(view)) => Ok(CheckpointResolution::Published(view)),
+            Ok(HeadPublication::Pending) | Err(Error::Store(_) | Error::RequestDenied) => {
                 Ok(CheckpointResolution::StillPending(pending))
             }
+            Ok(HeadPublication::Contended(current)) => {
+                Ok(CheckpointResolution::NotPublished(current))
+            }
             Err(error) => Err(error),
-            Ok(UpdateResult::PreconditionFailed) => {
-                let current = match self.load().await {
-                    Ok(view) => view,
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        return Ok(CheckpointResolution::StillPending(pending));
-                    }
-                    Err(error) => return Err(error),
-                };
+            Ok(HeadPublication::Changed(current)) => {
                 match Self::classify_checkpoint(&pending, current)? {
                     CheckpointEvidence::Published(view) => {
                         Ok(CheckpointResolution::Published(view))
@@ -1827,8 +1802,70 @@ impl Log {
         Ok((reference, bytes))
     }
 
-    fn candidate_head(prepared: &PreparedCommit, commit_ref: &CommitRef) -> Result<Head, Error> {
-        let mut head = prepared.view.head().clone();
+    async fn publish_head(
+        &self,
+        source: &View,
+        candidate: impl Fn(&View) -> Result<Head, Error>,
+    ) -> Result<HeadPublication, Error> {
+        let mut view = source.clone();
+        for attempt in 0..MAX_RETENTION_PUBLICATION_ATTEMPTS {
+            let head = candidate(&view)?;
+            let bytes = format::encode_head(&head)?;
+            self.validate_encoded_head(&bytes)?;
+            match self
+                .store
+                .update(StoreKey::Head, bytes, view.storage_version().clone())
+                .await
+            {
+                Ok(UpdateResult::Updated { version }) => {
+                    return Ok(HeadPublication::Updated(Self::view(head, version)));
+                }
+                Ok(UpdateResult::PreconditionFailed) => {
+                    let current = match self.load().await {
+                        Ok(current) => current,
+                        Err(Error::Store(_) | Error::RequestDenied) => {
+                            return Ok(HeadPublication::Pending);
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if !source.head().has_same_publication_base(current.head()) {
+                        return Ok(HeadPublication::Changed(current));
+                    }
+                    if current.generation() <= view.generation() {
+                        return Err(Error::InvalidFormat(
+                            "head version changed without a monotonic head change".to_owned(),
+                        ));
+                    }
+                    if attempt + 1 == MAX_RETENTION_PUBLICATION_ATTEMPTS {
+                        return Ok(HeadPublication::Contended(current));
+                    }
+                    view = current;
+                }
+                Err(Error::Store(_)) => return Ok(HeadPublication::Pending),
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("publication attempts are positive")
+    }
+
+    fn retention_publication_view(source: &View, current: &View) -> Result<Option<View>, Error> {
+        if current.head() == source.head() && current.storage_version() == source.storage_version()
+        {
+            return Ok(Some(current.clone()));
+        }
+        if !source.head().has_same_publication_base(current.head()) {
+            return Ok(None);
+        }
+        if current.generation() <= source.generation() {
+            return Err(Error::InvalidFormat(
+                "head version changed without a monotonic head change".to_owned(),
+            ));
+        }
+        Ok(Some(current.clone()))
+    }
+
+    fn candidate_head(view: &View, commit_ref: &CommitRef) -> Result<Head, Error> {
+        let mut head = view.head().clone();
         head.advance_generation()?;
         head.next_sequence = head
             .next_sequence

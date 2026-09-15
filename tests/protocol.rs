@@ -7,8 +7,8 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 use object_log::{
-    CommitRef, CommitStatus, Digest, Log, LogId, Options, Resolution, TransactionId,
-    ValidatedBackend,
+    CheckpointResolution, CheckpointStatus, CollectionStart, CommitRef, CommitStatus, Digest, Log,
+    LogId, Options, Resolution, RetentionId, RetentionStatus, TransactionId, ValidatedBackend,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -64,6 +64,9 @@ backend_cases! {
     capability_probe_rejects_false_not_modified_responses,
     encoded_commit_limit_fails_before_publication,
     two_writers_publish_one_order_and_require_explicit_reprepare,
+    retention_updates_do_not_reject_an_in_flight_commit,
+    retention_reconciliation_preserves_recovery_evidence,
+    retention_updates_do_not_reject_an_in_flight_checkpoint,
     repeated_first_attempt_requires_the_recovery_path,
     view_is_bound_to_one_durable_log_incarnation,
     open_rejects_options_that_differ_from_the_durable_contract,
@@ -254,6 +257,187 @@ async fn two_writers_publish_one_order_and_require_explicit_reprepare(
     assert_eq!(tail.len(), 2);
     assert_eq!(tail[1].operation(), &losing_operation);
     assert_eq!(tail[1].expected_tip(), Some(tail[0].reference().digest()));
+    Ok(())
+}
+
+async fn retention_updates_do_not_reject_an_in_flight_commit(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let backend: Arc<dyn ObjectStore> = new_store()?;
+    let writer = open(Arc::clone(&backend), "retention-race").await?;
+    let reader = open(backend, "retention-race").await?;
+    let source = writer.load().await?;
+    let prepared = writer.prepare(
+        &source,
+        TransactionId::new(),
+        Bytes::from_static(b"write prepared before reader retention"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    let retention_id = RetentionId::new();
+    let RetentionStatus::Applied(retained) = reader.retain(&source, retention_id).await? else {
+        return Err("reader retention was not acquired".into());
+    };
+
+    let CommitStatus::Committed(committed) = writer.commit(prepared).await? else {
+        return Err("reader retention rejected an in-flight commit".into());
+    };
+    assert_eq!(committed.generation(), retained.generation() + 1);
+    assert_eq!(committed.tail().len(), 1);
+    assert!(matches!(
+        writer.start_collection(&committed).await?,
+        CollectionStart::Retained(_)
+    ));
+    let RetentionStatus::Applied(released) =
+        reader.release_retention(&committed, retention_id).await?
+    else {
+        return Err("reader retention was not released".into());
+    };
+    assert_eq!(released.tail(), committed.tail());
+
+    let source = writer.load().await?;
+    let retention_id = RetentionId::new();
+    let RetentionStatus::Applied(retained) = reader.retain(&source, retention_id).await? else {
+        return Err("second reader retention was not acquired".into());
+    };
+    let prepared = writer.prepare(
+        &retained,
+        TransactionId::new(),
+        Bytes::from_static(b"write prepared before reader release"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    let RetentionStatus::Applied(released) =
+        reader.release_retention(&retained, retention_id).await?
+    else {
+        return Err("second reader retention was not released".into());
+    };
+    let CommitStatus::Committed(committed) = writer.commit(prepared).await? else {
+        return Err("reader release rejected an in-flight commit".into());
+    };
+    assert_eq!(committed.generation(), released.generation() + 1);
+    assert!(matches!(
+        writer.start_collection(&committed).await?,
+        CollectionStart::Empty(_)
+    ));
+    Ok(())
+}
+
+async fn retention_reconciliation_preserves_recovery_evidence(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for hidden_success in [false, true] {
+        let observed = Arc::new(InstrumentedStore::new(new_store()?));
+        let backend: Arc<dyn ObjectStore> = observed.clone();
+        let id = if hidden_success {
+            "retention-hidden-success"
+        } else {
+            "retention-retry"
+        };
+        let writer = open(Arc::clone(&backend), id).await?;
+        let reader = open(backend, id).await?;
+        let source = writer.load().await?;
+        let prepared = writer.prepare(
+            &source,
+            TransactionId::new(),
+            Bytes::from_static(b"stable operation"),
+            Bytes::from_static(b"stable result"),
+            Vec::new(),
+        )?;
+        let token = prepared.recovery_token()?;
+        let RetentionStatus::Applied(_) = reader.retain(&source, RetentionId::new()).await? else {
+            return Err("reader retention was not acquired".into());
+        };
+        if hidden_success {
+            observed.fail_next_update_after_success();
+        } else {
+            observed.fail_next_update_before_mutation();
+        }
+        let CommitStatus::Pending(pending) = writer.commit(prepared).await? else {
+            return Err("injected storage result did not preserve pending evidence".into());
+        };
+        assert_eq!(pending.recovery_token()?, token);
+
+        let reopened = open(observed, id).await?;
+        let Resolution::Committed(committed) = reopened.resume(&token).await? else {
+            return Err("original recovery token did not resolve to the commit".into());
+        };
+        assert_eq!(committed.tail().len(), 1);
+    }
+    Ok(())
+}
+
+async fn retention_updates_do_not_reject_an_in_flight_checkpoint(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for fault in [None, Some(false), Some(true)] {
+        let observed = Arc::new(InstrumentedStore::new(new_store()?));
+        let backend: Arc<dyn ObjectStore> = observed.clone();
+        let id = match fault {
+            None => "checkpoint-retention-race",
+            Some(false) => "checkpoint-retention-retry",
+            Some(true) => "checkpoint-retention-hidden-success",
+        };
+        let writer = open(Arc::clone(&backend), id).await?;
+        let reader = open(backend, id).await?;
+        let source = writer.load().await?;
+        let prepared = writer.prepare(
+            &source,
+            TransactionId::new(),
+            Bytes::from_static(b"commit"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(view) = writer.commit(prepared).await? else {
+            return Err("checkpoint source commit did not publish".into());
+        };
+        let through = view.tail()[0].clone();
+        let root = writer
+            .put_object(&view, Bytes::from_static(b"checkpoint root"))
+            .await?;
+        let retention_id = RetentionId::new();
+        let RetentionStatus::Applied(retained) = reader.retain(&view, retention_id).await? else {
+            return Err("reader retention was not acquired".into());
+        };
+        match fault {
+            Some(false) => observed.fail_next_update_before_mutation(),
+            Some(true) => observed.fail_next_update_after_success(),
+            None => {}
+        }
+
+        let status = writer
+            .publish_checkpoint(
+                &view,
+                &through,
+                Bytes::from_static(b"checkpoint"),
+                vec![root],
+            )
+            .await?;
+        let checkpointed = match (fault, status) {
+            (None, CheckpointStatus::Published(view)) => view,
+            (Some(_), CheckpointStatus::Pending(pending)) => {
+                let CheckpointResolution::Published(view) =
+                    writer.resolve_checkpoint(pending).await?
+                else {
+                    return Err("checkpoint did not resolve after retention movement".into());
+                };
+                view
+            }
+            _ => return Err("reader retention rejected an in-flight checkpoint".into()),
+        };
+        assert!(checkpointed.generation() > retained.generation());
+        assert!(checkpointed.tail().is_empty());
+        assert!(matches!(
+            writer.start_collection(&checkpointed).await?,
+            CollectionStart::Retained(_)
+        ));
+        let RetentionStatus::Applied(_) = reader
+            .release_retention(&checkpointed, retention_id)
+            .await?
+        else {
+            return Err("reader retention was not released".into());
+        };
+    }
     Ok(())
 }
 

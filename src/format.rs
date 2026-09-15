@@ -59,6 +59,18 @@ impl Head {
             .or_else(|| self.checkpoint.as_ref().map(|base| base.through_commit))
     }
 
+    pub(crate) fn has_same_publication_base(&self, other: &Self) -> bool {
+        self.log_id == other.log_id
+            && self.incarnation == other.incarnation
+            && self.options == other.options
+            && self.next_sequence == other.next_sequence
+            && self.checkpoint == other.checkpoint
+            && self.tail == other.tail
+            && self.recent_outcomes == other.recent_outcomes
+            && self.collection_epoch == other.collection_epoch
+            && self.active_plan == other.active_plan
+    }
+
     pub(crate) fn advance_generation(&mut self) -> Result<(), Error> {
         self.generation = self
             .generation

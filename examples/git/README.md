@@ -296,6 +296,11 @@ authenticated `POST` requests to `/sha1.git/recover-retentions-after-drain` and
 setting, and resume service. Never use this action while a reader may still be
 running.
 
+Retention acquire and release can overlap a receive-pack publication without
+rejecting the single Git writer. The WAL preserves the current retention set
+while publishing against the same logical repository state; competing Git or
+collection updates remain conflicts.
+
 Compressed loose objects of at most 512 bytes live directly in authenticated
 catalog leaves, avoiding separate reads during history traversal and collection.
 Larger objects and temporary incoming packs use the WAL byte-stream API, which owns
