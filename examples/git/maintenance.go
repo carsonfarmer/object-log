@@ -53,6 +53,10 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 			return wal.CollectionResult{State: state}, nil
 		}
 	}
+	return s.collect()
+}
+
+func (s *store) collect() (wal.CollectionResult, error) {
 	// Refresh shares the original transport counters and observes the checkpoint
 	// or collection epoch before asking the core to resume/install a fenced plan.
 	if err := s.ctx.Err(); err != nil {
