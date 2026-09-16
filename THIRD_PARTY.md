@@ -15,17 +15,21 @@ Apache-2.0 WITH LLVM-exception license is reproduced in
 [`licenses/wasmtime.txt`](licenses/wasmtime.txt) and must accompany redistributed
 adapter source or binaries.
 
-The Git example uses a reviewed go-git fork revision through `go.mod`. Its
-streaming decoder changes are proposed in
-[go-git #2379](https://github.com/go-git/go-git/pull/2379). The pinned fork also
-[applies the existing depth limit to reused deltas](https://github.com/carsonfarmer/go-git/commit/26cbbf6c051e0f72063eebb2f0d07a4181e4bb7c);
-that additional fix has not been submitted upstream.
+The Git example pins a [go-git fork](https://github.com/carsonfarmer/go-git/compare/d15c624290f14f5eec6f51a660b20b8449ee7d98...26cbbf6c051e0f72063eebb2f0d07a4181e4bb7c)
+with streaming pack import, request and object limits, error propagation, thin-pack
+resolution, version 3 packs, receive-pack corrections, reference advertisement
+fixes, and bounded reuse of existing deltas.
+[go-git #2379](https://github.com/go-git/go-git/pull/2379) proposes only the streaming
+decoder rewind and failed-reopen fixes; it does not cover the complete fork.
+The comparison above shows every retained change from its upstream ancestor.
 
 The Go component bindings pin a [go-pkg revision](https://github.com/carsonfarmer/go-pkg/commit/b0c40df4c02bb780994cedee093376abe9144ba2)
 that releases imported buffers after lifting them into Go values. The build
 compiles [componentize-go](https://github.com/carsonfarmer/componentize-go/commit/40407276251b333fd7e0d70725f1c5e0429634b4)
 with the corresponding [binding-generator correction](https://github.com/carsonfarmer/wit-bindgen/commit/fd8f26d9b019b853770c0446ab27530567e51c39).
-These ownership fixes have not been submitted upstream. Source revisions are
+The componentize-go fork only changes the generator dependency pin; it contains
+no builder implementation changes. These ownership fixes have not been submitted
+upstream. Source revisions are
 pinned in `examples/git/Makefile` and `go.mod`; their upstream licenses apply.
 
 ## Design acknowledgements
