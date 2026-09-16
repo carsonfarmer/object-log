@@ -7,6 +7,7 @@ build: $(ADAPTER) bindings
 	$(COMPONENTIZE_GO) -d wit -w client -w bytecodealliance:pkg/wasip2 build --adapt $(ADAPTER)
 
 bindings: $(COMPONENTIZE_GO)
+	go mod download
 	mkdir -p wit/deps/wal && cp "$(WAL_WIT)/wal.wit" wit/deps/wal/
 	$(COMPONENTIZE_GO) -d wit -w client bindings --format -o bindings --pkg-name object-log-git-proof/bindings
 
