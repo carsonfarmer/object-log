@@ -25,11 +25,10 @@ The comparison above shows every retained change from its upstream ancestor.
 
 The Go component bindings pin a [go-pkg revision](https://github.com/carsonfarmer/go-pkg/commit/b0c40df4c02bb780994cedee093376abe9144ba2)
 that releases imported buffers after lifting them into Go values. The build
-compiles [componentize-go](https://github.com/carsonfarmer/componentize-go/commit/40407276251b333fd7e0d70725f1c5e0429634b4)
-with the corresponding [binding-generator correction](https://github.com/carsonfarmer/wit-bindgen/commit/fd8f26d9b019b853770c0446ab27530567e51c39).
-The componentize-go fork only changes the generator dependency pin; it contains
-no builder implementation changes. These ownership fixes have not been submitted
-upstream. Source revisions are
+compiles upstream [componentize-go v0.4.3](https://github.com/bytecodealliance/componentize-go/commit/148dba505f8c6c64ad84db777cfde5e34e25098b)
+with a Cargo dependency override for the corresponding
+[binding-generator correction](https://github.com/carsonfarmer/wit-bindgen/commit/fd8f26d9b019b853770c0446ab27530567e51c39).
+These ownership fixes have not been submitted upstream. Source revisions are
 pinned in `examples/git/Makefile` and `go.mod`; their upstream licenses apply.
 
 ## Design acknowledgements

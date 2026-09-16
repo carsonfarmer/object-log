@@ -12,7 +12,9 @@ bindings: $(COMPONENTIZE_GO)
 	$(COMPONENTIZE_GO) -d wit -w client bindings --format -o bindings --pkg-name object-log-git-proof/bindings
 
 $(COMPONENTIZE_GO): Makefile
-	cargo install --locked --force --root .componentize --git https://github.com/carsonfarmer/componentize-go --rev 40407276251b333fd7e0d70725f1c5e0429634b4 componentize-go
+	cargo install --locked --force --root .componentize --git https://github.com/bytecodealliance/componentize-go --rev 148dba505f8c6c64ad84db777cfde5e34e25098b \
+		--config 'patch."https://github.com/bytecodealliance/wit-bindgen".wit-bindgen-go.git="https://github.com/carsonfarmer/wit-bindgen"' \
+		--config 'patch."https://github.com/bytecodealliance/wit-bindgen".wit-bindgen-go.rev="fd8f26d9b019b853770c0446ab27530567e51c39"' componentize-go
 
 $(ADAPTER): build-adapter.sh
 	sh build-adapter.sh
