@@ -1,52 +1,42 @@
-# Licensing and provenance
+# Third-party software
 
-Project code is Apache-2.0; see [LICENSE](LICENSE). The only publishable Cargo
-package is `object-log`. The KV example and WASI component also declare
-Apache-2.0 and have `publish = false`.
-Dependency licenses remain their own.
+Project code is Apache-2.0; see [LICENSE](LICENSE). `object-log` is the only
+publishable Cargo package. The key-value example and WASIp2 component are also
+Apache-2.0 and set `publish = false`. Dependencies retain their own licenses.
 
-## Retained source
+## Retained adapter source
 
 The Git build uses Wasmtime's `wasi-preview1-component-adapter` from
-[our pinned fix](https://github.com/carsonfarmer/wasmtime/tree/c8e24c308754f784fbb4a08205a2a9c08c461d00),
-submitted as [Wasmtime #14319](https://github.com/bytecodealliance/wasmtime/pull/14319).
-It handles cached clocks and immediate timer polling during canonical allocation.
-The build script verifies the source archive checksum. Its license is
-Apache-2.0 WITH LLVM-exception, reproduced in
-[licenses/wasmtime.txt](licenses/wasmtime.txt); retain it with redistributed
-adapter source and binaries.
+[revision `c8e24c3`](https://github.com/carsonfarmer/wasmtime/tree/c8e24c308754f784fbb4a08205a2a9c08c461d00),
+which contains the fix proposed in
+[Wasmtime #14319](https://github.com/bytecodealliance/wasmtime/pull/14319).
+The build script verifies the downloaded source archive checksum. The adapter's
+Apache-2.0 WITH LLVM-exception license is reproduced in
+[`licenses/wasmtime.txt`](licenses/wasmtime.txt) and must accompany redistributed
+adapter source or binaries.
 
-The Git proof uses go-git (Apache-2.0) and Bytecode Alliance's Go/WASI packages
-(Apache-2.0 WITH LLVM-exception) as dependencies. Generated WIT bindings use the
-local interface in `examples/wal-component/wit/wal.wit` and the pinned generator.
+The Git example uses a reviewed go-git fork revision through `go.mod`. Its
+streaming decoder changes are proposed in
+[go-git #2379](https://github.com/go-git/go-git/pull/2379). Go, WIT, and WASI
+dependencies retain their upstream licenses.
 
-## Design references
+## Design acknowledgements
 
-[Git](https://github.com/git/git/blob/master/COPYING) (GPL-2.0-only),
-[Micelio](https://github.com/tuist/micelio/blob/main/LICENSE) (MPL-2.0), and
-[Cursor's article](https://cursor.com/blog/git-at-any-scale) are behavior or
-design references. Referencing them does not license their source or prose
-under this project's Apache license. Source reuse requires a separate owner
-license decision and a record of the affected files and upstream revision.
+The protocol is informed by Cursor's
+[*Git at any scale*](https://cursor.com/blog/git-at-any-scale),
+[Micelio](https://github.com/tuist/micelio), and Git's object model. These are
+design references, not incorporated source. Git itself is GPL-2.0-only;
+Micelio is MPL-2.0.
 
-[Gitoxide](https://github.com/GitoxideLabs/gitoxide) (MIT OR Apache-2.0),
-[Walgit](https://github.com/tobi/walgit/blob/main/LICENSE) (MIT), and
-[Chroma WAL3](https://github.com/chroma-core/chroma/blob/f60fe42cdad202a92acad55a1f0fbf8ce757c8b1/LICENSE)
-(Apache-2.0) are not current dependencies. The comparisons in
-[docs/report-source.md](docs/report-source.md) describe design ideas, not
-incorporated source. Record actual source reuse by file and revision if added.
+## Dependency inventories
 
-## Dependency inventory
+- [`licenses/rust-direct.tsv`](licenses/rust-direct.tsv) records resolved direct
+  Rust dependency names, versions, and declared license expressions.
+- [`licenses/go.csv`](licenses/go.csv) records the Go packages and build tool
+  used by the Git example.
+- Lockfiles remain authoritative for exact dependency versions.
 
-[licenses/rust-direct.tsv](licenses/rust-direct.tsv) records direct dependency
-names, resolved versions, and declared license expressions for the workspace
-and WASI example, including development and optional dependencies.
-[licenses/go.csv](licenses/go.csv) is the Go package and build-tool license
-report, including imported transitive packages. Lockfiles remain authoritative
-for versions. These inventories are not substitutes for license texts in a
-binary distribution.
-
-Regenerate with `cargo-license 0.7.0` and `go-licenses v2.0.1`:
+Regenerate the inventories when dependencies change:
 
 ```sh
 cargo install cargo-license --version 0.7.0 --locked
@@ -56,24 +46,10 @@ done
 
 cd examples/git
 make bindings
-go run github.com/google/go-licenses/v2@v2.0.1 report --ignore object-log-git-proof ./... github.com/bytecodealliance/componentize-go
+go run github.com/google/go-licenses/v2@v2.0.1 report \
+    --ignore object-log-git-proof ./... github.com/bytecodealliance/componentize-go
 ```
 
-The Rust table retains the name/version/license columns, removes local packages,
-and deduplicates rows. `cargo-license` can include multiple resolved versions
-of a directly named crate. The Go report excludes this module's own code because
-its license is at the repository root; dependencies are still inspected.
-`go-licenses` warns that assembly cannot be inspected for further dependencies;
-the Wasmtime adapter is accounted for separately above.
-
-When shipping the Git component, collect the Go dependency license and notice
-files using the same build inputs:
-
-```sh
-go run github.com/google/go-licenses/v2@v2.0.1 save --ignore object-log-git-proof --save_path release-licenses ./...
-```
-
-Include the project license, adapter license, and the Rust component's dependency
-license/notice texts as well. Review changed dependencies and retained source
-before distributing a new artifact; do not infer its notices from an older
-binary or this direct-dependency inventory.
+Before distributing the composed Git component, collect dependency license and
+notice files from the same locked build inputs and include this project's
+license plus the retained adapter license.

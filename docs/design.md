@@ -24,10 +24,9 @@ lifecycle expiry, deletion, overwrite, or any tool that changes these objects
 violates the storage contract. The fast publication path depends on this
 property.
 
-This structure uses Cursor's mutable metadata and immutable object model, with
-Micelio's split between one index, ordered entry pointers, content-addressed
-WAL entries, payload objects, and bases. The Rust type `Head` is the decoded
-index. The Rust type `Commit` is one WAL entry.
+The design follows the mutable-metadata/immutable-data model described in
+Cursor's *Git at any scale* article and Micelio. The Rust type `Head` is the
+decoded index; `Commit` is one WAL entry.
 
 The durable encoding is canonical CBOR, not Protobuf. Each structure is a map
 with positive integer keys. `schema/object-log-v1.cddl` defines the current
@@ -81,8 +80,8 @@ commit from the active tail. Expiry must be explicit.
 names one immutable positive deletion plan. Retentions and an active plan
 cannot exist together.
 
-The implementation must enforce encoded byte and entry-count limits. It must
-request a checkpoint before the head becomes an unbounded manifest.
+The implementation enforces encoded byte and entry-count limits. Applications
+must checkpoint before the active tail reaches its configured bound.
 
 ## Immutable commit
 
@@ -188,8 +187,8 @@ Resolution reads the current head:
 - Missing evidence after resolution-window expiry returns `Expired`.
 - Store unavailability returns `StillPending`.
 
-An implementation must not report `NotCommitted` when history movement makes
-the evidence incomplete. `Expired` is indeterminate. It does not prove that the
+The library does not report `NotCommitted` when history movement makes the
+evidence incomplete. `Expired` is indeterminate. It does not prove that the
 operation failed. An application must not submit a non-idempotent operation as
 new work after this result.
 
@@ -289,53 +288,8 @@ The optional helper restores typed state. It receives publication proofs for
 the ordered object references in each authenticated snapshot or operation. It
 can retain those proofs for lazy reads and a checkpoint against the returned
 view. Each domain encodes and publishes its own checkpoints because only the
-domain knows which objects the snapshot retains.
-
-```rust
-trait Materializer {
-    type State;
-    type Error;
-
-    fn empty(&self) -> Self::State;
-    fn restore(
-        &self,
-        checkpoint: &[u8],
-        objects: &[StagedObject],
-    ) -> Result<Self::State, Self::Error>;
-    fn apply(
-        &self,
-        state: &mut Self::State,
-        operation: &[u8],
-        objects: &[StagedObject],
-    ) -> Result<(), Self::Error>;
-}
-```
+domain knows which objects the snapshot retains. See the `Materializer` trait
+in the generated API documentation for the current interface.
 
 The core log can be used without this trait. Domain transactions and query APIs
 do not belong in the core.
-
-## Preferred owner and group commit
-
-Rendezvous hashing over the live process set selects a preferred process for a
-log. Requests normally route to it. Ownership is advisory.
-
-The owner keeps:
-
-- The current view and materialized state.
-- A bounded request queue.
-- One active commit builder.
-- A short batch timer and a maximum batch size.
-
-It applies queued operations in order to a tentative state. Compatible
-operations become one commit record. Admission starts publication in a
-detached task so cancellation by one caller cannot stop an admitted batch.
-After the commit publishes, the owner replies through one-shot channels. A
-conflict discards the tentative state, refreshes, and validates the operations
-again. Queue limits apply to request count and bytes.
-
-If ownership changes, the new owner loads the current head. An old owner can
-still attempt a write, but it cannot overwrite a newer head. It loses the CAS,
-refreshes, and stops accepting ownership work.
-
-This layer increases logical operation throughput without changing the
-linearization point or allowing acknowledgement before durable publication.

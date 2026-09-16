@@ -14,9 +14,9 @@ provider "aws" {
   region  = var.aws_region
   default_tags {
     tags = {
-      Campaign = var.campaign_id
-      Project  = "object-log"
-      Purpose  = "live-s3-qualification"
+      Project = "object-log"
+      Purpose = "git-qualification"
+      TestRun = var.run_id
     }
   }
 }
@@ -29,11 +29,11 @@ variable "aws_region" {
   type = string
 }
 
-variable "campaign_id" {
+variable "run_id" {
   type = string
   validation {
-    condition     = can(regex("^[a-z0-9][a-z0-9-]{0,38}$", var.campaign_id))
-    error_message = "campaign_id must be 1-39 lowercase letters, digits, or hyphens."
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{0,38}$", var.run_id))
+    error_message = "run_id must be 1-39 lowercase letters, digits, or hyphens."
   }
 }
 
@@ -53,9 +53,9 @@ variable "object_prefix" {
       !strcontains(var.object_prefix, "//") &&
       !strcontains("/${var.object_prefix}/", "/./") &&
       !strcontains("/${var.object_prefix}/", "/../") &&
-      strcontains(var.object_prefix, var.campaign_id)
+      strcontains(var.object_prefix, var.run_id)
     )
-    error_message = "object_prefix must be normalized, relative, and contain campaign_id."
+    error_message = "object_prefix must be normalized, relative, and contain run_id."
   }
 }
 
@@ -97,7 +97,7 @@ resource "aws_s3_bucket_versioning" "qualification" {
 }
 
 resource "aws_iam_user" "qualification" {
-  name = "object-log-qualification-${var.campaign_id}"
+  name = "object-log-qualification-${var.run_id}"
   path = "/object-log-qualification/"
 }
 
@@ -119,7 +119,7 @@ resource "aws_iam_user_policy" "qualification" {
         Resource = aws_s3_bucket.qualification.arn
       },
       {
-        Sid      = "ListCampaignObjects"
+        Sid      = "ListTestObjects"
         Effect   = "Allow"
         Action   = ["s3:ListBucket", "s3:ListBucketVersions"]
         Resource = aws_s3_bucket.qualification.arn
@@ -130,7 +130,7 @@ resource "aws_iam_user_policy" "qualification" {
         }
       },
       {
-        Sid    = "UseCampaignObjects"
+        Sid    = "UseTestObjects"
         Effect = "Allow"
         Action = [
           "s3:AbortMultipartUpload",

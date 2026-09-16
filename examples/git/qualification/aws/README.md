@@ -1,140 +1,157 @@
-# AWS live qualification setup
+# Disposable AWS S3 qualification
 
-This Terraform root supports the live qualification proof; it is not part of
-the generic `object-log` contract. It creates a dedicated private, unversioned,
-AES-256-encrypted S3 bucket and an IAM user whose S3 access is restricted to one
-campaign prefix. `force_destroy = false` prevents cleanup from widening beyond
-that prefix.
+This Terraform root provisions an isolated backend for the Git and WAL
+integration tests. It creates:
 
-The administrator profile used for this campaign is an IAM Identity Center
-role session. AWS caps a role assumed from that session at one hour because it
-is [role chaining](https://docs.aws.amazon.com/IAM/latest/UserGuide/troubleshoot_roles.html#troubleshoot_roles_cant-assume-role).
-`issue-session.sh` creates temporary credentials with a four-hour expiry ceiling.
-The qualification starts immediately and uses a three-hour safety ceiling; there
-is no four-hour run or soak period. To issue the credentials, the helper briefly
-creates an IAM user access key, calls
-[`GetSessionToken`](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetSessionToken.html),
-deletes the long-lived key, and writes the temporary credentials to a protected
-file. Terraform never receives or outputs credential values.
+- one private, unversioned, AES-256-encrypted S3 bucket;
+- public-access blocking and bucket-owner-enforced ownership;
+- one IAM user restricted to the configured test prefix; and
+- no long-lived credential in Terraform state.
 
-## Provision and issue credentials
+`force_destroy = false` prevents Terraform from deleting an unexpected non-empty
+bucket. Never point this setup at production data.
 
-From the repository root:
+## Provision
+
+Use an authenticated AWS CLI profile and keep Terraform state, plans, variables,
+and credentials outside the repository:
 
 ```sh
 terraform_dir=examples/git/qualification/aws
-qualification_state=/absolute/path/outside/repository/qualification-state
+qualification_state=/absolute/private/path/object-log-qualification
+admin_profile=YOUR_AWS_PROFILE
 umask 077
-mkdir -p "${qualification_state}"
-chmod 700 "${qualification_state}"
-cp "${terraform_dir}/terraform.tfvars.example" "${terraform_dir}/terraform.tfvars"
-$EDITOR "${terraform_dir}/terraform.tfvars"
-aws sso login --profile AdministratorAccess-ACCOUNT_ID
-terraform -chdir="${terraform_dir}" init -reconfigure \
-  -backend-config=path="${qualification_state}/terraform.tfstate"
-terraform -chdir="${terraform_dir}" plan \
-  -out="${qualification_state}/qualification.tfplan"
-terraform -chdir="${terraform_dir}" apply \
-  "${qualification_state}/qualification.tfplan"
+mkdir -p "$qualification_state"
+chmod 700 "$qualification_state"
+cp "$terraform_dir/terraform.tfvars.example" \
+  "$qualification_state/terraform.tfvars"
+$EDITOR "$qualification_state/terraform.tfvars"
 
-admin_profile=AdministratorAccess-ACCOUNT_ID
-qualification_user="$(terraform -chdir="${terraform_dir}" output \
-  -raw qualification_user_name)"
-"${terraform_dir}/issue-session.sh" "${admin_profile}" "${qualification_user}" \
-  "${qualification_state}/session-credentials.json"
+aws sso login --profile "$admin_profile"
+terraform -chdir="$terraform_dir" init -reconfigure \
+  -backend-config="path=$qualification_state/terraform.tfstate"
+terraform -chdir="$terraform_dir" validate
+terraform -chdir="$terraform_dir" plan \
+  -var-file="$qualification_state/terraform.tfvars" \
+  -out="$qualification_state/qualification.tfplan"
+terraform -chdir="$terraform_dir" apply \
+  "$qualification_state/qualification.tfplan"
 ```
 
-The partial local backend keeps managed state and the saved plan in the
-protected directory; `.terraform/` contains only ignored initialization data.
+The `.terraform/` directory contains ignored provider initialization data. The
+managed state and saved plan stay in the protected external directory.
 
-The helper refuses an in-repository destination, an existing output, or a
-bootstrap user that already has an access key. It requests exactly 14,400
-seconds, retries new-key propagation for 10 seconds, disables shell tracing,
-recovers a returned key ID before cleanup, and publishes with a no-clobber hard
-link. If key creation returns no usable ID, the next run detects the key and
-stops for administrator cleanup. Keep the IAM user and policy until testing ends
-because AWS evaluates them on each session request.
+## Issue temporary credentials
 
-Load the session without printing it or putting values in process arguments:
+The test IAM user normally has no access key. `issue-session.sh` creates a key,
+uses it to request a four-hour STS session, deletes the key, and writes only the
+session credentials to a new mode-0600 file. The helper refuses in-repository or
+existing output paths.
 
 ```sh
-session_file="${qualification_state}/session-credentials.json"
-export AWS_ACCESS_KEY_ID="$(jq -er .AccessKeyId "${session_file}")"
-export AWS_SECRET_ACCESS_KEY="$(jq -er .SecretAccessKey "${session_file}")"
-export AWS_SESSION_TOKEN="$(jq -er .SessionToken "${session_file}")"
-credential_expires_at="$(jq -er .Expiration "${session_file}")"
+qualification_user="$(terraform -chdir="$terraform_dir" output \
+  -raw qualification_user_name)"
+"$terraform_dir/issue-session.sh" \
+  "$admin_profile" "$qualification_user" \
+  "$qualification_state/session.json"
 ```
 
-Copy `examples/git/remote-qualification.env.example` beside the session file,
-fill its non-secret record, and source it. Set its expiry to
-`credential_expires_at` and credential source to
-`iam-user:<qualification_user>:GetSessionToken`. Create the Spin variable file
-from the [existing template](../../README.md#live-s3-qualification) in the same
-0700 directory, set its mode to 0600, and pass only its path to Spin.
-Immediately before launching Spin, run `make git-build` from the repository root
-and record `shasum -a 256 examples/git/git.wasm` in the campaign notes. Spin
-loads that composed artifact; `examples/git/main.wasm` is only an intermediate
-build file.
+Load the session without printing it:
 
-## Qualify and destroy
-
-Run `make git-remote-qualification REMOTE_QUALIFICATION_PHASE=<phase>` from the
-repository root in this order:
-
-```text
-start → backend → protocol → standard → recovery → read-only → limits
-      → performance → teardown
+```sh
+session_file="$qualification_state/session.json"
+export AWS_ACCESS_KEY_ID="$(jq -er .AccessKeyId "$session_file")"
+export AWS_SECRET_ACCESS_KEY="$(jq -er .SecretAccessKey "$session_file")"
+export AWS_SESSION_TOKEN="$(jq -er .SessionToken "$session_file")"
 ```
 
-Follow the [Git README](../../README.md#live-s3-qualification) for the required
-profile changes, recovery restart, prefix split, and failure-review flow.
-The performance phase runs maintenance to completion on both mature repositories
-after repeated pushes and before the concurrent 513 MiB lifecycles.
+## Configure and test
 
-After runner teardown, capture the Terraform outputs, unset the temporary
-session, use the administrator profile to abort incomplete uploads under the
-exact prefix, and destroy the boundary. `ListBucketMultipartUploads` is
-bucket-wide, so it is deliberately absent from the temporary user's policy.
+Read the Terraform outputs:
 
-```bash
-set -euo pipefail
-: "${admin_profile:?set the administrator profile}"
-: "${qualification_state:?set the protected state directory}"
-: "${terraform_dir:?set the Terraform directory}"
-umask 077
-bucket="$(terraform -chdir="${terraform_dir}" output -raw bucket_name)"
-region="$(terraform -chdir="${terraform_dir}" output -raw aws_region)"
-prefix="$(terraform -chdir="${terraform_dir}" output -raw object_prefix)"
+```sh
+region="$(terraform -chdir="$terraform_dir" output -raw aws_region)"
+bucket="$(terraform -chdir="$terraform_dir" output -raw bucket_name)"
+prefix="$(terraform -chdir="$terraform_dir" output -raw object_prefix)"
+```
+
+Create a protected Spin variables file using the table in the
+[Git service guide](../../README.md#configuration). Set:
+
+```toml
+wal_endpoint = "https://s3.REGION.amazonaws.com"
+wal_bucket = "DEDICATED-BUCKET"
+wal_region = "REGION"
+wal_prefix = "ISOLATED-PREFIX/git"
+wal_access_key = "TEMPORARY-ACCESS-KEY"
+wal_secret_key = "TEMPORARY-SECRET-KEY"
+wal_session_token = "TEMPORARY-SESSION-TOKEN"
+git_password = "TEMPORARY-TEST-PASSWORD"
+git_boot_id = "aws-test-1"
+```
+
+Build the final composed component immediately before starting Spin. Run Spin
+in its own terminal:
+
+```sh
+make git-build
+(cd examples/git && spin up --listen 127.0.0.1:19100 \
+  --variable @"$qualification_state/spin.toml")
+```
+
+From the repository root in another terminal, run the ordinary provider suite
+first, followed by any opt-in large workloads:
+
+```sh
+export GIT_PROBE_URL=http://127.0.0.1:19100
+export GIT_PROBE_PASSWORD=TEMPORARY-TEST-PASSWORD
+make git-provider-test
+
+cd examples/git
+GIT_REPEATED_PUSHES=1 go test -race -count=1 -parallel=4 \
+  -run '^TestRepeatedPushes$' -v ./tests
+GIT_LARGE_OBJECT_MIB=513 GIT_CONCURRENT_LARGE=1 \
+  go test -race -count=1 -parallel=2 -run '^TestLargeBlob$' -v ./tests
+```
+
+To qualify the core directly, set the `OBJECT_LOG_MINIO_*` variables to the same
+endpoint, bucket, credentials, and an isolated `$prefix/core` subprefix, then run
+the ignored MinIO cases in `store_conformance`, `protocol`, `immutable_faults`,
+`maintenance_model`, and `minio`.
+
+A loopback Spin URL qualifies the application against live S3. It does not test
+a deployment host's inbound TLS, routing, authentication integration, or
+host-wide resource admission.
+
+## Destroy
+
+Stop Spin first. Delete only the configured prefix with the temporary identity:
+
+```sh
+aws --region "$region" s3 rm "s3://$bucket/$prefix/" --recursive
+aws --region "$region" s3api list-objects-v2 \
+  --bucket "$bucket" --prefix "$prefix/"
+```
+
+The final listing must be empty. Unset the temporary session, then use the
+administrator profile to inspect and abort any incomplete multipart uploads for
+the same prefix. `ListBucketMultipartUploads` is intentionally absent from the
+temporary user's prefix policy because AWS scopes that operation to the bucket.
+
+```sh
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-multipart_file="$(mktemp "${qualification_state}/multipart-uploads.XXXXXX")"
-
-list_uploads() {
-  AWS_PROFILE="${admin_profile}" aws s3api list-multipart-uploads \
-    --region "${region}" --bucket "${bucket}" --prefix "${prefix}/" \
-    --output json >"${multipart_file}"
-}
-for attempt in 1 2 3; do
-  list_uploads
-  uploads_remaining="$(jq -er '(.Uploads // []) | length' "${multipart_file}")"
-  (( uploads_remaining == 0 )) && break
-  jq -r '.Uploads[] | [.Key, .UploadId] | @tsv' "${multipart_file}" |
-    while IFS=$'\t' read -r key upload_id; do
-      AWS_PROFILE="${admin_profile}" aws s3api abort-multipart-upload \
-        --region "${region}" --bucket "${bucket}" \
-        --key "${key}" --upload-id "${upload_id}"
-    done
-  echo "multipart abort pass ${attempt} complete" >&2
-done
-list_uploads
-[[ "$(jq -er '(.Uploads // []) | length' "${multipart_file}")" == 0 ]] || {
-  echo "incomplete multipart uploads remain under ${prefix}/" >&2
-  exit 1
-}
-
-AWS_PROFILE="${admin_profile}" terraform -chdir="${terraform_dir}" destroy
-rm -f "${multipart_file}" "${qualification_state}/session-credentials.json" \
-  "${qualification_state}/qualification-spin.toml"
+AWS_PROFILE="$admin_profile" aws --region "$region" \
+  s3api list-multipart-uploads --bucket "$bucket" --prefix "$prefix/"
 ```
 
-Remove the protected files only after destroy succeeds. A non-empty-bucket
-failure requires inspection; do not enable `force_destroy`.
+After the object and multipart checks are empty, destroy the infrastructure:
+
+```sh
+AWS_PROFILE="$admin_profile" terraform -chdir="$terraform_dir" destroy \
+  -var-file="$qualification_state/terraform.tfvars"
+terraform -chdir="$terraform_dir" state list
+```
+
+The final state list must be empty. Remove the external credentials, plan, state,
+and Spin variables only after destruction succeeds. A non-empty-bucket failure
+requires inspection; do not enable `force_destroy` to bypass it.

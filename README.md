@@ -1,157 +1,157 @@
 # object-log
 
-[![Rust CI](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml/badge.svg)](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml)
+[![CI](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml/badge.svg)](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml)
 
-`object-log` is an experimental Rust library for a small, generic,
-object-storage-backed write-ahead log. The key-value and Git consumers test its
-public API.
+`object-log` is a pre-release Rust library for publishing a linearizable,
+byte-oriented log over conditional object storage. Each logical log has one
+mutable head. Commits, payloads, checkpoints, and collection plans are
+immutable, so application state can be rebuilt without a durable local cache.
 
-The design is inspired by Cursor's [Git at any scale](https://cursor.com/blog/git-at-any-scale):
-object storage holds the durable log and local repositories can be rebuilt.
-The standalone log is the product. Its examples must be complete, useful
-applications that demonstrate both correctness and ease of integration.
-When an example becomes complicated, distinguish domain requirements from
-missing generic capabilities and unnecessary integration machinery. Feed those
-lessons back into the log API while keeping domain rules outside the core.
+The library supplies ordering, recovery, authenticated object references,
+checkpoints, reader retention, and bounded garbage collection. Applications
+supply their own operation, result, and snapshot formats.
 
-Durable Object behavior, tenancy, routing, and actor or service ownership are
-out of scope.
+## Storage contract
 
-The durable model has:
+A backend must provide:
 
-- One mutable `index.cbor` object for each logical log.
-- Immutable WAL entries, payloads, reference nodes, checkpoints, and
-  collection plans.
-- Deterministic BLAKE3 content identity plus a random physical ID for each
-  deletable object.
-- `ETag` compare-and-swap as the publication point.
-- A durable positive deletion plan as the collection fence.
-- Explicit conflict and uncertain-result states.
-- Local memory and disk are optional caches.
-- One validated backend handle can open many isolated logs.
+- create-if-absent writes;
+- version-based conditional updates;
+- conditional reads;
+- consistent read-after-write behavior; and
+- stable immutable bytes until `object-log` garbage collection removes them.
 
-`Log::open` takes a `ValidatedBackend` and a `LogId`; the internal scoped store
-is not part of the public API. `load` returns one cheap-clone `View` for reads
-and conditional work. `refresh` returns `None` when that view is still current.
-Adapters can use `open_existing` when a missing log must not be initialized,
-and `node_size` to check exact reference-node fit before storing its children.
-Adapters can call `preflight` before expensive local work. Its successful path
-does no I/O and makes no allocation. They can then call `prepare` with the final
-operation and staged objects.
+`ValidatedBackend::new` probes those capabilities once and rejects unsupported
+stores. `object_store::local::LocalFileSystem` is useful for immutable-object
+tests but cannot host a log because it lacks conditional updates. The memory
+backend, `MinIO`, and AWS S3 satisfy the tested protocol.
 
-For larger byte sequences, `byte_writer(&view)` accepts successive writes and
-`finish()` returns one `StagedObject`; publish that root normally or leave it
-unpublished for temporary storage. `open_bytes(&view, root.reference())` exposes
-the logical length and authenticated `read_at` calls. Reads may be short; callers
-advance their offset as with an ordinary reader. The WAL chooses chunk geometry
-and enforces its object/reference limits. Discard a writer after a failed or
-cancelled write. `ByteWriter::storage_objects` reports how many immutable WAL
-objects a successful finish at the current length will own, so consumers can
-enforce a graph budget without reproducing that geometry.
+Only `<prefix>/v1/logs/<log-id>/index.cbor` is mutable. A conditional update to
+that object is the publication point. Everything else has a create-only key
+containing both a random physical identifier and a BLAKE3 content digest.
+External lifecycle expiry, overwrite, or deletion of protocol objects violates
+the storage contract.
 
-Long reads can call `retain` before opening application data and
-`release_retention` after their last byte. Both operations reuse one stable ID
-to resolve uncertain head updates. Retention has no expiry. If a stopped process
-loses an ID, `clear_retentions_after_drain` is available only after the caller
-has stopped new readers and drained every existing reader; normal collection
-never clears retention. Commit and checkpoint publication preserve concurrent
-retention changes when the log and collection state are otherwise unchanged.
+## Example
 
-Successful immutable creation has one required storage property: the exact
-bytes remain at the same physical key until object-log garbage collection
-deletes them. External lifecycle expiry, deletion, or overwrite violates this
-contract.
+```rust,no_run
+use std::sync::Arc;
 
-`put_object` and `put_node` return process-local `StagedObject` proofs.
-`prepare` and `publish_checkpoint` accept those proofs, so the same `Log`
-handle or one of its clones can publish without reading the object graph back.
-`materialize` accepts one loaded `View` and creates proofs for references in
-its authenticated checkpoint and tail records. An adapter can retain those
-proofs and publish them with that exact view. `read_staged_node` authenticates
-a proven parent and derives child proofs for unchanged-subtree reuse.
-`stage_objects` fully verifies
-arbitrary durable references before it creates proofs. Recovery tokens do not
-contain a proof. `resume` and publication from a separately opened handle fully
-verify the referenced graph. A collection-epoch change rejects an older proof. Complete tail reads and
-materialization also retain verification on that exact view. Local appends
-extend it, so checkpointing avoids rereading immutable commits. A reopened
-handle verifies the tail again. Graph verification keeps at most 32 reads in
-flight, starting another as each finishes so one slow object does not delay
-other ready reads.
+use bytes::Bytes;
+use object_log::{CommitStatus, Log, LogId, Options, TransactionId, ValidatedBackend};
+use object_store::{memory::InMemory, path::Path};
 
-The current durable format is v1. Before the first release, its byte layout can
-change when a different layout makes the design smaller or better. The project
-does not provide compatibility readers for earlier development layouts.
+# async fn example() -> Result<(), object_log::Error> {
+let backend = ValidatedBackend::new(
+    Arc::new(InMemory::new()),
+    Path::from("object-log-demo"),
+)
+.await?;
+let log = Log::open(&backend, &LogId::new("orders")?, Options::default()).await?;
+let view = log.load().await?;
 
-The project is independent from Spin. Its proof crates use only the public core
-API:
+let prepared = log.prepare(
+    &view,
+    TransactionId::new(),
+    Bytes::from_static(b"set:order/42"),
+    Bytes::from_static(b"accepted"),
+    Vec::new(),
+)?;
 
-- [`object-log-kv`](crates/object-log-kv) tests a key-value store.
-- [`examples/git`](examples/git) uses go-git for Git protocols and object formats.
-  A small [Rust component](examples/wal-component) connects it to the same WAL.
-  Refs and a sparse object catalog publish together through one head update.
-  Small compressed objects fit in catalog leaves; larger objects use WAL byte streams.
-  Incoming deltas stream through go-git into the WAL. Fetch checks reachability
-  from published refs without opening blob payloads. Have-aware negotiation avoids
-  objects the client already has; objects that must be sent use full-object pack
-  entries, which can increase transfer size while avoiding delta-generation buffering.
-  Spin supplies HTTP; the core has no Spin dependency or Git rules.
+// Persist this before publication when the operation must survive process loss.
+let recovery_token = prepared.recovery_token()?;
 
-The Git consumer replaces the custom Rust Git engine and native maintenance
-command. Installed Git remains the independent client and correctness oracle.
-See [its README](examples/git/README.md) for build, local `MinIO`, live S3 and
-provider-test instructions. Local qualification covers concurrent clients and
-cleanup, malformed inputs, resource limits and recovery after a forced restart.
-A prior endurance-test failure was traced to installed Git 2.54 background
-maintenance and reproduced without this service. The complete loopback-Spin/live
-AWS S3 qualification passed at runtime revision
-`57643eb6b155811f39d990fe8379964d3dcc4c6d`. Exact-prefix and infrastructure
-teardown left no residual state. Deployed HTTPS and host admission remain
-hosting tests.
+match log.commit(prepared).await? {
+    CommitStatus::Committed(next) => {
+        println!("published generation {}", next.generation());
+    }
+    CommitStatus::Conflict(winner) => {
+        println!("retry against generation {} after revalidation", winner.generation());
+    }
+    CommitStatus::Pending(_) => {
+        // The write may have succeeded. Preserve the token and resolve it with
+        // `Log::resume`; never replay non-idempotent work as a new operation.
+        println!("publication outcome is uncertain: {} token bytes", recovery_token.len());
+    }
+}
+# Ok(())
+# }
+```
 
-The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
-[docs/design.md](docs/design.md).
-[docs/follow-ons.md](docs/follow-ons.md) describes the next consumers and
-[issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes the queue.
+A candidate is prepared against one immutable `View`. Publication returns a
+confirmed commit, a definite conflict with a newer view, or an explicit pending
+result when a storage failure can hide success. The core never silently rebases
+application work.
 
-## Local checks
+Large values can be written through `ByteWriter` and read with authenticated,
+bounded `read_at` calls. Reference nodes form application-defined trees without
+exposing storage paths. `materialize` can rebuild typed state from a checkpoint
+and the active tail while preserving process-local publication proofs.
+
+## Checkpoints and collection
+
+The mutable head and every encoded object have configurable limits. Applications
+publish checkpoints before the tail reaches its limit. Collection then:
+
+1. validates the current checkpoint, tail, and complete live object graph;
+2. publishes a positive deletion plan through the same conditional head;
+3. deletes only the objects named by that durable plan; and
+4. clears the exact plan after all deletions succeed.
+
+Long readers acquire a retention ID before opening application data and release
+it after their last read. Any retention blocks a new collection plan. Retentions
+do not expire automatically; clearing IDs lost by a stopped process requires an
+explicit stop-ingress-and-drain procedure.
+
+See [the protocol design](https://github.com/carsonfarmer/object-log/blob/main/docs/design.md)
+for the durable format and recovery invariants. The schema is defined in
+[`schema/object-log-v1.cddl`](https://github.com/carsonfarmer/object-log/blob/main/schema/object-log-v1.cddl).
+
+## Examples
+
+- [`object-log-kv`](https://github.com/carsonfarmer/object-log/tree/main/crates/object-log-kv)
+  is an experimental key-value consumer.
+  It remains intentionally unchanged while its production design is reconsidered.
+- [`examples/git`](https://github.com/carsonfarmer/object-log/tree/main/examples/git)
+  is a complete Git service using go-git and the
+  same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
+  clients, SHA-1 and SHA-256, protocol-v2 clone/fetch, classic push, shallow
+  history, authentication, recovery, and garbage collection. It has passed the
+  local `MinIO` and live AWS S3 qualification suites.
+
+The core library has no Git, Spin, or serverless-runtime dependency.
+
+## Development
+
+The repository pins its Rust and Go toolchains. Run the complete local gate:
 
 ```sh
 make check
 ```
 
-Run the opt-in core protocol `MinIO` test with:
+Run the opt-in `MinIO` protocol suite or large garbage-collection acceptance
+case:
 
 ```sh
 make minio-test
-```
-
-Run the opt-in large garbage-collection acceptance test with:
-
-```sh
 make gc-acceptance
 ```
 
-Build and test the Git consumer with Go 1.26.3, the pinned Rust toolchain,
-`componentize-go` (from go.mod), and `wac`:
+The [Git example guide](https://github.com/carsonfarmer/object-log/blob/main/examples/git/README.md)
+covers its build, local service, tests, maintenance, and known limits. See
+[CONTRIBUTING.md](https://github.com/carsonfarmer/object-log/blob/main/CONTRIBUTING.md)
+for the development workflow.
 
-```sh
-make git-check
-make git-build
-# Start the example with ordinary Spin against local MinIO, then:
-GIT_PROBE_URL=http://127.0.0.1:19100 make git-provider-test
-```
+## Stability
 
-The `MinIO` targets default to a pinned container on a loopback port. To use an
-installed native `MinIO` executable instead, set `OBJECT_LOG_MINIO_BINARY` to its
-absolute path. Native mode requires Python, `lsof`, and `shasum`; it reports the
-binary version and SHA-256, verifies ownership of the loopback listener, and
-removes its temporary data after stopping the process. Both modes create an empty
-test bucket and run the same assertions without a cloud account. Native results
-qualify that host and binary, not Docker or Linux runtime memory limits.
-The single-flow test includes a 1,001-object
-collection boundary. The large acceptance target collects 100,000
-memory-backed objects and 10,001 objects from local `MinIO`. Each collection
-must complete its timed phase within 30 seconds, including repeated bounded
-batches when the backlog exceeds one plan. Local results do not qualify live
-AWS or remote object-store performance.
+The API and durable format are pre-release. Development revisions may require a
+fresh object-store namespace; compatibility readers for earlier development
+formats are intentionally absent. A tagged durable-format release will require a
+new format version for incompatible changes.
+
+`object-log` is licensed under
+[Apache-2.0](https://github.com/carsonfarmer/object-log/blob/main/LICENSE).
+Dependency and retained source notices are described in
+[THIRD_PARTY.md](https://github.com/carsonfarmer/object-log/blob/main/THIRD_PARTY.md).
+Please report security issues according to
+[SECURITY.md](https://github.com/carsonfarmer/object-log/blob/main/SECURITY.md).

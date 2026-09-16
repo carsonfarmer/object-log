@@ -1,102 +1,70 @@
 # Git proof contract
 
-The product is a small, generic object-storage WAL. The Git service proves that
-an established Git library can use it without a second durable authority.
-`examples/git` contains the Go consumer; `examples/wal-component` exposes the
-unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
+The Git service proves that an established Git implementation can use the
+generic WAL without another durable authority. Git protocol and repository
+rules remain outside the Rust core.
 
 ## Required behavior
 
-- Unchanged Git clients: SHA-1 and SHA-256, protocol-v2 discovery, clone and
-  have-aware fetch, classic receive-pack push, branches and annotated tags.
-- Atomic ref/catalog publication, stale-write rejection, fast-forward policy,
-  malformed-input rejection and object connectivity validation.
-- Optional authentication, read-only serving, persisted default branch and
-  cold recovery from object storage without a local repository cache.
-- Sparse object lookup and streamed chunk reads; cleanup preserves live history.
-- Shallow clone, deepen and unshallow, checked with ordinary Git clients.
+- Unchanged clients using SHA-1 or SHA-256 repositories.
+- Protocol-v2 discovery, clone, have-aware fetch, and shallow history.
+- Classic receive-pack push, branches, annotated tags, stale-write rejection,
+  fast-forward policy, connectivity validation, and malformed-input rejection.
+- Atomic publication of refs and the sparse object catalog.
+- Authentication, read-only mode, a persisted default branch, and recovery
+  without a local repository cache.
+- Maintenance that prunes unreachable Git objects and invokes bounded WAL
+  collection while preserving active readers.
 
-The custom Rust Git engine and its native maintenance command are retired.
-Installed Git remains the independent test oracle. Local provider and workspace
-qualification pass. The full loopback-Spin/live AWS S3 qualification passed at
-runtime revision `57643eb6b155811f39d990fe8379964d3dcc4c6d`, including mature
-maintenance and concurrent 513 MiB lifecycles for both hashes. A failure in the
-endurance test was traced to installed Git 2.54 background maintenance;
-deterministic native tests reproduce it, and the client test keeps maintenance
-synchronous. Deployed HTTPS remains a hosting qualification before public rollout.
-Advanced partial filters and packfile URIs are not required for acceptance;
-add them only when useful and supported without bespoke protocol machinery.
+Partial-clone filters and packfile URIs are outside the current proof. Add them
+through the Git library when real workloads justify them; do not build a second
+Git protocol engine here.
 
-## Storage and recovery
+## Implementation boundary
 
-Compressed loose objects of at most 512 bytes live in authenticated catalog
-leaves; larger objects and temporary incoming packs use the WAL byte-stream API.
-The WAL owns chunk geometry, authenticated length and bounded offset reads. A splitting radix catalog
-provides sparse lookup. The catalog and refs publish through the same conditional
-head update. Local handles and caches are disposable; no local repository is
-needed. Git formats, negotiation and pack processing belong to go-git.
+`examples/git` is a Go service built on go-git. `examples/wal-component` is the
+small WASIp2 bridge to the unchanged Rust WAL. Spin supplies HTTP hosting.
 
-Push validation completes before one publication. An uncertain result stays
-explicit; ordinary Git clients refresh refs after a lost response. Pushes are
-never automatically replayed. Expired reads may reopen once before response
-bytes are sent, with at most 1 MiB of request replay and cumulative storage
-counters. A late failure stops the response rather than restarting it.
-Upload-pack acquires WAL retention before reading the catalog and releases it
-after the last response write, including error and disconnect paths. Lost IDs
-can be cleared only in explicitly enabled drained-reader recovery mode; that
-mode rejects normal traffic and normal maintenance never clears retention.
-Fetch visibility checks current ref trees before older history and stops when
-requested objects and relevant haves are proven. Blob payload readers stay
-unopened until pack generation; unreachable objects remain unavailable.
-The storage bridge can retry one identical conditional write after a connection
-failure. A rejected retry preserves the original uncertain outcome for recovery.
+The WAL owns authenticated chunking, bounded sparse reads, recovery, retention,
+and collection. The Go consumer owns Git negotiation, pack handling, refs, its
+sparse catalog, and repository policy. Compressed small objects live in catalog
+leaves; larger objects and incoming packs use WAL streams. The catalog and refs
+publish in one WAL commit.
 
-At 64 tail entries, push admission checkpoints the current authenticated catalog
-before receiving another pack. This bounds the tail without walking Git history
-or deleting objects. The HTTP maintenance endpoint prunes unreachable Git objects
-and runs one bounded fenced deletion batch. Operators run it periodically and
-after ref deletion, repeating `more` until `complete`. Retry `pending` and
-`conflict`; `retained` means an active reader blocks collection. Collection,
-checkpoint safety and uncertain outcomes remain core responsibilities.
+Incoming delta bases and results stream through go-git. Outgoing packs contain
+full objects because the current go-git API does not provide bounded delta
+generation suitable for this service. Negotiation still omits objects the
+client already has. The tradeoff is higher transfer cost for similar revisions,
+which deployments must measure against their repositories.
 
-## Limits and tradeoffs
+## Recovery and maintenance
 
-Incoming delta bases and results stream through go-git's parser and decoder into
-WAL byte streams. go-git checks pack framing, lengths and checksums; the importer
-coordinates dependency resolution and publication.
-Pack metadata remains proportional to object count; backward copies may reread bases.
-Outgoing packs stream full objects without creating deltas, so transfer sizes
-can exceed a delta-compressed server's. Have-aware negotiation still omits objects
-the client already has, but missing objects can take more time and network egress to
-deliver, especially when large files have many similar revisions. The live S3
-campaign measured mixed histories and concurrent 513 MiB lifecycles; deployments
-must still measure egress for their own repository mix. There is no fixed
-process-memory promise.
-The generic WAL's configured object, reference and tail limits still apply.
-The Git example also bounds request bytes, pack entry counts, structured-object
-sizes and cumulative catalog decoding, with cooperative cancellation before
-storage operations. These checks cannot stop
-an already-running synchronous WASI import or bound total metadata memory.
-Host-wide request admission remains a deferred hosting concern.
-Normal Spin settings are used; no instance-count, pooling or host-memory wrapper.
-The service temporarily pins our go-git fork with streaming-decoder fixes and
-requires its v6 prerelease APIs for both hashes, v2
-serving, shallow history and streamed writes. The component build uses a pinned
-Wasmtime adapter fix from our fork for Go GC host calls. Spin and Go's
-collector are unchanged.
+Push validation finishes before publication. A push is never replayed after an
+uncertain response; ordinary clients refresh refs. Expired reads may reopen once
+before response bytes are sent, with cumulative limits across the retry.
 
-Use a fresh storage prefix: the prior custom Git catalog is incompatible, and
-there is no development-format migration tool. Original array leaves and
-unvalidated experimental Go roots are rejected. Do not silently reinterpret them.
+Fetch holds a WAL retention through the last response write. At the configured
+tail threshold, push admission checkpoints the authenticated catalog. The
+maintenance endpoint prunes unreachable Git objects, starts or resumes one WAL
+collection batch, and reports whether another pass is needed. Clearing lost
+reader retentions requires an explicitly drained service mode.
 
-## Checks
+## Qualification
 
-`make check` runs core/consumer Rust checks and `make git-check` (pure Go tests,
-provider-test compilation, bridge tests, strict native and WASIp2 Clippy).
-`make git-build` builds and composes the actual component separately.
-`make git-provider-test` runs unchanged-client tests against a supplied local
-Spin/MinIO service. Its README lists opt-in large/repeated-push and restart cases.
+`make git-check` runs Go race tests, static checks, provider-test compilation,
+and native/WASIp2 bridge checks. `make git-build` composes the deployable
+component. Provider suites use ordinary Git as the external oracle and cover
+both hash formats, clone/fetch/push, large files, repeated history, access
+control, restarts, maintenance, and collection.
 
-Keep fault tests, recovery, collection, memory/filesystem checks and the core
-benchmarks. New verification belongs in executable tests and concise commits,
-not evidence archives. Local MinIO measurements do not establish cloud behavior.
+Local MinIO and disposable live AWS S3 qualification have passed. Remaining
+public-host work is deployment-specific TLS, routing, identity integration,
+host-wide request admission, monitoring, and qualification through that exact
+edge.
+
+## Dependency policy
+
+The service temporarily pins reviewed forks of go-git and Wasmtime. Exact
+revisions, licenses, and upstream references live in `THIRD_PARTY.md`. New
+fork-only behavior requires owner review and focused tests. The service uses
+ordinary Spin and unmodified object storage.

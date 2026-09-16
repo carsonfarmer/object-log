@@ -1,24 +1,32 @@
-# WAL component
+# object-log WAL component
 
-A small WASIp2 interface to the existing Rust WAL for the Go Git consumer.
-Sessions, object handles and prepared candidates retain the core's authenticated
-staging proofs. Refresh shares cumulative transport counters. The WAL format,
-publication point, checkpoint safety and garbage collection stay in the core.
-`latest-complete-state` returns the latest record and exact tail count after
-verifying the checkpoint and every tail record. Referenced objects stay lazy.
-This fold is for complete-state records; delta consumers need a different fold.
+This unpublished WASIp2 component exposes the generic Rust WAL to the Go Git
+example. It contains no Git policy and introduces no second durable authority.
+Sessions, object handles, and prepared candidates retain the core library's
+authenticated staging proofs.
 
-Build and compose from the repository root with `make git-build`; see the
-[sibling Git example](../git/README.md) for ordinary Spin and local MinIO setup.
-The component reuses the established object_store S3 client through a WASI HTTP
-transport. The core itself has no Spin dependency. WAL objects are limited to
-2 MiB here. Byte writers finish into one ordinary object handle; readers expose
-a logical length and bounded offset reads. The Rust WAL owns chunk geometry and
-keeps one authenticated chunk cached. A stream holds up to 2 GiB with this
-configuration. Temporary packs use the same API without publishing their roots.
+The component uses the established `object_store` S3 client through a WASI HTTP
+transport. `latest-complete-state` verifies the checkpoint and active tail,
+returning the latest complete record and exact tail length while referenced
+application objects remain lazy. Byte writers and readers delegate chunk
+geometry, authenticated length, bounded offset reads, and garbage-collection
+reachability to the core.
 
-`make git-check` runs native library tests and strict native/WASIp2 checks.
-Native tests use `--lib`: the component's HTTP exports are intended for WASI,
-not a native shared-library host. Local provider tests exercise the composed
-component. The client README records remaining limits and the temporary
-component-build adapter patch.
+Build and compose it from the repository root:
+
+```sh
+make git-check
+make git-build
+```
+
+The second command creates the final `examples/git/git.wasm`. See the
+[Git example guide](../git/README.md) for local Spin, MinIO, configuration, and
+provider tests.
+
+This adapter configures WAL objects up to 2 MiB. With the current authenticated
+chunk geometry, one byte stream can represent up to 2 GiB. Incoming Git packs
+use the same API without publishing their temporary stream roots.
+
+The build uses a checksum-verified Wasmtime adapter revision documented in
+[THIRD_PARTY.md](../../THIRD_PARTY.md). Native tests cover the component library;
+strict native and WASIp2 Clippy checks run as part of `make git-check`.

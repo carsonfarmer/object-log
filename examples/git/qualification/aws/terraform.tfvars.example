@@ -1,6 +1,6 @@
 aws_profile = "AdministratorAccess-ACCOUNT_ID"
 aws_region  = "us-west-2"
 
-campaign_id   = "replace-with-campaign-id"
+run_id        = "replace-with-run-id"
 bucket_name   = "replace-with-globally-unique-bucket-name"
-object_prefix = "object-log-qualification/replace-with-campaign-id"
+object_prefix = "object-log-qualification/replace-with-run-id"

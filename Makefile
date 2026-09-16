@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test gc-acceptance git-check git-build git-spin-config-test git-provider-test git-remote-rehearse git-remote-qualification
+.PHONY: check test bench minio-test gc-acceptance git-check git-build git-spin-config-test git-provider-test
 
 check:
 	cargo fmt --all --check
@@ -47,12 +47,3 @@ git-spin-config-test: git-build
 git-provider-test:
 	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to your local Spin/MinIO service"; exit 1)
 	cd $(GIT_EXAMPLE_DIR) && go test ./tests -v -timeout 15m
-
-git-remote-rehearse:
-	./examples/git/qualification/aws/test-issue-session.sh
-	./scripts/test-qualify-git-remote.sh
-	./scripts/qualify-git-remote.sh rehearse
-
-REMOTE_QUALIFICATION_PHASE ?= status
-git-remote-qualification:
-	./scripts/qualify-git-remote.sh $(REMOTE_QUALIFICATION_PHASE)
