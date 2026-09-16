@@ -1,6 +1,10 @@
 package main
 
-import "io"
+import (
+	"io"
+
+	"github.com/go-git/go-git/v6/plumbing"
+)
 
 // Incoming packs are staged as seekable WAL bytes before streaming import.
 func (s *store) PackfileWriter() (io.WriteCloser, error) {
@@ -52,7 +56,25 @@ func (p *incomingPack) Close() (err error) {
 		return err
 	}
 	defer reader.Close()
-	if err := importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits); err != nil {
+	offsets := packOffsets{}
+	if err := importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits, offsets); err != nil {
+		return err
+	}
+	remaining := p.s.limits.catalogBytes
+	if err := offsets.deltas(reader, reader.size, func(id plumbing.Hash, delta *deltaMeta) {
+		key := id.String()
+		item := p.s.pending[key]
+		if len(item.Inline) != 0 || int64(len(delta.Data)) >= item.StoredSize {
+			return
+		}
+		cost := int64(len(delta.Data) + len(delta.Base) + 64)
+		if cost > remaining {
+			return
+		}
+		remaining -= cost
+		item.Delta = delta
+		p.s.pending[key] = item
+	}); err != nil {
 		return err
 	}
 	return p.s.failure

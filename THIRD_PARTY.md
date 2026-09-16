@@ -17,7 +17,9 @@ adapter source or binaries.
 
 The Git example uses a reviewed go-git fork revision through `go.mod`. Its
 streaming decoder changes are proposed in
-[go-git #2379](https://github.com/go-git/go-git/pull/2379).
+[go-git #2379](https://github.com/go-git/go-git/pull/2379). The pinned fork also
+[applies the existing depth limit to reused deltas](https://github.com/carsonfarmer/go-git/commit/26cbbf6c051e0f72063eebb2f0d07a4181e4bb7c);
+that additional fix has not been submitted upstream.
 
 The Go component bindings pin a [go-pkg revision](https://github.com/carsonfarmer/go-pkg/commit/b0c40df4c02bb780994cedee093376abe9144ba2)
 that releases imported buffers after lifting them into Go values. The build

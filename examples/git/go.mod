@@ -21,6 +21,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 )
 
-replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260911230610-a37a9c5b2b9a
+replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260916212441-26cbbf6c051e
 
 replace go.bytecodealliance.org/pkg => github.com/carsonfarmer/go-pkg v0.2.4-0.20260916211624-b0c40df4c02b

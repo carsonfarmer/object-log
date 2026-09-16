@@ -49,10 +49,11 @@ type objectMeta struct {
 	ID         string
 	Kind       plumbing.ObjectType
 	Size       int64
-	Encoding   string `json:",omitempty"`
-	StoredSize int64  `json:",omitempty"`
-	Inline     []byte `json:",omitempty"`
-	WALObjects uint64 `json:",omitempty"`
+	Encoding   string     `json:",omitempty"`
+	StoredSize int64      `json:",omitempty"`
+	Inline     []byte     `json:",omitempty"`
+	WALObjects uint64     `json:",omitempty"`
+	Delta      *deltaMeta `json:",omitempty"`
 }
 
 func (m objectMeta) validInline() bool {

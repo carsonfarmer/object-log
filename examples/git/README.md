@@ -69,7 +69,7 @@ Start the service:
 ```sh
 cd examples/git
 spin up --listen 127.0.0.1:19100 \
-  --variable @/tmp/object-log-git-vars.toml
+  --variable @/tmp/object-log-git-vars.toml 2>&1 | tee /tmp/object-log-git-spin.log
 ```
 
 The repositories are available at:
@@ -141,10 +141,12 @@ make git-spin-config-test
 Against a running service, run the unchanged-client provider suite:
 
 ```sh
-GIT_PROBE_URL=http://127.0.0.1:19100 make git-provider-test
+GIT_PROBE_URL=http://127.0.0.1:19100 \
+GIT_PROBE_LOG=/tmp/object-log-git-spin.log make git-provider-test
 ```
 
 Set `GIT_PROBE_PASSWORD` and `GIT_PROBE_BRANCH` when those values are configured.
+`GIT_PROBE_LOG` supplies per-request storage counters when Spin omits HTTP trailers.
 The provider suite uses installed Git as an independent protocol and integrity
 oracle. Larger opt-in cases are controlled by these environment variables:
 
@@ -197,11 +199,13 @@ Never clear retentions while a reader may still be active.
 
 ## Current limits
 
-- Fetch packs contain complete required objects rather than newly generated
-  deltas. Have-aware negotiation still omits objects the client already owns,
-  but similar large revisions can consume more bandwidth. This avoids
-  delta-selection memory proportional to object size: go-git’s native selector
-  loads complete base and target objects while comparing them.
+- Fetch reuses compact deltas supplied by Git clients; it does not calculate
+  new deltas. Each optional representation is limited to 64 KiB compressed,
+  shares the catalog leaf's 512 KiB inline allowance, and uses an optional
+  per-push allowance equal to `git_max_catalog_bytes`. Full objects remain available
+  when a representation does not fit or its base is absent from the fetch.
+  Such fetches can use more bandwidth. Have-aware negotiation still omits
+  objects the client already owns. Retained deltas also add catalog-read bytes.
 - Partial-clone filters and packfile URIs are not implemented.
 - Host-wide TLS, routing, authentication integration, concurrency, and memory
   admission belong to the deployment host.

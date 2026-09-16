@@ -12,7 +12,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
-func importPack(ctx context.Context, source io.ReadSeeker, storage storer.EncodedObjectStorer, objectFormat format.ObjectFormat, limits requestLimits) error {
+func importPack(ctx context.Context, source io.ReadSeeker, storage storer.EncodedObjectStorer, objectFormat format.ObjectFormat, limits requestLimits, observers ...packfile.Observer) error {
 	if objectFormat != format.SHA1 && objectFormat != format.SHA256 {
 		return fmt.Errorf("invalid object format")
 	}
@@ -30,9 +30,10 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage storer.Encode
 		return err
 	}
 	admission := &packAdmission{ctx: ctx, limits: limits, size: size}
+	observers = append(observers, admission)
 	parser := packfile.NewParser(&packSource{ReadSeeker: source, ctx: ctx},
 		packfile.WithStorage(storage), packfile.WithObjectFormat(objectFormat),
-		packfile.WithMaxObjectSize(limits.objectBytes), packfile.WithScannerObservers(admission))
+		packfile.WithMaxObjectSize(limits.objectBytes), packfile.WithScannerObservers(observers...))
 	admission.parser = parser
 	_, err = parser.Parse()
 	if errors.Is(err, packfile.ErrObjectTooLarge) {

@@ -35,9 +35,9 @@ control, cold recovery, automatic tail checkpoints, and explicit maintenance.
 Refs and its sparse object catalog publish atomically through one WAL commit.
 It has passed local MinIO and disposable live AWS S3 qualification.
 
-Incoming pack data and delta results stream through go-git. Outgoing packs send
-complete missing objects because the current go-git API does not expose bounded
-delta generation. This affects transfer efficiency, not repository correctness.
+Incoming pack data and delta results stream through go-git. Fetch reuses bounded
+client-provided deltas retained in the catalog, with full-object fallback. It
+does not generate new deltas, so some transfers use more bandwidth.
 Partial-clone filters and packfile URIs are outside the current proof.
 
 ## Dependencies

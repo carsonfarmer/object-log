@@ -54,6 +54,9 @@ func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], 
 		node.Items = map[string]indexed{}
 		next := 0
 		for _, item := range meta.Items {
+			if item.Delta != nil && (!item.Delta.valid() || len(item.Delta.Base) != len(item.ID) || len(item.Inline) != 0) {
+				return node, fmt.Errorf("invalid indexed delta")
+			}
 			if _, exists := node.Items[item.ID]; exists {
 				return node, fmt.Errorf("duplicate index object")
 			}
@@ -113,6 +116,7 @@ func (s *store) saveBucket(node radixNode[indexed, catalogRoot]) (catalogRoot, e
 			}
 		}
 	}
+	limitDeltas(meta.Items)
 	objects, err := bucketObjects(meta)
 	if err != nil {
 		return catalogRoot{}, err

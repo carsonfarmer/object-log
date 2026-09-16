@@ -57,8 +57,8 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	mem := memory.NewStorage(memory.WithObjectFormat(format))
 	// Memory storage returns its owned configuration; no save is needed.
 	cfg, _ := mem.Config()
-	// A nonzero window bounds object count, not buffered delta bytes.
-	cfg.Pack.Window = 0
+	// Reuse stored deltas without comparing object contents to generate new ones.
+	cfg.Pack.Window = 1
 	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]catalogRoot{}, loaded: map[*wal.Object]radixNode[indexed, catalogRoot]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
@@ -151,6 +151,16 @@ func (s *store) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) (plumb
 	return &storedObject{s, item}, nil
 }
 func (s *store) HasEncodedObject(id plumbing.Hash) error { _, e := s.lookup(id); return e }
+func (s *store) DeltaObject(kind plumbing.ObjectType, id plumbing.Hash) (plumbing.EncodedObject, error) {
+	object, err := s.EncodedObject(kind, id)
+	if err != nil {
+		return nil, err
+	}
+	if delta := object.(*storedObject).item.Delta; delta != nil {
+		return storedDelta{EncodedObject: object, delta: delta}, nil
+	}
+	return object, nil
+}
 func (s *store) EncodedObjectSize(id plumbing.Hash) (int64, error) {
 	v, e := s.lookup(id)
 	return v.Size, e

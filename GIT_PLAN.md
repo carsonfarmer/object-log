@@ -31,11 +31,11 @@ sparse catalog, and repository policy. Compressed small objects live in catalog
 leaves; larger objects and incoming packs use WAL streams. The catalog and refs
 publish in one WAL commit.
 
-Incoming delta bases and results stream through go-git. Outgoing packs contain
-full objects because the current go-git API does not provide bounded delta
-generation suitable for this service. Negotiation still omits objects the
-client already has. The tradeoff is higher transfer cost for similar revisions,
-which deployments must measure against their repositories.
+Incoming delta bases and results stream through go-git. The catalog retains
+bounded client-provided deltas within its existing inline allowance. Fetch uses
+go-git's stored-delta path without generating new deltas; full objects remain
+available when a representation or its base is unavailable. Negotiation still
+omits objects the client already has.
 
 ## Recovery and maintenance
 

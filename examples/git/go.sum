@@ -2,8 +2,8 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
-github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260911230610-a37a9c5b2b9a h1:Nmb4f5dCv/Q4t7zRnAyhqJa29JIHIr13ddZInzTz0HQ=
-github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260911230610-a37a9c5b2b9a/go.mod h1:2eK2w/x2zu4GWIHvrPUnxOTKkQ1H9Hm40hDPLl1az9Q=
+github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260916212441-26cbbf6c051e h1:A+KeMF+L8ltU5byr15LSlKObg+bj2EamE6Cr1aHW30c=
+github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260916212441-26cbbf6c051e/go.mod h1:2eK2w/x2zu4GWIHvrPUnxOTKkQ1H9Hm40hDPLl1az9Q=
 github.com/carsonfarmer/go-pkg v0.2.4-0.20260916211624-b0c40df4c02b h1:tZduA5ffiTADOujK1s0id+nyfGjtyWGvxYVzUUnzlKA=
 github.com/carsonfarmer/go-pkg v0.2.4-0.20260916211624-b0c40df4c02b/go.mod h1:OjA+V8g3uUFixeCKFfamm6sYhTJdg8fvwEdJ2GO0GSk=
 github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
