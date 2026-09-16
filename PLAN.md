@@ -51,8 +51,8 @@ implementation remains outside the core.
 Before a tagged release:
 
 1. Keep `make check`, `make minio-test`, and the Git provider suites green.
-2. Keep crate packaging limited to the library, schema, license, and public
-   README.
+2. Keep crate packaging limited to library source, the schema, license, public
+   README, integration tests, benchmarks, and Cargo metadata.
 3. Maintain public documentation for the current API and operator obligations.
 4. Review dependency forks and either land their fixes upstream or document the
    exact retained revisions.

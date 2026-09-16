@@ -114,10 +114,36 @@ GIT_LARGE_OBJECT_MIB=513 GIT_CONCURRENT_LARGE=1 \
   go test -race -count=1 -parallel=2 -run '^TestLargeBlob$' -v ./tests
 ```
 
-To qualify the core directly, set the `OBJECT_LOG_MINIO_*` variables to the same
-endpoint, bucket, credentials, and an isolated `$prefix/core` subprefix, then run
-the ignored MinIO cases in `store_conformance`, `protocol`, `immutable_faults`,
-`maintenance_model`, and `minio`.
+To qualify the core directly, export the same backend and temporary credentials
+under the test variable names, using a separate prefix:
+
+```sh
+export OBJECT_LOG_MINIO_ENDPOINT="https://s3.${region}.amazonaws.com"
+export OBJECT_LOG_MINIO_BUCKET="$bucket"
+export OBJECT_LOG_MINIO_REGION="$region"
+export OBJECT_LOG_MINIO_PREFIX="${prefix}/core"
+export OBJECT_LOG_MINIO_ACCESS_KEY="$AWS_ACCESS_KEY_ID"
+export OBJECT_LOG_MINIO_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
+export OBJECT_LOG_MINIO_SESSION_TOKEN="$AWS_SESSION_TOKEN"
+
+cargo test --features aws,test-util --test store_conformance \
+  minio_backend_conformance -- --ignored --nocapture
+cargo test --features aws,test-util --test protocol \
+  minio_protocol_matrix -- --ignored --nocapture
+cargo test --features aws,test-util --test immutable_faults \
+  minio_immutable_create_faults -- --ignored --nocapture
+cargo test --features aws,test-util --test maintenance_model \
+  minio_maintenance_model -- --ignored --nocapture
+cargo test --features aws,test-util --test minio \
+  minio_passes_recovery_checkpoint_and_gc_flow -- --ignored --nocapture
+```
+
+The large 10,001-object remote collection case is optional:
+
+```sh
+cargo test --features aws,test-util --test gc_acceptance \
+  minio_gc_removes_10001_objects -- --ignored --nocapture
+```
 
 A loopback Spin URL qualifies the application against live S3. It does not test
 a deployment host's inbound TLS, routing, authentication integration, or
@@ -140,6 +166,9 @@ temporary user's prefix policy because AWS scopes that operation to the bucket.
 
 ```sh
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+unset OBJECT_LOG_MINIO_ENDPOINT OBJECT_LOG_MINIO_BUCKET OBJECT_LOG_MINIO_REGION
+unset OBJECT_LOG_MINIO_PREFIX OBJECT_LOG_MINIO_ACCESS_KEY
+unset OBJECT_LOG_MINIO_SECRET_KEY OBJECT_LOG_MINIO_SESSION_TOKEN
 AWS_PROFILE="$admin_profile" aws --region "$region" \
   s3api list-multipart-uploads --bucket "$bucket" --prefix "$prefix/"
 ```

@@ -36,7 +36,7 @@ Micelio is MPL-2.0.
   used by the Git example.
 - Lockfiles remain authoritative for exact dependency versions.
 
-Regenerate the inventories when dependencies change:
+Audit the resolved dependencies when lockfiles change:
 
 ```sh
 cargo install cargo-license --version 0.7.0 --locked
@@ -49,6 +49,9 @@ make bindings
 go run github.com/google/go-licenses/v2@v2.0.1 report \
     --ignore object-log-git-proof ./... github.com/bytecodealliance/componentize-go
 ```
+
+These commands emit raw reports. Review, normalize, and deduplicate their
+output into the tracked inventories, preserving fork-specific revision URLs.
 
 Before distributing the composed Git component, collect dependency license and
 notice files from the same locked build inputs and include this project's

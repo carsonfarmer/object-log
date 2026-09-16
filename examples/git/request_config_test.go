@@ -27,7 +27,7 @@ func TestSessionToken(t *testing.T) {
 	}
 }
 
-func TestTargetIDMatchesQualificationRunner(t *testing.T) {
+func TestTargetIDIsStable(t *testing.T) {
 	values := map[string]string{
 		"WAL_ENDPOINT": "https://s3.us-west-2.amazonaws.com",
 		"WAL_BUCKET":   "test-bucket",

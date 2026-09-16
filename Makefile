@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test gc-acceptance git-check git-build git-spin-config-test git-provider-test
+.PHONY: check test bench minio-test gc-acceptance git-check git-build git-spin-config-test git-provider-test git-qualification-tools-test
 
 check:
 	cargo fmt --all --check
@@ -24,7 +24,7 @@ GIT_EXAMPLE_DIR = examples/git
 WAL_COMPONENT = examples/wal-component/Cargo.toml
 GIT_TEST_FILES = request_config.go request_config_test.go import_pack.go import_pack_test.go import_pack_lifecycle_test.go limits.go limits_test.go index.go index_test.go codec.go codec_test.go read_retry.go read_retry_test.go retention.go retention_test.go retry.go retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go
 
-git-check:
+git-check: git-qualification-tools-test
 	test -z "$$(gofmt -l $(GIT_EXAMPLE_DIR)/*.go $(GIT_EXAMPLE_DIR)/tests/*.go)"
 	$(MAKE) -C $(GIT_EXAMPLE_DIR) bindings
 	cd $(GIT_EXAMPLE_DIR) && go test -race $(GIT_TEST_FILES)
@@ -35,6 +35,9 @@ git-check:
 	cargo test --locked --manifest-path $(WAL_COMPONENT) --lib
 	cargo clippy --locked --manifest-path $(WAL_COMPONENT) --all-targets -- -D warnings
 	cargo clippy --locked --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2 -- -D warnings
+
+git-qualification-tools-test:
+	./examples/git/qualification/aws/test-issue-session.sh
 
 git-build:
 	cargo build --locked --release --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2

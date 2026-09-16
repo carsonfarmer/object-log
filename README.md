@@ -110,10 +110,10 @@ for the durable format and recovery invariants. The schema is defined in
 ## Examples
 
 - [`object-log-kv`](https://github.com/carsonfarmer/object-log/tree/main/crates/object-log-kv)
-  is an experimental key-value consumer.
-  It remains intentionally unchanged while its production design is reconsidered.
+  is an experimental consumer that demonstrates ordered key-value updates,
+  concurrent writers, replay, and checkpoint restore.
 - [`examples/git`](https://github.com/carsonfarmer/object-log/tree/main/examples/git)
-  is a complete Git service using go-git and the
+  is a working Git service using go-git and the
   same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
   clients, SHA-1 and SHA-256, protocol-v2 clone/fetch, classic push, shallow
   history, authentication, recovery, and garbage collection. It has passed the

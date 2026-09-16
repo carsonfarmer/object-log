@@ -1,6 +1,6 @@
 # Git on object-log
 
-This example is a complete smart-HTTP Git service backed by `object-log`.
+This example is a working smart-HTTP Git service backed by `object-log`.
 go-git handles Git protocols, object formats, and packs. A small Rust WASIp2
 component connects the Go service to the same generic WAL used by other
 consumers. The object-log head is the only mutable durable authority; the
@@ -36,23 +36,28 @@ both into `examples/git/git.wasm`. Spin loads that final file.
 
 ## Run locally
 
-Start an isolated MinIO instance:
+Start an isolated MinIO instance in one terminal. The command prints its unique
+data directory; remove that directory after stopping MinIO:
 
 ```sh
+minio_data="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-minio.XXXXXX")"
+echo "MinIO data: $minio_data"
 MINIO_ROOT_USER=objectlog MINIO_ROOT_PASSWORD=local-test-secret \
-  minio server /tmp/object-log-git-minio --address 127.0.0.1:19090
-mc alias set local-git http://127.0.0.1:19090 objectlog local-test-secret
-mc mb --ignore-existing local-git/wal-proof
+  minio server "$minio_data" --address 127.0.0.1:19090
 ```
 
-Create a protected Spin variables file:
+In another terminal, create the bucket and a protected Spin variables file.
+Each run gets a new WAL prefix:
 
 ```sh
-cat >/tmp/object-log-git-vars.toml <<'EOF_VARS'
-wal_prefix = "fresh-local-example"
+mc alias set local-git http://127.0.0.1:19090 objectlog local-test-secret
+mc mb --ignore-existing local-git/wal-proof
+test_id="local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+cat >/tmp/object-log-git-vars.toml <<EOF_VARS
+wal_prefix = "$test_id"
 wal_access_key = "objectlog"
 wal_secret_key = "local-test-secret"
-git_boot_id = "local-boot-1"
+git_boot_id = "$test_id"
 EOF_VARS
 chmod 600 /tmp/object-log-git-vars.toml
 ```
@@ -78,11 +83,13 @@ For example:
 git clone http://127.0.0.1:19100/sha256.git
 ```
 
+When finished, stop Spin and MinIO, then remove the variables file and the
+printed MinIO data directory.
+
 Authentication is disabled when `git_password` is empty and should only be used
 that way on loopback. When configured, clients use HTTP Basic authentication;
-the password is checked in constant time and the username is ignored. Branch
-updates must be fast-forward. Force pushes and force-with-lease do not rewrite
-branches.
+the username is ignored. Branch updates must be fast-forward. Force pushes and
+force-with-lease do not rewrite branches.
 
 ## Configuration
 

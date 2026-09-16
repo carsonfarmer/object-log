@@ -65,7 +65,7 @@ func TestAccess(t *testing.T) {
 			t.Errorf("%s %s: boot ID differs from %q", c.method, c.path, bootID)
 		}
 		if targetID != "" && response.Header.Get("X-Git-Target-ID") != targetID {
-			t.Errorf("%s %s: storage target differs from the campaign", c.method, c.path)
+			t.Errorf("%s %s: storage target differs from the expected configuration", c.method, c.path)
 		}
 	}
 }

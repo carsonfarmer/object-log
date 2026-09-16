@@ -6,4 +6,6 @@ may change without compatibility readers.
 
 ## Unreleased
 
-- Build and qualify the generic object-storage WAL and complete Git consumer.
+- Added the initial generic object-storage WAL, recovery, checkpoints,
+  retention, and bounded collection.
+- Added and qualified the go-git smart-HTTP example for SHA-1 and SHA-256.

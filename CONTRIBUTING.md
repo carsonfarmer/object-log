@@ -6,9 +6,12 @@ the core.
 
 ## Setup
 
-Install the Rust toolchain pinned by `rust-toolchain.toml`. Git example work also
-requires the Go version in `examples/git/go.mod`, Spin, `componentize-go`, and
-`wac`.
+Install the Rust toolchain pinned by `rust-toolchain.toml`, the Go version in
+`examples/git/go.mod`, and `jq`. Go resolves `componentize-go` from `go.mod`.
+The complete gate uses `jq` for a self-contained test of the AWS
+temporary-credential helper; it does not contact AWS. Building the composed
+component additionally requires `wac`; running it requires Spin. MinIO is needed
+only for the opt-in storage tests.
 
 Run the required local gate before submitting a change:
 
