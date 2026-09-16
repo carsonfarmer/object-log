@@ -10,12 +10,9 @@ require (
 
 require (
 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
-	github.com/apparentlymart/go-userdirs v0.0.0-20200915174352-b0c018a67c13 // indirect
-	github.com/bytecodealliance/componentize-go v0.4.2 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/go-git/gcfg/v2 v2.0.2 // indirect
-	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
@@ -24,6 +21,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 )
 
-tool github.com/bytecodealliance/componentize-go
-
 replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260911230610-a37a9c5b2b9a
+
+replace go.bytecodealliance.org/pkg => github.com/carsonfarmer/go-pkg v0.2.4-0.20260916211624-b0c40df4c02b

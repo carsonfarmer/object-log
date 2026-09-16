@@ -42,10 +42,14 @@ Partial-clone filters and packfile URIs are outside the current proof.
 
 ## Dependencies
 
-The Git example pins reviewed go-git and Wasmtime fork revisions. Their exact
+The Git example pins reviewed dependency fork revisions. Their exact
 provenance and upstream references are in `THIRD_PARTY.md`. Do not add another
 Git implementation or local storage authority. Use ordinary Spin and unmodified
 S3-compatible storage.
+
+Go component bindings release imported buffers individually after lifting.
+Keep the SDK and generator pins together; older bindings retain every streamed
+chunk or call the removed global cleanup function.
 
 The API and durable layout are pre-release. Use a fresh prefix after an
 incompatible format change; do not add readers for discarded development

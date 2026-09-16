@@ -33,6 +33,8 @@ make git-build
 
 `git-build` creates the Go component, builds the Rust WAL component, and composes
 both into `examples/git/git.wasm`. Spin loads that final file.
+The first build also compiles the pinned component build tool; later builds use
+the cached binary.
 
 ## Run locally
 
@@ -203,9 +205,8 @@ Never clear retentions while a reader may still be active.
 - Partial-clone filters and packfile URIs are not implemented.
 - Host-wide TLS, routing, authentication integration, concurrency, and memory
   admission belong to the deployment host.
-- Development currently pins reviewed go-git and Wasmtime fork revisions while
-  their fixes are under upstream review. Spin, MinIO, and componentize-go are
-  otherwise unpatched.
+- Development pins reviewed dependency fixes; see [their provenance](../../THIRD_PARTY.md).
+  Spin and MinIO are unmodified.
 - Durable development formats are not migrated. Start with a fresh prefix after
   an incompatible revision change.
 

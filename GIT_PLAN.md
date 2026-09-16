@@ -64,7 +64,7 @@ edge.
 
 ## Dependency policy
 
-The service temporarily pins reviewed forks of go-git and Wasmtime. Exact
+The service temporarily pins reviewed dependency forks. Exact
 revisions, licenses, and upstream references live in `THIRD_PARTY.md`. New
 fork-only behavior requires owner review and focused tests. The service uses
 ordinary Spin and unmodified object storage.

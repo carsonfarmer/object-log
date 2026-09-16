@@ -38,20 +38,23 @@ func TestLargeBlob(t *testing.T) {
 			url := strings.TrimRight(endpoint, "/") + "/" + format + ".git"
 			branch := fmt.Sprintf("large-%d", time.Now().UnixNano())
 			git(t, nil, "init", "--object-format="+format, "-b", branch, source)
+			git(t, nil, "-C", source, "config", "core.bigFileThreshold", "2g")
 			path := filepath.Join(source, "large.bin")
 			file, err := os.Create(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			hash := sha256.New()
-			size, err := io.CopyN(io.MultiWriter(file, hash), rand.New(rand.NewSource(91)), mib*1024*1024)
+			size, err := io.CopyN(file, rand.New(rand.NewSource(91)), mib*1024*1024)
 			closed := file.Close()
 			if err != nil || closed != nil {
 				t.Fatalf("write fixture: %v %v", err, closed)
 			}
-			want := fmt.Sprintf("%x", hash.Sum(nil))
 			git(t, nil, "-C", source, "add", ".")
 			git(t, nil, "-C", source, "commit", "-m", "large blob")
+			// Send a base and related revision together, then a thin update below.
+			editByte(t, path, size/3)
+			git(t, nil, "-C", source, "commit", "-am", "related blob")
+			want := fileDigest(t, path)
 			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
 			clone := filepath.Join(root, "clone")
 			git(t, nil, "-c", "protocol.version=2", "clone", "--single-branch", "--branch", branch, url, clone)
@@ -60,27 +63,14 @@ func TestLargeBlob(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			hash.Reset()
+			hash := sha256.New()
 			gotSize, err := io.Copy(hash, file)
 			closed = file.Close()
 			if err != nil || closed != nil || gotSize != size || fmt.Sprintf("%x", hash.Sum(nil)) != want {
 				t.Fatalf("large blob differs: size=%d want=%d errors=%v %v", gotSize, size, err, closed)
 			}
 			// A one-byte edit lets ordinary Git choose a thin delta when appropriate.
-			file, err = os.OpenFile(path, os.O_RDWR, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var edit [1]byte
-			_, err = file.ReadAt(edit[:], size/2)
-			if err == nil {
-				edit[0] ^= 1
-				_, err = file.WriteAt(edit[:], size/2)
-			}
-			closed = file.Close()
-			if err != nil || closed != nil {
-				t.Fatalf("edit fixture: %v %v", err, closed)
-			}
+			editByte(t, path, size/2)
 			git(t, nil, "-C", source, "add", ".")
 			git(t, nil, "-C", source, "commit", "-m", "small update")
 			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
@@ -96,6 +86,24 @@ func TestLargeBlob(t *testing.T) {
 			}
 			t.Logf("pushed, cloned, edited, and fetched %d MiB blob with matching SHA-256", mib)
 		})
+	}
+}
+
+func editByte(t *testing.T, path string, offset int64) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edit [1]byte
+	_, err = file.ReadAt(edit[:], offset)
+	if err == nil {
+		edit[0] ^= 1
+		_, err = file.WriteAt(edit[:], offset)
+	}
+	closed := file.Close()
+	if err != nil || closed != nil {
+		t.Fatalf("edit fixture: %v %v", err, closed)
 	}
 }
 
