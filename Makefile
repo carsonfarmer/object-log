@@ -22,7 +22,7 @@ gc-acceptance:
 
 GIT_EXAMPLE_DIR = examples/git
 WAL_COMPONENT = examples/wal-component/Cargo.toml
-GIT_TEST_FILES = request_config.go request_config_test.go import_pack.go import_pack_test.go import_pack_lifecycle_test.go limits.go limits_test.go index.go index_test.go codec.go codec_test.go delta.go delta_test.go read_retry.go read_retry_test.go retention.go retention_test.go retry.go retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go
+GIT_TEST_FILES = receive_transport.go receive_transport_test.go request_config.go request_config_test.go import_pack.go import_pack_test.go import_pack_lifecycle_test.go limits.go limits_test.go index.go index_test.go codec.go codec_test.go delta.go delta_test.go read_retry.go read_retry_test.go retention.go retention_test.go retry.go retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go
 
 git-check: git-qualification-tools-test
 	test -z "$$(gofmt -l $(GIT_EXAMPLE_DIR)/*.go $(GIT_EXAMPLE_DIR)/tests/*.go)"

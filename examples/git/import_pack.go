@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 
@@ -29,16 +28,13 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage storer.Encode
 	if _, err = source.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	admission := &packAdmission{ctx: ctx, limits: limits, size: size}
+	admission := &packAdmission{EncodedObjectStorer: storage, ctx: ctx, limits: limits, size: size}
 	observers = append(observers, admission)
 	parser := packfile.NewParser(&packSource{ReadSeeker: source, ctx: ctx},
-		packfile.WithStorage(storage), packfile.WithObjectFormat(objectFormat),
-		packfile.WithMaxObjectSize(limits.objectBytes), packfile.WithScannerObservers(observers...))
+		packfile.WithStorage(admission), packfile.WithObjectFormat(objectFormat),
+		packfile.WithScannerObservers(observers...))
 	admission.parser = parser
 	_, err = parser.Parse()
-	if errors.Is(err, packfile.ErrObjectTooLarge) {
-		return fmt.Errorf("%w: GIT_MAX_OBJECT_BYTES", errObjectLimit)
-	}
 	if err != nil {
 		return err
 	}
@@ -61,6 +57,7 @@ func (r *packSource) Read(p []byte) (int, error) {
 }
 
 type packAdmission struct {
+	storer.EncodedObjectStorer
 	ctx    context.Context
 	limits requestLimits
 	parser *packfile.Parser
@@ -87,3 +84,12 @@ func (o packAdmission) OnInflatedObjectContent(plumbing.Hash, int64, uint32, []b
 	return o.ctx.Err()
 }
 func (o packAdmission) OnFooter(plumbing.Hash) error { return o.ctx.Err() }
+
+func (o packAdmission) LowMemoryMode() bool { return true }
+
+func (o packAdmission) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteCloser, error) {
+	if err := o.OnInflatedObjectHeader(kind, size, 0); err != nil {
+		return nil, err
+	}
+	return o.EncodedObjectStorer.RawObjectWriter(kind, size)
+}

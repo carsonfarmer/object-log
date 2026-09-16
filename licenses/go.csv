@@ -4,11 +4,11 @@ github.com/emirpasic/gods,https://github.com/emirpasic/gods/blob/v1.18.1/LICENSE
 github.com/emirpasic/gods,https://github.com/emirpasic/gods/blob/v1.18.1/LICENSE,ISC
 github.com/go-git/gcfg/v2,https://github.com/go-git/gcfg/blob/v2.0.2/LICENSE,BSD-3-Clause
 github.com/go-git/go-billy/v6,https://github.com/go-git/go-billy/blob/v6.0.0-alpha.2/LICENSE,Apache-2.0
-github.com/go-git/go-git/v6,https://github.com/carsonfarmer/go-git/blob/26cbbf6c051e/LICENSE,Apache-2.0
+github.com/go-git/go-git/v6,https://github.com/carsonfarmer/go-git/blob/8a806eeb2f81/LICENSE,Apache-2.0
 github.com/klauspost/cpuid/v2,https://github.com/klauspost/cpuid/blob/v2.3.0/LICENSE,MIT
 github.com/pjbgf/sha1cd,https://github.com/pjbgf/sha1cd/blob/v0.6.0/LICENSE,Apache-2.0
 github.com/sergi/go-diff/diffmatchpatch,https://github.com/sergi/go-diff/blob/v1.4.0/LICENSE,MIT
 go.bytecodealliance.org/pkg,https://github.com/carsonfarmer/go-pkg/blob/b0c40df4c02b/LICENSE,Apache-with-LLVM-Exception
-golang.org/x/crypto,https://cs.opensource.google/go/x/crypto/+/v0.56.0:LICENSE,BSD-3-Clause
-golang.org/x/sync,https://cs.opensource.google/go/x/sync/+/v0.22.0:LICENSE,BSD-3-Clause
-golang.org/x/sys,https://cs.opensource.google/go/x/sys/+/v0.47.0:LICENSE,BSD-3-Clause
+golang.org/x/crypto,https://cs.opensource.google/go/x/crypto/+/v0.57.0:LICENSE,BSD-3-Clause
+golang.org/x/sync,https://cs.opensource.google/go/x/sync/+/v0.23.0:LICENSE,BSD-3-Clause
+golang.org/x/sys,https://cs.opensource.google/go/x/sys/+/v0.48.0:LICENSE,BSD-3-Clause

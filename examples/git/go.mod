@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
-	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260903224701-e9e5820fe0d2
+	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260916080202-3cb46ce7621c
 	go.bytecodealliance.org/pkg v0.2.4-0.20260806154504-91f6c4863e67
 )
 
@@ -16,11 +16,11 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
-	golang.org/x/crypto v0.56.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
 
-replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260916212441-26cbbf6c051e
+replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260916222942-8a806eeb2f81
 
 replace go.bytecodealliance.org/pkg => github.com/carsonfarmer/go-pkg v0.2.4-0.20260916211624-b0c40df4c02b

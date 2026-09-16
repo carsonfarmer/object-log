@@ -200,7 +200,7 @@ func TestImportPackRejectsInvalid(t *testing.T) {
 		{"copy-outside-base", []byte{3, 1, 0x91, 3, 1}},
 		{"trailing-instructions", []byte{3, 0, 0}},
 		{"oversized-result", []byte{3, 0x81, 8}},
-		{"oversized-base", []byte{0x81, 8, 0}},
+		{"mismatched-base-size", []byte{0x81, 8, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newImportStorage(f)
@@ -208,7 +208,7 @@ func TestImportPackRejectsInvalid(t *testing.T) {
 			if err := importPack(context.Background(), bytes.NewReader(packed), s, f, testPackLimits(1024)); err == nil {
 				t.Fatal("accepted malformed delta")
 			}
-			if (tc.name == "oversized-result" || tc.name == "oversized-base") && s.writes != 0 {
+			if tc.name == "oversized-result" && s.writes != 0 {
 				t.Fatal("size limit checked after storage writes")
 			}
 		})
@@ -327,6 +327,18 @@ func TestImportPackStreamsLargeDelta(t *testing.T) {
 		})
 	}
 }
+func TestImportPackRejectsOversizedDeltaBeforeReadingBase(t *testing.T) {
+	const size = 1025
+	delta := append(packutil.EncodeLEB128(size), packutil.EncodeLEB128(size)...)
+	delta = append(delta, 0xb0, 1, 4) // Copy 1025 bytes from the base.
+	packed := fixturePack(t, format.SHA1, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: delta, ref: blobID(format.SHA1, []byte("base"))}})
+	s := &streamingStorage{base: &repeatedObject{size: size, actual: size}}
+	err := importPack(t.Context(), bytes.NewReader(packed), s, format.SHA1, testPackLimits(1024))
+	if !errors.Is(err, errObjectLimit) || s.writes != 0 || s.base.opens != 0 {
+		t.Fatalf("oversized delta: err=%v writes=%d base opens=%d", err, s.writes, s.base.opens)
+	}
+}
+
 func TestImportPackBaseAndSinkFailures(t *testing.T) {
 	for _, mode := range []string{"short-base", "base-open", "sink", "base-limit"} {
 		t.Run(mode, func(t *testing.T) {

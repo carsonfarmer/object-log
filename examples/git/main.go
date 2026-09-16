@@ -17,9 +17,11 @@ import (
 	"go.bytecodealliance.org/pkg/wasihttp"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
+	"slices"
 	"strings"
 )
 
@@ -44,7 +46,8 @@ func advertise(w io.Writer, s *store) error {
 		adv.Capabilities.Add(feature)
 	}
 	adv.Capabilities.Set(capability.ObjectFormat, s.meta.Format.String())
-	for name, id := range s.meta.Refs {
+	for _, name := range slices.Sorted(maps.Keys(s.meta.Refs)) {
+		id := s.meta.Refs[name]
 		adv.References = append(adv.References, plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
 	}
 	return adv.Encode(w)
@@ -252,7 +255,12 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		e = advertise(w, s)
 	} else if service == transport.ReceivePackService {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-		e = transport.ReceivePack(r.Context(), s, r.Body, gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, MaxCommandBytes: limits.negotiationBytes, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
+		commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
+		push := &receiveStore{Storer: s, commands: commands}
+		e = transport.ReceivePack(r.Context(), push, gitio.NewReadCloser(commands, r.Body), gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
+			if len(info.Commands) == 0 {
+				return nil
+			}
 			refs, e := validate(s, info.Commands)
 			if e != nil {
 				return e
