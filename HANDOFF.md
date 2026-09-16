@@ -78,13 +78,17 @@ the current upstream source still has both paths. The endurance test sets
 `maintenance.autoDetach=false`, preserving normal maintenance while avoiding
 that client-side race. No Git patch has been submitted upstream.
 Failure artifacts remain available with `go test -artifacts`.
-Issue #10 tracks fresh live AWS S3 qualification for the current revision. Its
-performance phase drains explicit maintenance on the mature repositories after
-the repeated-push run and before the 513 MiB lifecycles. Do not carry forward an
-older campaign's final metrics. The reusable Terraform and temporary-credential
-workflow is in `examples/git/qualification/aws`; managed state, plans and
-credentials stay outside the repository. Deployed HTTPS, host admission and TLS
-remain for the chosen production host rather than the WAL or Git engine.
+The full loopback-Spin/live AWS S3 qualification passed at exact runtime revision
+`57643eb6b155811f39d990fe8379964d3dcc4c6d` with composed component SHA-256
+`e239c0234c3b9a2af4d709a1ce9c6d3997b4415e82df3a0e80063363947ee6bc`.
+All phases completed in 6,319 seconds, including mature maintenance for both
+hashes and concurrent 513 MiB lifecycles. Sampled Spin trigger RSS peaked at
+1,562,608 KiB during those performance workloads; this observation is not a
+fixed memory ceiling. Exact-prefix and infrastructure teardown left no objects,
+versions, markers or multipart uploads. Terraform state was empty, and the
+bucket, user, local config, credentials, processes and listeners were absent.
+The reusable workflow is in `examples/git/qualification/aws`.
+Deployed HTTPS, host admission and TLS remain for the chosen production host.
 
 Root alone integrates main. Implement in exclusive worktrees, request independent
 correctness/simplification reviews, and run applicable gates before integration.

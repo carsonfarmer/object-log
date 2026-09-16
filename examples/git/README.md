@@ -4,12 +4,12 @@ A Go Git service backed by the existing Rust WAL. go-git handles Git protocols,
 formats and packs; the sibling Rust component provides authenticated object
 storage, atomic publication, checkpoints and garbage collection. Refs and the
 sparse object catalog share one WAL head. No local repository cache is needed.
-Local Spin/MinIO qualification passes. Issue #10 tracks fresh
-loopback-Spin/live AWS S3 qualification for the current revision. Deployed HTTPS
-remains a hosting qualification before public rollout. Development pins our
-go-git fork at `a37a9c5b` through `go.mod`. Its v6 APIs provide both hashes,
-protocol-v2 serving, shallow history and streamed object writes. The streaming
-work is represented by [go-git PR #2379](https://github.com/go-git/go-git/pull/2379); additional
+Local Spin/MinIO and loopback-Spin/live AWS S3 qualification pass. Deployed
+HTTPS and host admission remain hosting qualifications before public rollout.
+Development pins our go-git fork at `a37a9c5b` through `go.mod`. Its v6 APIs
+provide both hashes, protocol-v2 serving, shallow history and streamed object
+writes. The streaming work is represented by
+[go-git PR #2379](https://github.com/go-git/go-git/pull/2379); additional
 small server fixes remain only on our fork pending owner review. Partial-clone filters
 remain deferred.
 
@@ -357,7 +357,27 @@ host RSS instead. No Spin pooling or memory-limit wrapper is used.
 
 ## Live S3 evidence
 
-Issue #10 tracks the current live S3 campaign. Do not claim remote qualification
-until the full ordered run, mature-repository maintenance, and exact-prefix
-teardown pass at the current revision. A public host still needs its own HTTPS,
-authentication, routing and host-wide admission tests.
+The full ordered live S3 qualification passed at runtime revision
+`57643eb6b155811f39d990fe8379964d3dcc4c6d` using composed `git.wasm` SHA-256
+`e239c0234c3b9a2af4d709a1ce9c6d3997b4415e82df3a0e80063363947ee6bc`.
+Start, backend, protocol, standard, recovery, read-only, limits and performance
+passed in 6,319 seconds, below the 10,800-second safety ceiling.
+
+Each hash completed 1,025 pushes at 0.37 pushes/s. The final-window p95/max
+latencies were 3.054/3.476 seconds for SHA-1 and 3.071/3.973 seconds for SHA-256;
+concurrent readers completed 394 and 402 fetches. Both hashes passed the
+concurrent 513 MiB push, clone, edit and fetch lifecycle.
+
+Mature `TestMaintenance` passed for both hashes in 998.27 seconds. Each traversed
+`more` with zero candidates, a positive collection, and `complete` with zero
+candidates, then preserved the live tip through a cold clone and `git fsck`
+while leaving the removed history unavailable. Each hash peaked at about 1,251
+WAL calls and 1.164 GB transferred.
+
+The Spin trigger's sampled peak RSS was 1,562,608 KiB, about 1.49 GiB, across
+mature maintenance and the concurrent 513 MiB lifecycles. This is an observed
+workload peak, not a fixed memory ceiling. Teardown verified zero current
+objects, versions, delete markers and multipart uploads; Terraform state was
+empty, and the bucket, user, local config, credentials, processes and listeners
+were absent. This qualifies loopback Spin with live S3. A public host still
+needs HTTPS, authentication, routing and host-wide admission tests.

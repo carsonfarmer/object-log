@@ -18,11 +18,12 @@ unchanged Rust log through WASIp2. Spin provides ordinary HTTP hosting.
 
 The custom Rust Git engine and its native maintenance command are retired.
 Installed Git remains the independent test oracle. Local provider and workspace
-qualification pass. Issue #10 tracks fresh loopback-Spin/live AWS S3 qualification
-for the current revision. A failure in the endurance test was traced to installed
-Git 2.54 background maintenance; deterministic native tests reproduce it, and the
-client test keeps maintenance synchronous. Deployed HTTPS remains a hosting
-qualification before public rollout.
+qualification pass. The full loopback-Spin/live AWS S3 qualification passed at
+runtime revision `57643eb6b155811f39d990fe8379964d3dcc4c6d`, including mature
+maintenance and concurrent 513 MiB lifecycles for both hashes. A failure in the
+endurance test was traced to installed Git 2.54 background maintenance;
+deterministic native tests reproduce it, and the client test keeps maintenance
+synchronous. Deployed HTTPS remains a hosting qualification before public rollout.
 Advanced partial filters and packfile URIs are not required for acceptance;
 add them only when useful and supported without bespoke protocol machinery.
 
