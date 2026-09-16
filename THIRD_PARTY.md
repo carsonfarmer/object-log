@@ -1,9 +1,8 @@
 # Licensing and provenance
 
 Project code is Apache-2.0; see [LICENSE](LICENSE). The only publishable Cargo
-package is `object-log`. The KV and SQLite examples also declare Apache-2.0 and
-have `publish = false`; the WASI component also declares Apache-2.0 and is
-unpublished.
+package is `object-log`. The KV example and WASI component also declare
+Apache-2.0 and have `publish = false`.
 Dependency licenses remain their own.
 
 ## Retained source
@@ -51,7 +50,7 @@ Regenerate with `cargo-license 0.7.0` and `go-licenses v2.0.1`:
 
 ```sh
 cargo install cargo-license --version 0.7.0 --locked
-for manifest in Cargo.toml crates/object-log-kv/Cargo.toml crates/object-log-sqlite/Cargo.toml examples/wal-component/Cargo.toml; do
+for manifest in Cargo.toml crates/object-log-kv/Cargo.toml examples/wal-component/Cargo.toml; do
     cargo license --manifest-path "$manifest" --all-features --direct-deps-only --tsv
 done
 

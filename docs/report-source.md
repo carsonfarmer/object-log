@@ -2,7 +2,7 @@
 
 Audience: object-log and Spin storage-factor implementers  
 Date: 2026-09-02  
-Scope: object-store WALs, key-value storage, SQLite, and `wasi:filesystem`
+Scope: object-store WALs, key-value storage, and `wasi:filesystem`
 
 ## Direct answer
 
@@ -134,25 +134,13 @@ provide the immutable WAL, exact pending-result evidence, or application
 checkpoint contract required here. [slatedb_txn_obj
 documentation](https://docs.rs/slatedb-txn-obj/latest/slatedb_txn_obj/).
 
-### SQLite and filesystem projects
-
-Use Graft as the SQLite research target. It provides transactional page
-storage, immutable snapshots, lazy partial replication, read-your-write state,
-and conditional remote commits. Its SQLite extension is already built on this
-volume model. It is alpha software and brings a larger storage engine, so the
-next tranche should compare its page and changeset choices before selecting an
-adapter. [Graft architecture](https://graft.rs/docs/internals/).
-
-Turbolite shows page grouping, compression, range reads, prefetch, and cache
-design. Its documented standalone contract has one safe writer. Direct
-multi-writer use can corrupt its manifest. It is not the ordering authority for
-multi-tenant factors. [Turbolite](https://github.com/russellromney/turbolite).
+### Filesystem projects
 
 `s3-wasi-fs` provides a host-binding and conformance reference. It separates a
-Wasmtime-free filesystem core from Wasmtime `wasi:filesystem` bindings and has
-a MinIO SQLite demonstration. Its documented limits include non-atomic rename,
-open-unlink differences, and last-writer-wins concurrent writes. It must not be
-used as the durable multi-writer authority. [s3-wasi-fs compatibility
+Wasmtime-free filesystem core from Wasmtime `wasi:filesystem` bindings. Its
+documented limits include non-atomic rename, open-unlink differences, and
+last-writer-wins concurrent writes. It must not be used as the durable
+multi-writer authority. [s3-wasi-fs compatibility
 summary](https://github.com/aruokhai/s3-wasi-fs#compatibility-matrix).
 
 Crab uses content-defined immutable chunks, hash verification, lazy hydration,
@@ -168,8 +156,7 @@ host `wasi:filesystem` implementation avoids that credential problem, but it
 still has a larger semantic problem than a key-value factor.
 
 Filesystem calls use descriptors, offsets, directory streams, rename, links,
-open-unlink behavior, and partial writes. SQLite adds page locking, journal
-ordering, sync, and crash expectations. Mapping each call to an object request
+open-unlink behavior, and partial writes. Mapping each call to an object request
 is slow. Caching is not only a byte cache: it must preserve coherent handle and
 metadata behavior across updates. The `s3-wasi-fs` limitations show why direct
 object mapping is not enough for safe concurrent tenants.
@@ -179,9 +166,7 @@ Implement in this order:
 1. Keep the WAL as the only durable ordering authority.
 2. Prove key-value operations and checkpoints.
 3. Add safe garbage collection.
-4. Select a SQLite representation after comparing page objects, SQLite session
-   changesets, and VFS journal records.
-5. Implement `wasi:filesystem` only after its metadata transaction model is
+4. Implement `wasi:filesystem` only after its metadata transaction model is
    explicit and tested.
 
 ## Throughput and the preferred owner
@@ -230,7 +215,7 @@ tenant scopes without more probe requests.
 
 The public result model distinguishes committed, definite conflict, pending,
 and expired evidence. A recovery token preserves the exact candidate before
-publication. The key-value, SQLite, and Git crates test the public API.
+publication. The key-value and Git consumers test the public API.
 Epoch-fenced, bounded garbage collection is locally complete. The current Git
 work replaces its native-only core with a WASI-compatible engine. The
 `wasi:filesystem` adapter and live AWS qualification remain separate work.
@@ -255,9 +240,8 @@ gaps](testing.md#current-matrix-gaps).
   but its workspace coupling makes direct reuse expensive. Its recovery can
   adopt an unreferenced next-sequence fragment. `object-log` deliberately
   requires exact transaction evidence instead.
-- Graft, Micelio, Turbolite, and `s3-wasi-fs` describe themselves as alpha,
-  experimental, or semantically limited. They are evidence, not production
-  qualification for this project.
+- Micelio and `s3-wasi-fs` describe themselves as experimental or semantically
+  limited. They are evidence, not production qualification for this project.
 - No live AWS test has run. No claim in this report treats MinIO as proof of S3
   performance or complete provider compatibility.
 
@@ -283,12 +267,8 @@ All sources were accessed on 2026-09-02.
   and replica materialization. https://github.com/JayJamieson/objwal
 - SlateDB project and `slatedb_txn_obj` documentation: object-store LSM and
   reusable conditional transactional object. https://github.com/slatedb/slatedb
-- Graft documentation: transactional page volumes, snapshot reads, and remote
-  conditional commits. https://graft.rs/docs/internals/
-- Russell Romney, Turbolite README: SQLite page/cache design and single-writer
-  limitation. https://github.com/russellromney/turbolite
-- Aruokhai, s3-wasi-fs README: WASI host split, MinIO SQLite demonstration, and
-  filesystem semantic limits. https://github.com/aruokhai/s3-wasi-fs
+- Aruokhai, s3-wasi-fs README: WASI host split and filesystem semantic limits.
+  https://github.com/aruokhai/s3-wasi-fs
 - Crab project README: immutable chunks, hash verification, lazy hydration,
   and conditional mutable references. https://github.com/crabbuild/crab
 - Tobi, walgit README: Git-specific WAL, CAS manifest, group commit, and broad

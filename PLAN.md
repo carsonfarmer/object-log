@@ -7,9 +7,8 @@ object-store interface. The library must support concurrent writers, immutable
 payload objects, disposable local caches, explicit uncertain outcomes, and
 bounded recovery through checkpoints and bounded garbage collection.
 
-The consumers are a key-value state machine, SQLite storage, and a Git service.
-They exercise the public API; the core remains independent of their languages
-and runtimes.
+The consumers are a key-value state machine and a Git service. They exercise
+the public API; the core remains independent of their languages and runtimes.
 
 ## Accepted architecture
 
@@ -374,14 +373,6 @@ in this order unless a correctness defect changes the order.
 The v1 protocol now has bounded graph marking, reader retention, a durable
 positive plan and publication fence, complete-set retry, view expiry, and
 immutable deletion. The current evidence is local.
-
-### Completed locally: SQLite storage
-
-`object-log-sqlite` stores a complete first snapshot and later committed WAL
-ranges. One log owns one database history, and the local SQLite file is a
-disposable cache. The local evidence records transactions, recovery,
-checkpoints, garbage collection, MinIO compatibility, object requests, byte
-amplification, and latency. Live AWS and Spin integration remain separate.
 
 ### 1. Serverless Git example
 

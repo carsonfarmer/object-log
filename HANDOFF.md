@@ -7,7 +7,7 @@ mutable durable authority. Read AGENTS.md and GIT_PLAN.md.
 The accepted implementation is `examples/git` (go-git consumer) and
 `examples/wal-component` (Rust WAL bridge). The custom Rust Git engine and native
 maintenance service are removed. Installed Git remains the independent oracle.
-KV, SQLite and the Go WAL experiment are deferred. Do not resume them.
+KV and the Go WAL experiment are deferred. Do not resume them.
 
 ## Current behavior
 

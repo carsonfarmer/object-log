@@ -1,10 +1,9 @@
 # Ordered follow-on goals
 
-The local log, checkpoint, key-value proof, bounded garbage collection, and
-SQLite proof are implemented. `object-log` remains a small, generic,
-object-storage-backed WAL for higher-level storage systems. Git, key-value, and
-SQLite are consumers of the public API. Each next goal keeps object storage as the durable
-authority.
+The local log, checkpoint, key-value proof, and bounded garbage collection are
+implemented. `object-log` remains a small, generic, object-storage-backed WAL
+for higher-level storage systems. Git and key-value are consumers of the public
+API. Each next goal keeps object storage as the durable authority.
 
 Durable Object behavior, tenancy, routing, and actor or service ownership are
 out of scope.
@@ -15,39 +14,6 @@ The implementation contract and completion record are in
 [`GC_PLAN.md`](../GC_PLAN.md). The v1 protocol has bounded graph marking,
 reader retention, a positive durable plan and fence, complete-set retry, view
 expiry, and best-effort plan-object cleanup. Current qualification is local.
-
-## Completed locally: SQLite storage
-
-The selected demonstration contract and implementation gates are in
-[`SQLITE_PLAN.md`](../SQLITE_PLAN.md). The adapter uses a disposable SQLite
-cache, the current canonical record, committed WAL ranges, per-record payload
-bounds, and ordered object transfers.
-
-### Implemented contract
-
-- One log owns one SQLite database history.
-- One SQLite transaction maps to one atomic log publication.
-- Recovery produces one database image that passes SQLite integrity checks.
-- A local database file is a cache. Removing it does not remove durable state.
-- The adapter defines its page size, journal mode, and lock behavior.
-
-### Local evidence
-
-- The memory suite covers transactions, rollback, uncertain results,
-  cancellation, conflicting writers, checkpoints, allocation limits,
-  collection, and deleted-cache recovery.
-- The loopback MinIO flow covers chunked writes, uncertain publication,
-  checkpointing, collection, and cold recovery.
-- The Criterion suite covers 11 local latency cases. A separate untimed audit
-  records object requests, transferred bytes, and durable growth. Neither path
-  measures a remote service.
-
-The same WAL-access proof passed on macOS and Linux with SQLite's public
-journal-pointer control. Before production use, add aggregate recovery and
-transfer-byte limits, bound recovery retries, and isolate synchronous `SQLite`
-work on a capped blocking executor. Recovery can stream validated WAL ranges
-after those limits are in place. Windows, other VFS implementations, a native
-memory-safety sanitizer, live AWS, and Spin integration remain.
 
 ## Core performance decision
 
@@ -68,15 +34,13 @@ until object-log garbage collection deletes them. External lifecycle expiry,
 deletion, or overwrite violates the storage contract.
 
 The API and its local acceptance evidence are complete. The
-[staged-object evidence](evidence/staged-objects-local-2026-09-03.md) records
-new-object request counts, transferred bytes, recovery checks, and limits. The
 [materialized-proof evidence](evidence/materialized-proofs-2026-09-04.md)
 records no-read Git checkpoints and the proof boundary.
 
 [Issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes all
 current limitations and follow-on work. The linked issues define separate
-acceptance criteria for SQLite hardening, Spin factors, Git, WASI filesystem,
-verification, performance, and live AWS qualification.
+acceptance criteria for Spin factors, Git, WASI filesystem, verification,
+performance, and live AWS qualification.
 
 ## Git and key-value storage
 
@@ -91,9 +55,9 @@ production-oriented byte-key/value library with conditional atomic batches,
 ordered scans, disposable caches, recovery and bounded maintenance. Select its
 index and layout from measured workloads. Git's sparse reads, proof reuse and
 batched collection should inform it without importing Git policy into the core.
-SQLite hardening and verifiable g-trees are separate projects.
+Verifiable g-trees are a separate project.
 
-## 2. WASI filesystem storage
+## 1. WASI filesystem storage
 
 ### Required contract
 
@@ -116,7 +80,7 @@ SQLite hardening and verifiable g-trees are separate projects.
 - Benchmarks report metadata latency, sequential and random I/O, cold restore,
   write amplification, and object-store requests.
 
-## 3. Live AWS qualification
+## 2. Live AWS qualification
 
 Live AWS qualification is separate from local product completion.
 

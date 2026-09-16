@@ -3,8 +3,8 @@
 [![Rust CI](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml/badge.svg)](https://github.com/carsonfarmer/object-log/actions/workflows/ci.yml)
 
 `object-log` is an experimental Rust library for a small, generic,
-object-storage-backed write-ahead log. The key-value, `SQLite`, and Git consumers
-test its public API.
+object-storage-backed write-ahead log. The key-value and Git consumers test its
+public API.
 
 The design is inspired by Cursor's [Git at any scale](https://cursor.com/blog/git-at-any-scale):
 object storage holds the durable log and local repositories can be rebuilt.
@@ -87,10 +87,6 @@ The project is independent from Spin. Its proof crates use only the public core
 API:
 
 - [`object-log-kv`](crates/object-log-kv) tests a key-value store.
-- [`object-log-sqlite`](crates/object-log-sqlite) stores a complete first
-  snapshot and later committed WAL ranges. Its tests cover in-memory storage,
-  injected faults, garbage collection, and exact recovery of a 1,000-record WAL
-  tail. It also has Criterion benchmarks and an opt-in loopback `MinIO` test.
 - [`examples/git`](examples/git) uses go-git for Git protocols and object formats.
   A small [Rust component](examples/wal-component) connects it to the same WAL.
   Refs and a sparse object catalog publish together through one head update.
@@ -113,8 +109,8 @@ AWS S3 qualification passed at runtime revision
 teardown left no residual state. Deployed HTTPS and host admission remain
 hosting tests.
 
-The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md),
-[SQLITE_PLAN.md](SQLITE_PLAN.md), and [docs/design.md](docs/design.md).
+The current contracts are in [PLAN.md](PLAN.md), [GC_PLAN.md](GC_PLAN.md), and
+[docs/design.md](docs/design.md).
 [docs/follow-ons.md](docs/follow-ons.md) describes the next consumers and
 [issue #11](https://github.com/carsonfarmer/object-log/issues/11) indexes the queue.
 
@@ -128,25 +124,6 @@ Run the opt-in core protocol `MinIO` test with:
 
 ```sh
 make minio-test
-```
-
-Run the separate `SQLite` recovery, checkpoint, collection, and cold-recovery
-flow with:
-
-```sh
-make sqlite-minio-test
-```
-
-Run the large local `SQLite` recovery case with:
-
-```sh
-make sqlite-recovery-acceptance
-```
-
-Run the staged-object request accounting cases with:
-
-```sh
-make staged-performance-acceptance
 ```
 
 Run the opt-in large garbage-collection acceptance test with:
