@@ -252,8 +252,16 @@ wal_recover_retentions_after_drain = "false"
 For local Spin connected to live S3, pass only that protected path:
 
 ```sh
+make git-build
+shasum -a 256 examples/git/git.wasm
+cd examples/git
 spin up --listen 127.0.0.1:19100 --variable @/absolute/path/qualification-spin.toml
 ```
+
+Run the build and digest commands from the repository root immediately before
+launching Spin, and record the SHA-256 in the campaign notes. Spin loads the
+composed `examples/git/git.wasm`; `examples/git/main.wasm` is an intermediate
+build file.
 
 Set `GIT_PROBE_LOG` to the absolute `.spin/logs/git_stderr.txt` path for this
 loopback qualification so the runner can read Spin's cumulative WAL counters.

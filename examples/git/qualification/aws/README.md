@@ -71,6 +71,10 @@ fill its non-secret record, and source it. Set its expiry to
 `iam-user:<qualification_user>:GetSessionToken`. Create the Spin variable file
 from the [existing template](../../README.md#live-s3-qualification) in the same
 0700 directory, set its mode to 0600, and pass only its path to Spin.
+Immediately before launching Spin, run `make git-build` from the repository root
+and record `shasum -a 256 examples/git/git.wasm` in the campaign notes. Spin
+loads that composed artifact; `examples/git/main.wasm` is only an intermediate
+build file.
 
 ## Qualify and destroy
 
