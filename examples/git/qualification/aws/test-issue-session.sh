@@ -48,7 +48,7 @@ FAKE_SLEEP
 chmod +x "${test_root}/bin/aws" "${test_root}/bin/sleep"
 
 mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 run_failure() {
