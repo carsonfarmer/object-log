@@ -265,20 +265,6 @@ pub(crate) enum ConditionalRead {
     Missing,
 }
 
-/// The result of a create-only write.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CreateResult {
-    Created { version: UpdateVersion },
-    AlreadyExists,
-}
-
-/// The result of a conditional update.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum UpdateResult {
-    Updated { version: UpdateVersion },
-    PreconditionFailed,
-}
-
 /// A namespace-safe adapter for one logical log.
 ///
 /// Every protocol key is derived from the root prefix and validated [`LogId`].
@@ -436,11 +422,12 @@ impl ScopedStore {
     }
 
     /// Creates one protocol object without replacing an existing object.
+    /// Returns `true` when it creates the object and `false` when it already exists.
     ///
     /// # Errors
     ///
     /// Returns a storage error other than a definite already-exists response.
-    pub(crate) async fn create(&self, key: StoreKey, bytes: Bytes) -> Result<CreateResult, Error> {
+    pub(crate) async fn create(&self, key: StoreKey, bytes: Bytes) -> Result<bool, Error> {
         self.admit(Request::Write { bytes: bytes.len() })?;
         match self
             .store
@@ -454,15 +441,14 @@ impl ScopedStore {
             )
             .await
         {
-            Ok(result) => Ok(CreateResult::Created {
-                version: result.into(),
-            }),
-            Err(object_store::Error::AlreadyExists { .. }) => Ok(CreateResult::AlreadyExists),
+            Ok(_) => Ok(true),
+            Err(object_store::Error::AlreadyExists { .. }) => Ok(false),
             Err(error) => Err(error.into()),
         }
     }
 
     /// Replaces one protocol object only at the observed storage version.
+    /// Returns the new version, or `None` when the observed version is stale.
     ///
     /// # Errors
     ///
@@ -472,7 +458,7 @@ impl ScopedStore {
         key: StoreKey,
         bytes: Bytes,
         observed: UpdateVersion,
-    ) -> Result<UpdateResult, Error> {
+    ) -> Result<Option<UpdateVersion>, Error> {
         self.admit(Request::Write { bytes: bytes.len() })?;
         match self
             .store
@@ -486,13 +472,11 @@ impl ScopedStore {
             )
             .await
         {
-            Ok(result) => Ok(UpdateResult::Updated {
-                version: result.into(),
-            }),
+            Ok(result) => Ok(Some(result.into())),
             Err(
                 object_store::Error::Precondition { .. }
                 | object_store::Error::AlreadyExists { .. },
-            ) => Ok(UpdateResult::PreconditionFailed),
+            ) => Ok(None),
             Err(error) => Err(error.into()),
         }
     }

@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use crate::format::{self, CollectionCandidate, CollectionPlan, CollectionPlanRef, Head};
 use crate::store::{
-    ConditionalRead, CreateResult, ImmutableKey, ImmutableKind, MAX_DELETE_BATCH, ScopedStore,
-    StoreKey, UpdateResult,
+    ConditionalRead, ImmutableKey, ImmutableKind, MAX_DELETE_BATCH, ScopedStore, StoreKey,
 };
 use crate::{
     CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, ObservedState,
@@ -364,8 +363,8 @@ impl Log {
         Self::validate_head_size(options, &initial_bytes)?;
 
         let incarnation = match store.create(StoreKey::Head, initial_bytes).await {
-            Ok(CreateResult::Created { .. }) => initial.incarnation,
-            Ok(CreateResult::AlreadyExists) => Self::load_incarnation(&store, options).await?,
+            Ok(true) => initial.incarnation,
+            Ok(false) => Self::load_incarnation(&store, options).await?,
             Err(create_error) => match store.read(StoreKey::Head, options.max_head_bytes).await? {
                 Some(stored) => Self::incarnation_from_stored(&store, options, &stored)?,
                 None => return Err(create_error),
@@ -560,10 +559,8 @@ impl Log {
             .update(StoreKey::Head, bytes, view.storage_version().clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => {
-                Ok(RetentionStatus::Applied(Self::view(candidate, version)))
-            }
-            Ok(UpdateResult::PreconditionFailed) => match self.load().await {
+            Ok(Some(version)) => Ok(RetentionStatus::Applied(Self::view(candidate, version))),
+            Ok(None) => match self.load().await {
                 Ok(current) => Ok(Self::retention_status(
                     change.classify(current.head()),
                     current,
@@ -643,14 +640,8 @@ impl Log {
             .into_iter()
             .map(|(key, bytes)| CollectionCandidate { key, bytes })
             .collect::<Vec<_>>();
-        let candidate_bytes = candidates.iter().try_fold(0_u64, |total, candidate| {
-            total
-                .checked_add(candidate.bytes)
-                .ok_or(Error::LimitExceeded("collection candidate bytes"))
-        })?;
-        let report = CollectionReport::new(candidates.len(), candidate_bytes, 0);
         if candidates.is_empty() {
-            return Ok(CollectionStart::Empty(report));
+            return Ok(CollectionStart::Empty(CollectionReport::new(0, 0, 0)));
         }
 
         let epoch = view
@@ -662,6 +653,7 @@ impl Log {
             collection_epoch: epoch,
             candidates,
         };
+        let report = CollectionReport::new(plan.candidates.len(), plan.candidate_bytes()?, 0);
         let plan_ref = self.create_collection_plan(&plan).await?;
         let plan_key = Self::collection_plan_key(self.incarnation, &plan_ref);
         let mut candidate = view.head().clone();
@@ -675,11 +667,11 @@ impl Log {
             .update(StoreKey::Head, bytes, view.storage_version().clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => Ok(CollectionStart::Installed(
+            Ok(Some(version)) => Ok(CollectionStart::Installed(
                 Self::view(candidate, version),
                 report,
             )),
-            Ok(UpdateResult::PreconditionFailed) => {
+            Ok(None) => {
                 self.cleanup_collection_plan(plan_key).await?;
                 match self.load().await {
                     Ok(current) => Ok(CollectionStart::Conflict(current)),
@@ -755,14 +747,14 @@ impl Log {
             .update(StoreKey::Head, bytes, current.storage_version().clone())
             .await
         {
-            Ok(UpdateResult::Updated { version }) => {
+            Ok(Some(version)) => {
                 self.cleanup_collection_plan(plan_key).await?;
                 Ok(CollectionFinish::Complete(
                     Self::view(candidate, version),
                     report,
                 ))
             }
-            Ok(UpdateResult::PreconditionFailed) => {
+            Ok(None) => {
                 let current = match self.load().await {
                     Ok(current) => current,
                     Err(Error::Store(_) | Error::RequestDenied) => {
@@ -1252,16 +1244,7 @@ impl Log {
     /// Returns expiry for missing commits in an older unretained view. A
     /// missing commit in the current epoch is corruption.
     pub async fn read_tail(&self, view: &View) -> Result<Vec<CommitRecord>, Error> {
-        let records = self
-            .tail_records(view)?
-            .try_fold(
-                Vec::with_capacity(view.tail().len()),
-                |mut records, record| async move {
-                    records.push(record);
-                    Ok(records)
-                },
-            )
-            .await?;
+        let records = self.tail_records(view)?.try_collect().await?;
         self.remember_tail(view);
         Ok(records)
     }
@@ -1817,10 +1800,10 @@ impl Log {
                 .update(StoreKey::Head, bytes, view.storage_version().clone())
                 .await
             {
-                Ok(UpdateResult::Updated { version }) => {
+                Ok(Some(version)) => {
                     return Ok(HeadPublication::Updated(Self::view(head, version)));
                 }
-                Ok(UpdateResult::PreconditionFailed) => {
+                Ok(None) => {
                     let current = match self.load().await {
                         Ok(current) => current,
                         Err(Error::Store(_) | Error::RequestDenied) => {
@@ -2247,7 +2230,7 @@ impl Log {
                 digest,
                 len,
             };
-            match self
+            if self
                 .store
                 .create(
                     StoreKey::Immutable(Self::collection_plan_key(self.incarnation, &reference)),
@@ -2255,8 +2238,7 @@ impl Log {
                 )
                 .await?
             {
-                CreateResult::Created { .. } => return Ok(reference),
-                CreateResult::AlreadyExists => {}
+                return Ok(reference);
             }
         }
         Err(Error::LimitExceeded("fresh physical storage identity"))
@@ -2335,16 +2317,17 @@ impl Log {
     }
 
     async fn create_new_commit(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
-        match self.store.create(key, bytes).await? {
-            CreateResult::Created { .. } => Ok(()),
-            CreateResult::AlreadyExists => Err(Error::PhysicalIdentityCollision),
+        if self.store.create(key, bytes).await? {
+            Ok(())
+        } else {
+            Err(Error::PhysicalIdentityCollision)
         }
     }
 
     async fn ensure_immutable(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
         let create_error = match self.store.create(key, bytes.clone()).await {
-            Ok(CreateResult::Created { .. }) => return Ok(()),
-            Ok(CreateResult::AlreadyExists) => None,
+            Ok(true) => return Ok(()),
+            Ok(false) => None,
             Err(error) => Some(error),
         };
         match self.store.read(key, bytes.len()).await? {
@@ -2380,8 +2363,8 @@ impl Log {
                 continue;
             }
             match self.store.create(key, bytes.clone()).await {
-                Ok(CreateResult::Created { .. }) => return Ok(object),
-                Ok(CreateResult::AlreadyExists) => {}
+                Ok(true) => return Ok(object),
+                Ok(false) => {}
                 Err(create_error) => return Err(create_error),
             }
         }
@@ -2718,7 +2701,7 @@ mod tests {
             .read(StoreKey::Head, log.options.max_head_bytes)
             .await?
             .ok_or("missing head")?;
-        let UpdateResult::Updated { .. } = log
+        let Some(_) = log
             .store
             .update(
                 StoreKey::Head,
@@ -4366,7 +4349,7 @@ mod tests {
         head.generation += 1;
         head.collection_epoch = 1;
         head.active_plan = Some(reference);
-        let UpdateResult::Updated { version } = log
+        let Some(version) = log
             .store
             .update(
                 StoreKey::Head,
@@ -4425,7 +4408,7 @@ mod tests {
         head.collection_epoch = epoch;
         head.active_plan = Some(plan_ref);
         let bytes = format::encode_head(&head)?;
-        let UpdateResult::Updated { version } = log
+        let Some(version) = log
             .store
             .update(StoreKey::Head, bytes, source.storage_version().clone())
             .await?

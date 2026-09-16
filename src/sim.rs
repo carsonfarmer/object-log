@@ -13,6 +13,7 @@ use object_store::{
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::fmt;
+use std::future::Future;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -436,6 +437,51 @@ impl FaultStore {
         let _ = pause.release.await;
     }
 
+    async fn execute<T, F, Fut, D>(
+        &self,
+        ticket: RequestTicket,
+        path: &Path,
+        request: F,
+        downloaded_bytes: D,
+    ) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+        D: FnOnce(&T) -> u64,
+    {
+        self.enter_pause(ticket, FailurePhase::Before).await;
+        if self.take_failure(ticket, FailurePhase::Before) {
+            self.finish(ticket, path, 0, RequestOutcome::InjectedBefore);
+            return Err(Self::injected_error(ticket, FailurePhase::Before, path));
+        }
+
+        let fail_after = self.take_failure(ticket, FailurePhase::After);
+        let result = request().await;
+        if result.is_ok() {
+            self.enter_pause(ticket, FailurePhase::After).await;
+        }
+        match result {
+            Ok(value) => {
+                let downloaded_bytes = downloaded_bytes(&value);
+                let outcome = if fail_after {
+                    RequestOutcome::InjectedAfter
+                } else {
+                    RequestOutcome::Succeeded
+                };
+                self.finish(ticket, path, downloaded_bytes, outcome);
+                if fail_after {
+                    Err(Self::injected_error(ticket, FailurePhase::After, path))
+                } else {
+                    Ok(value)
+                }
+            }
+            Err(error) => {
+                self.finish(ticket, path, 0, RequestOutcome::BackendError);
+                Err(error)
+            }
+        }
+    }
+
     fn finish(
         &self,
         ticket: RequestTicket,
@@ -503,35 +549,9 @@ impl FaultStore {
 
     async fn delete_one(&self, location: Path) -> Result<Path> {
         let ticket = self.start(Operation::Delete, 0);
-        self.enter_pause(ticket, FailurePhase::Before).await;
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, &location, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(
-                ticket,
-                FailurePhase::Before,
-                &location,
-            ));
-        }
-
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        let result = self.inner.delete(&location).await;
-        if result.is_ok() {
-            self.enter_pause(ticket, FailurePhase::After).await;
-        }
-        match result {
-            Ok(()) if fail_after => {
-                self.finish(ticket, &location, 0, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(ticket, FailurePhase::After, &location))
-            }
-            Ok(()) => {
-                self.finish(ticket, &location, 0, RequestOutcome::Succeeded);
-                Ok(location)
-            }
-            Err(error) => {
-                self.finish(ticket, &location, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        self.execute(ticket, &location, || self.inner.delete(&location), |()| 0)
+            .await?;
+        Ok(location)
     }
 }
 
@@ -560,31 +580,13 @@ impl ObjectStore for FaultStore {
         options: PutOptions,
     ) -> Result<PutResult> {
         let ticket = self.start(Operation::Put, usize_to_u64(payload.content_length()));
-        self.enter_pause(ticket, FailurePhase::Before).await;
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, location, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(ticket, FailurePhase::Before, location));
-        }
-
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        let result = self.inner.put_opts(location, payload, options).await;
-        if result.is_ok() {
-            self.enter_pause(ticket, FailurePhase::After).await;
-        }
-        match result {
-            Ok(_) if fail_after => {
-                self.finish(ticket, location, 0, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(ticket, FailurePhase::After, location))
-            }
-            Ok(result) => {
-                self.finish(ticket, location, 0, RequestOutcome::Succeeded);
-                Ok(result)
-            }
-            Err(error) => {
-                self.finish(ticket, location, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        self.execute(
+            ticket,
+            location,
+            || self.inner.put_opts(location, payload, options),
+            |_| 0,
+        )
+        .await
     }
 
     async fn put_multipart_opts(
@@ -593,97 +595,52 @@ impl ObjectStore for FaultStore {
         options: PutMultipartOptions,
     ) -> Result<Box<dyn MultipartUpload>> {
         let ticket = self.start(Operation::MultipartCreate, 0);
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, location, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(ticket, FailurePhase::Before, location));
-        }
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.put_multipart_opts(location, options).await {
-            Ok(_) if fail_after => {
-                self.finish(ticket, location, 0, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(ticket, FailurePhase::After, location))
-            }
-            Ok(upload) => {
-                self.finish(ticket, location, 0, RequestOutcome::Succeeded);
-                Ok(Box::new(FaultMultipartUpload {
-                    inner: upload,
-                    store: self.clone(),
-                    location: location.clone(),
-                }))
-            }
-            Err(error) => {
-                self.finish(ticket, location, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        let upload = self
+            .execute(
+                ticket,
+                location,
+                || self.inner.put_multipart_opts(location, options),
+                |_| 0,
+            )
+            .await?;
+        Ok(Box::new(FaultMultipartUpload {
+            inner: upload,
+            store: self.clone(),
+            location: location.clone(),
+        }))
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
         let ticket = self.start(Operation::Get, 0);
         let returns_body = !options.head;
-        self.enter_pause(ticket, FailurePhase::Before).await;
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, location, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(ticket, FailurePhase::Before, location));
-        }
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        let result = self.inner.get_opts(location, options).await;
-        if result.is_ok() {
-            self.enter_pause(ticket, FailurePhase::After).await;
-        }
-        match result {
-            Ok(result) if fail_after => {
-                let bytes = if returns_body {
+        self.execute(
+            ticket,
+            location,
+            || self.inner.get_opts(location, options),
+            |result| {
+                if returns_body {
                     result.range.end.saturating_sub(result.range.start)
                 } else {
                     0
-                };
-                self.finish(ticket, location, bytes, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(ticket, FailurePhase::After, location))
-            }
-            Ok(result) => {
-                let bytes = if returns_body {
-                    result.range.end.saturating_sub(result.range.start)
-                } else {
-                    0
-                };
-                self.finish(ticket, location, bytes, RequestOutcome::Succeeded);
-                Ok(result)
-            }
-            Err(error) => {
-                self.finish(ticket, location, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+                }
+            },
+        )
+        .await
     }
 
     async fn get_ranges(&self, location: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         let ticket = self.start(Operation::GetRanges, 0);
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, location, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(ticket, FailurePhase::Before, location));
-        }
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.get_ranges(location, ranges).await {
-            Ok(bytes) if fail_after => {
-                let downloaded = bytes.iter().fold(0_u64, |total, bytes| {
+        self.execute(
+            ticket,
+            location,
+            || self.inner.get_ranges(location, ranges),
+            |bytes| {
+                bytes.iter().fold(0_u64, |total, bytes| {
                     total.saturating_add(usize_to_u64(bytes.len()))
-                });
-                self.finish(ticket, location, downloaded, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(ticket, FailurePhase::After, location))
-            }
-            Ok(bytes) => {
-                let downloaded = bytes.iter().fold(0_u64, |total, bytes| {
-                    total.saturating_add(usize_to_u64(bytes.len()))
-                });
-                self.finish(ticket, location, downloaded, RequestOutcome::Succeeded);
-                Ok(bytes)
-            }
-            Err(error) => {
-                self.finish(ticket, location, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+                })
+            },
+        )
+        .await
     }
 
     fn delete_stream(
@@ -742,79 +699,35 @@ impl ObjectStore for FaultStore {
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
         let ticket = self.start(Operation::ListWithDelimiter, 0);
         let event_path = prefix.cloned().unwrap_or_default();
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, &event_path, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(
-                ticket,
-                FailurePhase::Before,
-                &event_path,
-            ));
-        }
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.list_with_delimiter(prefix).await {
-            Ok(_) if fail_after => {
-                self.finish(ticket, &event_path, 0, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(
-                    ticket,
-                    FailurePhase::After,
-                    &event_path,
-                ))
-            }
-            Ok(result) => {
-                self.finish(ticket, &event_path, 0, RequestOutcome::Succeeded);
-                Ok(result)
-            }
-            Err(error) => {
-                self.finish(ticket, &event_path, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        self.execute(
+            ticket,
+            &event_path,
+            || self.inner.list_with_delimiter(prefix),
+            |_| 0,
+        )
+        .await
     }
 
     async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
         let ticket = self.start(Operation::Copy, 0);
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, to, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(ticket, FailurePhase::Before, to));
-        }
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.copy_opts(from, to, options).await {
-            Ok(()) if fail_after => {
-                self.finish(ticket, to, 0, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(ticket, FailurePhase::After, to))
-            }
-            Ok(()) => {
-                self.finish(ticket, to, 0, RequestOutcome::Succeeded);
-                Ok(())
-            }
-            Err(error) => {
-                self.finish(ticket, to, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        self.execute(
+            ticket,
+            to,
+            || self.inner.copy_opts(from, to, options),
+            |()| 0,
+        )
+        .await
     }
 
     async fn rename_opts(&self, from: &Path, to: &Path, options: RenameOptions) -> Result<()> {
         let ticket = self.start(Operation::Rename, 0);
-        if self.take_failure(ticket, FailurePhase::Before) {
-            self.finish(ticket, to, 0, RequestOutcome::InjectedBefore);
-            return Err(Self::injected_error(ticket, FailurePhase::Before, to));
-        }
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        match self.inner.rename_opts(from, to, options).await {
-            Ok(()) if fail_after => {
-                self.finish(ticket, to, 0, RequestOutcome::InjectedAfter);
-                Err(Self::injected_error(ticket, FailurePhase::After, to))
-            }
-            Ok(()) => {
-                self.finish(ticket, to, 0, RequestOutcome::Succeeded);
-                Ok(())
-            }
-            Err(error) => {
-                self.finish(ticket, to, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        self.execute(
+            ticket,
+            to,
+            || self.inner.rename_opts(from, to, options),
+            |()| 0,
+        )
+        .await
     }
 }
 
@@ -865,72 +778,16 @@ impl MultipartUpload for FaultMultipartUpload {
 
     async fn complete(&mut self) -> Result<PutResult> {
         let ticket = self.store.start(Operation::MultipartComplete, 0);
-        if self.store.take_failure(ticket, FailurePhase::Before) {
-            self.store
-                .finish(ticket, &self.location, 0, RequestOutcome::InjectedBefore);
-            return Err(FaultStore::injected_error(
-                ticket,
-                FailurePhase::Before,
-                &self.location,
-            ));
-        }
-        let fail_after = self.store.take_failure(ticket, FailurePhase::After);
-        match self.inner.complete().await {
-            Ok(_) if fail_after => {
-                self.store
-                    .finish(ticket, &self.location, 0, RequestOutcome::InjectedAfter);
-                Err(FaultStore::injected_error(
-                    ticket,
-                    FailurePhase::After,
-                    &self.location,
-                ))
-            }
-            Ok(result) => {
-                self.store
-                    .finish(ticket, &self.location, 0, RequestOutcome::Succeeded);
-                Ok(result)
-            }
-            Err(error) => {
-                self.store
-                    .finish(ticket, &self.location, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        self.store
+            .execute(ticket, &self.location, || self.inner.complete(), |_| 0)
+            .await
     }
 
     async fn abort(&mut self) -> Result<()> {
         let ticket = self.store.start(Operation::MultipartAbort, 0);
-        if self.store.take_failure(ticket, FailurePhase::Before) {
-            self.store
-                .finish(ticket, &self.location, 0, RequestOutcome::InjectedBefore);
-            return Err(FaultStore::injected_error(
-                ticket,
-                FailurePhase::Before,
-                &self.location,
-            ));
-        }
-        let fail_after = self.store.take_failure(ticket, FailurePhase::After);
-        match self.inner.abort().await {
-            Ok(()) if fail_after => {
-                self.store
-                    .finish(ticket, &self.location, 0, RequestOutcome::InjectedAfter);
-                Err(FaultStore::injected_error(
-                    ticket,
-                    FailurePhase::After,
-                    &self.location,
-                ))
-            }
-            Ok(()) => {
-                self.store
-                    .finish(ticket, &self.location, 0, RequestOutcome::Succeeded);
-                Ok(())
-            }
-            Err(error) => {
-                self.store
-                    .finish(ticket, &self.location, 0, RequestOutcome::BackendError);
-                Err(error)
-            }
-        }
+        self.store
+            .execute(ticket, &self.location, || self.inner.abort(), |()| 0)
+            .await
     }
 }
 
