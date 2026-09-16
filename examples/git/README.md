@@ -197,7 +197,9 @@ Never clear retentions while a reader may still be active.
 
 - Fetch packs contain complete required objects rather than newly generated
   deltas. Have-aware negotiation still omits objects the client already owns,
-  but similar large revisions can consume more bandwidth.
+  but similar large revisions can consume more bandwidth. This avoids
+  delta-selection memory proportional to object size: go-git’s native selector
+  loads complete base and target objects while comparing them.
 - Partial-clone filters and packfile URIs are not implemented.
 - Host-wide TLS, routing, authentication integration, concurrency, and memory
   admission belong to the deployment host.
