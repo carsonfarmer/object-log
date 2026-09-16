@@ -12,6 +12,25 @@ var (
 	errMaintenancePending  = errors.New("maintenance remains pending; retry push")
 )
 
+// Retry an expired request view once, before Git can consume the request body
+// or emit a response. The refresh retains the request transport meter.
+func retryOpenStore[T any](open func() (T, error), refresh func() error) (T, error) {
+	s, err := open()
+	if !errors.Is(err, errExpired) {
+		return s, err
+	}
+	if err := refresh(); err != nil {
+		var zero T
+		return zero, fmt.Errorf("refresh expired store: %w", err)
+	}
+	s, err = open()
+	if err != nil {
+		var zero T
+		return zero, fmt.Errorf("open refreshed store: %w", err)
+	}
+	return s, nil
+}
+
 // Retry one stale-view maintenance result before the caller receives the pack.
 // Each reopen observes whether a pending checkpoint actually committed.
 func retryBeforePush(before func() (bool, error), reopen func() error) error {

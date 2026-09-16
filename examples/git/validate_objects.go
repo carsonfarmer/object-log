@@ -3,14 +3,15 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/plumbing/storer"
 	"io"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
 // Check every new object, including objects the incoming refs do not reach.

@@ -18,7 +18,6 @@ var (
 )
 
 type retentionCall func([]byte) (wal.RetentionState, error)
-type retentionRecoveryCall func() (wal.RetentionState, error)
 
 func retentionRecoveryStatus(enabled, recoveryRoute bool) int {
 	if enabled && !recoveryRoute {
@@ -68,23 +67,14 @@ func resolveAcquire(ctx context.Context, call retentionCall, id []byte) error {
 // Release ignores the request context: a disconnect must not abandon a
 // retention. Exhaustion remains explicit for drained operator recovery.
 func resolveRelease(call retentionCall, id []byte) error {
-	for range retentionResolutionAttempts {
-		state, err := call(id)
-		if err != nil {
-			return err
-		}
-		switch state {
-		case wal.RetentionStateApplied:
-			return nil
-		case wal.RetentionStateConflict, wal.RetentionStatePending:
-		case wal.RetentionStateActiveCollection:
-			return fmt.Errorf("invalid release state: active collection")
-		}
-	}
-	return errRetentionUnresolved
+	return resolveRetention(func() (wal.RetentionState, error) { return call(id) }, "release")
 }
 
-func resolveDrainedRecovery(call retentionRecoveryCall) error {
+func resolveDrainedRecovery(call func() (wal.RetentionState, error)) error {
+	return resolveRetention(call, "recovery")
+}
+
+func resolveRetention(call func() (wal.RetentionState, error), operation string) error {
 	for range retentionResolutionAttempts {
 		state, err := call()
 		if err != nil {
@@ -95,7 +85,7 @@ func resolveDrainedRecovery(call retentionRecoveryCall) error {
 			return nil
 		case wal.RetentionStateConflict, wal.RetentionStatePending:
 		case wal.RetentionStateActiveCollection:
-			return fmt.Errorf("invalid recovery state: active collection")
+			return fmt.Errorf("invalid %s state: active collection", operation)
 		}
 	}
 	return errRetentionUnresolved

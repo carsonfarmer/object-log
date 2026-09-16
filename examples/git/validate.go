@@ -2,11 +2,12 @@ package main
 
 import (
 	"fmt"
+	"maps"
+	"strings"
+
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
-	"maps"
-	"strings"
 )
 
 func validate(st *store, cmds []*packp.Command) (map[string]string, error) {

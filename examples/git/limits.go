@@ -53,18 +53,19 @@ func loadLimits(getenv func(string) string) (requestLimits, error) {
 		}
 		limits.timeout = value
 	}
-	if value := getenv("GIT_READ_ONLY"); value != "" {
-		var err error
-		limits.readOnly, err = strconv.ParseBool(value)
-		if err != nil {
-			return limits, fmt.Errorf("GIT_READ_ONLY must be a boolean")
-		}
-	}
-	if value := getenv("WAL_RECOVER_RETENTIONS_AFTER_DRAIN"); value != "" {
-		var err error
-		limits.recoverRetentions, err = strconv.ParseBool(value)
-		if err != nil {
-			return limits, fmt.Errorf("WAL_RECOVER_RETENTIONS_AFTER_DRAIN must be a boolean")
+	for _, setting := range []struct {
+		name  string
+		value *bool
+	}{
+		{"GIT_READ_ONLY", &limits.readOnly},
+		{"WAL_RECOVER_RETENTIONS_AFTER_DRAIN", &limits.recoverRetentions},
+	} {
+		if text := getenv(setting.name); text != "" {
+			value, err := strconv.ParseBool(text)
+			if err != nil {
+				return limits, fmt.Errorf("%s must be a boolean", setting.name)
+			}
+			*setting.value = value
 		}
 	}
 	return limits, nil

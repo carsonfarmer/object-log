@@ -27,16 +27,12 @@ impl SessionState {
 
     fn accept_retention(&self, status: RetentionStatus) -> RetentionState {
         let (state, view) = match status {
-            RetentionStatus::Applied(view) => (RetentionState::Applied, Some(view)),
-            RetentionStatus::ActiveCollection(view) => {
-                (RetentionState::ActiveCollection, Some(view))
-            }
-            RetentionStatus::Conflict(view) => (RetentionState::Conflict, Some(view)),
-            RetentionStatus::Pending => (RetentionState::Pending, None),
+            RetentionStatus::Applied(view) => (RetentionState::Applied, view),
+            RetentionStatus::ActiveCollection(view) => (RetentionState::ActiveCollection, view),
+            RetentionStatus::Conflict(view) => (RetentionState::Conflict, view),
+            RetentionStatus::Pending => return RetentionState::Pending,
         };
-        if let Some(view) = view {
-            self.view.replace(view);
-        }
+        self.view.replace(view);
         state
     }
 }
@@ -91,10 +87,9 @@ fn proofs(objects: &[ObjectBorrow<'_>]) -> Vec<StagedObject> {
         .collect()
 }
 fn retention_id(value: Vec<u8>) -> Result<RetentionId, Failure> {
-    let bytes = value
-        .try_into()
-        .map_err(|_| Failure::Other("retention ID must contain 16 bytes".into()))?;
-    Ok(RetentionId::from_uuid(uuid::Uuid::from_bytes(bytes)))
+    uuid::Uuid::from_slice(&value)
+        .map(RetentionId::from_uuid)
+        .map_err(|_| Failure::Other("retention ID must contain 16 bytes".into()))
 }
 // Each record represents a complete state. Delta consumers must fold differently.
 struct LatestCompleteState;

@@ -102,3 +102,71 @@ func walkRadix[V, H any](root H, load func(H) (radixNode[V, H], error), visit fu
 	}
 	return nil
 }
+
+// Filter immutable catalog nodes, retaining the original proof whenever a
+// subtree is unchanged. The caller publishes the replacement root through WAL.
+func filterRadix[V any, H comparable](root H, keep func(string) bool, load func(H) (radixNode[V, H], error), save func(radixNode[V, H]) (H, error)) (H, bool, error) {
+	var zero H
+	node, err := load(root)
+	if err != nil {
+		return zero, false, err
+	}
+	if node.Children == nil {
+		var items map[string]V
+		changed, kept := false, false
+		for id, item := range node.Items {
+			if keep(id) {
+				kept = true
+				if changed {
+					if items == nil {
+						items = map[string]V{}
+					}
+					items[id] = item
+				}
+				continue
+			}
+			if !changed {
+				changed = true
+				if kept {
+					items = maps.Clone(node.Items)
+				}
+			}
+			delete(items, id)
+		}
+		if !changed {
+			return root, true, nil
+		}
+		if len(items) == 0 {
+			return zero, false, nil
+		}
+		replacement, err := save(radixNode[V, H]{Items: items})
+		return replacement, err == nil, err
+	}
+
+	var children map[string]H
+	for prefix, child := range node.Children {
+		replacement, exists, err := filterRadix(child, keep, load, save)
+		if err != nil {
+			return zero, false, err
+		}
+		if exists && replacement == child {
+			continue
+		}
+		if children == nil {
+			children = maps.Clone(node.Children)
+		}
+		if exists {
+			children[prefix] = replacement
+		} else {
+			delete(children, prefix)
+		}
+	}
+	if children == nil {
+		return root, true, nil
+	}
+	if len(children) == 0 {
+		return zero, false, nil
+	}
+	replacement, err := save(radixNode[V, H]{Children: children})
+	return replacement, err == nil, err
+}

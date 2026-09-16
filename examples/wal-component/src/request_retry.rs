@@ -30,17 +30,22 @@ where
                 .any(|b| matches!(b, b'"' | b','))
     });
     let conditional_put = *request.method() == http::Method::PUT && (create || update);
-    let retry = (read || conditional_put).then(|| request.clone());
-    match (retry, attempt(request).await) {
-        (Some(request), Err(first)) if retryable_error(&first) => {
-            let response = attempt(request).await;
-            if read || response.as_ref().is_ok_and(|r| r.status().is_success()) {
-                response
-            } else {
-                Err(first)
-            }
-        }
-        (_, result) => result,
+
+    if !read && !conditional_put {
+        return attempt(request).await;
+    }
+    let retry = request.clone();
+    let first = match attempt(request).await {
+        Ok(response) => return Ok(response),
+        Err(error) if retryable_error(&error) => error,
+        Err(error) => return Err(error),
+    };
+
+    let response = attempt(retry).await;
+    if read || response.as_ref().is_ok_and(|r| r.status().is_success()) {
+        response
+    } else {
+        Err(first)
     }
 }
 
