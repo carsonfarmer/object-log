@@ -6,11 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 )
 
-const retentionResolutionAttempts = 16
+const (
+	retentionResolutionAttempts = 16
+	// At most 15 waits (1.5 seconds), in addition to the WAL calls.
+	retentionCollectionDelay = 100 * time.Millisecond
+)
 
 var (
 	errCollectionActive    = errors.New("collection is active")
@@ -42,7 +47,7 @@ func retained(ctx context.Context, retain, release retentionCall, run func() err
 }
 
 func resolveAcquire(ctx context.Context, call retentionCall, id []byte) error {
-	for range retentionResolutionAttempts {
+	for attempt := range retentionResolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -54,7 +59,14 @@ func resolveAcquire(ctx context.Context, call retentionCall, id []byte) error {
 		case wal.RetentionStateApplied:
 			return nil
 		case wal.RetentionStateActiveCollection:
-			return errCollectionActive
+			if attempt == retentionResolutionAttempts-1 {
+				return errCollectionActive
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retentionCollectionDelay):
+			}
 		case wal.RetentionStateConflict:
 			// The bridge advances the session to the returned head. Repeat with
 			// the same ID so an acquisition race has one durable identity.
