@@ -3,7 +3,7 @@ name = "object-log-kv"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-description = "Key-value demonstration for object-log"
+description = "Sparse byte-key/value storage on object-log"
 license = "Apache-2.0"
 publish = false
 
@@ -14,8 +14,11 @@ object-log = { path = "../.." }
 thiserror = "2.0"
 
 [dev-dependencies]
+criterion = { version = "0.7", features = ["async_tokio"] }
 futures = "0.3"
-object_store = "0.14"
+object-log = { path = "../..", features = ["test-util"] }
+object_store = { version = "0.14", features = ["fs"] }
+tempfile = "3.20"
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
 
 [lints.rust]
@@ -27,3 +30,7 @@ pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[[bench]]
+name = "kv"
+harness = false
