@@ -52,16 +52,20 @@ In another terminal, create the bucket and a protected Spin variables file.
 Each run gets a new WAL prefix:
 
 ```sh
-mc alias set local-git http://127.0.0.1:19090 objectlog local-test-secret
-mc mb --ignore-existing local-git/wal-proof
+local_config="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-config.XXXXXX")"
+mc --config-dir "$local_config/mc" alias set local-git \
+  http://127.0.0.1:19090 objectlog local-test-secret
+mc --config-dir "$local_config/mc" mb --ignore-existing local-git/wal-proof
 test_id="local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-cat >/tmp/object-log-git-vars.toml <<EOF_VARS
+(
+  umask 077
+  cat >"$local_config/variables.toml" <<EOF_VARS
 wal_prefix = "$test_id"
 wal_access_key = "objectlog"
 wal_secret_key = "local-test-secret"
 git_boot_id = "$test_id"
 EOF_VARS
-chmod 600 /tmp/object-log-git-vars.toml
+)
 ```
 
 Start the service:
@@ -69,7 +73,7 @@ Start the service:
 ```sh
 cd examples/git
 spin up --listen 127.0.0.1:19100 \
-  --variable @/tmp/object-log-git-vars.toml 2>&1 | tee /tmp/object-log-git-spin.log
+  --variable "@$local_config/variables.toml" 2>&1 | tee /tmp/object-log-git-spin.log
 ```
 
 The repositories are available at:
@@ -85,7 +89,7 @@ For example:
 git clone http://127.0.0.1:19100/sha256.git
 ```
 
-When finished, stop Spin and MinIO, then remove the variables file and the
+When finished, stop Spin and MinIO, then remove `"$local_config"` and the
 printed MinIO data directory.
 
 Authentication is disabled when `git_password` is empty and should only be used
@@ -138,7 +142,10 @@ Verify the composed component and Spin configuration:
 make git-spin-config-test
 ```
 
-Against a running service, run the unchanged-client provider suite:
+Against a service with a fresh WAL prefix, run the unchanged-client provider
+suite. The suite creates its own refs; do not reuse a repository containing
+manual demo commits. Stop Spin, choose a new `wal_prefix` in the variables file,
+and restart it before the first suite run or a rerun:
 
 ```sh
 GIT_PROBE_URL=http://127.0.0.1:19100 \
