@@ -146,14 +146,15 @@ one WAL commit. It uses the generic byte streams and reference nodes, while
 Git negotiation and repository rules stay outside the Rust library.
 
 Large Git objects required streaming storage. Cold repository access required
-sparse reads. Pushes with
-uncertain responses required honest publication outcomes. Concurrent fetch
+sparse reads. Pushes with uncertain responses required honest publication
+outcomes. Concurrent fetch
 and collection required explicit reader retention.
 
-The repository also has a small key-value state-machine example. I am
-extending it into a usable store with sparse reads and writes. It should reuse
-those properties while supplying its own index and query semantics. If it has
-to rebuild recovery or chunk handling, there is more work to do in the WAL.
+The key-value example uses a compressed radix tree for sparse reads, path-copy
+writes, and ordered scans. It publishes one root per atomic batch and reuses
+the WAL's snapshots, recovery, and collection. Its local tests compare results
+against an independent in-memory map; provider and sustained-load testing are
+still ahead.
 
 The API and durable format are still pre-release. The repository contains
 memory, filesystem, fault-injection, MinIO, and Git-client tests, alongside

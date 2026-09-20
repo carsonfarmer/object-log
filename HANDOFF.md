@@ -12,8 +12,9 @@ Read `AGENTS.md`, `PLAN.md`, and `GIT_PLAN.md` before changing behavior.
 
 - `src/`: Rust WAL, authenticated object graph, recovery, checkpoints,
   retention, collection, simulator, and request limits.
-- `crates/object-log-kv/`: experimental key-value consumer; hold changes until
-  its next design and performance contract are agreed.
+- `crates/object-log-kv/`: experimental sparse radix-tree consumer with atomic
+  batches, exact snapshots, scans, and root checkpoints. Local correctness and
+  logical-I/O tests pass; provider and sustained-load qualification remain.
 - `examples/git/`: go-git smart-HTTP service and provider tests.
 - `examples/wal-component/`: WASIp2 bridge from the Git service to the Rust WAL.
 - `examples/git/qualification/aws/`: optional disposable S3 Terraform setup and

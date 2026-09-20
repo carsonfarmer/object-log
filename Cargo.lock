@@ -1118,10 +1118,12 @@ name = "object-log-kv"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "criterion",
  "futures",
  "minicbor",
  "object-log",
  "object_store",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

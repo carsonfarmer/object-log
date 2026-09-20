@@ -8,8 +8,9 @@ object integrity, checkpoints, reader retention, and bounded collection.
 Applications own their operation and snapshot formats.
 
 The Git service is the primary proof: unchanged Git clients exercise the WAL
-through an established Git implementation. The key-value example remains
-available but is held until its next design is justified by measured needs.
+through an established Git implementation. The key-value consumer uses sparse
+radix-tree paths and the same recovery and collection contract. Its next gate
+is provider and sustained-load qualification, after the Git dependency review.
 
 ## Authority and storage
 
