@@ -25,8 +25,6 @@ match store.log().commit(candidate).await? {
     CommitStatus::Conflict(_) => { /* refresh snapshot, then prepare again */ }
     CommitStatus::Pending(pending) => { /* preserve evidence; resolve, don't replay */ }
 }
-let fresh = store.snapshot().await?;
-assert_eq!(fresh.get(b"name").await?.as_deref(), Some(b"Ada".as_slice()));
 # Ok(())
 # }
 ```
@@ -35,9 +33,11 @@ Snapshots are exact and immutable. `get_many` and each scan page use that same
 view; `scan` uses inclusive start, exclusive end, and an exclusive continuation
 key. Continue on the same snapshot. `scan_prefix` includes the empty prefix and
 arbitrary binary keys. Missing values are `None`; empty keys and values are valid.
-Commands in a batch execute in order and become visible atomically. A mismatched
-CAS returns false and changes nothing for that command. Other batch commands
-still execute. Invalid integers, overflow, or limits abort the entire preparation.
+Commands in a batch execute in order and become visible atomically. Set/delete
+return `Changed(bool)`; setting an identical value or deleting an absent key
+returns false. Read from the same snapshot before preparing when the application
+needs the previous value. A mismatched CAS returns false and changes nothing for
+that command. Other batch commands still execute. Invalid integers, overflow, or limits abort the entire preparation.
 Even a no-op batch records durable results when committed.
 
 Prepare and publish are separate so applications can persist recovery evidence
@@ -60,11 +60,9 @@ leave a recoverable WAL; reopen before starting new maintenance.
 Limits bound key/value sizes, batch inputs, response bytes, and cumulative tree
 bytes read/written and scan-prefix bytes allocated per call. Large values are
 rejected rather than streamed.
-The default value limit is 1 KiB, so one previous value fits the WAL's default
-4 KiB result allowance. For larger values or batches, configure the WAL's
-`max_inline_result_bytes` to fit the encoded results when creating the namespace,
-then raise the KV limits. WAL options are durable and cannot be increased by
-reopening. Set/delete return previous values; CAS returns only a boolean.
+The default value limit is 64 KiB. Mutation results contain only booleans or
+integers, so their size does not depend on stored value size. The WAL's result
+allowance still bounds the encoded batch results.
 The tree budget includes repeated path reads and every command in a batch. It
 excludes WAL metadata: WAL options separately bound tail, commit, checkpoint,
 and head sizes. Use a shared WAL request guard across retries for cumulative

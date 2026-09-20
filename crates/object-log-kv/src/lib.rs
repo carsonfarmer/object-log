@@ -36,7 +36,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             key_bytes: 1024,
-            value_bytes: 1024,
+            value_bytes: 64 * 1024,
             batch_entries: 128,
             batch_bytes: 1024 * 1024,
             page_entries: 128,
@@ -49,14 +49,14 @@ impl Default for Limits {
 /// One byte-oriented command. Commands in a batch observe earlier commands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KvCommand {
-    /// Set a value and return its previous value.
+    /// Set a value and report whether it changed.
     Set {
         /// Key bytes; the empty key is valid.
         key: Bytes,
         /// Value bytes; an empty value differs from an absent key.
         value: Bytes,
     },
-    /// Delete a key and return its previous value.
+    /// Delete a key and report whether it existed.
     Delete {
         /// Key bytes.
         key: Bytes,
@@ -91,8 +91,11 @@ impl KvCommand {
 
     fn evaluate(&self, previous: Option<Bytes>) -> Result<(Option<Bytes>, KvResult), KvError> {
         Ok(match self {
-            Self::Set { value, .. } => (Some(value.clone()), KvResult::Previous(previous)),
-            Self::Delete { .. } => (None, KvResult::Previous(previous)),
+            Self::Set { value, .. } => (
+                Some(value.clone()),
+                KvResult::Changed(previous.as_ref() != Some(value)),
+            ),
+            Self::Delete { .. } => (None, KvResult::Changed(previous.is_some())),
             Self::CompareAndSwap {
                 expected, value, ..
             } => {
@@ -127,15 +130,18 @@ impl KvCommand {
     }
 }
 
-/// A result recorded in command order in the same atomic WAL publication.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A small result recorded in command order in the same atomic WAL publication.
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, PartialEq)]
 pub enum KvResult {
-    /// Previous value of a set or delete; `None` means absent.
-    Previous(Option<Bytes>),
+    /// Whether a set or delete changed the value, including creating an empty value.
+    #[n(0)]
+    Changed(#[n(0)] bool),
     /// Value following an increment.
-    Integer(i64),
-    /// Whether the compare-and-swap matched.
-    Swapped(bool),
+    #[n(1)]
+    Integer(#[n(0)] i64),
+    /// Whether the compare-and-swap matched, even if the replacement was identical.
+    #[n(2)]
+    Swapped(#[n(0)] bool),
 }
 
 /// A KV namespace over one WAL. All writers must use this crate's format.
@@ -316,17 +322,13 @@ impl KvSnapshot {
         let mut tree = self.tree();
         let mut root = self.root.clone();
         let mut results = Vec::with_capacity(commands.len());
-        let mut response = Budget(limits.response_bytes);
         for command in commands {
             let previous = tree.get(root.clone(), command.key()).await?;
             let (next, result) = command.evaluate(previous.clone())?;
             if next != previous {
                 root = tree.set(root, command.key(), next).await?;
             }
-            if let KvResult::Previous(Some(value)) = &result {
-                response.charge(value.len())?;
-            }
-            results.push(ResultWire::from(&result));
+            results.push(result);
         }
         let result = encode(&results)?;
         Ok(self.store.log.prepare(
@@ -391,18 +393,7 @@ pub struct KvPage {
 /// # Errors
 /// Returns an error for noncanonical or invalid result bytes.
 pub fn decode_results(bytes: &[u8]) -> Result<Vec<KvResult>, KvError> {
-    let results: Vec<ResultWire> = decode(bytes)?;
-    results
-        .into_iter()
-        .map(
-            |result| match (result.kind, result.value, result.integer, result.swapped) {
-                (1, value, None, None) => Ok(KvResult::Previous(value.map(Bytes::from))),
-                (2, None, Some(value), None) => Ok(KvResult::Integer(value)),
-                (3, None, None, Some(value)) => Ok(KvResult::Swapped(value)),
-                _ => Err(KvError::InvalidEncoding),
-            },
-        )
-        .collect()
+    decode(bytes)
 }
 
 /// An invalid operation, incompatible format, admission failure, or WAL error.
@@ -451,34 +442,6 @@ impl Materializer for Root {
     ) -> Result<(), KvError> {
         *state = self.restore(bytes, objects)?;
         Ok(())
-    }
-}
-
-#[derive(Decode, Encode)]
-#[cbor(array)]
-struct ResultWire {
-    #[n(0)]
-    kind: u8,
-    #[cbor(n(1), with = "minicbor::bytes")]
-    value: Option<Vec<u8>>,
-    #[n(2)]
-    integer: Option<i64>,
-    #[n(3)]
-    swapped: Option<bool>,
-}
-impl From<&KvResult> for ResultWire {
-    fn from(result: &KvResult) -> Self {
-        let (kind, value, integer, swapped) = match result {
-            KvResult::Previous(value) => (1, value.as_deref().map(<[u8]>::to_vec), None, None),
-            KvResult::Integer(value) => (2, None, Some(*value), None),
-            KvResult::Swapped(value) => (3, None, None, Some(*value)),
-        };
-        Self {
-            kind,
-            value,
-            integer,
-            swapped,
-        }
     }
 }
 

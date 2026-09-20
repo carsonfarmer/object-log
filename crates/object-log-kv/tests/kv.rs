@@ -91,15 +91,15 @@ async fn ordered_batches_missing_empty_cas_and_integer_results() -> TestResult {
     assert_eq!(
         commit(&store, &commands).await?,
         vec![
-            KvResult::Previous(None),
-            KvResult::Previous(None),
-            KvResult::Previous(Some(Bytes::from("one"))),
+            KvResult::Changed(true),
+            KvResult::Changed(true),
+            KvResult::Changed(true),
             KvResult::Swapped(false),
             KvResult::Swapped(true),
             KvResult::Integer(4),
             KvResult::Integer(3),
             KvResult::Integer(0),
-            KvResult::Previous(Some(Bytes::from("three")))
+            KvResult::Changed(true)
         ]
     );
     assert_eq!(
@@ -180,7 +180,7 @@ async fn model_survives_splits_merges_binary_ranges_and_cold_checkpoints() -> Te
                     commands.push(KvCommand::Delete {
                         key: Bytes::copy_from_slice(key),
                     });
-                    expected.push(KvResult::Previous(model.remove(key)));
+                    expected.push(KvResult::Changed(model.remove(key).is_some()));
                 }
                 1 => {
                     let prior = if random & 16 == 0 {
@@ -207,7 +207,9 @@ async fn model_survives_splits_merges_binary_ranges_and_cold_checkpoints() -> Te
                         Bytes::copy_from_slice(&random.to_be_bytes())
                     };
                     commands.push(set(key, &value));
-                    expected.push(KvResult::Previous(model.insert(key.clone(), value)));
+                    let changed = model.get(key) != Some(&value);
+                    model.insert(key.clone(), value);
+                    expected.push(KvResult::Changed(changed));
                 }
             }
         }
@@ -360,7 +362,7 @@ async fn lost_publication_cancellation_and_expired_evidence_remain_distinct() ->
         reopened.log().resume(&token).await?,
         Resolution::Committed(_)
     ));
-    assert_eq!(decode_results(&results)?, vec![KvResult::Previous(None)]);
+    assert_eq!(decode_results(&results)?, vec![KvResult::Changed(true)]);
     checkpoint(&reopened).await?;
     commit(&reopened, &[set(b"x", b"two")]).await?;
     checkpoint(&reopened).await?;
@@ -611,16 +613,8 @@ async fn filesystem_backend_is_rejected_before_kv_use() -> TestResult {
 
 #[tokio::test]
 async fn full_byte_fanout_with_maximum_inline_parent_value_remains_readable() -> TestResult {
-    let (_, store, _) = fixture(Options {
-        max_inline_result_bytes: 128 * 1024,
-        ..Options::default()
-    })
-    .await?;
-    let limits = Limits {
-        value_bytes: 64 * 1024,
-        ..Limits::default()
-    };
-    let store = KvStore::new(store.log().clone(), limits);
+    let (_, store, _) = fixture(Options::default()).await?;
+    let limits = Limits::default();
     let value = vec![42; limits.value_bytes];
     commit(&store, &[set(b"root", &value)]).await?;
     for chunk in (0..=255_u8).collect::<Vec<_>>().chunks(64) {
@@ -666,9 +660,39 @@ async fn full_byte_fanout_with_maximum_inline_parent_value_remains_readable() ->
     assert_eq!(keys.len(), 257);
     assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(!keys.iter().any(|key| key.as_ref() == b"root-new"));
+    let updated = vec![43; limits.value_bytes];
     assert_eq!(
-        commit(&store, &[set(b"root", b"updated")]).await?,
-        vec![KvResult::Previous(Some(Bytes::from(value)))]
+        commit(&store, &[set(b"root", &updated)]).await?,
+        vec![KvResult::Changed(true)]
+    );
+    assert_eq!(
+        store.snapshot().await?.get(b"root").await?.as_deref(),
+        Some(updated.as_slice())
+    );
+    assert_eq!(
+        commit(
+            &store,
+            &[
+                set(b"root", &updated),
+                KvCommand::Delete {
+                    key: Bytes::from("root")
+                },
+                KvCommand::Delete {
+                    key: Bytes::from("root")
+                },
+            ]
+        )
+        .await?,
+        vec![
+            KvResult::Changed(false),
+            KvResult::Changed(true),
+            KvResult::Changed(false)
+        ]
+    );
+    assert_eq!(store.snapshot().await?.get(b"root").await?, None);
+    assert_eq!(
+        snapshot.get(b"root").await?.as_deref(),
+        Some(value.as_slice())
     );
     Ok(())
 }
