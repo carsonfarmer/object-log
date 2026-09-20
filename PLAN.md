@@ -44,8 +44,9 @@ The core implements and tests:
 
 The Git proof supports SHA-1 and SHA-256 repositories, protocol-v2 clone and
 fetch, classic push, shallow history, tags, access control, cold recovery, and
-maintenance. It has passed local MinIO and live AWS S3 qualification. Its
-implementation remains outside the core.
+maintenance. Its implementation remains outside the core. The move to
+unmodified go-git passes local checks and needs a fresh remote capacity check
+because incoming deltas now use the library's normal buffers.
 
 ## Release gate
 

@@ -117,8 +117,9 @@ for the durable format and recovery invariants. The schema is defined in
   is a working Git service using go-git and the
   same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
   clients, SHA-1 and SHA-256, protocol-v2 clone/fetch, classic push, shallow
-  history, authentication, recovery, and garbage collection. It has passed the
-  local `MinIO` and live AWS S3 qualification suites.
+  history, authentication, recovery, and garbage collection. Local `MinIO`
+  tests cover the current implementation. Qualify remote storage and host
+  capacity with the provider suite before deployment.
 
 The core library has no Git, Spin, or serverless-runtime dependency.
 

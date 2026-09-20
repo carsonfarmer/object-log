@@ -34,18 +34,23 @@ The Git service supports unchanged SHA-1 and SHA-256 clients, protocol-v2 clone
 and have-aware fetch, shallow history, classic push, branches, tags, access
 control, cold recovery, automatic tail checkpoints, and explicit maintenance.
 Refs and its sparse object catalog publish atomically through one WAL commit.
-It has passed local MinIO and disposable live AWS S3 qualification.
+Local MinIO tests pass with unmodified go-git. Repeat remote qualification
+before relying on its changed memory and upload behavior.
 
-Incoming pack data and delta results stream through go-git. Fetch reuses bounded
-client-provided deltas retained in the catalog, with full-object fallback. It
-does not generate new deltas, so some transfers use more bandwidth.
+Incoming packs are staged as WAL streams. Unmodified go-git buffers delta bases
+and results during import; object limits do not bound peak memory. Receive-pack
+advertises `no-thin`, so ordinary clients include delta bases in their packs.
+Fetch reuses compact client-provided deltas retained in the catalog, with
+full-object fallback. It does not generate new deltas, so some transfers use
+more bandwidth.
 Partial-clone filters and packfile URIs are outside the current proof.
 
 ## Dependencies
 
-The Git example pins reviewed dependency fork revisions. Their exact
-provenance and upstream references are in `THIRD_PARTY.md`. Do not add another
-Git implementation or local storage authority. Use ordinary Spin and unmodified
+The Git example uses unmodified upstream go-git and pins component build and
+binding fixes. Their exact provenance and upstream references are in
+`THIRD_PARTY.md`. Do not add another Git implementation or local storage
+authority. Use ordinary Spin and unmodified
 S3-compatible storage.
 
 Go component bindings release imported buffers individually after lifting.

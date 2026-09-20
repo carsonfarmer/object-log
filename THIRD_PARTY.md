@@ -15,12 +15,10 @@ Apache-2.0 WITH LLVM-exception license is reproduced in
 [`licenses/wasmtime.txt`](licenses/wasmtime.txt) and must accompany redistributed
 adapter source or binaries.
 
-The Git example pins a [go-git fork](https://github.com/carsonfarmer/go-git/compare/3cb46ce7621cd87a1b136f6c3fd33c91f6518ad8...8a806eeb2f816270cfd9e000ca28d92f6c89965e)
-for streamed delta import, decoder cleanup and error handling, thin-pack
-resolution, bounded reuse of existing deltas, and empty SHA-256 advertisements.
-Request and object limits use the library's public reader and storage interfaces.
-[go-git #2379](https://github.com/go-git/go-git/pull/2379) proposes the decoder
-rewind and failed-reopen fixes; the comparison above shows the complete fork.
+The Git example uses unmodified upstream [go-git at revision `0f3a0a2`](https://github.com/go-git/go-git/commit/0f3a0a2c25513f2666ac9b88a6745f7b2382f572).
+It uses the public pack parser, object storage, stored-delta, and receive-hook
+interfaces. Incoming deltas use go-git's normal buffering. Receive-pack
+advertises `no-thin`, so ordinary Git clients include the bases their packs need.
 
 The Go component bindings pin a [go-pkg revision](https://github.com/carsonfarmer/go-pkg/commit/b0c40df4c02bb780994cedee093376abe9144ba2)
 that releases imported buffers after lifting them into Go values. The build

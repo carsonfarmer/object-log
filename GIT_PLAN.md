@@ -31,9 +31,11 @@ sparse catalog, and repository policy. Compressed small objects live in catalog
 leaves; larger objects and incoming packs use WAL streams. The catalog and refs
 publish in one WAL commit.
 
-Incoming delta bases and results stream through go-git. The catalog retains
-bounded client-provided deltas within its existing inline allowance. Fetch uses
-go-git's stored-delta path without generating new deltas; full objects remain
+Incoming packs use WAL streams; go-git buffers delta bases and results during
+import. Receive-pack advertises `no-thin`, allowing ordinary clients to send
+self-contained packs. The catalog retains compact client-provided deltas within
+its existing inline allowance. Fetch uses go-git's stored-delta path without
+generating new deltas; full objects remain
 available when a representation or its base is unavailable. Negotiation still
 omits objects the client already has.
 
@@ -57,14 +59,15 @@ component. Provider suites use ordinary Git as the external oracle and cover
 both hash formats, clone/fetch/push, large files, repeated history, access
 control, restarts, maintenance, and collection.
 
-Local MinIO and disposable live AWS S3 qualification have passed. Remaining
-public-host work is deployment-specific TLS, routing, identity integration,
+The upstream-go-git service passes local MinIO tests; remote tests remain.
+Public-host work includes deployment-specific TLS, routing, identity integration,
 host-wide request admission, monitoring, and qualification through that exact
 edge.
 
 ## Dependency policy
 
-The service temporarily pins reviewed dependency forks. Exact
-revisions, licenses, and upstream references live in `THIRD_PARTY.md`. New
-fork-only behavior requires owner review and focused tests. The service uses
+The service uses unmodified upstream go-git and temporarily pins component
+build and binding fixes. Exact revisions, licenses, and upstream references
+live in `THIRD_PARTY.md`. New fork-only behavior requires owner review and
+focused tests. The service uses
 ordinary Spin and unmodified object storage.

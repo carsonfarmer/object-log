@@ -159,16 +159,21 @@ their own workload settings; an ordinary test run does not run all of them.
 
 For the provider suite, start a fresh namespace rather than reuse the demo
 repository. The [example guide](../../examples/git/README.md#test) gives the
-commands and workload settings. The same service has also passed the
-repository's disposable AWS S3 qualification. That is evidence for the
-tested workloads, not a claim of arbitrary scale or a substitute for testing
-the public deployment's TLS, routing, identity, and capacity controls.
+commands and workload settings. The repository also has an optional disposable
+AWS S3 setup for running the provider tests remotely. Those checks complement
+testing the public deployment's TLS, routing, identity, and capacity controls;
+they do not establish arbitrary scale.
 
-There are costs I do not want to hide. The Go component build has several
-moving parts. The current dependency pins include binding/runtime fixes and
-a go-git extension for streamed delta import, alongside correctness fixes.
-Those are described in [THIRD_PARTY.md](../../THIRD_PARTY.md). Minimizing that
-maintenance burden is still unfinished work.
+There are costs I do not want to hide. The service uses unmodified go-git,
+including its normal buffering of incoming delta bases and results. Large
+updates can therefore need substantially more memory than their compressed
+size. Pushes advertise Git's `no-thin` capability, so clients include delta bases
+in the upload. This can cost bandwidth, but uses Git's existing negotiation
+without changing clients.
+
+The Go component build still pins binding/runtime fixes, described in
+[THIRD_PARTY.md](../../THIRD_PARTY.md). Minimizing that remaining maintenance
+burden is unfinished work.
 
 Branch updates must be fast-forward, including when a client requests a force
 push. The service supports the Git operations listed above, but not partial-clone

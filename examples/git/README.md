@@ -17,8 +17,9 @@ Supported behavior includes:
 - atomic ref and catalog publication;
 - restart recovery, checkpoints, reader retention, and bounded collection.
 
-The example has passed local MinIO and live AWS S3 qualification. It remains a
-pre-release example: use a fresh object-store prefix when changing revisions.
+The example is tested against local MinIO. Run the provider suite against your
+remote storage and host before deployment. It is pre-release: use a fresh
+object-store prefix when changing incompatible revisions.
 
 ## Build
 
@@ -124,9 +125,11 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `git_max_catalog_bytes` | `67108864` | Catalog data decoded during one request |
 | `git_request_timeout` | `5m` | Cooperative request deadline |
 
-Invalid, zero, or inconsistent limits fail closed. These are protocol and
-object-graph bounds, not a whole-process memory limit. The deployment host must
-also bound concurrent requests and instance memory.
+Invalid, zero, or inconsistent limits fail closed. These defaults are
+configurable service policy, not requirements of the WAL or Spin. They bound
+accepted requests and stored objects, not peak memory: go-git buffers incoming
+delta bases and results before the object-size check. Deployment capacity must
+account for that memory use and concurrent requests.
 
 ## Test
 
@@ -206,6 +209,12 @@ Never clear retentions while a reader may still be active.
 
 ## Current limits
 
+- Push advertises Git's `no-thin` capability. Ordinary clients include any delta
+  bases needed by the pack, which can increase upload size. No client
+  configuration is required.
+- Incoming delta reconstruction uses go-git's normal in-memory buffers. Large
+  objects and long delta chains can use substantially more memory than the
+  compressed upload size. Plain object data and WAL reads remain streamed.
 - Fetch reuses compact deltas supplied by Git clients; it does not calculate
   new deltas. Each optional representation is limited to 64 KiB compressed,
   shares the catalog leaf's 512 KiB inline allowance, and uses an optional
@@ -216,8 +225,8 @@ Never clear retentions while a reader may still be active.
 - Partial-clone filters and packfile URIs are not implemented.
 - Host-wide TLS, routing, authentication integration, concurrency, and memory
   admission belong to the deployment host.
-- Development pins reviewed dependency fixes; see [their provenance](../../THIRD_PARTY.md).
-  Spin and MinIO are unmodified.
+- go-git, Spin, and MinIO are unmodified. Component build and binding fixes
+  remain pinned; see [their provenance](../../THIRD_PARTY.md).
 - Durable development formats are not migrated. Start with a fresh prefix after
   an incompatible revision change.
 
