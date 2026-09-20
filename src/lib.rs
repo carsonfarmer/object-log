@@ -210,15 +210,27 @@ pub enum ObjectKind {
 }
 
 /// A content-addressed immutable object reference.
+///
+/// Carries authenticated subtree accounting for publication admission. Shared
+/// descendants are counted once per path, so the count is conservative for DAGs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectRef {
     pub(crate) kind: ObjectKind,
     pub(crate) storage_id: StorageId,
     pub(crate) digest: Digest,
     pub(crate) len: u64,
+    pub(crate) subtree_objects: u64,
 }
 
 impl ObjectRef {
+    pub(crate) fn validate_count(&self) -> Result<(), Error> {
+        if self.subtree_objects == 0 || (self.kind == ObjectKind::Blob && self.subtree_objects != 1)
+        {
+            return Err(Error::CorruptObject);
+        }
+        Ok(())
+    }
+
     /// Returns the object role.
     #[must_use]
     pub const fn kind(&self) -> ObjectKind {

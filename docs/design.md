@@ -145,6 +145,15 @@ A separately opened handle cannot use another handle's proof. A recovery token
 does not contain one. Both paths fully verify the referenced graph before they
 can publish.
 
+Each object reference authenticates a subtree count: one for a blob, or one
+plus its child counts for a node. Commit and checkpoint admission include their
+own enclosing object and reject graphs above `max_collection_objects` without
+reading descendants again. Shared descendants count once per reference path,
+so this is a conservative bound. Collection still counts distinct physical
+objects exactly. A complete-state commit can be checkpointed using the same
+roots within this limit; the combined historical tail can exceed it and must
+be checkpointed before collection.
+
 ## Commit
 
 The caller prepares one candidate against one view.

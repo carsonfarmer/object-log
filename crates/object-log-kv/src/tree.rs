@@ -92,7 +92,7 @@ impl Tree<'_> {
         let payload_len = minicbor::len(&wire);
         let len = self.log.node_size(
             payload_len,
-            node.children.iter().map(|child| child.reference().len()),
+            node.children.iter().map(StagedObject::reference),
         )?;
         self.budget.charge(len)?;
         Ok(Some(

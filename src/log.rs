@@ -19,6 +19,10 @@ use crate::{
 const MAX_CONCURRENT_READS: usize = 32;
 const MAX_FRESH_OBJECT_ATTEMPTS: usize = 16;
 
+#[cfg(test)]
+#[path = "storage_accounting_tests.rs"]
+mod storage_accounting_tests;
+
 /// Limits applied by one log writer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
@@ -42,7 +46,12 @@ pub struct Options {
     pub max_checkpoint_bytes: usize,
     /// Maximum concurrent retention identities in the head.
     pub max_retention_ids: usize,
-    /// Maximum objects in a live graph or one deletion plan.
+    /// Maximum objects admitted by one commit or checkpoint, including its envelope.
+    /// Descendants count once per reference path, conservatively for shared DAGs.
+    /// A full-tail checkpoint reusing an admitted dependency graph fits this
+    /// bound. Historical graphs in the active tail can exceed it together.
+    /// Collection separately applies this limit to unique live physical objects
+    /// and to each deletion plan. Zero prevents commit/checkpoint publication.
     /// Collection scans examine at most the live count plus this limit plus one.
     pub max_collection_objects: usize,
     /// Maximum encoded bytes in one collection plan.
@@ -793,28 +802,41 @@ impl Log {
         }
         let blocked = self.active_collection_candidates(view.head()).await?;
         let object = self
-            .create_fresh_object_with(ObjectKind::Blob, bytes, blocked.as_deref(), StorageId::new)
+            .create_fresh_object_with(
+                ObjectKind::Blob,
+                bytes,
+                1,
+                blocked.as_deref(),
+                StorageId::new,
+            )
             .await?;
         Ok(self.staged_object(view, object))
     }
 
-    /// Returns the exact encoded size of a node before its children are stored.
+    /// Returns the exact encoded size of a node before storing it.
     ///
     /// Includes the payload, authenticated child references, and node envelope.
-    /// Child identities and kinds do not affect their encoded width; only their
-    /// byte lengths are needed. Performs no storage I/O or buffer allocation.
+    /// Child references supply their byte lengths and authenticated subtree counts.
+    /// Performs no storage I/O or buffer allocation.
     /// This checks encoding fit, not child existence, provenance, or publication
     /// readiness. [`Self::put_node`] still validates the supplied child proofs.
     ///
     /// # Errors
     /// Returns a limit error for too many children, size overflow, or an encoded
     /// node exceeding this log's maximum object size.
-    pub fn node_size(
+    pub fn node_size<'a>(
         &self,
         payload_bytes: usize,
-        child_lengths: impl IntoIterator<Item = u64>,
+        children: impl IntoIterator<Item = &'a ObjectRef>,
     ) -> Result<usize, Error> {
-        format::node_size(payload_bytes, child_lengths, self.options).map(|size| size.encoded)
+        format::node_size(
+            payload_bytes,
+            children
+                .into_iter()
+                .map(|child| (child.len, child.subtree_objects)),
+            self.options,
+        )
+        .map(|size| size.encoded)
     }
 
     /// Stores one immutable reference node after its direct children exist.
@@ -839,10 +861,17 @@ impl Log {
             .map(|child| child.object)
             .collect::<Vec<_>>();
         let node = format::Node { payload, children };
+        let subtree_objects = format::subtree_objects(&node.children)?;
         let bytes = format::encode_node(&node, self.options)?;
         let blocked = self.active_collection_candidates(view.head()).await?;
         let object = self
-            .create_fresh_object_with(ObjectKind::Node, bytes, blocked.as_deref(), StorageId::new)
+            .create_fresh_object_with(
+                ObjectKind::Node,
+                bytes,
+                subtree_objects,
+                blocked.as_deref(),
+                StorageId::new,
+            )
             .await?;
         Ok(self.staged_object(view, object))
     }
@@ -901,11 +930,23 @@ impl Log {
             ));
         }
         let bytes = self.read_immutable_for_view(view, object).await?;
-        let node = format::decode_node(&bytes, self.options)?;
+        let node = self.decode_node_reference(object, &bytes)?;
         Ok(ReferenceNode {
             payload: node.payload,
             children: node.children,
         })
+    }
+
+    fn decode_node_reference(
+        &self,
+        object: &ObjectRef,
+        bytes: &Bytes,
+    ) -> Result<format::Node, Error> {
+        let node = format::decode_node(bytes, self.options)?;
+        if object.subtree_objects != format::subtree_objects(&node.children)? {
+            return Err(Error::CorruptObject);
+        }
+        Ok(node)
     }
 
     /// Reads an authenticated node and derives publication proofs for its children.
@@ -992,6 +1033,11 @@ impl Log {
     ///
     /// This operation does not access storage and does not rebase the opaque
     /// operation onto a newer view.
+    /// The candidate's dependency graph plus its commit must fit
+    /// [`Options::max_collection_objects`], counting shared descendants per path.
+    /// Admission bounds this record's declared dependencies. Applications that
+    /// publish complete state roots can checkpoint the same roots within the
+    /// count limit; historical roots in the tail can exceed it together.
     ///
     /// # Errors
     ///
@@ -1006,6 +1052,7 @@ impl Log {
         objects: Vec<StagedObject>,
     ) -> Result<PreparedCommit, Error> {
         self.validate_staged_objects(view, &objects)?;
+        self.publication_objects(objects.iter().map(StagedObject::reference))?;
         self.validate_prepared_sizes(&operation, &result)?;
         self.validate_commit_position(view, transaction_id)?;
         Ok(PreparedCommit {
@@ -1330,6 +1377,11 @@ impl Log {
     /// successful local appends extend the proof to their returned view. As
     /// with staged objects, this relies on preserving immutable objects.
     /// Fresh loads and decoded recovery evidence do not carry this proof.
+    ///
+    /// The snapshot dependencies plus this checkpoint must fit
+    /// [`Options::max_collection_objects`]. A checkpoint through the last commit
+    /// therefore fits collection's live-object bound. A remaining tail suffix
+    /// can still make the combined live graph exceed that bound.
     pub async fn publish_checkpoint(
         &self,
         view: &View,
@@ -1337,8 +1389,10 @@ impl Log {
         snapshot: Bytes,
         objects: Vec<StagedObject>,
     ) -> Result<CheckpointStatus, Error> {
-        self.verify_tail(view).await?;
         self.validate_staged_objects(view, &objects)?;
+        let subtree_objects =
+            self.publication_objects(objects.iter().map(StagedObject::reference))?;
+        self.verify_tail(view).await?;
         let objects = objects
             .into_iter()
             .map(|staged| staged.object)
@@ -1358,6 +1412,7 @@ impl Log {
             .create_fresh_object_with(
                 ObjectKind::Checkpoint,
                 bytes,
+                subtree_objects,
                 blocked.as_deref(),
                 StorageId::new,
             )
@@ -1580,6 +1635,9 @@ impl Log {
     ) -> Result<format::Checkpoint, Error> {
         let checkpoint = format::decode_checkpoint(bytes)?;
         self.validate_dependencies(&checkpoint.objects)?;
+        if reference.object.subtree_objects != format::subtree_objects(&checkpoint.objects)? {
+            return Err(Error::CorruptObject);
+        }
         if checkpoint.log_id != *self.store.log_id()
             || checkpoint.incarnation != self.incarnation
             || checkpoint.through_sequence != reference.through_sequence
@@ -1675,7 +1733,19 @@ impl Log {
                 "application dependencies cannot name a checkpoint".to_owned(),
             ));
         }
+        self.publication_objects(objects)?;
         Ok(())
+    }
+
+    fn publication_objects<'a>(
+        &self,
+        objects: impl IntoIterator<Item = &'a ObjectRef>,
+    ) -> Result<u64, Error> {
+        let count = format::subtree_objects(objects)?;
+        if !usize::try_from(count).is_ok_and(|count| count <= self.options.max_collection_objects) {
+            return Err(Error::LimitExceeded("publication objects"));
+        }
+        Ok(count)
     }
 
     pub(crate) fn staged_object(&self, view: &View, object: ObjectRef) -> StagedObject {
@@ -2084,7 +2154,7 @@ impl Log {
         ))
     }
 
-    async fn mark_live(&self, view: &View) -> Result<HashMap<ImmutableKey, u64>, Error> {
+    async fn mark_live(&self, view: &View) -> Result<HashMap<ImmutableKey, (u64, u64)>, Error> {
         let mut live = HashMap::new();
         let tail = self.read_tail(view).await?;
         let mut roots = Vec::new();
@@ -2093,6 +2163,7 @@ impl Log {
                 &mut live,
                 self.commit_immutable_key(&record.reference),
                 record.reference.len,
+                0,
             )?;
             if record.objects.len() > self.options.max_collection_objects - roots.len() {
                 return Err(Error::LimitExceeded("collection live objects"));
@@ -2104,6 +2175,7 @@ impl Log {
                 &mut live,
                 self.object_immutable_key(&reference.object),
                 reference.object.len,
+                reference.object.subtree_objects,
             )?;
             let checkpoint = self.load_checkpoint(reference).await?;
             if checkpoint.objects.len() > self.options.max_collection_objects - roots.len() {
@@ -2118,7 +2190,7 @@ impl Log {
     async fn mark_object_graph(
         &self,
         roots: &[ObjectRef],
-        visited: &mut HashMap<ImmutableKey, u64>,
+        visited: &mut HashMap<ImmutableKey, (u64, u64)>,
         blocked: Option<&[CollectionCandidate]>,
     ) -> Result<(), Error> {
         let mut pending = VecDeque::new();
@@ -2147,7 +2219,7 @@ impl Log {
     fn enqueue_object(
         &self,
         object: &ObjectRef,
-        visited: &mut HashMap<ImmutableKey, u64>,
+        visited: &mut HashMap<ImmutableKey, (u64, u64)>,
         blocked: Option<&[CollectionCandidate]>,
         pending: &mut VecDeque<ObjectRef>,
     ) -> Result<(), Error> {
@@ -2156,16 +2228,18 @@ impl Log {
                 "application dependencies cannot name a checkpoint".to_owned(),
             ));
         }
+        object.validate_count()?;
         let key = self.object_immutable_key(object);
         if blocked.is_some_and(|blocked| Self::is_collection_candidate(blocked, key)) {
             return Err(Error::CollectionFence);
         }
-        if let Some(declared_len) = visited.get(&key) {
-            if *declared_len != object.len {
+        let metadata = (object.len, object.subtree_objects);
+        if let Some(declared) = visited.get(&key) {
+            if *declared != metadata {
                 return Err(Error::CorruptObject);
             }
         } else {
-            visited.insert(key, object.len);
+            visited.insert(key, metadata);
             if visited.len() > self.options.max_collection_objects {
                 return Err(Error::LimitExceeded("collection live objects"));
             }
@@ -2176,12 +2250,13 @@ impl Log {
 
     fn insert_live(
         &self,
-        live: &mut HashMap<ImmutableKey, u64>,
+        live: &mut HashMap<ImmutableKey, (u64, u64)>,
         key: ImmutableKey,
         len: u64,
+        subtree_objects: u64,
     ) -> Result<(), Error> {
-        if let Some(declared_len) = live.insert(key, len)
-            && declared_len != len
+        if let Some(declared) = live.insert(key, (len, subtree_objects))
+            && declared != (len, subtree_objects)
         {
             return Err(Error::CorruptObject);
         }
@@ -2205,7 +2280,7 @@ impl Log {
             }
             ObjectKind::Node => {
                 let bytes = self.read_immutable(object).await?;
-                let node = format::decode_node(&bytes, self.options)?;
+                let node = self.decode_node_reference(object, &bytes)?;
                 Ok(node.children)
             }
             ObjectKind::Checkpoint => Err(Error::InvalidFormat(
@@ -2343,6 +2418,7 @@ impl Log {
         &self,
         kind: ObjectKind,
         bytes: Bytes,
+        subtree_objects: u64,
         blocked: Option<&[CollectionCandidate]>,
         mut new_storage_id: impl FnMut() -> StorageId,
     ) -> Result<ObjectRef, Error> {
@@ -2355,6 +2431,7 @@ impl Log {
                 storage_id: new_storage_id(),
                 digest,
                 len,
+                subtree_objects,
             };
             let key = self.object_key(&object);
             if blocked.is_some_and(|blocked| {
@@ -2412,6 +2489,7 @@ impl Log {
     }
 
     fn verify_object(object: &ObjectRef, bytes: &Bytes) -> Result<(), Error> {
+        object.validate_count()?;
         let actual_len =
             u64::try_from(bytes.len()).map_err(|_| Error::LimitExceeded("object byte length"))?;
         if actual_len != object.len || Digest::of(bytes) != object.digest {
@@ -2783,17 +2861,17 @@ mod tests {
         let backend =
             ValidatedBackend::new(Arc::new(faults.clone()), Path::from("node-size")).await?;
         let log = Log::open(&backend, &LogId::new("node")?, Options::default()).await?;
+        let view = log.load().await?;
+        let first = log.put_object(&view, Bytes::from(vec![1; 24])).await?;
+        let second = log.put_object(&view, Bytes::from(vec![2; 256])).await?;
         faults.reset();
-        let predicted = log.node_size(3, [24, 256])?;
+        let predicted = log.node_size(3, [first.reference(), second.reference()])?;
         assert!(matches!(
             log.node_size(usize::MAX, []),
             Err(Error::LimitExceeded("object bytes"))
         ));
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
-        let view = log.load().await?;
-        let first = log.put_object(&view, Bytes::from(vec![1; 24])).await?;
-        let second = log.put_object(&view, Bytes::from(vec![2; 256])).await?;
         let node = log
             .put_node(&view, Bytes::from_static(b"abc"), vec![first, second])
             .await?;
@@ -2823,6 +2901,7 @@ mod tests {
             storage_id: collision,
             digest: Digest::of(&bytes),
             len: u64::try_from(bytes.len())?,
+            subtree_objects: 1,
         };
         log.store
             .create(log.object_key(&occupied), bytes.clone())
@@ -2830,7 +2909,7 @@ mod tests {
         faults.reset();
         let uploaded = bytes.len() * MAX_FRESH_OBJECT_ATTEMPTS;
         let result = log
-            .create_fresh_object_with(ObjectKind::Checkpoint, bytes, None, || collision)
+            .create_fresh_object_with(ObjectKind::Checkpoint, bytes, 1, None, || collision)
             .await;
         assert!(matches!(
             result,
@@ -2856,6 +2935,7 @@ mod tests {
             storage_id: collision,
             digest: Digest::of(&bytes),
             len: u64::try_from(bytes.len())?,
+            subtree_objects: 1,
         };
         log.store
             .create(log.object_key(&occupied), bytes.clone())
@@ -2863,7 +2943,7 @@ mod tests {
         let mut ids = [collision, replacement].into_iter();
 
         let staged = log
-            .create_fresh_object_with(ObjectKind::Blob, bytes, None, || {
+            .create_fresh_object_with(ObjectKind::Blob, bytes, 1, None, || {
                 ids.next().unwrap_or(replacement)
             })
             .await?;
@@ -2894,6 +2974,7 @@ mod tests {
             storage_id: collision,
             digest: Digest::of(&bytes),
             len: u64::try_from(bytes.len())?,
+            subtree_objects: 1,
         };
         log.store
             .create(log.object_key(&occupied), bytes.clone())
@@ -2906,7 +2987,7 @@ mod tests {
         });
 
         let error = log
-            .create_fresh_object_with(ObjectKind::Blob, bytes, None, || collision)
+            .create_fresh_object_with(ObjectKind::Blob, bytes, 1, None, || collision)
             .await
             .err()
             .ok_or("ambiguous fresh create returned its colliding ID")?;
@@ -3127,6 +3208,7 @@ mod tests {
             storage_id: StorageId::from_uuid(uuid::Uuid::from_u128(47)),
             digest: Digest::of(&bytes),
             len: u64::try_from(bytes.len())?,
+            subtree_objects: 1,
         };
         log.store.create(log.object_key(&object), bytes).await?;
         let fenced = install_plan(
@@ -3182,7 +3264,7 @@ mod tests {
         let mut ids = [blocked_id, replacement_id].into_iter();
 
         let object = log
-            .create_fresh_object_with(ObjectKind::Checkpoint, bytes, Some(&blocked), || {
+            .create_fresh_object_with(ObjectKind::Checkpoint, bytes, 1, Some(&blocked), || {
                 ids.next().unwrap_or(replacement_id)
             })
             .await?;
@@ -3304,6 +3386,7 @@ mod tests {
                     storage_id: StorageId::new(),
                     digest: Digest::of(b"oversized"),
                     len: 2,
+                    subtree_objects: 1,
                 }],
             },
         )

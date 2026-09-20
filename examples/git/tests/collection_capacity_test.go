@@ -103,7 +103,7 @@ func TestCollectionCapacity(t *testing.T) {
 					published = tip
 					continue
 				}
-				if published == "" || !strings.Contains(string(output), "WAL live object capacity") {
+				if published == "" || !strings.Contains(string(output), "publication objects") {
 					t.Fatalf("unexpected push failure after %d publications: %v\n%s", i, err, output)
 				}
 				fields := strings.Fields(string(git(t, nil, "ls-remote", url, "refs/heads/capacity")))

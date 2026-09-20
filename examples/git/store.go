@@ -20,20 +20,6 @@ import (
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 )
 
-func unwrap[T any](call func() wt.Result[T, wal.Failure]) (T, error) {
-	imports.Lock()
-	defer finishImports()
-	r := call()
-	if r.IsOk() {
-		return r.Ok(), nil
-	}
-	var zero T
-	if r.Err().Tag() == wal.FailureExpired {
-		return zero, errExpired
-	}
-	return zero, fmt.Errorf("wal: %s", r.Err().Other())
-}
-
 type indexed struct {
 	objectMeta
 	root *wal.Object
@@ -49,8 +35,8 @@ type store struct {
 	session     *wal.Session
 	stateRoot   *wal.Object
 	meta        rootMeta
-	buckets     map[string]catalogRoot
-	loaded      map[*wal.Object]radixNode[indexed, catalogRoot]
+	buckets     map[string]*wal.Object
+	loaded      map[*wal.Object]radixNode[indexed, *wal.Object]
 	pending     map[string]indexed
 }
 
@@ -63,7 +49,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	cfg, _ := mem.Config()
 	// Reuse stored deltas without comparing object contents to generate new ones.
 	cfg.Pack.Window = 1
-	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]catalogRoot{}, loaded: map[*wal.Object]radixNode[indexed, catalogRoot]{}, pending: map[string]indexed{}}
+	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
 			s.Close()
@@ -90,7 +76,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 			return nil, e
 		}
 		for i, key := range s.meta.Buckets {
-			s.buckets[key] = catalogRoot{root: root.Objects[i], objects: s.meta.BucketWALObjects[i]}
+			s.buckets[key] = root.Objects[i]
 		}
 		for name, id := range s.meta.Refs {
 			_ = s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
@@ -280,7 +266,7 @@ func (w *objectWriter) Close() (err error) {
 	if w.sink.writer == nil {
 		item.Inline = w.sink.prefix
 	} else {
-		item.root, item.WALObjects, err = w.sink.writer.finish()
+		item.root, err = w.sink.writer.finish()
 		if err != nil {
 			return err
 		}
@@ -376,7 +362,7 @@ func (s *store) publish(refs map[string]string) error {
 		return e
 	}
 	for key, updates := range changed {
-		node := radixNode[indexed, catalogRoot]{}
+		node := radixNode[indexed, *wal.Object]{}
 		if root, ok := s.buckets[key]; ok {
 			node, e = s.loadBucket(root)
 			if e != nil {
@@ -426,22 +412,11 @@ func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
 	keys := slices.AppendSeq(make([]string, 0, len(s.buckets)), maps.Keys(s.buckets))
 	slices.Sort(keys)
 	children := make([]*wal.Object, 0, len(keys))
-	counts := make([]uint64, 0, len(keys))
 	for _, key := range keys {
-		children = append(children, s.buckets[key].root)
-		counts = append(counts, s.buckets[key].objects)
-	}
-	objects, e := sumObjects(1, counts)
-	if e != nil {
-		return nil, e
-	}
-	// Collection also retains one immutable checkpoint.
-	if objects >= uint64(s.limits.collectionObjects) {
-		return nil, fmt.Errorf("%w: WAL live object capacity", errObjectLimit)
+		children = append(children, s.buckets[key])
 	}
 	s.meta.Refs = refs
 	s.meta.Buckets = keys
-	s.meta.BucketWALObjects = counts
 	data, e := json.Marshal(s.meta)
 	if e != nil {
 		return nil, e

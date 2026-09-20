@@ -132,14 +132,13 @@ func TestDeltaCatalogBound(t *testing.T) {
 	for _, size := range []int{inlineObjectLimit, 4096, inlineDeltaLimit} {
 		for _, mixInline := range []bool{false, true} {
 			t.Run(fmt.Sprintf("bytes=%d/mixed=%t", size, mixInline), func(t *testing.T) {
-				meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: math.MaxInt64, WALObjects: math.MaxUint64, Delta: &deltaMeta{Base: strings.Repeat("f", 64), Size: math.MaxInt64, Data: make([]byte, size)}}
+				meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: math.MaxInt64, Delta: &deltaMeta{Base: strings.Repeat("f", 64), Size: math.MaxInt64, Data: make([]byte, size)}}
 				leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafSize)}
 				for i := range leaf.Items {
 					leaf.Items[i] = meta
 					if mixInline && i%2 == 0 {
 						leaf.Items[i].Delta = nil
 						leaf.Items[i].Inline = make([]byte, inlineObjectLimit)
-						leaf.Items[i].WALObjects = 0
 					}
 				}
 				limitDeltas(leaf.Items)

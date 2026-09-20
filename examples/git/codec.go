@@ -12,12 +12,11 @@ import (
 )
 
 type rootMeta struct {
-	Validated        bool `json:",omitempty"`
-	Format           config.ObjectFormat
-	Head             string
-	Refs             map[string]string
-	Buckets          []string
-	BucketWALObjects []uint64
+	Validated bool `json:",omitempty"`
+	Format    config.ObjectFormat
+	Head      string
+	Refs      map[string]string
+	Buckets   []string
 }
 
 func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta, error) {
@@ -25,21 +24,10 @@ func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return meta, err
 	}
-	_, err := sumObjects(1, meta.BucketWALObjects)
-	if !meta.Validated || meta.Format != format || len(meta.Buckets) != children || meta.BucketWALObjects == nil || len(meta.BucketWALObjects) != children || err != nil {
+	if !meta.Validated || meta.Format != format || len(meta.Buckets) != children {
 		return meta, fmt.Errorf("invalid repository root")
 	}
 	return meta, nil
-}
-
-func sumObjects(total uint64, counts []uint64) (uint64, error) {
-	for _, count := range counts {
-		if count == 0 || count > ^uint64(0)-total {
-			return 0, fmt.Errorf("invalid WAL object count")
-		}
-		total += count
-	}
-	return total, nil
 }
 
 // Keep full catalog leaves below the WAL node limit, including base64 encoding.
@@ -52,12 +40,11 @@ type objectMeta struct {
 	Encoding   string     `json:",omitempty"`
 	StoredSize int64      `json:",omitempty"`
 	Inline     []byte     `json:",omitempty"`
-	WALObjects uint64     `json:",omitempty"`
 	Delta      *deltaMeta `json:",omitempty"`
 }
 
 func (m objectMeta) validInline() bool {
-	return len(m.Inline) > 0 && len(m.Inline) <= inlineObjectLimit && m.Encoding == "zlib" && int64(len(m.Inline)) == m.StoredSize && m.WALObjects == 0
+	return len(m.Inline) > 0 && len(m.Inline) <= inlineObjectLimit && m.Encoding == "zlib" && int64(len(m.Inline)) == m.StoredSize
 }
 
 func (m objectMeta) readInline(format config.ObjectFormat) (io.ReadCloser, error) {

@@ -795,21 +795,22 @@ async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() ->
         },
     )
     .await?;
-    let source = bounded.log.load().await?;
-    let object = bounded
-        .log
-        .put_object(&source, Bytes::from_static(b"required"))
-        .await?;
-    let prepared = bounded.log.prepare(
-        &source,
-        TransactionId::new(),
-        Bytes::new(),
-        Bytes::new(),
-        vec![object],
-    )?;
-    let CommitStatus::Committed(view) = bounded.log.commit(prepared).await? else {
-        return Err("bounded reference did not commit".into());
-    };
+    // Each envelope fits admission, but their active-tail union exceeds the
+    // collection bound until the application checkpoints it.
+    let mut view = bounded.log.load().await?;
+    for _ in 0..2 {
+        let prepared = bounded.log.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::new(),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(next) = bounded.log.commit(prepared).await? else {
+            return Err("bounded reference did not commit".into());
+        };
+        view = next;
+    }
     bounded.store.reset();
     assert!(matches!(
         bounded.log.start_collection(&view).await,

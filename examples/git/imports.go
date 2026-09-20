@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
+	wt "go.bytecodealliance.org/pkg/wit/types"
 	"io"
 	"net/http"
+	wal "object-log-git-proof/bindings/object_log_storage_wal"
 	"sync"
 
 	witRuntime "go.bytecodealliance.org/pkg/wit/runtime"
@@ -16,6 +19,23 @@ var imports sync.Mutex
 func finishImports() {
 	witRuntime.Unpin()
 	imports.Unlock()
+}
+
+func unwrap[T any](call func() wt.Result[T, wal.Failure]) (T, error) {
+	imports.Lock()
+	defer finishImports()
+	r := call()
+	if r.IsOk() {
+		return r.Ok(), nil
+	}
+	var zero T
+	switch r.Err().Tag() {
+	case wal.FailureExpired:
+		return zero, errExpired
+	case wal.FailureLimit:
+		return zero, fmt.Errorf("%w: %s", errObjectLimit, r.Err().Limit())
+	}
+	return zero, fmt.Errorf("wal: %s", r.Err().Other())
 }
 
 type componentBody struct {

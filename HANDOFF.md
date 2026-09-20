@@ -30,6 +30,13 @@ objects, checkpoints, retained readers, and fenced bounded collection. It
 compiles natively and for WASIp2. Memory, filesystem, fault-simulation, MinIO,
 large collection, and benchmark coverage are retained.
 
+The WAL owns authenticated subtree counts and checks publication admission,
+including the commit/checkpoint envelope. Counts are conservative for shared
+graphs; collection deduplicates physical keys. Git and the bridge no longer
+carry chunk counts. Complete-state consumers can checkpoint their admitted
+roots, but the union of historical tail roots can still exceed the bound.
+The reference encoding changed; use a fresh prefix for this revision.
+
 The Git service supports unchanged SHA-1 and SHA-256 clients, protocol-v2 clone
 and have-aware fetch, shallow history, classic push, branches, tags, access
 control, cold recovery, automatic tail checkpoints, and explicit maintenance.

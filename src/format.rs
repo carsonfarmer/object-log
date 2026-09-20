@@ -475,6 +475,8 @@ struct ObjectRefWire {
     len: u64,
     #[cbor(n(4), with = "minicbor::bytes")]
     storage_id: Vec<u8>,
+    #[n(5)]
+    subtree_objects: u64,
 }
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
@@ -582,8 +584,8 @@ fn validate_head_shape(bytes: &[u8]) -> Result<(), Error> {
                 5 => head_shape_map(decoder, &[1, 2, 3], |decoder, field| match field {
                     1 => shape_uint(decoder),
                     2 => shape_bytes(decoder, DIGEST_LEN),
-                    3 => head_shape_map(decoder, &[1, 2, 3, 4], |decoder, field| match field {
-                        1 | 3 => shape_uint(decoder),
+                    3 => head_shape_map(decoder, &[1, 2, 3, 4, 5], |decoder, field| match field {
+                        1 | 3 | 5 => shape_uint(decoder),
                         2 => shape_bytes(decoder, DIGEST_LEN),
                         4 => shape_bytes(decoder, UUID_LEN),
                         _ => Err(invalid_canonical_object()),
@@ -785,7 +787,9 @@ pub(crate) fn encode_node(node: &Node, options: Options) -> Result<Bytes, Error>
         children: child_count,
     } = node_size(
         node.payload.len(),
-        node.children.iter().map(ObjectRef::len),
+        node.children
+            .iter()
+            .map(|child| (child.len, child.subtree_objects)),
         options,
     )?;
     let mut bytes = Vec::with_capacity(outer_len);
@@ -802,11 +806,12 @@ pub(crate) fn encode_node(node: &Node, options: Options) -> Result<Bytes, Error>
                     ObjectKind::Checkpoint => ObjectKindWire::Checkpoint,
                     ObjectKind::Node => ObjectKindWire::Node,
                 };
-                encoder.map(4)?.u8(1)?.u8(kind as u8)?;
+                encoder.map(5)?.u8(1)?.u8(kind as u8)?;
                 encoder.u8(2)?.bytes(child.digest.as_bytes())?;
                 encoder.u8(3)?.u64(child.len)?;
                 let storage_id = child.storage_id.as_uuid().as_bytes();
                 encoder.u8(4)?.bytes(storage_id)?;
+                encoder.u8(5)?.u64(child.subtree_objects)?;
             }
             Ok(())
         })();
@@ -832,18 +837,21 @@ pub(crate) struct NodeSize {
 
 pub(crate) fn node_size(
     payload_bytes: usize,
-    child_lengths: impl IntoIterator<Item = u64>,
+    children: impl IntoIterator<Item = (u64, u64)>,
     options: Options,
 ) -> Result<NodeSize, Error> {
     let mut count = 0_usize;
     let mut children_len = 0_usize;
-    for length in child_lengths {
+    for (length, subtree_objects) in children {
         count = count
             .checked_add(1)
             .filter(|count| *count <= options.max_object_refs)
             .ok_or(Error::LimitExceeded("object references"))?;
-        children_len =
-            checked_node_len(children_len, checked_node_len(57, cbor_head_len(length))?)?;
+        let reference_len = checked_node_len(58, cbor_head_len(length))?;
+        children_len = checked_node_len(
+            children_len,
+            checked_node_len(reference_len, cbor_head_len(subtree_objects))?,
+        )?;
     }
     let payload_len =
         u64::try_from(payload_bytes).map_err(|_| Error::LimitExceeded("object bytes"))?;
@@ -875,6 +883,18 @@ pub(crate) fn node_size(
 fn checked_node_len(left: usize, right: usize) -> Result<usize, Error> {
     left.checked_add(right)
         .ok_or(Error::LimitExceeded("object bytes"))
+}
+
+/// Counts one enclosing object and its children, once per reference path.
+pub(crate) fn subtree_objects<'a>(
+    children: impl IntoIterator<Item = &'a ObjectRef>,
+) -> Result<u64, Error> {
+    children.into_iter().try_fold(1_u64, |total, child| {
+        child.validate_count()?;
+        total
+            .checked_add(child.subtree_objects)
+            .ok_or(Error::LimitExceeded("subtree objects"))
+    })
 }
 
 const fn cbor_head_len(value: u64) -> usize {
@@ -960,15 +980,15 @@ fn decode_node_payload(
     if child_count > options.max_object_refs {
         return Err(Error::LimitExceeded("object references"));
     }
-    // A canonical child reference needs at least 58 bytes. Reject impossible
+    // A canonical child reference needs at least 60 bytes. Reject impossible
     // counts before allocating, even when the configured reference limit is large.
-    valid(child_count <= (bytes.len() - decoder.position()) / 58)?;
+    valid(child_count <= (bytes.len() - decoder.position()) / 60)?;
     let mut children = Vec::new();
     children
         .try_reserve_exact(child_count)
         .map_err(|_| Error::LimitExceeded("object references"))?;
     for _ in 0..child_count {
-        valid(exact_len!(decoder, encoder, map) == 4)?;
+        valid(exact_len!(decoder, encoder, map) == 5)?;
         valid(exact_value!(decoder, encoder, u8) == 1)?;
         let kind = match exact_value!(decoder, encoder, u8) {
             value if value == ObjectKindWire::Blob as u8 => ObjectKind::Blob,
@@ -984,12 +1004,17 @@ fn decode_node_payload(
         }
         valid(exact_value!(decoder, encoder, u8) == 4)?;
         let storage_id_bytes = exact_value!(decoder, encoder, bytes);
-        children.push(ObjectRef {
+        valid(exact_value!(decoder, encoder, u8) == 5)?;
+        let subtree_objects = exact_value!(decoder, encoder, u64);
+        let child = ObjectRef {
             kind,
             storage_id: storage_id(storage_id_bytes)?,
             digest: digest(digest_bytes)?,
             len,
-        });
+            subtree_objects,
+        };
+        child.validate_count()?;
+        children.push(child);
     }
     valid(decoder.position() == bytes.len())?;
     Ok((payload_range, children))
@@ -1330,6 +1355,7 @@ impl From<&ObjectRef> for ObjectRefWire {
             digest: value.digest.as_bytes().to_vec(),
             len: value.len,
             storage_id: value.storage_id.as_uuid().as_bytes().to_vec(),
+            subtree_objects: value.subtree_objects,
         }
     }
 }
@@ -1346,12 +1372,15 @@ impl TryFrom<ObjectRefWire> for ObjectRef {
                 return Err(Error::InvalidFormat("invalid object kind".into()));
             }
         };
-        Ok(Self {
+        let object = Self {
             kind,
             storage_id: storage_id(&value.storage_id)?,
             digest: digest(&value.digest)?,
             len: value.len,
-        })
+            subtree_objects: value.subtree_objects,
+        };
+        object.validate_count()?;
+        Ok(object)
     }
 }
 
@@ -1494,6 +1523,7 @@ mod tests {
             storage_id: storage_id(),
             digest: Digest::of(b"page"),
             len,
+            subtree_objects: 1,
         }
     }
 
@@ -1864,6 +1894,7 @@ mod tests {
             storage_id: storage_id(),
             digest: Digest::of(b"checkpoint"),
             len: 10,
+            subtree_objects: 1,
         };
         let first = commit_ref(4, b"first");
         let second = commit_ref(5, b"second");
@@ -1942,6 +1973,7 @@ mod tests {
                 storage_id: storage_id(),
                 digest: Digest::of(b"blob"),
                 len: 4,
+                subtree_objects: 1,
             }],
         };
 
@@ -1970,6 +2002,7 @@ mod tests {
                 storage_id: storage_id(),
                 digest: Digest::of(b"blob"),
                 len: 4,
+                subtree_objects: 1,
             }],
         };
 
@@ -2015,7 +2048,7 @@ mod tests {
         ));
         assert_eq!(
             hex::encode(encoded),
-            "a201585ca3010102581a756e69717565206f7061717565206e6f6465207061796c6f61640381a40101025820cad079fe52fa1b162e375eceec083d82ed9ac94420e05934969828aee170249103040450000000000000000000000000000000020258202488ddf0fe738ebed3830755cf0142dba307002f8c3cab0e5e94c95ba99b833b"
+            "a201585ea3010102581a756e69717565206f7061717565206e6f6465207061796c6f61640381a50101025820cad079fe52fa1b162e375eceec083d82ed9ac94420e05934969828aee170249103040450000000000000000000000000000000020501025820f2b4303e14f054ef57a16c5386cd43656b160b06239a90d52097d876cae21a45"
         );
     }
 
@@ -2044,7 +2077,9 @@ mod tests {
                     derived_node(&node).unwrap_or_else(|error| panic!("derive failed: {error}"));
                 let predicted = super::node_size(
                     node.payload.len(),
-                    node.children.iter().map(ObjectRef::len),
+                    node.children
+                        .iter()
+                        .map(|child| (child.len, child.subtree_objects)),
                     options,
                 )
                 .unwrap_or_else(|error| panic!("preflight failed: {error}"));
@@ -2066,7 +2101,9 @@ mod tests {
             );
             let predicted = super::node_size(
                 0,
-                node.children.iter().map(ObjectRef::len),
+                node.children
+                    .iter()
+                    .map(|child| (child.len, child.subtree_objects)),
                 Options::default(),
             )
             .unwrap_or_else(|error| panic!("preflight failed: {error}"));
@@ -2108,7 +2145,7 @@ mod tests {
         let consumed = std::cell::Cell::new(0);
         let lengths = std::iter::from_fn(|| {
             consumed.set(consumed.get() + 1);
-            Some(0)
+            Some((0, 1))
         });
         assert!(matches!(
             super::node_size(
@@ -2122,7 +2159,7 @@ mod tests {
             Err(Error::LimitExceeded("object references"))
         ));
         assert_eq!(consumed.get(), 3);
-        let exact = super::node_size(23, [0, u64::MAX], Options::default())
+        let exact = super::node_size(23, [(0, 1), (u64::MAX, 1)], Options::default())
             .unwrap_or_else(|error| panic!("preflight failed: {error}"));
         let options = Options {
             max_object_refs: 2,
@@ -2130,7 +2167,7 @@ mod tests {
             ..Options::default()
         };
         assert_eq!(
-            super::node_size(23, [0, u64::MAX], options)
+            super::node_size(23, [(0, 1), (u64::MAX, 1)], options)
                 .unwrap_or_else(|error| panic!("exact limit failed: {error}"))
                 .encoded,
             exact.encoded
@@ -2138,7 +2175,7 @@ mod tests {
         assert!(matches!(
             super::node_size(
                 23,
-                [0, u64::MAX],
+                [(0, 1), (u64::MAX, 1)],
                 Options {
                     max_object_bytes: exact.encoded - 1,
                     ..options
@@ -2149,15 +2186,15 @@ mod tests {
     }
 
     #[test]
-    fn reference_node_encoder_bounds_the_maximum_git_root() {
-        const MAX_GIT_ROOT_BYTES: usize = 2_098_197;
+    fn reference_node_encoder_bounds_large_payloads_with_children() {
+        const MAX_NODE_BYTES: usize = 2_098_229;
         let root = node(
             Bytes::from(vec![0; 2_097_152]),
             vec![object_ref(ObjectKind::Blob, 1_048_576); 16],
         );
         let options = Options {
             max_object_refs: 16,
-            max_object_bytes: MAX_GIT_ROOT_BYTES,
+            max_object_bytes: MAX_NODE_BYTES,
             ..Options::default()
         };
         let empty = node(Bytes::new(), Vec::new());
@@ -2165,12 +2202,12 @@ mod tests {
             .unwrap_or_else(|error| panic!("empty encode failed: {error}"));
         let maximum = encode_node_with_options(&root, options)
             .unwrap_or_else(|error| panic!("max encode failed: {error}"));
-        assert_eq!((empty.len(), maximum.len()), (45, MAX_GIT_ROOT_BYTES));
+        assert_eq!((empty.len(), maximum.len()), (45, MAX_NODE_BYTES));
         assert!(matches!(
             encode_node_with_options(
                 &root,
                 Options {
-                    max_object_bytes: MAX_GIT_ROOT_BYTES - 1,
+                    max_object_bytes: MAX_NODE_BYTES - 1,
                     ..options
                 }
             ),
@@ -2356,6 +2393,74 @@ mod tests {
     }
 
     #[test]
+    fn object_references_require_positive_counts_and_unit_blob_counts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (kind, count) in [
+            (ObjectKind::Blob, 0),
+            (ObjectKind::Blob, 2),
+            (ObjectKind::Node, 0),
+        ] {
+            let mut reference = object_ref(kind, 4);
+            reference.subtree_objects = count;
+            assert!(matches!(
+                ObjectRef::try_from(ObjectRefWire::from(&reference)),
+                Err(Error::CorruptObject)
+            ));
+            let encoded = encode_node(&node(Bytes::new(), vec![reference]))?;
+            assert!(matches!(
+                decode_node(&encoded, Options::default()),
+                Err(Error::CorruptObject)
+            ));
+        }
+        let child = ObjectRefWire::from(&object_ref(ObjectKind::Blob, 4));
+        let mut missing = minicbor::to_vec(&child)?;
+        assert_eq!(&missing[missing.len() - 2..], &[5, 1]);
+        missing.truncate(missing.len() - 2);
+        missing[0] = 0xa4;
+        assert!(minicbor::decode::<ObjectRefWire>(&missing).is_err());
+        let mut payload = minicbor::to_vec(NodeWire {
+            format_version: FORMAT_VERSION,
+            payload: Vec::new(),
+            children: vec![child.clone()],
+        })?;
+        payload.truncate(payload.len() - minicbor::to_vec(child)?.len());
+        payload.extend(missing);
+        let encoded = wrap_node_payload(payload);
+        assert!(matches!(
+            decode_node(&encoded, Options::default()),
+            Err(Error::InvalidFormat(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn node_geometry_accounts_for_subtree_count_integer_widths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for count in [
+            1,
+            23,
+            24,
+            255,
+            256,
+            65_535,
+            65_536,
+            u64::from(u32::MAX),
+            u64::from(u32::MAX) + 1,
+            u64::MAX,
+        ] {
+            let mut child = object_ref(ObjectKind::Node, 256);
+            child.subtree_objects = count;
+            let node = node(Bytes::new(), vec![child]);
+            let encoded = encode_node(&node)?;
+            let predicted = super::node_size(0, [(256, count)], Options::default())?;
+            assert_eq!(predicted.encoded, encoded.len());
+            assert_eq!(encoded, derived_node(&node)?);
+            assert_eq!(decode_node(&encoded, Options::default())?, node);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn reference_node_rejects_invalid_child_fields() -> Result<(), Box<dyn std::error::Error>> {
         let child = ObjectRefWire::from(&object_ref(ObjectKind::Blob, 4));
         let mut invalid_children = Vec::new();
@@ -2448,6 +2553,7 @@ mod tests {
                 storage_id: storage_id(),
                 digest: Digest::of(b"blob"),
                 len: 4,
+                subtree_objects: 1,
             }],
         };
 
@@ -2490,6 +2596,7 @@ mod tests {
                 storage_id: crate::StorageId::from_uuid(uuid::Uuid::from_u128(4)),
                 digest: Digest::of(b"blob"),
                 len: 4,
+                subtree_objects: 1,
             }],
         };
         let without_proof = encode_recovery_token(&prepared)
@@ -2600,6 +2707,7 @@ mod tests {
                     storage_id: storage_id(),
                     digest: Digest::of(b"checkpoint"),
                     len: 10,
+                    subtree_objects: 1,
                 },
             }),
             tail: Vec::new(),
@@ -2631,6 +2739,7 @@ mod tests {
                     storage_id: storage_id(),
                     digest: Digest::of(b"checkpoint"),
                     len: 10,
+                    subtree_objects: 1,
                 },
             }),
             tail: vec![active],
@@ -2686,6 +2795,7 @@ mod tests {
                     storage_id: storage_id(),
                     digest: Digest::of(b"checkpoint"),
                     len: 10,
+                    subtree_objects: 1,
                 },
             }),
             tail: vec![active],

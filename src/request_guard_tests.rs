@@ -99,6 +99,7 @@ async fn request_guard_counts_collisions_and_missing_classification() -> GuardRe
         storage_id,
         digest: Digest::of(&bytes),
         len: bytes.len() as u64,
+        subtree_objects: 1,
     };
     log.store
         .create(log.object_key(&object), bytes.clone())
@@ -108,7 +109,7 @@ async fn request_guard_counts_collisions_and_missing_classification() -> GuardRe
     let guarded = log.with_request_guard(guard.clone());
     assert!(matches!(
         guarded
-            .create_fresh_object_with(ObjectKind::Blob, bytes, None, || storage_id)
+            .create_fresh_object_with(ObjectKind::Blob, bytes, 1, None, || storage_id)
             .await,
         Err(Error::RequestDenied)
     ));

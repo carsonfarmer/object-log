@@ -210,23 +210,15 @@ func TestInlineMetadataBound(t *testing.T) {
 }
 
 func TestRepositoryRootAdmission(t *testing.T) {
-	if _, err := sumObjects(^uint64(0), []uint64{1}); err == nil {
-		t.Fatal("accepted overflowing object count")
-	}
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
 		t.Run(format.String(), func(t *testing.T) {
-			empty := rootMeta{Validated: true, Format: format, Refs: map[string]string{}, Buckets: []string{}, BucketWALObjects: []uint64{}}
+			empty := rootMeta{Validated: true, Format: format, Refs: map[string]string{}, Buckets: []string{}}
 			data, err := json.Marshal(empty)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, err = decodeRoot(data, format, 0); err != nil {
-				t.Fatalf("rejected counted empty root: %v", err)
-			}
-			empty.BucketWALObjects = nil
-			data, _ = json.Marshal(empty)
-			if _, err = decodeRoot(data, format, 0); err == nil {
-				t.Fatal("accepted legacy empty root without counts")
+				t.Fatalf("rejected empty root: %v", err)
 			}
 			for _, test := range []struct {
 				name      string
@@ -238,7 +230,7 @@ func TestRepositoryRootAdmission(t *testing.T) {
 				{"validated", true, true},
 			} {
 				t.Run(test.name, func(t *testing.T) {
-					root := map[string]any{"Format": format, "Buckets": []string{"ab"}, "BucketWALObjects": []uint64{1}}
+					root := map[string]any{"Format": format, "Buckets": []string{"ab"}}
 					if test.marker != nil {
 						root["Validated"] = test.marker
 					}
@@ -252,23 +244,6 @@ func TestRepositoryRootAdmission(t *testing.T) {
 					}
 					if _, err = decodeRoot(data, format, 0); err == nil {
 						t.Fatal("accepted missing child")
-					}
-				})
-			}
-			for name, mutate := range map[string]func(map[string]any){
-				"missing counts": func(root map[string]any) { delete(root, "BucketWALObjects") },
-				"missing child":  func(root map[string]any) { root["BucketWALObjects"] = []uint64{} },
-				"zero child":     func(root map[string]any) { root["BucketWALObjects"] = []uint64{0} },
-			} {
-				t.Run(name, func(t *testing.T) {
-					root := map[string]any{"Validated": true, "Format": format, "Buckets": []string{"ab"}, "BucketWALObjects": []uint64{1}}
-					mutate(root)
-					data, err := json.Marshal(root)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if _, err = decodeRoot(data, format, 1); err == nil {
-						t.Fatal("accepted invalid object count")
 					}
 				})
 			}

@@ -71,6 +71,7 @@ fn s3_builder(
 fn failure(error: object_log::Error) -> Failure {
     match error {
         object_log::Error::ViewExpired => Failure::Expired,
+        object_log::Error::LimitExceeded(limit) => Failure::Limit(limit.into()),
         error => Failure::Other(error.to_string()),
     }
 }
@@ -122,18 +123,14 @@ impl GuestByteWriter for WriterState {
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
         spin_executor::run(writer.write(&data)).map_err(failure)
     }
-    fn finish(&self) -> Result<ByteStream, Failure> {
+    fn finish(&self) -> Result<Object, Failure> {
         let writer = self
             .0
             .borrow_mut()
             .take()
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
-        let storage_objects = writer.storage_objects() as u64;
         spin_executor::run(writer.finish())
-            .map(|root| ByteStream {
-                root: Object::new(root),
-                storage_objects,
-            })
+            .map(Object::new)
             .map_err(failure)
     }
 }

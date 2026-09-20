@@ -33,7 +33,7 @@ options = {
   8: uint,                         ; maximum encoded base bytes
   9: uint,                         ; maximum immutable object bytes
   10: uint,                        ; maximum retention IDs
-  11: uint,                        ; maximum collection objects
+  11: uint,                        ; per-publication count and exact collection limit
   12: uint                         ; maximum encoded collection-plan bytes
 }
 
@@ -96,7 +96,8 @@ object-ref = {
   1: object-kind,
   2: digest,
   3: uint,                         ; byte length
-  4: storage-id                    ; private physical identity
+  4: storage-id,                   ; private physical identity
+  5: uint .gt 0                    ; blob=1; node/checkpoint=1+sum(child counts), per path
 }
 
 collection-plan-ref = {

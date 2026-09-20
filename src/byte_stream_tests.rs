@@ -60,16 +60,15 @@ async fn geometry_capacity_and_tiny_limits() -> TestResult {
     assert_eq!(writer.chunk_bytes, 2 * 1024 * 1024);
     let (log, view) = setup(Arc::new(InMemory::new()), small()).await?;
     let mut writer = log.byte_writer(&view)?;
-    assert_eq!(writer.storage_objects(), 1);
-    assert_eq!(writer.capacity, 3 * 256);
-    writer.write(&vec![1; 768]).await?;
-    assert_eq!(writer.storage_objects(), 4);
+    assert_eq!(writer.capacity, 2 * 256);
+    writer.write(&vec![1; 512]).await?;
     let root = writer.finish().await?;
+    assert_eq!(root.reference().subtree_objects, 3);
     assert!(root.reference().len() <= 256);
-    assert_eq!(log.open_bytes(&view, root.reference()).await?.len(), 768);
+    assert_eq!(log.open_bytes(&view, root.reference()).await?.len(), 512);
     let mut writer = log.byte_writer(&view)?;
     assert!(matches!(
-        writer.write(&vec![0; 769]).await,
+        writer.write(&vec![0; 513]).await,
         Err(Error::LimitExceeded(_))
     ));
     assert!(writer.finish().await.is_err());
@@ -92,17 +91,16 @@ async fn geometry_capacity_and_tiny_limits() -> TestResult {
 async fn reads_are_short_authenticated_and_cache_one_chunk() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let (log, view) = setup(Arc::new(faults.clone()), small()).await?;
-    let payload: Vec<u8> = (0_u8..251).cycle().take(600).collect();
+    let payload: Vec<u8> = (0_u8..251).cycle().take(400).collect();
     let mut writer = log.byte_writer(&view)?;
     drop(writer.write(b"not polled"));
     writer.write(&payload[..17]).await?;
-    assert_eq!(writer.storage_objects(), 2);
     writer.write(&[]).await?;
     writer.write(&payload[17..]).await?;
-    assert_eq!(writer.storage_objects(), 4);
     let root = writer.finish().await?;
+    assert_eq!(root.reference().subtree_objects, 3);
     let mut reader = log.open_bytes(&view, root.reference()).await?;
-    assert_eq!(reader.len(), 600);
+    assert_eq!(reader.len(), 400);
     faults.reset();
     assert!(reader.read_at(u64::MAX, usize::MAX).await?.is_empty());
     assert!(reader.read_at(0, 0).await?.is_empty());
@@ -113,7 +111,7 @@ async fn reads_are_short_authenticated_and_cache_one_chunk() -> TestResult {
     );
     assert_eq!(reader.read_at(0, 1).await?.as_ref(), &payload[..1]);
     assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
-    assert_eq!(reader.read_at(599, 100).await?.as_ref(), &payload[599..]);
+    assert_eq!(reader.read_at(399, 100).await?.as_ref(), &payload[399..]);
     assert_eq!(reader.read_at(0, 1).await?.as_ref(), &payload[..1]);
     assert_eq!(faults.metrics().operation(Operation::Get).requests, 3);
     let mut actual = Vec::new();

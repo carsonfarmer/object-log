@@ -98,6 +98,12 @@ publish checkpoints before the tail reaches its limit. Collection then:
 3. deletes only the objects named by that durable plan; and
 4. clears the exact plan after all deletions succeed.
 
+The WAL checks each publication's dependency count, including its enclosing
+commit or checkpoint, against `max_collection_objects`. Consumers do not count
+storage chunks. Shared descendants count per reference path for admission;
+collection deduplicates physical objects. Historical roots can exceed the bound
+together, so checkpoint the full tail before collecting them.
+
 Long readers acquire a retention ID before opening application data and release
 it after their last read. Any retention blocks a new collection plan. Retentions
 do not expire automatically; clearing IDs lost by a stopped process requires an

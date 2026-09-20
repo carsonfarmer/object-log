@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-use crate::{Error, Log, ObjectKind, ObjectRef, StagedObject, View};
+use crate::{Error, Log, ObjectKind, ObjectRef, StagedObject, View, format};
 
 const TAG: &[u8; 8] = b"OLBS\0\0\0\x01";
 const DESCRIPTOR_BYTES: usize = 24;
@@ -50,12 +50,12 @@ impl Log {
             .min(self.options().max_object_bytes / 32);
         while low < high {
             let mid = low + (high - low).div_ceil(2);
-            if self
-                .node_size(
-                    DESCRIPTOR_BYTES,
-                    std::iter::repeat_n(chunk_bytes as u64, mid),
-                )
-                .is_ok()
+            if format::node_size(
+                DESCRIPTOR_BYTES,
+                std::iter::repeat_n((chunk_bytes as u64, 1), mid),
+                self.options(),
+            )
+            .is_ok()
             {
                 low = mid;
             } else {
@@ -122,16 +122,6 @@ fn invalid() -> Error {
 }
 
 impl ByteWriter {
-    /// Returns the number of immutable WAL objects a finish at the current length owns.
-    ///
-    /// This includes the authenticated stream root, completed chunks, and a
-    /// final partial chunk when one is buffered. The value lets adapters budget
-    /// a larger object graph without depending on the WAL's chunk geometry.
-    #[must_use]
-    pub const fn storage_objects(&self) -> usize {
-        1 + self.children.len() + if self.buffer.is_empty() { 0 } else { 1 }
-    }
-
     /// Appends bytes. Success accepts all input; on error or cancellation discard the writer.
     ///
     /// # Errors

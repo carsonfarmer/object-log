@@ -2,7 +2,11 @@ package main
 
 import (
 	"errors"
+	wt "go.bytecodealliance.org/pkg/wit/types"
 	"io"
+	"net/http"
+	wal "object-log-git-proof/bindings/object_log_storage_wal"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,5 +66,14 @@ func TestComponentBodyDrainsReadBeforeClosing(t *testing.T) {
 	}
 	if raw.reads != 1 || raw.closes != 1 {
 		t.Fatalf("underlying reads=%d closes=%d", raw.reads, raw.closes)
+	}
+}
+
+func TestWALLimitKeepsClientErrorStatus(t *testing.T) {
+	_, err := unwrap(func() wt.Result[wt.Unit, wal.Failure] {
+		return wt.Err[wt.Unit](wal.MakeFailureLimit("publication objects"))
+	})
+	if !errors.Is(err, errObjectLimit) || operationStatus(err) != http.StatusRequestEntityTooLarge || !strings.Contains(err.Error(), "publication objects") {
+		t.Fatalf("WAL capacity rejection lost its client error: %v", err)
 	}
 }

@@ -9,22 +9,16 @@ import (
 )
 
 type bucketMeta struct {
-	Items           []objectMeta `json:",omitempty"`
-	Prefixes        []string     `json:",omitempty"`
-	ChildWALObjects []uint64     `json:",omitempty"`
+	Items    []objectMeta `json:",omitempty"`
+	Prefixes []string     `json:",omitempty"`
 }
 
-type catalogRoot struct {
-	root    *wal.Object
-	objects uint64
-}
-
-func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], error) {
-	if node, ok := s.loaded[value.root]; ok {
+func (s *store) loadBucket(value *wal.Object) (radixNode[indexed, *wal.Object], error) {
+	if node, ok := s.loaded[value]; ok {
 		return node, nil
 	}
-	node := radixNode[indexed, catalogRoot]{}
-	entry, err := s.readNode(value.root)
+	node := radixNode[indexed, *wal.Object]{}
+	entry, err := s.readNode(value)
 	if err != nil {
 		return node, err
 	}
@@ -37,18 +31,18 @@ func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], 
 		return node, err
 	}
 	if len(meta.Prefixes) > 0 {
-		if len(meta.Items) != 0 || len(meta.Prefixes) != len(entry.Objects) || len(meta.Prefixes) != len(meta.ChildWALObjects) || len(meta.Prefixes) > 16 {
+		if len(meta.Items) != 0 || len(meta.Prefixes) != len(entry.Objects) || len(meta.Prefixes) > 16 {
 			return node, fmt.Errorf("invalid index branch")
 		}
-		node.Children = map[string]catalogRoot{}
+		node.Children = map[string]*wal.Object{}
 		for i, key := range meta.Prefixes {
 			if _, exists := node.Children[key]; exists {
 				return node, fmt.Errorf("duplicate index child")
 			}
-			node.Children[key] = catalogRoot{root: entry.Objects[i], objects: meta.ChildWALObjects[i]}
+			node.Children[key] = entry.Objects[i]
 		}
 	} else {
-		if len(meta.ChildWALObjects) != 0 || len(meta.Items) > indexLeafSize {
+		if len(meta.Items) > indexLeafSize {
 			return node, fmt.Errorf("invalid index leaf")
 		}
 		node.Items = map[string]indexed{}
@@ -65,7 +59,7 @@ func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], 
 				return node, fmt.Errorf("invalid inline object")
 			}
 			if len(item.Inline) == 0 {
-				if next == len(entry.Objects) || item.WALObjects == 0 {
+				if next == len(entry.Objects) {
 					return node, fmt.Errorf("missing index object")
 				}
 				value.root = entry.Objects[next]
@@ -77,34 +71,17 @@ func (s *store) loadBucket(value catalogRoot) (radixNode[indexed, catalogRoot], 
 			return node, fmt.Errorf("extra index objects")
 		}
 	}
-	objects, err := bucketObjects(meta)
-	if err != nil || objects != value.objects {
-		return node, fmt.Errorf("invalid index object count")
-	}
-	s.loaded[value.root] = node
+	s.loaded[value] = node
 	return node, nil
 }
 
-func bucketObjects(meta bucketMeta) (uint64, error) {
-	counts := make([]uint64, 0, len(meta.ChildWALObjects)+len(meta.Items))
-	counts = append(counts, meta.ChildWALObjects...)
-	for _, item := range meta.Items {
-		if item.WALObjects > 0 {
-			counts = append(counts, item.WALObjects)
-		}
-	}
-	return sumObjects(1, counts)
-}
-
-func (s *store) saveBucket(node radixNode[indexed, catalogRoot]) (catalogRoot, error) {
+func (s *store) saveBucket(node radixNode[indexed, *wal.Object]) (*wal.Object, error) {
 	var meta bucketMeta
 	var children []*wal.Object
 	if node.Children != nil {
 		meta.Prefixes = slices.Sorted(maps.Keys(node.Children))
 		for _, prefix := range meta.Prefixes {
-			child := node.Children[prefix]
-			children = append(children, child.root)
-			meta.ChildWALObjects = append(meta.ChildWALObjects, child.objects)
+			children = append(children, node.Children[prefix])
 		}
 	} else {
 		keys := slices.AppendSeq(make([]string, 0, len(node.Items)), maps.Keys(node.Items))
@@ -117,17 +94,9 @@ func (s *store) saveBucket(node radixNode[indexed, catalogRoot]) (catalogRoot, e
 		}
 	}
 	limitDeltas(meta.Items)
-	objects, err := bucketObjects(meta)
-	if err != nil {
-		return catalogRoot{}, err
-	}
 	data, err := json.Marshal(meta)
 	if err != nil {
-		return catalogRoot{}, err
+		return nil, err
 	}
-	root, err := s.putNode(data, children)
-	if err != nil {
-		return catalogRoot{}, err
-	}
-	return catalogRoot{root: root, objects: objects}, nil
+	return s.putNode(data, children)
 }

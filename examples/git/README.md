@@ -112,7 +112,7 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `wal_secret_key` | empty | S3 secret key |
 | `wal_session_token` | empty | Optional temporary-credential token |
 | `wal_default_branch` | empty | Persisted default branch when supplied |
-| `wal_max_collection_objects` | `100000` | Maximum physical objects in one repository graph or collection plan |
+| `wal_max_collection_objects` | `100000` | Publication graph bound (shared paths count separately); maximum unique live objects or entries per collection plan |
 | `wal_recover_retentions_after_drain` | `false` | Exclusive lost-retention recovery mode |
 | `git_password` | empty | Optional HTTP Basic password |
 | `git_boot_id` | `local-boot` | Instance identity exposed for recovery tests |
