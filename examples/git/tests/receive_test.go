@@ -2,6 +2,10 @@ package tests
 
 import (
 	"bytes"
+	"compress/zlib"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"math/rand"
 	"os"
@@ -10,6 +14,70 @@ import (
 	"testing"
 	"time"
 )
+
+func TestMalformedPackDoesNotPublish(t *testing.T) {
+	endpoint := os.Getenv("GIT_PROBE_URL")
+	if endpoint == "" {
+		t.Skip("set GIT_PROBE_URL to a local Spin/MinIO instance")
+	}
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			source := t.TempDir()
+			url := strings.TrimRight(endpoint, "/") + "/" + format + ".git"
+			branch := fmt.Sprintf("malformed-%d", time.Now().UnixNano())
+			git(t, nil, "init", "--object-format="+format, "-b", branch, source)
+			write(t, filepath.Join(source, "file"), []byte("valid base"))
+			git(t, nil, "-C", source, "add", ".")
+			git(t, nil, "-C", source, "commit", "-m", "valid base")
+			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+branch)
+			tip := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
+			for _, malformed := range []string{"short-object", "trailing-byte"} {
+				t.Run(malformed, func(t *testing.T) {
+					var pack bytes.Buffer
+					pack.WriteString("PACK")
+					_ = binary.Write(&pack, binary.BigEndian, uint32(2))
+					_ = binary.Write(&pack, binary.BigEndian, uint32(1))
+					header := byte(0x33) // Blob with three decoded bytes.
+					if malformed == "short-object" {
+						header = 0x34 // The writer must reject the short body on Close.
+					}
+					pack.WriteByte(header)
+					z := zlib.NewWriter(&pack)
+					_, _ = z.Write([]byte("abc"))
+					if err := z.Close(); err != nil {
+						t.Fatal(err)
+					}
+					if format == "sha256" {
+						sum := sha256.Sum256(pack.Bytes())
+						pack.Write(sum[:])
+					} else {
+						sum := sha1.Sum(pack.Bytes())
+						pack.Write(sum[:])
+					}
+					if malformed == "trailing-byte" {
+						pack.WriteByte(0)
+					}
+					first := "refs/heads/" + branch + "-" + malformed
+					second := first + "-second"
+					zero := strings.Repeat("0", len(tip))
+					request := append(packet(zero+" "+tip+" "+first+"\x00report-status atomic object-format="+format+"\n"), packet(zero+" "+tip+" "+second+"\n")...)
+					request = append(request, []byte("0000")...)
+					result, _ := post(t, url+"/git-receive-pack", "git-receive-pack", append(request, pack.Bytes()...))
+					if bytes.Contains(result, []byte("unpack ok")) || bytes.Contains(result, []byte("ok "+first)) || bytes.Contains(result, []byte("ok "+second)) {
+						t.Fatalf("malformed pack acknowledged: %s", result)
+					}
+					if malformed == "short-object" && !bytes.Contains(result, []byte("incomplete object")) {
+						t.Fatalf("expected stored writer failure: %s", result)
+					}
+					// Both tips already exist: connectivity cannot mask an unpack failure.
+					if refs := git(t, nil, "ls-remote", url, first, second); len(refs) != 0 {
+						t.Fatalf("malformed pack published refs: %s", refs)
+					}
+				})
+			}
+		})
+	}
+}
 
 // Exercise a multi-chunk incoming pack without depending on the main proof's refs.
 func TestManyObjects(t *testing.T) {

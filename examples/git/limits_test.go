@@ -9,7 +9,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-git/go-git/v6/plumbing"
 )
+
+func TestObjectAndMetadataLimits(t *testing.T) {
+	limits := requestLimits{objectBytes: 32, metadataBytes: 16}
+	for _, kind := range []plumbing.ObjectType{plumbing.BlobObject, plumbing.CommitObject, plumbing.TreeObject, plumbing.TagObject} {
+		for _, size := range []int64{16, 17, 32, 33} {
+			err := limits.checkObject(kind, size)
+			if err != nil && !errors.Is(err, errObjectLimit) {
+				t.Fatalf("%s size %d: unexpected error %v", kind, size, err)
+			}
+			wantLimit := size > 32 || (kind != plumbing.BlobObject && size > 16)
+			if errors.Is(err, errObjectLimit) != wantLimit {
+				t.Fatalf("%s size %d: got %v, want limit=%v", kind, size, err, wantLimit)
+			}
+		}
+	}
+}
 
 func TestRequestLimits(t *testing.T) {
 	defaults, err := loadLimits(func(string) string { return "" })

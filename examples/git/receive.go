@@ -6,7 +6,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// Incoming packs are staged as seekable WAL bytes before streaming import.
+// Incoming packs are staged as seekable WAL bytes before import.
 func (s *store) PackfileWriter() (io.WriteCloser, error) {
 	writer, err := s.newByteWriter()
 	if err != nil {

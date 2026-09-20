@@ -94,6 +94,7 @@ type looseReader struct {
 	remaining int64
 	id        plumbing.Hash
 	err       error
+	failure   *error
 }
 
 func (r *looseReader) Read(p []byte) (int, error) {
@@ -122,11 +123,17 @@ func (r *looseReader) Read(p []byte) (int, error) {
 	}
 	if err != nil {
 		r.err = err
+		if r.failure != nil && !errors.Is(err, io.EOF) {
+			observeRead(r.failure, err)
+		}
 	}
 	return n, err
 }
 func (r *looseReader) Close() error {
 	err := errors.Join(r.body.Close(), r.source.Close())
+	if r.failure != nil {
+		observeRead(r.failure, err)
+	}
 	r.err = io.ErrClosedPipe
 	return err
 }

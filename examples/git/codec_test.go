@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
@@ -16,10 +17,11 @@ import (
 
 type closeProbe struct {
 	*bytes.Reader
-	closed bool
+	closed   bool
+	closeErr error
 }
 
-func (r *closeProbe) Close() error { r.closed = true; return nil }
+func (r *closeProbe) Close() error { r.closed = true; return r.closeErr }
 
 func TestLooseRoundTripAndValidation(t *testing.T) {
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
@@ -41,12 +43,17 @@ func TestLooseRoundTripAndValidation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				var failure error
+				r.(*looseReader).failure = &failure
 				got, err := io.ReadAll(r)
 				if err != nil || !bytes.Equal(got, data) {
 					t.Fatalf("roundtrip: %v", err)
 				}
 				if err = r.Close(); err != nil || !source.closed {
 					t.Fatal("source not closed")
+				}
+				if failure != nil {
+					t.Fatalf("successful read recorded failure: %v", failure)
 				}
 				for _, test := range []struct {
 					name       string
@@ -63,8 +70,13 @@ func TestLooseRoundTripAndValidation(t *testing.T) {
 					source = &closeProbe{Reader: bytes.NewReader(test.compressed)}
 					r, err = readLoose(source, format, test.kind, test.size, test.id)
 					if err == nil {
+						failure = nil
+						r.(*looseReader).failure = &failure
 						_, err = io.ReadAll(r)
 						_ = r.Close()
+						if failure == nil || !errors.Is(failure, err) {
+							t.Fatalf("%s: read failure was not retained: %v / %v", test.name, err, failure)
+						}
 					}
 					if err == nil || !source.closed {
 						t.Fatalf("%s: accepted or leaked source: %v %v", test.name, err, source.closed)
@@ -75,6 +87,28 @@ func TestLooseRoundTripAndValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLooseReaderRecordsCloseFailure(t *testing.T) {
+	var encoded bytes.Buffer
+	w := objfile.NewWriter(&encoded, config.SHA1)
+	if err := w.WriteHeader(plumbing.BlobObject, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("source close failed")
+	source := &closeProbe{Reader: bytes.NewReader(encoded.Bytes()), closeErr: want}
+	r, err := readLoose(source, config.SHA1, plumbing.BlobObject, 0, w.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure error
+	r.(*looseReader).failure = &failure
+	if err := r.Close(); !errors.Is(err, want) || !errors.Is(failure, want) {
+		t.Fatalf("close failure was not retained: %v / %v", err, failure)
 	}
 }
 func TestLooseRejectsDeclaredBodyMismatch(t *testing.T) {

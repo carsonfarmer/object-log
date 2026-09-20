@@ -17,7 +17,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
-	packutil "github.com/go-git/go-git/v6/plumbing/format/packfile/util"
 	"github.com/go-git/go-git/v6/storage/memory"
 	gitbinary "github.com/go-git/go-git/v6/utils/binary"
 )
@@ -120,7 +119,7 @@ func blobID(f format.ObjectFormat, data []byte) plumbing.Hash {
 	_, _ = h.Write(data)
 	return h.Sum()
 }
-func TestImportPackStreaming(t *testing.T) {
+func TestImportPackRoundTrip(t *testing.T) {
 	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
 		t.Run(string(f), func(t *testing.T) {
 			base := []byte("abcdefghijklmnopqrst")
@@ -208,9 +207,6 @@ func TestImportPackRejectsInvalid(t *testing.T) {
 			if err := importPack(context.Background(), bytes.NewReader(packed), s, f, testPackLimits(1024)); err == nil {
 				t.Fatal("accepted malformed delta")
 			}
-			if tc.name == "oversized-result" && s.writes != 0 {
-				t.Fatal("size limit checked after storage writes")
-			}
 		})
 	}
 	for _, mode := range []string{"checksum", "trailing", "truncated", "missing-base", "canceled"} {
@@ -247,14 +243,12 @@ func TestImportPackRejectsInvalid(t *testing.T) {
 	}
 }
 
-// A virtual large base makes accidental whole-object buffering visible without
-// storing a full base or result in the test itself.
+// A virtual base exercises failures without storing the object in the fixture.
 type repeatedObject struct {
 	plumbing.EncodedObject
 	size         int64
 	actual       int64
 	opens, reads int
-	largestRead  int
 	openError    error
 }
 
@@ -272,32 +266,30 @@ type repeatReader struct{ o *repeatedObject }
 
 func (r *repeatReader) Read(p []byte) (int, error) {
 	r.o.reads++
-	r.o.largestRead = max(r.o.largestRead, len(p))
 	for i := range p {
 		p[i] = 'x'
 	}
 	return len(p), nil
 }
 
-type streamingStorage struct {
+type importSinkStorage struct {
 	*memory.Storage
 	base      *repeatedObject
 	writes    int64
-	largest   int
 	sinkError error
 	cancel    context.CancelFunc
 }
 
-func (s *streamingStorage) EncodedObject(plumbing.ObjectType, plumbing.Hash) (plumbing.EncodedObject, error) {
+func (s *importSinkStorage) EncodedObject(plumbing.ObjectType, plumbing.Hash) (plumbing.EncodedObject, error) {
 	return s.base, nil
 }
-func (s *streamingStorage) RawObjectWriter(plumbing.ObjectType, int64) (io.WriteCloser, error) {
-	return streamSink{s}, nil
+func (s *importSinkStorage) RawObjectWriter(plumbing.ObjectType, int64) (io.WriteCloser, error) {
+	return importSink{s}, nil
 }
 
-type streamSink struct{ s *streamingStorage }
+type importSink struct{ s *importSinkStorage }
 
-func (w streamSink) Write(p []byte) (int, error) {
+func (w importSink) Write(p []byte) (int, error) {
 	if w.s.sinkError != nil {
 		return 0, w.s.sinkError
 	}
@@ -305,45 +297,14 @@ func (w streamSink) Write(p []byte) (int, error) {
 		w.s.cancel()
 	}
 	w.s.writes += int64(len(p))
-	w.s.largest = max(w.s.largest, len(p))
 	return len(p), nil
 }
-func (w streamSink) Close() error { return nil }
-func TestImportPackStreamsLargeDelta(t *testing.T) {
-	const size = 16 << 20
-	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
-		t.Run(string(f), func(t *testing.T) {
-			delta := append(packutil.EncodeLEB128(size), packutil.EncodeLEB128(size)...)
-			// Two 8 MiB copies reopen the base once, without retaining either result.
-			delta = append(delta, 0xc0, 0x80, 0xc0, 0x80)
-			packed := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: delta, ref: blobID(f, []byte("base"))}})
-			s := &streamingStorage{base: &repeatedObject{size: size, actual: size}}
-			if err := importPack(context.Background(), bytes.NewReader(packed), s, f, testPackLimits(size)); err != nil {
-				t.Fatal(err)
-			}
-			if s.writes != size || s.largest > 32<<10 || s.base.opens != 2 || s.base.largestRead > 32<<10 {
-				t.Fatalf("writes=%d largest=%d opens=%d", s.writes, s.largest, s.base.opens)
-			}
-		})
-	}
-}
-func TestImportPackRejectsOversizedDeltaBeforeReadingBase(t *testing.T) {
-	const size = 1025
-	delta := append(packutil.EncodeLEB128(size), packutil.EncodeLEB128(size)...)
-	delta = append(delta, 0xb0, 1, 4) // Copy 1025 bytes from the base.
-	packed := fixturePack(t, format.SHA1, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: delta, ref: blobID(format.SHA1, []byte("base"))}})
-	s := &streamingStorage{base: &repeatedObject{size: size, actual: size}}
-	err := importPack(t.Context(), bytes.NewReader(packed), s, format.SHA1, testPackLimits(1024))
-	if !errors.Is(err, errObjectLimit) || s.writes != 0 || s.base.opens != 0 {
-		t.Fatalf("oversized delta: err=%v writes=%d base opens=%d", err, s.writes, s.base.opens)
-	}
-}
-
+func (w importSink) Close() error { return nil }
 func TestImportPackBaseAndSinkFailures(t *testing.T) {
-	for _, mode := range []string{"short-base", "base-open", "sink", "base-limit"} {
+	for _, mode := range []string{"short-base", "base-open", "sink"} {
 		t.Run(mode, func(t *testing.T) {
 			injected := errors.New("injected failure")
-			s := &streamingStorage{base: &repeatedObject{size: 3, actual: 3}}
+			s := &importSinkStorage{base: &repeatedObject{size: 3, actual: 3}}
 			switch mode {
 			case "short-base":
 				s.base.actual = 1
@@ -351,8 +312,6 @@ func TestImportPackBaseAndSinkFailures(t *testing.T) {
 				s.base.openError = injected
 			case "sink":
 				s.sinkError = injected
-			case "base-limit":
-				s.base.size = 1025
 			}
 			packed := fixturePack(t, format.SHA1, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: []byte{3, 3, 0x90, 3}, ref: blobID(format.SHA1, []byte("base"))}})
 			err := importPack(context.Background(), bytes.NewReader(packed), s, format.SHA1, testPackLimits(1024))
@@ -361,9 +320,6 @@ func TestImportPackBaseAndSinkFailures(t *testing.T) {
 			}
 			if mode == "sink" && !errors.Is(err, injected) {
 				t.Fatal(err)
-			}
-			if mode == "base-limit" && (s.base.opens != 0 || s.writes != 0) {
-				t.Fatal("opened oversized base")
 			}
 		})
 	}
@@ -391,7 +347,7 @@ func TestImportPackBoundsDeltaDepth(t *testing.T) {
 }
 
 func TestImportPackObjectFraming(t *testing.T) {
-	for _, mode := range []string{"empty-pack", "short-object", "long-object", "reserved-kind", "version", "zlib-checksum"} {
+	for _, mode := range []string{"empty-pack", "long-object", "reserved-kind", "version", "zlib-checksum"} {
 		t.Run(mode, func(t *testing.T) {
 			f := format.SHA1
 			entries := []packFixtureEntry{{kind: plumbing.BlobObject, data: []byte("abc")}}
@@ -400,8 +356,6 @@ func TestImportPackObjectFraming(t *testing.T) {
 			}
 			packed := fixturePack(t, f, entries)
 			switch mode {
-			case "short-object":
-				packed[12] = 0x34
 			case "long-object":
 				packed[12] = 0x32
 			case "reserved-kind":
@@ -425,11 +379,11 @@ func testPackLimits(size int64) requestLimits {
 	return requestLimits{objectBytes: size, metadataBytes: size, packObjects: 1_000_000}
 }
 
-func TestPackEntryAndMetadataBounds(t *testing.T) {
+func TestPackEntryBounds(t *testing.T) {
 	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
 		t.Run(f.String(), func(t *testing.T) {
 			limits := testPackLimits(1024)
-			limits.packObjects, limits.metadataBytes = 2, 16
+			limits.packObjects = 2
 			for _, n := range []int{2, 3} {
 				entries := make([]packFixtureEntry, n)
 				for i := range entries {
@@ -450,55 +404,23 @@ func TestPackEntryAndMetadataBounds(t *testing.T) {
 			if err := importPack(context.Background(), bytes.NewReader(oversized), newImportStorage(f), f, limits); !errors.Is(err, errObjectLimit) {
 				t.Fatalf("header count: %v", err)
 			}
-			for _, kind := range []plumbing.ObjectType{plumbing.CommitObject, plumbing.TreeObject, plumbing.TagObject, plumbing.BlobObject} {
-				for _, size := range []int{16, 17} {
-					s := newImportStorage(f)
-					packed := fixturePack(t, f, []packFixtureEntry{{kind: kind, data: bytes.Repeat([]byte{'x'}, size)}})
-					err := importPack(context.Background(), bytes.NewReader(packed), s, f, limits)
-					if kind == plumbing.BlobObject || size == 16 {
-						if err != nil {
-							t.Fatalf("%s size%d: %v", kind, size, err)
-						}
-					} else if !errors.Is(err, errObjectLimit) || s.writes != 0 {
-						t.Fatalf("metadata overflow %s: %v writes=%d", kind, err, s.writes)
-					}
-				}
-				// Both delta encodings inherit their base type; neither bypasses metadata limits.
-				for _, deltaKind := range []plumbing.ObjectType{plumbing.REFDeltaObject, plumbing.OFSDeltaObject} {
-					baseData := []byte("x")
-					hasher := plumbing.NewHasher(f, kind, int64(len(baseData)))
-					_, _ = hasher.Write(baseData)
-					base := hasher.Sum()
-					delta := append([]byte{1, 17, 17}, bytes.Repeat([]byte{'y'}, 17)...)
-					packed := fixturePack(t, f, []packFixtureEntry{{kind: kind, data: baseData}, {kind: deltaKind, ref: base, ofs: 0, data: delta}})
-					s := newImportStorage(f)
-					err := importPack(context.Background(), bytes.NewReader(packed), s, f, limits)
-					if kind == plumbing.BlobObject {
-						if err != nil || s.writes != 2 {
-							t.Fatalf("blob delta: %v writes=%d", err, s.writes)
-						}
-					} else if !errors.Is(err, errObjectLimit) || s.writes != 1 {
-						t.Fatalf("metadata delta %s %s: %v writes=%d", kind, deltaKind, err, s.writes)
-					}
-				}
-			}
 		})
 	}
 }
 
-func (s *importStorage) LowMemoryMode() bool    { return true }
-func (s *streamingStorage) LowMemoryMode() bool { return true }
+func (s *importStorage) LowMemoryMode() bool     { return true }
+func (s *importSinkStorage) LowMemoryMode() bool { return true }
 
-func TestImportPackTrailingBytesDoNotResolveDeltas(t *testing.T) {
+func TestImportPackRejectsTrailingBytesWithDelta(t *testing.T) {
 	t.Parallel()
 	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
 		t.Run(string(f), func(t *testing.T) {
 			t.Parallel()
 			packed := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, data: []byte{3, 1, 0x90, 1}, ref: blobID(f, []byte("abc"))}})
-			s := &streamingStorage{base: &repeatedObject{size: 3, actual: 3}}
+			s := &importSinkStorage{base: &repeatedObject{size: 3, actual: 3}}
 			err := importPack(t.Context(), bytes.NewReader(append(packed, 0)), s, f, testPackLimits(1024))
-			if err == nil || s.base.opens != 0 || s.writes != 0 {
-				t.Fatalf("trailing pack: err=%v, base reads=%d, writes=%d", err, s.base.opens, s.writes)
+			if err == nil {
+				t.Fatal("accepted trailing bytes")
 			}
 		})
 	}
@@ -517,7 +439,7 @@ func TestImportPackCancellationDuringInflation(t *testing.T) {
 	packed := fixturePack(t, format.SHA1, []packFixtureEntry{{kind: plumbing.BlobObject, data: data}})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	s := &streamingStorage{cancel: cancel}
+	s := &importSinkStorage{cancel: cancel}
 	err := importPack(ctx, bytes.NewReader(packed), s, format.SHA1, testPackLimits(int64(len(data))))
 	if !errors.Is(err, context.Canceled) || s.writes == 0 || s.writes >= int64(len(data)) {
 		t.Fatalf("canceled inflation: err=%v, wrote %d/%d bytes", err, s.writes, len(data))

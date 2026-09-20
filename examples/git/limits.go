@@ -116,7 +116,8 @@ func operationStatus(err error) int {
 	}
 }
 
-// Structured objects are decoded into Go fields; blobs remain streamed.
+// Structured objects are decoded into Go fields; plain blobs stream through
+// storage, while go-git's delta importer buffers bases and results.
 func (l requestLimits) checkObject(kind plumbing.ObjectType, size int64) error {
 	if size < 0 {
 		return fmt.Errorf("invalid object size")

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -104,6 +105,47 @@ func TestConfiguredLimits(t *testing.T) {
 			}
 			if refs := git(t, nil, "ls-remote", url, "refs/heads/limits"); len(refs) != 0 {
 				t.Fatalf("rejected object published: %s", refs)
+			}
+
+			// A 60 KiB base is admissible; its 100 KiB delta result is not.
+			source = t.TempDir()
+			git(t, nil, "init", "--object-format="+format, "-b", "delta-limit", source)
+			base := make([]byte, 60*1024)
+			_, _ = rand.New(rand.NewSource(74)).Read(base)
+			write(t, filepath.Join(source, "file"), base)
+			git(t, nil, "-C", source, "add", ".")
+			git(t, nil, "-C", source, "commit", "-m", "admissible base")
+			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/delta-limit-base")
+			baseTip := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
+			write(t, filepath.Join(source, "file"), append(bytes.Clone(base), base[:40*1024]...))
+			git(t, nil, "-C", source, "add", ".")
+			git(t, nil, "-C", source, "commit", "-m", "oversized delta result")
+			tip = strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
+			blob := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD:file")))
+			pack = git(t, []byte(tip+"\n^"+baseTip+"\n"), "-C", source, "pack-objects", "--stdout", "--thin", "--revs", "--no-reuse-delta")
+			// Native Git appends the base to make the incoming pack self-contained.
+			indexed := strings.Fields(string(git(t, pack, "-C", source, "index-pack", "--stdin", "--fix-thin")))
+			packName := filepath.Join(source, ".git", "objects", "pack", "pack-"+indexed[len(indexed)-1])
+			verified := string(git(t, nil, "-C", source, "verify-pack", "-v", packName+".idx"))
+			deltaFound := false
+			for _, line := range strings.Split(verified, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 7 && fields[0] == blob && fields[5] == "1" {
+					deltaFound = true
+				}
+			}
+			pack, err = os.ReadFile(packName + ".pack")
+			if err != nil || !deltaFound || len(pack) >= 128*1024 {
+				t.Fatalf("invalid delta-limit fixture: delta=%v bytes=%d err=%v", deltaFound, len(pack), err)
+			}
+			command = strings.Repeat("0", len(tip)) + " " + tip + " refs/heads/delta-limit\x00report-status atomic object-format=" + format + "\n"
+			body = append(packet(command), []byte("0000")...)
+			reply, _ = post(t, url+"/git-receive-pack", "git-receive-pack", append(body, pack...))
+			if !bytes.Contains(reply, []byte("GIT_MAX_OBJECT_BYTES")) {
+				t.Fatalf("missing delta-result rejection: %s", reply)
+			}
+			if refs := git(t, nil, "ls-remote", url, "refs/heads/delta-limit"); len(refs) != 0 {
+				t.Fatalf("rejected delta published: %s", refs)
 			}
 		})
 	}

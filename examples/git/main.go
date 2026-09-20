@@ -9,6 +9,7 @@ import (
 	"github.com/go-git/go-git/v6/backend"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
+	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/transport"
@@ -42,13 +43,20 @@ func advertise(w io.Writer, s *store) error {
 		return err
 	}
 	adv := &packp.AdvRefs{}
-	for _, feature := range []string{capability.ReportStatus, capability.DeleteRefs, capability.OFSDelta, capability.Atomic} {
+	for _, feature := range []string{capability.ReportStatus, capability.DeleteRefs, capability.OFSDelta, capability.Atomic, capability.NoThin} {
 		adv.Capabilities.Add(feature)
 	}
 	adv.Capabilities.Set(capability.ObjectFormat, s.meta.Format.String())
 	for _, name := range slices.Sorted(maps.Keys(s.meta.Refs)) {
 		id := s.meta.Refs[name]
 		adv.References = append(adv.References, plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
+	}
+	if len(adv.References) == 0 && s.meta.Format == config.SHA256 {
+		// Upstream AdvRefs.Encode uses a SHA-1 zero ID for the empty sentinel.
+		if _, err := pktline.Writef(w, "%s capabilities^{}\x00%s\n", strings.Repeat("0", 64), adv.Capabilities.String()); err != nil {
+			return err
+		}
+		return pktline.WriteFlush(w)
 	}
 	return adv.Encode(w)
 }

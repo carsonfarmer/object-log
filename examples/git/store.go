@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -136,7 +137,12 @@ func (s *store) lookup(id plumbing.Hash) (indexed, error) {
 	}
 	return item, nil
 }
-func (s *store) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) (plumbing.EncodedObject, error) {
+func (s *store) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) (object plumbing.EncodedObject, err error) {
+	defer func() {
+		if !errors.Is(err, plumbing.ErrObjectNotFound) {
+			observeRead(&s.failure, err)
+		}
+	}()
 	item, e := s.lookup(id)
 	if e != nil {
 		return nil, e
@@ -321,7 +327,13 @@ func (o *storedObject) Size() int64                     { return o.item.Size }
 func (o *storedObject) SetType(plumbing.ObjectType)     { panic("immutable object") }
 func (o *storedObject) SetSize(int64)                   { panic("immutable object") }
 func (o *storedObject) Writer() (io.WriteCloser, error) { return nil, fmt.Errorf("immutable object") }
-func (o *storedObject) Reader() (io.ReadCloser, error) {
+func (o *storedObject) Reader() (reader io.ReadCloser, err error) {
+	defer func() {
+		observeRead(&o.s.failure, err)
+		if codec, ok := reader.(*looseReader); ok {
+			codec.failure = &o.s.failure
+		}
+	}()
 	if err := o.s.limits.checkObject(o.item.Kind, o.item.Size); err != nil {
 		observeRead(&o.s.failure, err)
 		return nil, err

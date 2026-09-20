@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
-	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260916080202-3cb46ce7621c
+	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260917090420-0f3a0a2c2551
 	go.bytecodealliance.org/pkg v0.2.4-0.20260806154504-91f6c4863e67
 )
 
@@ -20,7 +20,5 @@ require (
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
-
-replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260916222942-8a806eeb2f81
 
 replace go.bytecodealliance.org/pkg => github.com/carsonfarmer/go-pkg v0.2.4-0.20260916211624-b0c40df4c02b
