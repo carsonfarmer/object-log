@@ -27,6 +27,6 @@ This adapter configures WAL objects up to 2 MiB. With the current authenticated
 chunk geometry, one byte stream can represent up to 2 GiB. Incoming Git packs
 use the same API without publishing their temporary stream roots.
 
-The build uses a checksum-verified Wasmtime adapter revision documented in
+The build uses componentize-go's bundled adapter; dependency revisions are in
 [THIRD_PARTY.md](../../THIRD_PARTY.md). Native tests cover the component library;
 strict native and WASIp2 Clippy checks run as part of `make git-check`.

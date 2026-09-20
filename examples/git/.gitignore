@@ -3,5 +3,4 @@
 /wit/deps/wal/
 /git.wasm
 /.spin/
-/.adapter/
 /.componentize/

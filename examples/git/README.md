@@ -23,11 +23,11 @@ object-store prefix when changing incompatible revisions.
 
 ## Build
 
-Install Go 1.26.3, the repository's pinned Rust toolchain, Spin 4, `wac`, MinIO,
+Install Go 1.27.1, the repository's pinned Rust toolchain, Spin 4, `wac`, MinIO,
 and the MinIO `mc` client. Then run from the repository root:
 
 ```sh
-rustup target add wasm32-unknown-unknown wasm32-wasip2
+rustup target add wasm32-wasip2
 make git-check
 make git-build
 ```
@@ -225,8 +225,8 @@ Never clear retentions while a reader may still be active.
 - Partial-clone filters and packfile URIs are not implemented.
 - Host-wide TLS, routing, authentication integration, concurrency, and memory
   admission belong to the deployment host.
-- go-git, Spin, and MinIO are unmodified. Component build and binding fixes
-  remain pinned; see [their provenance](../../THIRD_PARTY.md).
+- go-git, Spin, MinIO, and componentize-go are unmodified. The Go SDK pins the
+  proposed fix in go-pkg PR #13; see [its provenance](../../THIRD_PARTY.md).
 - Durable development formats are not migrated. Start with a fresh prefix after
   an incompatible revision change.
 

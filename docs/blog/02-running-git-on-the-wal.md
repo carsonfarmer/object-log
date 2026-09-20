@@ -69,20 +69,20 @@ small as Git's repacking machinery would produce.
 
 ## Run it on a laptop
 
-The local setup needs Git, Go 1.26.3, the repository's pinned Rust toolchain,
+The local setup needs Git, Go 1.27.1, the repository's pinned Rust toolchain,
 Spin 4, `wac`, MinIO, and MinIO's `mc` client. It uses two local processes:
 MinIO for storage and Spin for HTTP. No cloud account is needed.
 
 From the repository root, build the component:
 
 ```sh
-rustup target add wasm32-unknown-unknown wasm32-wasip2
+rustup target add wasm32-wasip2
 make git-check
 make git-build
 ```
 
 The result is `examples/git/git.wasm`. The first build also compiles the
-component build tool and adapter; later builds reuse those artifacts. This
+component build tool; later builds reuse it. This
 is currently a source-build workflow, not a prebuilt one-command install.
 
 In one terminal, start an isolated local object store:
@@ -171,7 +171,7 @@ size. Pushes advertise Git's `no-thin` capability, so clients include delta base
 in the upload. This can cost bandwidth, but uses Git's existing negotiation
 without changing clients.
 
-The Go component build still pins binding/runtime fixes, described in
+The Go component pins a proposed upstream SDK fix, described in
 [THIRD_PARTY.md](../../THIRD_PARTY.md). Minimizing that remaining maintenance
 burden is unfinished work.
 

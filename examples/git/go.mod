@@ -1,6 +1,6 @@
 module object-log-git-proof
 
-go 1.26.3
+go 1.27.1
 
 require (
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
@@ -21,4 +21,4 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 )
 
-replace go.bytecodealliance.org/pkg => github.com/carsonfarmer/go-pkg v0.2.4-0.20260916211624-b0c40df4c02b
+replace go.bytecodealliance.org/pkg => github.com/ricochet/go-pkg v0.0.0-20260912220218-af8c737ad573

@@ -4,29 +4,30 @@ Project code is Apache-2.0; see [LICENSE](LICENSE). `object-log` is the only
 publishable Cargo package. The key-value example and WASIp2 component are also
 Apache-2.0 and set `publish = false`. Dependencies retain their own licenses.
 
-## Retained adapter source
+## Git component dependencies
 
-The Git build uses Wasmtime's `wasi-preview1-component-adapter` from
-[revision `c8e24c3`](https://github.com/carsonfarmer/wasmtime/tree/c8e24c308754f784fbb4a08205a2a9c08c461d00),
-which contains the fix proposed in
-[Wasmtime #14319](https://github.com/bytecodealliance/wasmtime/pull/14319).
-The build script verifies the downloaded source archive checksum. The adapter's
-Apache-2.0 WITH LLVM-exception license is reproduced in
+The build uses the preview1 adapter bundled with unmodified
+[componentize-go v0.4.3](https://github.com/bytecodealliance/componentize-go/commit/148dba505f8c6c64ad84db777cfde5e34e25098b).
+The adapter's Apache-2.0 WITH LLVM-exception license is reproduced in
 [`licenses/wasmtime.txt`](licenses/wasmtime.txt) and must accompany redistributed
-adapter source or binaries.
+adapter binaries.
 
 The Git example uses unmodified upstream [go-git at revision `0f3a0a2`](https://github.com/go-git/go-git/commit/0f3a0a2c25513f2666ac9b88a6745f7b2382f572).
 It uses the public pack parser, object storage, stored-delta, and receive-hook
 interfaces. Incoming deltas use go-git's normal buffering. Receive-pack
 advertises `no-thin`, so ordinary Git clients include the bases their packs need.
 
-The Go component bindings pin a [go-pkg revision](https://github.com/carsonfarmer/go-pkg/commit/b0c40df4c02bb780994cedee093376abe9144ba2)
-that releases imported buffers after lifting them into Go values. The build
-compiles upstream [componentize-go v0.4.3](https://github.com/bytecodealliance/componentize-go/commit/148dba505f8c6c64ad84db777cfde5e34e25098b)
-with a Cargo dependency override for the corresponding
-[binding-generator correction](https://github.com/carsonfarmer/wit-bindgen/commit/fd8f26d9b019b853770c0446ab27530567e51c39).
-These ownership fixes have not been submitted upstream. Source revisions are
-pinned in `examples/git/Makefile` and `go.mod`; their upstream licenses apply.
+The Go SDK pins [go-pkg PR #13](https://github.com/bytecodealliance/go-pkg/pull/13)
+at its contributor's exact [revision `af8c737`](https://github.com/ricochet/go-pkg/commit/af8c737ad573d76dd08cf2927baf2660475c5c01).
+The change postpones garbage collection during canonical allocation, allowing
+the stock adapter to run the Go component. The PR is unmerged; the module
+replacement uses that revision unchanged, with no project-specific SDK patch.
+The binding generator is the version bundled with componentize-go.
+
+The service serializes allocating component calls and releases imported-buffer
+pins through go-pkg's public `Unpin` function after the bindings return Go
+values. Source revisions are pinned in `examples/git/Makefile` and `go.mod`;
+their upstream licenses apply.
 
 ## Design acknowledgements
 
@@ -63,4 +64,4 @@ output into the tracked inventories, preserving fork-specific revision URLs.
 
 Before distributing the composed Git component, collect dependency license and
 notice files from the same locked build inputs and include this project's
-license plus the retained adapter license.
+license plus the bundled adapter license.

@@ -47,15 +47,19 @@ Partial-clone filters and packfile URIs are outside the current proof.
 
 ## Dependencies
 
-The Git example uses unmodified upstream go-git and pins component build and
-binding fixes. Their exact provenance and upstream references are in
+The Git example uses unmodified upstream go-git and componentize-go, including
+its bundled adapter. The SDK pins the unchanged contributor revision from
+go-pkg PR #13 while it remains under review. Dependency provenance and references are in
 `THIRD_PARTY.md`. Do not add another Git implementation or local storage
 authority. Use ordinary Spin and unmodified
 S3-compatible storage.
 
-Go component bindings release imported buffers individually after lifting.
-Keep the SDK and generator pins together; older bindings retain every streamed
-chunk or call the removed global cleanup function.
+The synchronous WASIp2 service serializes allocating component calls through
+lifting and upstream `Unpin`. Its HTTP body wrapper drains active reads and
+rejects late reads after closure. Recheck that boundary before adding background
+component calls or moving to asynchronous WASI. Buffer pins are released during
+the handler; wasihttp closes its response after the handler returns. Separate
+Spin requests still run concurrently.
 
 The API and durable layout are pre-release. Use a fresh prefix after an
 incompatible format change; do not add readers for discarded development

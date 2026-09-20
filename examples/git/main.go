@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-git/v6/storage"
 	gitio "github.com/go-git/go-git/v6/utils/ioutil"
 	"go.bytecodealliance.org/pkg/wasihttp"
+	wt "go.bytecodealliance.org/pkg/wit/types"
 	"io"
 	"log"
 	"maps"
@@ -32,9 +33,9 @@ func (l loader) Load(*url.URL) (storage.Storer, error) { return l.s, nil }
 
 func sessionRetention(session *wal.Session) (retentionCall, retentionCall) {
 	return func(id []byte) (wal.RetentionState, error) {
-			return unwrap(session.Retain(id))
+			return unwrap(func() wt.Result[wal.RetentionState, wal.Failure] { return session.Retain(id) })
 		}, func(id []byte) (wal.RetentionState, error) {
-			return unwrap(session.ReleaseRetention(id))
+			return unwrap(func() wt.Result[wal.RetentionState, wal.Failure] { return session.ReleaseRetention(id) })
 		}
 }
 
@@ -63,6 +64,11 @@ func advertise(w io.Writer, s *store) error {
 func init() { wasihttp.HandleFunc(serve) }
 func main() {}
 func serve(response http.ResponseWriter, r *http.Request) {
+	response = componentResponse{response}
+	if r.Body != nil {
+		r.Body = &componentBody{ReadCloser: r.Body}
+		defer r.Body.Close()
+	}
 	response.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
 	response.Header().Set("X-Git-Target-ID", targetID(getConfig))
 	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 2)
@@ -123,7 +129,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
-	defer r.Body.Close()
 	format := config.SHA1
 	if parts[0] == "sha256.git" {
 		format = config.SHA256
@@ -132,7 +137,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
-	session, e := unwrap(wal.Open(wal.Config{Endpoint: getConfig("WAL_ENDPOINT"), Bucket: getConfig("WAL_BUCKET"), Region: getConfig("WAL_REGION"), AccessKey: getConfig("WAL_ACCESS_KEY"), SecretKey: getConfig("WAL_SECRET_KEY"), SessionToken: sessionToken(getConfig), Prefix: getConfig("WAL_PREFIX"), LogId: "repo-" + format.String(), MaxCollectionObjects: uint64(limits.collectionObjects)}))
+	settings := wal.Config{Endpoint: getConfig("WAL_ENDPOINT"), Bucket: getConfig("WAL_BUCKET"), Region: getConfig("WAL_REGION"), AccessKey: getConfig("WAL_ACCESS_KEY"), SecretKey: getConfig("WAL_SECRET_KEY"), SessionToken: sessionToken(getConfig), Prefix: getConfig("WAL_PREFIX"), LogId: "repo-" + format.String(), MaxCollectionObjects: uint64(limits.collectionObjects)}
+	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] { return wal.Open(settings) })
 	if e != nil {
 		http.Error(response, e.Error(), operationStatus(e))
 		return
@@ -151,7 +157,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		if err := r.Context().Err(); err != nil {
 			return err
 		}
-		fresh, err := unwrap(session.Refresh())
+		fresh, err := unwrap(session.Refresh)
 		if err == nil {
 			session.Drop()
 			session = fresh
@@ -206,7 +212,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if recoverRetentions {
 		e = resolveDrainedRecovery(func() (wal.RetentionState, error) {
-			return unwrap(session.ClearRetentionsAfterDrain())
+			return unwrap(session.ClearRetentionsAfterDrain)
 		})
 		if e != nil {
 			http.Error(w, "drained retention recovery failed: "+e.Error(), operationStatus(e))

@@ -66,8 +66,9 @@ edge.
 
 ## Dependency policy
 
-The service uses unmodified upstream go-git and temporarily pins component
-build and binding fixes. Exact revisions, licenses, and upstream references
+The service uses unmodified upstream go-git and componentize-go, including its
+bundled adapter. It pins the unchanged go-pkg PR #13 revision pending upstream
+review. Exact revisions, licenses, and upstream references
 live in `THIRD_PARTY.md`. New fork-only behavior requires owner review and
 focused tests. The service uses
 ordinary Spin and unmodified object storage.

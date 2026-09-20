@@ -20,7 +20,10 @@ import (
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 )
 
-func unwrap[T any](r wt.Result[T, wal.Failure]) (T, error) {
+func unwrap[T any](call func() wt.Result[T, wal.Failure]) (T, error) {
+	imports.Lock()
+	defer finishImports()
+	r := call()
 	if r.IsOk() {
 		return r.Ok(), nil
 	}
@@ -67,7 +70,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 		}
 	}()
 	s.meta = rootMeta{Format: format, Refs: map[string]string{}}
-	recovered, e := unwrap(session.LatestCompleteState())
+	recovered, e := unwrap(session.LatestCompleteState)
 	if e != nil {
 		return nil, e
 	}
@@ -408,7 +411,7 @@ func (s *store) publishRoot(root *wal.Object) (wal.Outcome, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.Outcome{}, err
 	}
-	candidate, e := unwrap(s.session.Prepare(nil, []*wal.Object{root}))
+	candidate, e := unwrap(func() wt.Result[*wal.Candidate, wal.Failure] { return s.session.Prepare(nil, []*wal.Object{root}) })
 	if e != nil {
 		return wal.Outcome{}, e
 	}
@@ -416,7 +419,7 @@ func (s *store) publishRoot(root *wal.Object) (wal.Outcome, error) {
 	if e := s.ctx.Err(); e != nil {
 		return wal.Outcome{}, e
 	}
-	return unwrap(candidate.Publish())
+	return unwrap(candidate.Publish)
 }
 
 func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
@@ -461,7 +464,7 @@ func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
 		observeRead(&s.failure, err)
 		return wal.Entry{}, err
 	}
-	entry, e := unwrap(s.session.ReadNode(root))
+	entry, e := unwrap(func() wt.Result[wal.Entry, wal.Failure] { return s.session.ReadNode(root) })
 	observeRead(&s.failure, e)
 	if e == nil {
 		s.owned = append(s.owned, entry.Objects...)
@@ -472,7 +475,7 @@ func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
 	if err := s.ctx.Err(); err != nil {
 		return nil, err
 	}
-	o, e := unwrap(s.session.PutNode(b, children))
+	o, e := unwrap(func() wt.Result[*wal.Object, wal.Failure] { return s.session.PutNode(b, children) })
 	if e == nil {
 		s.owned = append(s.owned, o)
 	}

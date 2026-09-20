@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	wt "go.bytecodealliance.org/pkg/wit/types"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/revlist"
@@ -90,7 +91,9 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	state, err := unwrap(s.session.Checkpoint(nil, []*wal.Object{root}))
+	state, err := unwrap(func() wt.Result[wal.MaintenanceState, wal.Failure] {
+		return s.session.Checkpoint(nil, []*wal.Object{root})
+	})
 	if err != nil {
 		return wal.CollectionResult{}, err
 	}
@@ -106,7 +109,9 @@ func (s *store) checkpointTail() (wal.MaintenanceState, error) {
 	if err := s.ctx.Err(); err != nil {
 		return 0, err
 	}
-	return unwrap(s.session.Checkpoint(nil, []*wal.Object{s.stateRoot}))
+	return unwrap(func() wt.Result[wal.MaintenanceState, wal.Failure] {
+		return s.session.Checkpoint(nil, []*wal.Object{s.stateRoot})
+	})
 }
 
 func (s *store) collect() (wal.CollectionResult, error) {
@@ -115,7 +120,7 @@ func (s *store) collect() (wal.CollectionResult, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	session, err := unwrap(s.session.Refresh())
+	session, err := unwrap(s.session.Refresh)
 	if err != nil {
 		return wal.CollectionResult{}, err
 	}
@@ -123,5 +128,5 @@ func (s *store) collect() (wal.CollectionResult, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	return unwrap(session.Collect())
+	return unwrap(session.Collect)
 }
