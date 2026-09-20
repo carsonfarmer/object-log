@@ -3,7 +3,7 @@ package main
 import (
 	"strings"
 
-	config "object-log-git-proof/bindings/wasi_config_store"
+	config "object-log-git-proof/bindings/wasi_config_0_2_0_draft_2024_09_27_store"
 )
 
 func getConfig(name string) string {
