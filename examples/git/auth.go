@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -19,11 +18,9 @@ import (
 )
 
 const (
-	authTokenBytes     = 16 << 10
-	authJWKSBytes      = 64 << 10
-	authFetchTimeout   = 5 * time.Second
-	authKeyLifetime    = 15 * time.Minute
-	authRefreshBackoff = time.Minute
+	authTokenBytes   = 16 << 10
+	authJWKSBytes    = 64 << 10
+	authFetchTimeout = 5 * time.Second
 )
 
 var (
@@ -46,12 +43,6 @@ type cognitoAuthenticator struct {
 	config cognitoConfig
 	client *http.Client
 	now    func() time.Time
-
-	mu           sync.Mutex
-	keys         map[string]jose.JSONWebKey
-	expires      time.Time
-	refreshAfter time.Time
-	refreshError error
 }
 
 // The transport must bound network waits and close bodies synchronously. The
@@ -80,8 +71,7 @@ func newCognitoAuthenticator(config cognitoConfig, transport http.RoundTripper) 
 				return http.ErrUseLastResponse
 			},
 		},
-		now:  time.Now,
-		keys: map[string]jose.JSONWebKey{},
+		now: time.Now,
 	}, nil
 }
 
@@ -102,7 +92,7 @@ func (a *cognitoAuthenticator) Authenticate(r *http.Request) (gitPrincipal, erro
 		return gitPrincipal{}, err
 	}
 	token, err := jwt.ParseSigned(encoded, []jose.SignatureAlgorithm{jose.RS256})
-	if err != nil || len(token.Headers) != 1 {
+	if err != nil {
 		return gitPrincipal{}, errAuthInvalid
 	}
 	kid := token.Headers[0].KeyID
@@ -164,31 +154,16 @@ func requestAccessToken(r *http.Request) (string, error) {
 	return token, nil
 }
 
-// Keys are an instance-local cache. Fetch synchronously, at most once a minute,
-// including unknown kids and failures. A cold instance always refetches.
+// Fetch per authentication; the synchronous WASIp2 instance is request-scoped.
 func (a *cognitoAuthenticator) key(ctx context.Context, kid string) (jose.JSONWebKey, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return jose.JSONWebKey{}, errAuthUnavailable
 	}
-	now := a.now()
-	if key, ok := a.keys[kid]; ok && now.Before(a.expires) {
-		return key, nil
-	}
-	if !now.Before(a.refreshAfter) {
-		a.refreshAfter = now.Add(authRefreshBackoff)
-		keys, err := a.fetchKeys(ctx)
-		a.refreshError = err
-		if err == nil {
-			a.keys = keys
-			a.expires = a.now().Add(authKeyLifetime)
-		}
-	}
-	if a.refreshError != nil || !a.now().Before(a.expires) {
+	keys, err := a.fetchKeys(ctx)
+	if err != nil {
 		return jose.JSONWebKey{}, errAuthUnavailable
 	}
-	key, ok := a.keys[kid]
+	key, ok := keys[kid]
 	if !ok {
 		return jose.JSONWebKey{}, errAuthInvalid
 	}

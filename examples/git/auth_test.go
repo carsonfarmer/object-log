@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -31,11 +30,11 @@ type authTestTransport func(*http.Request) (*http.Response, error)
 func (f authTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type authTestBody struct {
-	io.Reader
+	io.ReadCloser
 	closed bool
 }
 
-func (b *authTestBody) Close() error { b.closed = true; return nil }
+func (b *authTestBody) Close() error { b.closed = true; return b.ReadCloser.Close() }
 
 func authTestConfig() cognitoConfig {
 	return cognitoConfig{issuer: authTestIssuer, clientID: "git-client", requiredScope: "git/access"}
@@ -154,9 +153,11 @@ func TestCognitoAuthenticateSignedAccessTokens(t *testing.T) {
 	tests := []struct {
 		name   string
 		change func(*cognitoClaims)
+		bearer bool
 		want   error
 	}{
-		{name: "valid access token", change: func(*cognitoClaims) {}},
+		{name: "valid Basic password", change: func(*cognitoClaims) {}},
+		{name: "valid Bearer", change: func(*cognitoClaims) {}, bearer: true},
 		{name: "expired", change: func(c *cognitoClaims) {
 			c.Expiry = jwt.NewNumericDate(now.Add(-time.Second))
 		}, want: errAuthInvalid},
@@ -180,7 +181,9 @@ func TestCognitoAuthenticateSignedAccessTokens(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			calls := 0
 			auth := authForTest(t, authTestTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
 				if r.URL.String() != authTestIssuer+"/.well-known/jwks.json" || r.Header.Get("Authorization") != "" {
 					t.Fatal("key fetch was not restricted to the configured issuer without credentials")
 				}
@@ -189,7 +192,12 @@ func TestCognitoAuthenticateSignedAccessTokens(t *testing.T) {
 			auth.now = func() time.Time { return now }
 			claims := authTestClaims(now)
 			tt.change(&claims)
-			principal, err := auth.Authenticate(authRequest(authSignedToken(t, claims, nil)))
+			token := authSignedToken(t, claims, nil)
+			request := authRequest(token)
+			if tt.bearer {
+				request.Header.Set("Authorization", "Bearer "+token)
+			}
+			principal, err := auth.Authenticate(request)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("Authenticate error = %v, want %v", err, tt.want)
 			}
@@ -198,6 +206,9 @@ func TestCognitoAuthenticateSignedAccessTokens(t *testing.T) {
 			}
 			if err != nil && principal.subject != "" {
 				t.Fatal("failed authentication returned a principal")
+			}
+			if calls != 1 {
+				t.Fatalf("key fetches = %d, want one", calls)
 			}
 		})
 	}
@@ -290,40 +301,7 @@ func TestRequestAccessToken(t *testing.T) {
 	}
 }
 
-func TestCognitoKeyCacheRotationAndExpiry(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	set := authTestJWKS(t)
-	calls := 0
-	auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
-		calls++
-		return authKeyResponse(t, set), nil
-	}))
-	auth.now = func() time.Time { return now }
-	if _, err := auth.key(context.Background(), "key-one"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := auth.key(context.Background(), "key-one"); err != nil || calls != 1 {
-		t.Fatalf("cached lookup error=%v calls=%d", err, calls)
-	}
-	if _, err := auth.key(context.Background(), "unknown"); !errors.Is(err, errAuthInvalid) || calls != 1 {
-		t.Fatalf("unknown kid bypassed refresh backoff: error=%v calls=%d", err, calls)
-	}
-	set.Keys[0].KeyID = "key-two"
-	now = now.Add(authRefreshBackoff)
-	if _, err := auth.key(context.Background(), "key-two"); err != nil || calls != 2 {
-		t.Fatalf("rotated key error=%v calls=%d", err, calls)
-	}
-	if _, err := auth.key(context.Background(), "key-one"); !errors.Is(err, errAuthInvalid) {
-		t.Fatal("removed key remained trusted")
-	}
-	now = now.Add(authKeyLifetime)
-	if _, err := auth.key(context.Background(), "key-two"); err != nil || calls != 3 {
-		t.Fatalf("expired cache did not refresh: error=%v calls=%d", err, calls)
-	}
-}
-
-func TestCognitoKeyFetchFailuresDenyAndBackOff(t *testing.T) {
+func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 	t.Parallel()
 	valid := authTestJWKS(t)
 	tests := []struct {
@@ -369,74 +347,51 @@ func TestCognitoKeyFetchFailuresDenyAndBackOff(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
+			response := tt.get()
+			body := &authTestBody{ReadCloser: response.Body}
+			response.Body = body
 			auth := authForTest(t, authTestTransport(func(r *http.Request) (*http.Response, error) {
 				calls++
 				if r.URL.String() != authTestIssuer+"/.well-known/jwks.json" {
 					t.Fatal("followed redirect")
 				}
-				return tt.get(), nil
-			}))
-			for range 2 {
-				if _, err := auth.key(context.Background(), "key-one"); !errors.Is(err, errAuthUnavailable) {
-					t.Fatalf("key error = %v, want unavailable", err)
-				}
-			}
-			if calls != 1 {
-				t.Fatalf("failed fetch retried without backoff: calls=%d", calls)
-			}
-		})
-	}
-}
-
-func TestCognitoExpiredKeysFailClosedDuringOutage(t *testing.T) {
-	t.Parallel()
-	now := time.Now()
-	available := true
-	auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
-		if !available {
-			return nil, errors.New("offline")
-		}
-		return authKeyResponse(t, authTestJWKS(t)), nil
-	}))
-	auth.now = func() time.Time { return now }
-	if _, err := auth.key(context.Background(), "key-one"); err != nil {
-		t.Fatal(err)
-	}
-	available = false
-	now = now.Add(authKeyLifetime)
-	if _, err := auth.key(context.Background(), "key-one"); !errors.Is(err, errAuthUnavailable) {
-		t.Fatalf("stale key accepted during outage: %v", err)
-	}
-	available = true
-	now = now.Add(authRefreshBackoff)
-	if _, err := auth.key(context.Background(), "key-one"); err != nil {
-		t.Fatalf("recovery after backoff failed: %v", err)
-	}
-}
-
-func TestCognitoKeyFetchClosesBodiesSynchronously(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		body string
-	}{
-		{name: "invalid JSON", body: "{"},
-		{name: "oversized body", body: strings.Repeat(" ", authJWKSBytes+1)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			body := &authTestBody{Reader: strings.NewReader(tt.body)}
-			auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
-				return &http.Response{StatusCode: 200, Body: body}, nil
+				return response, nil
 			}))
 			if _, err := auth.key(context.Background(), "key-one"); !errors.Is(err, errAuthUnavailable) {
-				t.Fatalf("key error = %v", err)
+				t.Fatalf("key error = %v, want unavailable", err)
+			}
+			if calls != 1 {
+				t.Fatalf("key fetches = %d, want one", calls)
 			}
 			if !body.closed {
 				t.Fatal("returned before closing key response")
 			}
 		})
+	}
+}
+
+func TestCognitoCanceledRequestDoesNotAffectNextAuthentication(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	auth := authForTest(t, authTestTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			cancel()
+			return nil, r.Context().Err()
+		}
+		return authKeyResponse(t, authTestJWKS(t)), nil
+	}))
+	request := authRequest(authSignedToken(t, authTestClaims(time.Now()), nil))
+	if _, err := auth.Authenticate(request.WithContext(ctx)); !errors.Is(err, errAuthUnavailable) {
+		t.Fatalf("canceled authentication error = %v", err)
+	}
+	if _, err := auth.Authenticate(request); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("key fetches = %d, want two", calls)
 	}
 }
 
@@ -454,28 +409,6 @@ func TestCognitoKeyFetchDeadline(t *testing.T) {
 			t.Fatalf("fetch duration = %v, want %v", elapsed, authFetchTimeout)
 		}
 	})
-}
-
-func TestCognitoConcurrentAuthenticationSharesKeys(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int32
-	auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return authKeyResponse(t, authTestJWKS(t)), nil
-	}))
-	token := authSignedToken(t, authTestClaims(time.Now()), nil)
-	var group sync.WaitGroup
-	for range 8 {
-		group.Go(func() {
-			if _, err := auth.Authenticate(authRequest(token)); err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	group.Wait()
-	if calls.Load() != 1 {
-		t.Fatalf("key fetches = %d, want one", calls.Load())
-	}
 }
 
 func TestGitPrincipalActionsAreIndependentAndDenyByDefault(t *testing.T) {
