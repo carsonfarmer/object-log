@@ -4,10 +4,8 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math/rand"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,36 +121,7 @@ func TestCollectionCapacity(t *testing.T) {
 
 func finishMaintenance(t *testing.T, url string) {
 	t.Helper()
-	var candidates uint64
-	for range 16 {
-		request, err := http.NewRequest(http.MethodPost, url+"/maintenance", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		authenticateProbeRequest(request)
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var result struct {
-			State   string `json:"state"`
-			Objects uint64 `json:"candidate_objects"`
-		}
-		err = json.NewDecoder(response.Body).Decode(&result)
-		_ = response.Body.Close()
-		if err != nil || response.StatusCode != http.StatusOK {
-			t.Fatalf("maintenance HTTP %d: %v", response.StatusCode, err)
-		}
-		candidates += result.Objects
-		if result.State == "complete" {
-			if candidates == 0 {
-				t.Fatal("maintenance did not find unpublished objects")
-			}
-			return
-		}
-		if result.State != "more" {
-			t.Fatalf("unexpected maintenance state %q", result.State)
-		}
+	if finishGitMaintenance(t, url) == 0 {
+		t.Fatal("maintenance did not find unpublished objects")
 	}
-	t.Fatal("maintenance did not complete")
 }

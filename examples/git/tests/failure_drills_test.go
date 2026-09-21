@@ -151,9 +151,15 @@ func TestFailureDrills(t *testing.T) {
 				})
 				t.Run("collector", func(t *testing.T) {
 					t.Parallel()
+					service := "maintenance"
 					for round := 0; round < 8; round++ {
 						markActive(3, true)
-						collectDrillStep(t, repo.URL)
+						state := collectDrillStep(t, repo.URL, service)
+						if state == "more" || state == "retained" {
+							service = "collect"
+						} else if state == "complete" {
+							service = "maintenance"
+						}
 						markActive(3, false)
 					}
 				})
@@ -276,9 +282,14 @@ func drillRequest(t *testing.T, ctx context.Context, url string, body []byte) *h
 
 func collectDrill(t *testing.T, url string) {
 	t.Helper()
+	service := "maintenance"
 	for attempt := 0; attempt < 32; attempt++ {
-		if collectDrillStep(t, url) == "complete" {
+		state := collectDrillStep(t, url, service)
+		if state == "complete" {
 			return
+		}
+		if state == "more" || state == "retained" {
+			service = "collect"
 		}
 	}
 	t.Fatal("maintenance did not complete in 32 requests")
@@ -287,9 +298,9 @@ func collectDrill(t *testing.T, url string) {
 // A concurrent collector performs one bounded step; conflicts, pending fences,
 // and active reader retention are valid outcomes. After readers and writers stop,
 // collectDrill still requires completion.
-func collectDrillStep(t *testing.T, url string) string {
+func collectDrillStep(t *testing.T, url, service string) string {
 	t.Helper()
-	response := drillRequest(t, context.Background(), url+"/maintenance", nil)
+	response := drillRequest(t, context.Background(), url+"/"+service, nil)
 	var result struct {
 		State string `json:"state"`
 	}

@@ -24,6 +24,7 @@ func TestMaintenance(t *testing.T) {
 	for _, format := range []string{"sha1", "sha256"} {
 		t.Run(format, func(t *testing.T) {
 			url := strings.TrimRight(endpoint, "/") + "/" + format + ".git"
+			post(t, url+"/git-receive-pack", "git-receive-pack", []byte("0000"))
 			finishGitMaintenance(t, url)
 			source := filepath.Join(t.TempDir(), "source")
 			liveBranch := fmt.Sprintf("cleanup-live-%d", time.Now().UnixNano())
@@ -54,8 +55,8 @@ func TestMaintenance(t *testing.T) {
 			// The empty receive checkpoints the as-is catalog without appending.
 			post(t, url+"/git-receive-pack", "git-receive-pack", []byte("0000"))
 			first := requestGitMaintenance(t, url)
-			if first.State != "more" || first.Objects != 0 {
-				t.Fatalf("tail-zero pruning did not publish before collection: %+v", first)
+			if first.State != "more" || first.Objects == 0 {
+				t.Fatalf("tail-zero pruning did not checkpoint and collect in one request: %+v", first)
 			}
 			write(t, filepath.Join(source, "keep"), []byte("intervening live update"))
 			git(t, nil, "-C", source, "add", ".")
@@ -84,14 +85,19 @@ func TestMaintenance(t *testing.T) {
 
 func requestGitMaintenance(t *testing.T, url string) maintenanceResult {
 	t.Helper()
-	r, err := http.NewRequest(http.MethodPost, url+"/maintenance", nil)
+	return requestMaintenanceStep(t, url, "maintenance")
+}
+
+func requestMaintenanceStep(t *testing.T, url, service string) maintenanceResult {
+	t.Helper()
+	r, err := http.NewRequest(http.MethodPost, url+"/"+service, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if password := os.Getenv("GIT_PROBE_PASSWORD"); password != "" {
 		r.SetBasicAuth("git", password)
 	}
-	response, err := http.DefaultClient.Do(r)
+	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +112,9 @@ func requestGitMaintenance(t *testing.T, url string) maintenanceResult {
 func finishGitMaintenance(t *testing.T, url string) uint64 {
 	t.Helper()
 	var candidates uint64
+	service := "maintenance"
 	for range 16 {
-		result := requestGitMaintenance(t, url)
+		result := requestMaintenanceStep(t, url, service)
 		candidates += result.Objects
 		if result.State == "complete" {
 			return candidates
@@ -115,6 +122,7 @@ func finishGitMaintenance(t *testing.T, url string) uint64 {
 		if result.State != "more" {
 			t.Fatalf("unexpected maintenance outcome: %s", result.State)
 		}
+		service = "collect"
 	}
 	t.Fatal("maintenance did not complete")
 	return 0
