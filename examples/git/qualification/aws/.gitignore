@@ -6,3 +6,5 @@
 !*.tfvars.example
 qualification-spin.toml
 session-credentials.json
+__pycache__/
+*.tar.gz

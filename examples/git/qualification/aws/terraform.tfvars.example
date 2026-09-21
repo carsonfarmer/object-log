@@ -4,3 +4,26 @@ aws_region  = "us-west-2"
 run_id        = "replace-with-run-id"
 bucket_name   = "replace-with-globally-unique-bucket-name"
 object_prefix = "object-log-qualification/replace-with-run-id"
+
+# Optional remote HTTPS service. Use an unused name in an existing public zone.
+# host_service         = true
+# host_name            = "git.example.com"
+# host_route53_zone_id = "ZEXISTINGZONE"
+# host_artifact_path   = "/absolute/private/path/git.tar.gz"
+# host_subnet_id       = "subnet-PUBLIC" # Empty selects a default-VPC default subnet.
+# host_instance_type   = "t3.medium"    # Capacity is not yet qualified.
+# host_groups          = ["readers", "writers", "admins"]
+# host_repositories = {
+#   "team/project.git" = {
+#     log_id         = "team-project"
+#     format         = "sha1"
+#     default_branch = "main"
+#     read_groups    = ["readers", "writers", "admins"]
+#     write_groups   = ["writers"]
+#     admin_groups   = ["admins"]
+#   }
+#   "team/next.git" = { log_id = "team-next", format = "sha256", read_groups = ["readers"], write_groups = ["writers"] }
+# }
+# host_maintenance_interval = 300 # Seconds after the previous run finishes.
+# host_maintenance_budget_seconds = 300 # Absolute time budget per repository.
+# host_maintenance_pause_seconds = 0 # Optional ingress gap; zero disables it.

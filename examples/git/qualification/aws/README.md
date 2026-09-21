@@ -6,7 +6,12 @@ integration tests. It creates:
 - one private, unversioned, AES-256-encrypted S3 bucket;
 - public-access blocking and bucket-owner-enforced ownership;
 - one IAM user restricted to the configured test prefix; and
-- no long-lived credential in Terraform state.
+- no long-lived credential in Terraform state when hosting is disabled.
+
+Optional [remote hosting](HOSTING.md) adds one Ubuntu EC2 host, Caddy HTTPS,
+stock Spin 4.0.2, restricted workload identity, Cognito, and periodic maintenance.
+That option stores a generated maintenance client secret in sensitive Terraform
+state and an SSM SecureString parameter.
 
 `force_destroy = false` prevents Terraform from deleting an unexpected non-empty
 bucket. Never point this setup at production data.
@@ -151,7 +156,9 @@ host-wide resource admission.
 
 ## Destroy
 
-Stop Spin first. Delete only the configured prefix with the temporary identity:
+For a hosted service, first stop `object-log-maintenance.timer` and
+`object-log-git.service` through SSM and drain traffic. Stop any local Spin too.
+Delete only the configured prefix with the temporary identity:
 
 ```sh
 aws --region "$region" s3 rm "s3://$bucket/$prefix/" --recursive

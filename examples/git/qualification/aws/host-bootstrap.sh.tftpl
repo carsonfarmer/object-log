@@ -1,0 +1,116 @@
+#!/bin/bash
+# Terraform expands the quoted template bindings before this script is run.
+# shellcheck disable=SC2016,SC2154
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ca-certificates curl gnupg debian-keyring debian-archive-keyring apt-transport-https awscli python3
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
+chmod 644 /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
+apt-get update
+apt-get install -y caddy
+if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+  snap install amazon-ssm-agent --classic
+fi
+snap start --enable amazon-ssm-agent
+
+workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"' EXIT
+curl -fsSL --retry 3 https://github.com/spinframework/spin/releases/download/v4.0.2/spin-v4.0.2-linux-amd64.tar.gz -o "$workdir/spin.tar.gz"
+printf '%s  %s\n' 79523cfc93424d555b3493c7ea07e0fb482e1fd9972f29a83bea0ba7d764bf00 "$workdir/spin.tar.gz" | sha256sum --check
+tar -xzf "$workdir/spin.tar.gz" -C "$workdir" spin
+install -m 755 "$workdir/spin" /usr/local/bin/spin
+
+useradd --system --create-home --home-dir /var/lib/object-log-git --shell /usr/sbin/nologin object-log-git
+install -d -m 755 /opt/object-log-git /etc/object-log-git
+aws --region '${region}' s3 cp '${artifact_uri}' "$workdir/git.tar.gz"
+printf '%s  %s\n' '${artifact_sha}' "$workdir/git.tar.gz" | sha256sum --check
+tar -xzf "$workdir/git.tar.gz" -C /opt/object-log-git --no-same-owner spin.toml git.wasm
+chmod 644 /opt/object-log-git/spin.toml /opt/object-log-git/git.wasm
+printf '%s' '${variables_base64}' | base64 --decode > /etc/object-log-git/variables.json
+printf '%s' '${maintenance_config}' | base64 --decode > /etc/object-log-git/maintenance.json
+printf '%s' '${maintenance_script}' | base64 --decode > /usr/local/bin/object-log-maintenance
+chmod 755 /usr/local/bin/object-log-maintenance
+
+cat > /etc/systemd/system/object-log-git.service <<'UNIT'
+[Unit]
+Description=Object-log Git service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=object-log-git
+Group=object-log-git
+WorkingDirectory=/opt/object-log-git
+ExecStart=/usr/local/bin/spin up --from /opt/object-log-git/spin.toml --listen 127.0.0.1:3000 --variable @/etc/object-log-git/variables.json --state-dir /var/lib/object-log-git --log-dir ""
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/object-log-git
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/caddy/Caddyfile <<'CADDY'
+${hostname} {
+    @admin {
+        method POST
+        expression `{http.request.uri.path} in ${admin_paths}`
+    }
+    @paused file {
+        root /run/object-log-maintenance
+        try_files pause
+    }
+    route {
+        reverse_proxy @admin 127.0.0.1:3000
+        handle @paused {
+            header Retry-After ${retry_after}
+            respond "Scheduled maintenance; retry later" 503
+        }
+        reverse_proxy 127.0.0.1:3000
+    }
+}
+CADDY
+
+cat > /etc/systemd/system/object-log-maintenance.service <<'UNIT'
+[Unit]
+Description=Periodic Git pruning and bounded WAL collection
+After=object-log-git.service caddy.service network-online.target
+
+[Service]
+Type=oneshot
+User=object-log-git
+Group=object-log-git
+ExecStart=/usr/local/bin/object-log-maintenance /etc/object-log-git/maintenance.json
+RuntimeDirectory=object-log-maintenance
+RuntimeDirectoryMode=0755
+TimeoutStartSec=${run_timeout}s
+TimeoutStopSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+UNIT
+
+cat > /etc/systemd/system/object-log-maintenance.timer <<'UNIT'
+[Unit]
+Description=Schedule Git maintenance after the previous run finishes
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=${interval}s
+Unit=object-log-maintenance.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now object-log-git.service
+systemctl reload caddy.service
+systemctl enable --now object-log-maintenance.timer
