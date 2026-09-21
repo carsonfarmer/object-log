@@ -41,12 +41,14 @@ The Git service supports unchanged SHA-1 and SHA-256 clients, protocol-v2 clone
 and have-aware fetch, shallow history, classic push, branches, tags, access
 control, cold recovery, automatic tail checkpoints, and explicit maintenance.
 Refs and its sparse object catalog publish atomically through one WAL commit.
-Local MinIO tests pass with unmodified go-git. The current service still exposes
-only two demonstration repository paths and a shared password. Opening a WAL
-can create its head; read-only access must be separated from creation. Complete
-the repository, identity, automatic-maintenance and remote-host gates in
-GIT_PLAN.md before calling the service ready. Earlier live S3 qualification ran
-Spin locally; it did not qualify a remotely hosted HTTPS service.
+Local MinIO tests pass with unmodified go-git. Repository paths, formats, default
+branches and per-action groups now come from configuration. Only an authorized
+writer can materialize a configured repository; reads open existing state.
+Cognito access-token validation and a separate administration-only machine
+client are wired. Password mode is the explicit local default and requires a
+password. Actual Cognito/helper interoperability remains a remote gate.
+Earlier live S3 qualification ran Spin locally; it did not qualify a remotely
+hosted HTTPS service.
 
 Incoming packs are staged as WAL streams. Unmodified go-git buffers delta bases
 and results during import; object limits do not bound peak memory. Receive-pack
@@ -92,15 +94,21 @@ in `examples/git/README.md` for service changes. Network-backed tests are
 opt-in, isolated, and disposable.
 
 The active service-readiness queue and remote HTTPS gate are new issue #45.
-Issue #10 retains its completed local-Spin/live-S3 scope. Maintenance design
-needs the deeper comparison in new issue #46 before selecting a trigger.
+Issue #10 retains its completed local-Spin/live-S3 scope. Maintenance design and
+the bounded periodic host worker remain in new issue #46.
 Authentication and KV workers use separate worktrees. KV provider qualification remains in #39.
 
-Full maintenance scans the Git graph before bounded WAL deletion. Compare
-algorithmic costs, safe reader coordination and forward progress in #46; simply
-automating the existing call is not yet the selected solution.
-S3 session credentials currently enter through explicit configuration; deployed
-workload-identity renewal still needs implementation and tests.
+Maintenance now resumes an active WAL deletion plan before loading the Git
+catalog. Logical pruning/checkpointing is separate from physical /collect
+followups. New plans have a per-operation candidate cap independent of the
+live-graph limit. Each new plan still audits the full live graph; continuous
+reader retention can starve collection. Optional host admission gaps and bounded
+scheduling are being reviewed in #46; never clear retentions automatically.
+The bridge now explicitly selects static credentials or object_store IMDSv2
+role acquisition/renewal. Native and composed stock-Spin fixtures pass, including
+renewal failure. Actual EC2 credentials and hosted HTTPS tests remain in #45.
+Signing-key fetches have a five-second WASI deadline, including slow bodies;
+stock-Spin TLS tests verify timeout and same-instance cleanup without an SDK fork.
 
 Keep final documentation user-facing and current. Plans capture internal intent;
 executable tests and concise commits replace raw evidence archives.

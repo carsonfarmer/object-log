@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	wt "go.bytecodealliance.org/pkg/wit/types"
+	"net/http"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/revlist"
@@ -32,8 +35,8 @@ func (s *store) beforePush() (bool, error) {
 }
 
 // Maintenance publishes the reachable catalog, checkpoints it, then completes
-// one fenced deletion batch. An empty tail needs a publish-only first pass;
-// `more` requests the next bounded pass.
+// one fenced deletion batch. Further passes use /collect without repeating
+// the Git traversal. A concurrent publication is always kept when checkpointing.
 func (s *store) maintain() (wal.CollectionResult, error) {
 	tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
 	for _, id := range s.meta.Refs {
@@ -68,10 +71,14 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 	if s.tailEntries == 0 && !changed {
 		return s.collect()
 	}
-	root, err := s.stageRoot(s.meta.Refs)
-	if err != nil {
-		return wal.CollectionResult{}, err
+	root := s.stateRoot
+	if changed {
+		root, err = s.stageRoot(s.meta.Refs)
+		if err != nil {
+			return wal.CollectionResult{}, err
+		}
 	}
+	checkpointSession := s.session
 	if s.tailEntries == 0 {
 		outcome, err := s.publishRoot(root)
 		if err != nil {
@@ -79,7 +86,26 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 		}
 		switch outcome.Tag() {
 		case wal.OutcomeCommitted:
-			return wal.CollectionResult{State: wal.MaintenanceStateMore}, nil
+			fresh, err := unwrap(s.session.Refresh)
+			if err != nil {
+				return wal.CollectionResult{}, err
+			}
+			defer fresh.Drop()
+			current, err := unwrap(fresh.LatestCompleteState)
+			if err != nil {
+				return wal.CollectionResult{}, err
+			}
+			if current.Latest.IsNone() || len(current.Latest.Some().Objects) != 1 {
+				return wal.CollectionResult{}, fmt.Errorf("invalid published root")
+			}
+			// Another push may have followed pruning. Checkpoint its winning
+			// root, never the stale root we just published.
+			root = current.Latest.Some().Objects[0]
+			defer root.Drop()
+			if current.TailEntries == 0 {
+				return s.collect()
+			}
+			checkpointSession = fresh
 		case wal.OutcomeConflict, wal.OutcomeExpired:
 			return wal.CollectionResult{State: wal.MaintenanceStateConflict}, nil
 		case wal.OutcomePending:
@@ -92,7 +118,7 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 		return wal.CollectionResult{}, err
 	}
 	state, err := unwrap(func() wt.Result[wal.MaintenanceState, wal.Failure] {
-		return s.session.Checkpoint(nil, []*wal.Object{root})
+		return checkpointSession.Checkpoint(nil, []*wal.Object{root})
 	})
 	if err != nil {
 		return wal.CollectionResult{}, err
@@ -128,5 +154,33 @@ func (s *store) collect() (wal.CollectionResult, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	return unwrap(session.Collect)
+	return collectSession(s.ctx, session, s.limits)
+}
+
+// Resume an installed deletion plan without loading the Git catalog again.
+func collectSession(ctx context.Context, session *wal.Session, limits requestLimits) (wal.CollectionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return wal.CollectionResult{}, err
+	}
+	return unwrap(func() wt.Result[wal.CollectionResult, wal.Failure] {
+		return session.Collect(uint64(min(limits.collectionCandidates, limits.collectionObjects)))
+	})
+}
+
+func writeMaintenance(w http.ResponseWriter, report wal.CollectionResult, err error) {
+	if err != nil {
+		http.Error(w, "maintenance failed: "+err.Error(), operationStatus(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	states := map[wal.MaintenanceState]string{
+		wal.MaintenanceStateComplete: "complete", wal.MaintenanceStateMore: "more",
+		wal.MaintenanceStateConflict: "conflict", wal.MaintenanceStatePending: "pending",
+		wal.MaintenanceStateRetained: "retained",
+	}
+	_ = json.NewEncoder(w).Encode(struct {
+		State   string `json:"state"`
+		Objects uint64 `json:"candidate_objects"`
+		Bytes   uint64 `json:"candidate_bytes"`
+	}{states[report.State], report.Objects, report.Bytes})
 }

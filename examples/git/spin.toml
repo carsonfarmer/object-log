@@ -8,12 +8,20 @@ wal_endpoint = { default = "http://127.0.0.1:19090" }
 wal_bucket = { default = "wal-proof" }
 wal_region = { default = "us-east-1" }
 wal_prefix = { default = "" }
+wal_credential_mode = { default = "static" }
+wal_collection_candidates = { default = "1000" }
 wal_access_key = { default = "", secret = true }
 wal_secret_key = { default = "", secret = true }
 wal_session_token = { default = "", secret = true }
-wal_default_branch = { default = "" }
 wal_max_collection_objects = { default = "100000" }
 wal_recover_retentions_after_drain = { default = "false" }
+git_repositories = { default = '{"sha1.git":{"log_id":"repo-sha1","format":"sha1"},"sha256.git":{"log_id":"repo-sha256","format":"sha256"}}' }
+git_auth_mode = { default = "password" }
+git_cognito_issuer = { default = "" }
+git_cognito_client_id = { default = "" }
+git_cognito_operator_client_id = { default = "" }
+git_cognito_scope = { default = "" }
+git_cognito_host = { default = "https://cognito-idp.us-east-1.amazonaws.com" }
 git_password = { default = "", secret = true }
 git_boot_id = { default = "local-boot" }
 git_read_only = { default = "false" }
@@ -31,18 +39,25 @@ component = "git"
 
 [component.git]
 source = "git.wasm"
-allowed_outbound_hosts = ["{{ wal_endpoint }}"]
+allowed_outbound_hosts = ["{{ wal_endpoint }}", "{{ git_cognito_host }}", "http://169.254.169.254"]
 [component.git.variables]
 wal_endpoint = "{{ wal_endpoint }}"
 wal_bucket = "{{ wal_bucket }}"
 wal_region = "{{ wal_region }}"
 wal_prefix = "{{ wal_prefix }}"
+wal_credential_mode = "{{ wal_credential_mode }}"
+wal_collection_candidates = "{{ wal_collection_candidates }}"
 wal_access_key = "{{ wal_access_key }}"
 wal_secret_key = "{{ wal_secret_key }}"
 wal_session_token = "{{ wal_session_token }}"
-wal_default_branch = "{{ wal_default_branch }}"
 wal_max_collection_objects = "{{ wal_max_collection_objects }}"
 wal_recover_retentions_after_drain = "{{ wal_recover_retentions_after_drain }}"
+git_repositories = "{{ git_repositories }}"
+git_auth_mode = "{{ git_auth_mode }}"
+git_cognito_issuer = "{{ git_cognito_issuer }}"
+git_cognito_client_id = "{{ git_cognito_client_id }}"
+git_cognito_operator_client_id = "{{ git_cognito_operator_client_id }}"
+git_cognito_scope = "{{ git_cognito_scope }}"
 git_password = "{{ git_password }}"
 git_boot_id = "{{ git_boot_id }}"
 git_read_only = "{{ git_read_only }}"

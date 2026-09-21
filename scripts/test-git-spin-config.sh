@@ -16,6 +16,7 @@ wal_endpoint = "http://127.0.0.1:1"
 wal_bucket = "config-test"
 wal_region = "us-test-1"
 wal_prefix = "spin/config-test"
+git_auth_mode = "password"
 git_password = "config-test-password"
 git_boot_id = "config-test-boot"
 EOF

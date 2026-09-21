@@ -12,19 +12,21 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
+var errLogMissing = errors.New("repository does not exist")
+
 var errObjectLimit = errors.New("configured Git resource limit exceeded")
 
 type requestLimits struct {
 	pushBytes, negotiationBytes, objectBytes int64
 	packObjects, metadataBytes, catalogBytes int64
-	collectionObjects                        int64
+	collectionObjects, collectionCandidates  int64
 	timeout                                  time.Duration
 	readOnly, recoverRetentions              bool
 	catalogRead                              *int64
 }
 
 func loadLimits(getenv func(string) string) (requestLimits, error) {
-	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, collectionObjects: 100_000, catalogRead: new(int64), timeout: 5 * time.Minute}
+	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, collectionObjects: 100_000, collectionCandidates: 1000, catalogRead: new(int64), timeout: 5 * time.Minute}
 	for _, setting := range []struct {
 		name  string
 		value *int64
@@ -36,6 +38,7 @@ func loadLimits(getenv func(string) string) (requestLimits, error) {
 		{"GIT_MAX_METADATA_BYTES", &limits.metadataBytes},
 		{"GIT_MAX_CATALOG_BYTES", &limits.catalogBytes},
 		{"WAL_MAX_COLLECTION_OBJECTS", &limits.collectionObjects},
+		{"WAL_COLLECTION_CANDIDATES", &limits.collectionCandidates},
 	} {
 		if text := getenv(setting.name); text != "" {
 			value, err := strconv.ParseInt(text, 10, 64)
@@ -105,6 +108,8 @@ func limitedRequest(w http.ResponseWriter, r *http.Request, limits requestLimits
 func operationStatus(err error) int {
 	var tooLarge *http.MaxBytesError
 	switch {
+	case errors.Is(err, errLogMissing):
+		return http.StatusNotFound
 	case errors.As(err, &tooLarge), errors.Is(err, errObjectLimit):
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):

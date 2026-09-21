@@ -25,8 +25,8 @@ func TestAccess(t *testing.T) {
 		status                 int
 	}
 	cases := []request{
-		{"GET", "/sha1.git/info/refs?service=git-upload-pack", password, 200},
 		{"GET", "/sha1.git/info/refs?service=git-receive-pack", password, receiveStatus},
+		{"GET", "/sha1.git/info/refs?service=git-upload-pack", password, 200},
 		{"POST", "/sha1.git/info/refs?service=git-upload-pack", password, 405},
 		{"GET", "/sha1.git/git-upload-pack", password, 405},
 		{"GET", "/sha1.git/maintenance", password, 405},

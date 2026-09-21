@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/storage"
@@ -40,10 +39,11 @@ type store struct {
 	pending     map[string]indexed
 }
 
-func openStore(ctx context.Context, session *wal.Session, format config.ObjectFormat, limits requestLimits) (result *store, err error) {
+func openStore(ctx context.Context, session *wal.Session, repository repositoryConfig, limits requestLimits) (result *store, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	format := repository.Format
 	mem := memory.NewStorage(memory.WithObjectFormat(format))
 	// Memory storage returns its owned configuration; no save is needed.
 	cfg, _ := mem.Config()
@@ -87,7 +87,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 	head := s.meta.Head
 	if head == "" {
 		branch := "main"
-		if configured := getConfig("WAL_DEFAULT_BRANCH"); !recovered.Latest.IsSome() && configured != "" {
+		if configured := repository.DefaultBranch; !recovered.Latest.IsSome() && configured != "" {
 			branch = configured
 		}
 		head = "refs/heads/" + branch
@@ -389,7 +389,7 @@ func (s *store) publish(refs map[string]string) error {
 	case wal.OutcomePending:
 		return &pendingError{token: result.Pending()}
 	default:
-		return fmt.Errorf("publication conflict or expired view")
+		return errPublicationConflict
 	}
 }
 

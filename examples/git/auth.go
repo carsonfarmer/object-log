@@ -34,9 +34,10 @@ var (
 )
 
 type cognitoConfig struct {
-	issuer        string
-	clientID      string
-	requiredScope string
+	issuer           string
+	clientID         string
+	operatorClientID string
+	requiredScope    string
 }
 
 type cognitoAuthenticator struct {
@@ -54,6 +55,9 @@ func newCognitoAuthenticator(config cognitoConfig, transport http.RoundTripper) 
 	}
 	if config.clientID == "" || strings.TrimSpace(config.clientID) != config.clientID {
 		return nil, errors.New("Cognito client ID is required")
+	}
+	if config.operatorClientID != "" && (config.operatorClientID == config.clientID || strings.TrimSpace(config.operatorClientID) != config.operatorClientID) {
+		return nil, errors.New("maintenance requires a distinct Cognito client ID")
 	}
 	scopes := strings.Fields(config.requiredScope)
 	if len(scopes) != 1 || scopes[0] != config.requiredScope {
@@ -116,14 +120,19 @@ func (a *cognitoAuthenticator) Authenticate(r *http.Request) (gitPrincipal, erro
 		return gitPrincipal{}, errAuthInvalid
 	}
 	// Cognito access tokens identify the app by client_id, not the ID-token aud.
-	validAccess := claims.TokenUse == "access" && claims.ClientID == a.config.clientID
+	operator := a.config.operatorClientID != "" && claims.ClientID == a.config.operatorClientID
+	validClient := claims.ClientID == a.config.clientID || operator
+	validAccess := claims.TokenUse == "access" && validClient
 	if !validAccess || claims.Subject == "" {
 		return gitPrincipal{}, errAuthInvalid
 	}
 	if !slices.Contains(strings.Fields(claims.Scope), a.config.requiredScope) {
 		return gitPrincipal{}, errAuthScope
 	}
-	return gitPrincipal{subject: claims.Subject, groups: claims.Groups}, nil
+	if operator && !slices.Contains(strings.Fields(claims.Scope), "git/maintenance") {
+		return gitPrincipal{}, errAuthScope
+	}
+	return gitPrincipal{subject: claims.Subject, groups: claims.Groups, operator: operator}, nil
 }
 
 func requestAccessToken(r *http.Request) (string, error) {
@@ -245,14 +254,18 @@ type repositoryAccess struct {
 }
 
 type gitPrincipal struct {
-	subject string
-	groups  []string
+	subject  string
+	groups   []string
+	operator bool
 }
 
 // Actions are independent: write and admin do not imply read. Empty lists deny.
 func (p gitPrincipal) Allows(policy repositoryAccess, action gitAction) bool {
 	if p.subject == "" {
 		return false
+	}
+	if p.operator {
+		return action == gitAdmin
 	}
 	allowed := []string{}
 	switch action {

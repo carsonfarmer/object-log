@@ -8,6 +8,7 @@ import (
 const pushMaintenanceAttempts = 2
 
 var (
+	errPublicationConflict = errors.New("publication conflict or expired view")
 	errMaintenanceConflict = errors.New("maintenance conflicted; retry push")
 	errMaintenancePending  = errors.New("maintenance remains pending; retry push")
 )

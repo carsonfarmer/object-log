@@ -3,8 +3,8 @@ package main
 import (
 	"compress/gzip"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/go-git/go-git/v6/backend"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -71,41 +71,32 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	response.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
 	response.Header().Set("X-Git-Target-ID", targetID(getConfig))
-	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 2)
-	if len(parts) != 2 || (parts[0] != "sha1.git" && parts[0] != "sha256.git") {
-		http.NotFound(response, r)
+	repositories, e := loadRepositories(getConfig)
+	if e != nil {
+		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
 	}
-	service := parts[1]
-	maintenance := service == "maintenance"
-	recoverRetentions := service == "recover-retentions-after-drain"
-	method := http.MethodPost
-	if service == "info/refs" {
-		service = r.URL.Query().Get("service")
-		method = http.MethodGet
-	}
-	if service != transport.ReceivePackService && service != transport.UploadPackService && !maintenance && !recoverRetentions {
-		http.NotFound(response, r)
-		return
-	}
-	if r.Method != method {
-		response.Header().Set("Allow", method)
+	route, e := resolveRepository(repositories, r)
+	if errors.Is(e, errRepositoryMethod) {
+		response.Header().Set("Allow", route.Method)
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	password := getConfig("GIT_PASSWORD")
-	if recoverRetentions && password == "" {
-		http.Error(response, "retention recovery requires authentication", http.StatusForbidden)
+	if e != nil {
+		http.NotFound(response, r)
 		return
 	}
-	if password != "" {
-		_, supplied, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(password), []byte(supplied)) != 1 {
+	if status, err := authorizeRequest(r, route, getConfig, keyTransport{}); err != nil {
+		if status == http.StatusUnauthorized {
 			response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
-			http.Error(response, "authentication required", http.StatusUnauthorized)
-			return
 		}
+		http.Error(response, err.Error(), status)
+		return
 	}
+	service, method := route.Service, route.Method
+	maintenance := service == "maintenance"
+	collect := service == "collect"
+	recoverRetentions := service == "recover-retentions-after-drain"
 	limits, e := loadLimits(getConfig)
 	if e != nil {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
@@ -119,7 +110,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, message, status)
 		return
 	}
-	if limits.readOnly && (service == transport.ReceivePackService || maintenance) {
+	if limits.readOnly && (service == transport.ReceivePackService || maintenance || collect) {
 		http.Error(response, "repository is read-only", http.StatusForbidden)
 		return
 	}
@@ -129,16 +120,33 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
-	format := config.SHA1
-	if parts[0] == "sha256.git" {
-		format = config.SHA256
-	}
 	if err := r.Context().Err(); err != nil {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
-	settings := wal.Config{Endpoint: getConfig("WAL_ENDPOINT"), Bucket: getConfig("WAL_BUCKET"), Region: getConfig("WAL_REGION"), AccessKey: getConfig("WAL_ACCESS_KEY"), SecretKey: getConfig("WAL_SECRET_KEY"), SessionToken: sessionToken(getConfig), Prefix: getConfig("WAL_PREFIX"), LogId: "repo-" + format.String(), MaxCollectionObjects: uint64(limits.collectionObjects)}
-	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] { return wal.Open(settings) })
+	mode := wal.CredentialModeStaticCredentials
+	switch getConfig("WAL_CREDENTIAL_MODE") {
+	case "static":
+	case "instance-role":
+		mode = wal.CredentialModeInstanceRole
+	default:
+		http.Error(response, "WAL_CREDENTIAL_MODE must be static or instance-role", http.StatusInternalServerError)
+		return
+	}
+	settings := wal.Config{
+		Endpoint: getConfig("WAL_ENDPOINT"), Bucket: getConfig("WAL_BUCKET"), Region: getConfig("WAL_REGION"),
+		CredentialMode: mode, AccessKey: getConfig("WAL_ACCESS_KEY"), SecretKey: getConfig("WAL_SECRET_KEY"),
+		SessionToken: sessionToken(getConfig), Prefix: getConfig("WAL_PREFIX"), LogId: route.Repository.LogID,
+		MaxCollectionObjects: uint64(limits.collectionObjects),
+	}
+	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
+		// First-push discovery requires an empty repository advertisement. Only
+		// a configured repository and an authorized writer may create its head.
+		if route.Action == gitWrite {
+			return wal.Open(settings)
+		}
+		return wal.OpenExisting(settings)
+	})
 	if e != nil {
 		http.Error(response, e.Error(), operationStatus(e))
 		return
@@ -168,11 +176,14 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
 			retain, release := sessionRetention(session)
 			return retained(r.Context(), retain, release, func() error {
-				s, err := openStore(r.Context(), session, format, limits)
+				s, err := openStore(r.Context(), session, route.Repository, limits)
 				if err != nil {
 					return err
 				}
 				defer s.Close()
+				if s.stateRoot == nil {
+					return errLogMissing
+				}
 				attempt.failure = &s.failure
 				if request.Method == http.MethodPost {
 					var body io.Reader = request.Body
@@ -224,14 +235,46 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	open := func() (*store, error) { return openStore(r.Context(), session, format, limits) }
+	if collect || (maintenance && session.HasActiveCollection()) {
+		report, err := collectSession(r.Context(), session, limits)
+		writeMaintenance(w, report, err)
+		return
+	}
+	open := func() (*store, error) { return openStore(r.Context(), session, route.Repository, limits) }
 	s, e := retryOpenStore(open, refresh)
 	if e != nil {
 		log.Printf("git request setup failed stage=open-store: %v", e)
 		http.Error(w, "Git storage unavailable", operationStatus(e))
 		return
 	}
-	defer func() { s.Close() }()
+	defer func() {
+		if s != nil {
+			s.Close()
+		}
+	}()
+	if s.stateRoot == nil {
+		if route.Action != gitWrite {
+			http.NotFound(w, r)
+			return
+		}
+		// Persist the format and default branch before the first advertisement.
+		// A competing creator must reload the winning root before proceeding.
+		if err := s.publish(s.meta.Refs); err != nil && !errors.Is(err, errPublicationConflict) {
+			http.Error(w, "repository initialization failed", operationStatus(err))
+			return
+		}
+		s.Close()
+		if e = refresh(); e == nil {
+			s, e = retryOpenStore(open, refresh)
+		}
+		if e == nil && s.stateRoot == nil {
+			e = errPublicationConflict
+		}
+		if e != nil {
+			http.Error(w, "repository initialization failed", operationStatus(e))
+			return
+		}
+	}
 	if service == transport.ReceivePackService && method == http.MethodPost {
 		e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {
 			s.Close()
@@ -253,17 +296,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if maintenance {
 		report, err := s.maintain()
-		if err != nil {
-			http.Error(w, "maintenance failed: "+err.Error(), operationStatus(err))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		states := map[wal.MaintenanceState]string{wal.MaintenanceStateComplete: "complete", wal.MaintenanceStateMore: "more", wal.MaintenanceStateConflict: "conflict", wal.MaintenanceStatePending: "pending", wal.MaintenanceStateRetained: "retained"}
-		e = json.NewEncoder(w).Encode(struct {
-			State   string `json:"state"`
-			Objects uint64 `json:"candidate_objects"`
-			Bytes   uint64 `json:"candidate_bytes"`
-		}{states[report.State], report.Objects, report.Bytes})
+		writeMaintenance(w, report, err)
+		return
 	} else if service == transport.ReceivePackService && method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 		e = advertise(w, s)

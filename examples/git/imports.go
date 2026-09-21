@@ -30,6 +30,8 @@ func unwrap[T any](call func() wt.Result[T, wal.Failure]) (T, error) {
 	}
 	var zero T
 	switch r.Err().Tag() {
+	case wal.FailureMissing:
+		return zero, errLogMissing
 	case wal.FailureExpired:
 		return zero, errExpired
 	case wal.FailureLimit:

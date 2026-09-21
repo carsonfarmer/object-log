@@ -103,6 +103,8 @@ commit or checkpoint, against `max_collection_objects`. Consumers do not count
 storage chunks. Shared descendants count per reference path for admission;
 collection deduplicates physical objects. Historical roots can exceed the bound
 together, so checkpoint the full tail before collecting them.
+`start_collection_with_limit` bounds a new deletion plan independently of that
+live-graph limit. An already installed plan is resumed unchanged.
 
 Long readers acquire a retention ID before opening application data and release
 it after their last read. Any retention blocks a new collection plan. Retentions
@@ -123,7 +125,8 @@ for the durable format and recovery invariants. The schema is defined in
   is a working Git service using go-git and the
   same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
   clients, SHA-1 and SHA-256, protocol-v2 clone/fetch, classic push, shallow
-  history, authentication, recovery, and garbage collection. Local `MinIO`
+  history, configured repository names, Cognito permissions, recovery, and garbage
+  collection. Local `MinIO`
   tests cover the current implementation. Qualify remote storage and host
   capacity with the provider suite before deployment.
 

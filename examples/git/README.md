@@ -13,7 +13,7 @@ Supported behavior includes:
 - protocol-v2 discovery, clone, and have-aware fetch;
 - classic receive-pack push;
 - shallow clone, deepen, and unshallow;
-- branches, annotated tags, optional authentication, and read-only mode;
+- named repositories, branches, annotated tags, Cognito permissions, and read-only mode;
 - atomic ref and catalog publication;
 - restart recovery, checkpoints, reader retention, and bounded collection.
 
@@ -65,6 +65,8 @@ wal_prefix = "$test_id"
 wal_access_key = "objectlog"
 wal_secret_key = "local-test-secret"
 git_boot_id = "$test_id"
+git_auth_mode = "password"
+git_password = "local-git-password"
 EOF_VARS
 )
 ```
@@ -84,19 +86,29 @@ http://127.0.0.1:19100/sha1.git
 http://127.0.0.1:19100/sha256.git
 ```
 
-For example:
+Initialize a repository with its first push. Enter `git` and the local password
+when Git prompts. Reads never create repositories:
 
 ```sh
-git clone http://127.0.0.1:19100/sha256.git
+git init --object-format=sha256 -b main demo
+cd demo
+echo 'Git on object-log' > README.md
+git add README.md
+git commit -m 'Initial commit'
+git push http://127.0.0.1:19100/sha256.git main
+cd ..
+git clone http://127.0.0.1:19100/sha256.git cloned-demo
 ```
 
 When finished, stop Spin and MinIO, then remove `"$local_config"` and the
 printed MinIO data directory.
 
-Authentication is disabled when `git_password` is empty and should only be used
-that way on loopback. When configured, clients use HTTP Basic authentication;
-the username is ignored. Branch updates must be fast-forward. Force pushes and
-force-with-lease do not rewrite branches.
+The local `password` mode uses HTTP Basic authentication; the username is
+ignored. An empty password is a configuration error. Anonymous access requires
+explicit `git_auth_mode = "anonymous"`, no password, and disables administration;
+use it only for disposable loopback demos. Hosted services should use Cognito.
+Branch updates must be fast-forward. Force pushes and force-with-lease do not
+rewrite branches.
 
 ## Configuration
 
@@ -111,10 +123,18 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `wal_access_key` | empty | S3 access key |
 | `wal_secret_key` | empty | S3 secret key |
 | `wal_session_token` | empty | Optional temporary-credential token |
-| `wal_default_branch` | empty | Persisted default branch when supplied |
+| `wal_credential_mode` | `static` | Explicit keys or `instance-role` for renewing EC2 IMDSv2 credentials |
+| `wal_collection_candidates` | `1000` | Maximum entries in a new deletion plan, capped by the durable graph limit |
 | `wal_max_collection_objects` | `100000` | Publication graph bound (shared paths count separately); maximum unique live objects or entries per collection plan |
 | `wal_recover_retentions_after_drain` | `false` | Exclusive lost-retention recovery mode |
-| `git_password` | empty | Optional HTTP Basic password |
+| `git_repositories` | two demo entries | JSON map of paths, WAL identities, formats, default branches and permissions |
+| `git_auth_mode` | `password` | `password`, `cognito`, or explicit local `anonymous` mode |
+| `git_password` | empty | Required password for local password mode |
+| `git_cognito_issuer` | empty | HTTPS Cognito user-pool issuer |
+| `git_cognito_client_id` | empty | Public OAuth client for users |
+| `git_cognito_scope` | empty | Required access-token scope, e.g. `git/access` |
+| `git_cognito_host` | Cognito in `us-east-1` | Allowed outbound signing-key host; match the issuer's region |
+| `git_cognito_operator_client_id` | empty | Separate machine client allowed administration only; requires the access scope plus `git/maintenance` |
 | `git_boot_id` | `local-boot` | Instance identity exposed for recovery tests |
 | `git_read_only` | `false` | Reject push and maintenance when true |
 | `git_max_push_bytes` | `2147483648` | Incoming push body limit |
@@ -131,6 +151,34 @@ accepted requests and stored objects, not peak memory: go-git buffers incoming
 delta bases and results before the object-size check. Deployment capacity must
 account for that memory use and concurrent requests.
 
+## Repositories and permissions
+
+Repository names come from configuration, including nested names. For example:
+
+```toml
+git_repositories = '{"team/project.git":{"log_id":"team-project","format":"sha1","default_branch":"main","read_groups":["developers"],"write_groups":["developers"],"admin_groups":["operators"]}}'
+```
+
+Each name has its own WAL identity. Duplicate identities, ambiguous names and
+invalid formats are rejected. Add another entry and reload Spin to provision a
+repository without rebuilding. Keep each identity stable. The first authorized
+push discovery persists its format and default branch; subsequent configuration
+cannot reinterpret that stored format or change its default branch.
+
+Cognito mode checks signed access tokens, issuer, client, expiry and scope before
+opening storage. Git supplies the access token as its Basic password through an
+OAuth credential helper; HTTP clients may also send a Bearer token. Read, write
+and administrator groups are independent. Empty group lists grant no access.
+The optional machine client is for automated maintenance across all configured
+repositories and cannot clone or push. Its token must include both
+`git_cognito_scope` and `git/maintenance`. It uses Cognito's client-credentials
+grant, not a user's password or refresh token.
+
+User authentication is separate from storage authentication. On EC2, set
+`wal_credential_mode = "instance-role"` and leave all static credential fields
+empty. The established object_store provider obtains and renews role credentials
+through IMDSv2. Restrict the instance role to the application's bucket prefix.
+
 ## Test
 
 Run the code-level gate from the repository root:
@@ -143,6 +191,8 @@ Verify the composed component and Spin configuration:
 
 ```sh
 make git-spin-config-test
+./scripts/test-git-auth-transport.sh
+python3 examples/wal-component/tests/test-credentials.py
 ```
 
 Against a service with a fresh WAL prefix, run the unchanged-client provider
@@ -152,6 +202,7 @@ and restart it before the first suite run or a rerun:
 
 ```sh
 GIT_PROBE_URL=http://127.0.0.1:19100 \
+GIT_PROBE_PASSWORD=local-git-password \
 GIT_PROBE_LOG=/tmp/object-log-git-spin.log make git-provider-test
 ```
 
@@ -181,29 +232,33 @@ unreachable Git objects. Run authenticated maintenance periodically and after
 ref deletion:
 
 ```sh
-curl --fail --user git:"$GIT_PASSWORD" \
-  -X POST http://127.0.0.1:19100/sha1.git/maintenance
-curl --fail --user git:"$GIT_PASSWORD" \
+curl --fail --user git \
   -X POST http://127.0.0.1:19100/sha256.git/maintenance
 ```
 
 The JSON response state is:
 
-- `complete`: no further work remains;
-- `more`: run maintenance again;
+- `complete`: the physical scan found no remaining deletion candidates;
+- `more`: call the same repository's `/collect` endpoint for another physical batch;
 - `pending` or `conflict`: retry with a fresh request; or
-- `retained`: an active reader currently blocks collection.
+- `retained`: a registered reader blocks collection; if its process stopped, use
+  the explicit drain procedure below.
 
-Each request prunes unreachable Git objects and processes one bounded WAL
-collection batch. Candidate counts are plan entries, not guaranteed unique
-physical deletions.
+`/maintenance` prunes unreachable Git objects and checkpoints the resulting
+catalog, then processes one WAL collection plan. `/collect` only reclaims
+physical objects; it does not repeat the Git graph walk. An installed plan is
+resumed before opening the catalog. New plans use `wal_collection_candidates`;
+an installed larger plan always needs enough budget to finish in full.
+Candidate counts are plan entries, not guaranteed unique physical deletions.
+Each new plan still authenticates the complete live WAL graph. Continuous
+readers can delay cleanup; scheduling alone does not remove that constraint.
 
 Every fetch acquires WAL retention before opening catalog data and releases it
 after the last response byte. If a stopped instance loses a retention ID, stop
 new traffic and drain all readers. Start one authenticated instance with
-`wal_recover_retentions_after_drain = "true"`, call both
-`/sha1.git/recover-retentions-after-drain` and
-`/sha256.git/recover-retentions-after-drain`, then stop it and restart with the
+`wal_recover_retentions_after_drain = "true"`, call
+`/<repository>/recover-retentions-after-drain` for each configured repository,
+then stop it and restart with the
 setting disabled. Recovery mode rejects ordinary Git and maintenance traffic.
 Never clear retentions while a reader may still be active.
 
@@ -223,8 +278,9 @@ Never clear retentions while a reader may still be active.
   Such fetches can use more bandwidth. Have-aware negotiation still omits
   objects the client already owns. Retained deltas also add catalog-read bytes.
 - Partial-clone filters and packfile URIs are not implemented.
-- Host-wide TLS, routing, authentication integration, concurrency, and memory
-  admission belong to the deployment host.
+- TLS termination, process supervision, and host-wide connection and memory
+  policies belong to the deployment host. Cognito settings must match the
+  deployed user pool and clients.
 - go-git, Spin, MinIO, and componentize-go are unmodified. The Go SDK pins the
   proposed fix in go-pkg PR #13; see [its provenance](../../THIRD_PARTY.md).
 - Durable development formats are not migrated. Start with a fresh prefix after

@@ -63,10 +63,12 @@ component. Provider suites use ordinary Git as the external oracle and cover
 both hash formats, clone/fetch/push, large files, repeated history, access
 control, restarts, maintenance, and collection.
 
-The upstream-go-git service passes local MinIO tests. Earlier live S3 testing
-ran Spin locally and does not qualify a remotely hosted service. The current
-routes and shared password remain demonstration setup. Service readiness
-requires completing the work below against the exact deployed revision.
+The upstream-go-git service passes local MinIO tests, including three isolated
+configured repository names and both hash formats. Cognito validation is wired;
+real sign-in and helper refresh await remote qualification. Earlier live S3
+testing ran Spin locally and does not qualify a remotely hosted service.
+Service readiness requires completing the remaining gates below against the
+exact deployed revision.
 
 ## Dependency policy
 
@@ -119,11 +121,11 @@ ordinary writes. Test the actual browser login, credential delivery and refresh
 flow; signed test tokens alone do not establish Cognito interoperability.
 
 S3 authenticates the service separately through IAM. The deployed host receives
-a role restricted to its data prefix. The current bridge takes explicit session
-credentials and does not refresh them. Prefer the established object_store
-IMDSv2 credential provider through the existing WASI HTTP connector, selected
-explicitly for the deployed host. First test it with a controlled metadata
-endpoint in the composed component, then prove role credential renewal on EC2.
+a role restricted to its data prefix. The bridge now selects explicit static
+credentials or the established object_store IMDSv2 credential provider through
+the WASI HTTP connector.
+Controlled metadata tests pass in the composed component, including renewal
+and failure; still prove role credential renewal on EC2.
 Do not assume native metadata access proves WASI compatibility or introduce
 long-lived access keys.
 
@@ -135,12 +137,16 @@ the actual WASI transport; a native context-timeout test is not enough.
 
 ### 3. Automatic maintenance
 
-Preserve the existing cheap write-triggered tail checkpoint. Full Git maintenance
-currently walks reachable objects and the catalog; only its WAL deletion phase
-is batch-bounded. Do not put a full graph scan on every push or start detached
-component calls after an HTTP handler returns.
+Preserve the existing cheap write-triggered tail checkpoint. Logical Git
+maintenance walks reachable objects and the catalog. Physical followups skip
+that walk and resume installed deletion plans first. Do not put a full graph
+scan on every push or start detached component calls after an HTTP handler returns.
 
-Select the maintenance design in #46 before implementing automatic triggers.
+The first selected changes in #46 are separate logical/physical passes and a
+per-call deletion-plan cap. A periodic host worker with finite work budgets is
+being implemented. An optional disposable ingress marker can pause new requests
+while admitted requests finish; evaluate it without changing the WAL authority.
+No scheduling approach alone guarantees progress with continuous readers.
 Compare request-triggered work, publication events, periodic invocation and
 checkpoint/epoch-driven approaches. Evaluate scheduling separately from the
 reachability and deletion algorithms: repeating a full scan on every small
