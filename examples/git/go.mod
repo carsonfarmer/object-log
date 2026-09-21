@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
 	github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260917090420-0f3a0a2c2551
+	github.com/go-jose/go-jose/v4 v4.1.5
 	go.bytecodealliance.org/pkg v0.2.4-0.20260806154504-91f6c4863e67
 )
 
