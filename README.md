@@ -123,8 +123,9 @@ for the durable format and recovery invariants. The schema is defined in
 
 - [`object-log-kv`](https://github.com/carsonfarmer/object-log/tree/main/crates/object-log-kv)
   is a byte-key/value store with sparse reads and writes, atomic batches,
-  immutable snapshots, ordered scans, and checkpoint recovery. It remains
-  experimental; qualify it against the intended workload before production use.
+  immutable snapshots, ordered scans, and checkpoint recovery. Its guide defines
+  a bounded small-record profile, local qualification and the caller's recovery
+  and maintenance responsibilities.
 - [`examples/git`](https://github.com/carsonfarmer/object-log/tree/main/examples/git)
   is a working Git service using go-git and the
   same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
