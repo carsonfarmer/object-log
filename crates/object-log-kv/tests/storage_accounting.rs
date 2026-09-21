@@ -2,7 +2,8 @@ use std::{error::Error as StdError, sync::Arc};
 
 use bytes::Bytes;
 use object_log::{
-    CheckpointStatus, CommitStatus, Error, Log, LogId, Options, TransactionId, ValidatedBackend,
+    CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus, Error, Log, LogId, Options,
+    TransactionId, ValidatedBackend,
 };
 use object_log_kv::{KvCommand, KvError, KvStore, Limits};
 use object_store::{memory::InMemory, path::Path};
@@ -43,10 +44,16 @@ async fn capacity_rejection_preserves_a_collectible_tree() -> Result<(), Box<dyn
             .await?
             .prepare(
                 TransactionId::new(),
-                &[KvCommand::Set {
-                    key: Bytes::from_static(b"ab"),
-                    value: Bytes::from_static(b"two")
-                },]
+                &[
+                    KvCommand::Set {
+                        key: Bytes::from_static(b"aa"),
+                        value: Bytes::from_static(b"unpublished replacement"),
+                    },
+                    KvCommand::Set {
+                        key: Bytes::from_static(b"ab"),
+                        value: Bytes::from_static(b"two"),
+                    },
+                ]
             )
             .await,
         Err(KvError::Log(Error::LimitExceeded("publication objects")))
@@ -58,9 +65,47 @@ async fn capacity_rejection_preserves_a_collectible_tree() -> Result<(), Box<dyn
         Some(b"one".as_slice())
     );
     assert_eq!(snapshot.get(b"ab").await?, None);
-    let Some(CheckpointStatus::Published(view)) = snapshot.checkpoint().await? else {
+    let Some(CheckpointStatus::Published(_)) = snapshot.checkpoint().await? else {
         return Err("checkpoint did not publish".into());
     };
-    store.log().start_collection(&view).await?;
+    let mut drained = false;
+    for _ in 0..8 {
+        match store
+            .log()
+            .start_collection(&store.log().load().await?)
+            .await?
+        {
+            CollectionStart::Empty(_) => {
+                drained = true;
+                break;
+            }
+            CollectionStart::Installed(view, _) => {
+                assert!(matches!(
+                    store.log().resume_collection(&view).await?,
+                    CollectionFinish::Complete(_, _)
+                ));
+            }
+            status => return Err(format!("unexpected collection result: {status:?}").into()),
+        }
+    }
+    assert!(drained, "rejected staging must remain collectible");
+    let snapshot = store.snapshot().await?;
+    assert_eq!(
+        snapshot.scan(b"", None, None, 2).await?.entries,
+        vec![(Bytes::from_static(b"aa"), Bytes::from_static(b"one"))]
+    );
+    let prepared = snapshot
+        .prepare(
+            TransactionId::new(),
+            &[KvCommand::Set {
+                key: Bytes::from_static(b"aa"),
+                value: Bytes::from_static(b"retry"),
+            }],
+        )
+        .await?;
+    assert!(matches!(
+        store.log().commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
     Ok(())
 }

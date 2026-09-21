@@ -51,6 +51,8 @@ backend_cases! {
     lost_publication_cancellation_and_expired_evidence_remain_distinct,
     retention_pins_scan_and_checkpoint_gc_can_resume_after_failure,
     rejected_uncertain_candidate_resolves_without_replaying_over_winner,
+    deep_prefix_pages_remain_exact_across_deletes_and_checkpoint,
+    exhausted_tree_budget_never_publishes_a_partial_batch,
 }
 
 async fn open(backend: &ValidatedBackend, options: Options) -> Result<KvStore, Box<dyn StdError>> {
@@ -872,6 +874,132 @@ async fn rejected_uncertain_candidate_resolves_without_replaying_over_winner(
     assert_eq!(
         reopened.snapshot().await?.get(b"x").await?,
         Some(Bytes::from("winner"))
+    );
+    Ok(())
+}
+
+async fn deep_prefix_pages_remain_exact_across_deletes_and_checkpoint(
+    new_store: &StoreFactory,
+) -> TestResult {
+    let (backend, store, _) = fixture_on(new_store()?, Options::default()).await?;
+    let limits = Limits {
+        key_bytes: 32,
+        value_bytes: 1024,
+        batch_entries: 8,
+        batch_bytes: 16 * 1024,
+        page_entries: 7,
+        response_bytes: 1100,
+        tree_bytes: 4 * 1024 * 1024,
+    };
+    let store = KvStore::new(store.log().clone(), limits);
+    // Every value-bearing key is an ancestor of the next, through the key limit.
+    let model: Vec<_> = (0..=limits.key_bytes)
+        .map(|length| (Bytes::from(vec![0xff; length]), Bytes::from(vec![42; 1024])))
+        .collect();
+    for entries in model.chunks(limits.batch_entries) {
+        let commands: Vec<_> = entries.iter().map(|(key, value)| set(key, value)).collect();
+        commit(&store, &commands).await?;
+    }
+    let snapshot = store.snapshot().await?;
+    let id = RetentionId::new();
+    assert!(matches!(
+        store.log().retain(snapshot.view(), id).await?,
+        RetentionStatus::Applied(_)
+    ));
+    let first = snapshot.scan_prefix(b"", None, limits.page_entries).await?;
+    assert_eq!(first.entries, model[..1]);
+
+    let deletes: Vec<_> = model
+        .iter()
+        .step_by(2)
+        .map(|(key, _)| KvCommand::Delete { key: key.clone() })
+        .collect();
+    for commands in deletes.chunks(limits.batch_entries) {
+        commit(&store, commands).await?;
+    }
+    checkpoint(&store).await?;
+
+    let mut actual = first.entries;
+    let mut after = first.after;
+    while after.is_some() {
+        let page = snapshot
+            .scan_prefix(b"", after.as_deref(), limits.page_entries)
+            .await?;
+        assert!(
+            page.entries
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
+                <= limits.response_bytes
+        );
+        actual.extend(page.entries);
+        after = page.after;
+    }
+    assert_eq!(
+        actual, model,
+        "pagination changed its snapshot after publication"
+    );
+    assert!(matches!(
+        store
+            .log()
+            .release_retention(&store.log().load().await?, id)
+            .await?,
+        RetentionStatus::Applied(_)
+    ));
+    let reopened = open(&backend, Options::default()).await?;
+    let snapshot = reopened.snapshot().await?;
+    for (index, (key, value)) in model.iter().enumerate() {
+        assert_eq!(
+            snapshot.get(key).await?,
+            (index % 2 != 0).then(|| value.clone())
+        );
+    }
+    Ok(())
+}
+
+async fn exhausted_tree_budget_never_publishes_a_partial_batch(
+    new_store: &StoreFactory,
+) -> TestResult {
+    let (_, store, faults) = fixture_on(new_store()?, Options::default()).await?;
+    let limited = KvStore::new(
+        store.log().clone(),
+        Limits {
+            tree_bytes: 512,
+            ..Limits::default()
+        },
+    );
+    let snapshot = limited.snapshot().await?;
+    let generation = snapshot.view().generation();
+    faults.reset();
+    assert!(matches!(
+        snapshot
+            .prepare(
+                TransactionId::new(),
+                &[set(b"a", b"first"), set(b"b", &[42; 1024])]
+            )
+            .await,
+        Err(KvError::Limit(_))
+    ));
+    assert!(
+        faults.metrics().operation(Operation::Put).requests > 0,
+        "failure must follow staging"
+    );
+    assert_eq!(store.log().load().await?.generation(), generation);
+    assert_eq!(
+        store
+            .snapshot()
+            .await?
+            .get_many(&[Bytes::from("a"), Bytes::from("b")])
+            .await?,
+        vec![None, None]
+    );
+    assert_eq!(
+        commit(&store, &[set(b"a", b"retry")]).await?,
+        vec![KvResult::Changed(true)]
+    );
+    assert_eq!(
+        store.snapshot().await?.get(b"a").await?,
+        Some(Bytes::from("retry"))
     );
     Ok(())
 }

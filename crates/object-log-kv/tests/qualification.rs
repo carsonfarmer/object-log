@@ -44,7 +44,25 @@ type ProviderCounts = dyn Fn() -> [u64; 4];
 
 #[tokio::test]
 async fn memory_growth_and_contention() -> TestResult {
-    qualify(Arc::new(InMemory::new()), &|| [0; 4], "memory").await
+    qualify(
+        Arc::new(InMemory::new()),
+        &|| [0; 4],
+        "memory",
+        &[(256, 6), (1024, 6), (4096, 6)],
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "larger finite small-record workload; see README"]
+async fn memory_large_growth_and_contention() -> TestResult {
+    qualify(
+        Arc::new(InMemory::new()),
+        &|| [0; 4],
+        "memory",
+        &[(16_384, 6), (65_536, 7)],
+    )
+    .await
 }
 
 #[cfg(feature = "aws")]
@@ -52,7 +70,13 @@ async fn memory_growth_and_contention() -> TestResult {
 #[ignore = "requires isolated local MinIO; see README"]
 async fn minio_growth_and_contention() -> TestResult {
     let (storage, counts) = minio::build()?;
-    qualify(storage, &move || counts.snapshot(), "minio").await
+    qualify(
+        storage,
+        &move || counts.snapshot(),
+        "minio",
+        &[(256, 6), (4096, 6), (16_384, 7)],
+    )
+    .await
 }
 
 async fn open(backend: &ValidatedBackend) -> TestResult<KvStore> {
@@ -204,6 +228,7 @@ async fn qualify(
     storage: Arc<dyn ObjectStore>,
     provider: &ProviderCounts,
     name: &str,
+    sizes: &[(u32, u64)],
 ) -> TestResult {
     let faults = FaultStore::from_arc(Arc::clone(&storage));
     faults.record_events(false);
@@ -215,12 +240,12 @@ async fn qualify(
     let mut model = Model::new();
     let mut count = 0;
     eprintln!(
-        "backend={name} key=records/8-digit value_bytes=1024 sizes=256,1024,4096 \
+        "backend={name} key=records/8-digit value_bytes=1024 sizes_and_point_get_limits={sizes:?} \
         seed=0x5eed samples_per_size=32 batch_sizes=1,8,64 writers=4 readers=2 \
         tree_budget={} batch_budget={} response_budget={}",
         LIMITS.tree_bytes, LIMITS.batch_bytes, LIMITS.response_bytes
     );
-    for target in [256, 1024, 4096] {
+    for &(target, max_gets) in sizes {
         reset(&faults);
         let http = provider();
         let started = Instant::now();
@@ -265,8 +290,14 @@ async fn qualify(
             snapshot.get(&key(count / 2)).await?,
             model.get(&key(count / 2)).cloned()
         );
-        assert!(faults.metrics().operation(Operation::Get).requests <= 6);
-        assert!(faults.metrics().downloaded_bytes() < 32 * 1024);
+        let metrics = faults.metrics();
+        let gets = metrics.operation(Operation::Get).requests;
+        let bytes = metrics.downloaded_bytes();
+        eprintln!("{name} keys={count} sparse_point_gets={gets} downloaded_bytes={bytes}");
+        // Larger decimal-key spaces add a level; counter keys from a previous
+        // stage also split the shared records/ prefix. Keep each fixture's bound.
+        assert!(gets <= max_gets);
+        assert!(bytes < 32 * 1024);
         drop(snapshot);
 
         mixed(&store, &faults, provider, name, count, &mut model).await?;
