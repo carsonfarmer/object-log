@@ -52,7 +52,7 @@ resource "aws_cognito_user_pool_client" "git" {
   generate_secret                      = false
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
-  allowed_oauth_scopes                 = ["git/access"]
+  allowed_oauth_scopes                 = ["openid", "git/access"]
   callback_urls                        = ["http://localhost:53119"]
   default_redirect_uri                 = "http://localhost:53119"
   supported_identity_providers         = ["COGNITO"]
@@ -109,7 +109,7 @@ output "host_cognito" {
     client_id     = aws_cognito_user_pool_client.git[0].id
     authorize_url = "${local.cognito_login_origin}/oauth2/authorize"
     token_url     = "${local.cognito_login_origin}/oauth2/token"
-    scopes        = "git/access"
+    scopes        = "openid git/access"
     redirect_url  = "http://localhost:53119"
   } : null
 }

@@ -68,6 +68,8 @@ run "host" {
       aws_cognito_user_pool_client.git[0].generate_secret == false &&
       aws_cognito_user_pool_client.git[0].access_token_validity == 5 &&
       aws_cognito_user_pool_client.git[0].allowed_oauth_flows == toset(["code"]) &&
+      aws_cognito_user_pool_client.git[0].allowed_oauth_scopes == toset(["openid", "git/access"]) &&
+      output.host_cognito.scopes == "openid git/access" &&
       aws_cognito_user_pool_client.git[0].callback_urls == toset(["http://localhost:53119"]) &&
       aws_cognito_user_pool_client.maintenance[0].allowed_oauth_flows == toset(["client_credentials"]) &&
       aws_cognito_user_pool_client.maintenance[0].allowed_oauth_scopes == toset(["git/access", "git/maintenance"])

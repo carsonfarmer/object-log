@@ -95,7 +95,7 @@ endpoint values below. Use the `host_service_url` output in place of
 
 ```sh
 git config --global credential.https://git.example.com.oauthClientId CLIENT_ID
-git config --global credential.https://git.example.com.oauthScopes git/access
+git config --global credential.https://git.example.com.oauthScopes 'openid git/access'
 git config --global credential.https://git.example.com.oauthAuthURL https://COGNITO_DOMAIN/oauth2/authorize
 git config --global credential.https://git.example.com.oauthTokenURL https://COGNITO_DOMAIN/oauth2/token
 git config --global credential.https://git.example.com.oauthRedirectURL http://localhost:53119
@@ -111,6 +111,9 @@ and initial branch before trying to clone it.
 The helper uses authorization-code S256 PKCE and sends the access token as an
 ordinary Basic password. Its fixed `http://localhost:53119` callback matches the
 registered public client; the random loopback-port default is unsuitable.
+Request both scopes: the live Cognito authorization-code flow omitted
+`cognito:groups` with only `git/access`, and included the repository groups with
+`openid git/access`. The service still requires an access token and `git/access`.
 Cognito supports PKCE but this client setting does not require it server-side.
 Refresh uses the token endpoint; the issuer/JWKS hostname is a different endpoint.
 For the finite live expiry test, set `host_access_token_minutes = 5` through
