@@ -170,7 +170,7 @@ locals {
       secret_parameter = aws_ssm_parameter.maintenance_secret[0].name
       client_id        = aws_cognito_user_pool_client.maintenance[0].id
       token_url        = "${local.cognito_login_origin}/oauth2/token"
-      service_url      = local.host_service_url
+      service_url      = "http://127.0.0.1:3000"
       repositories     = sort(keys(var.host_repositories))
       budget_seconds   = var.host_maintenance_budget_seconds
       pause_seconds    = var.host_maintenance_pause_seconds

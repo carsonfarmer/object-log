@@ -119,9 +119,9 @@ run "host_public_ip" {
       strcontains(local.host_bootstrap, "198.51.100.42 {\n    tls {") &&
       strcontains(local.host_bootstrap, "issuer acme https://acme-v02.api.letsencrypt.org/directory") &&
       strcontains(local.host_bootstrap, "profile shortlived") &&
-      jsondecode(base64decode(regex("printf '%s' '([^']+)' \\| base64 --decode > /etc/object-log-git/maintenance.json", local.host_bootstrap)[0])).service_url == output.host_service_url
+      jsondecode(base64decode(regex("printf '%s' '([^']+)' \\| base64 --decode > /etc/object-log-git/maintenance.json", local.host_bootstrap)[0])).service_url == "http://127.0.0.1:3000"
     )
-    error_message = "The rendered proxy and worker must use trusted public-IP HTTPS at the same address."
+    error_message = "The proxy must use trusted public-IP HTTPS and the worker must call the loopback listener."
   }
 }
 

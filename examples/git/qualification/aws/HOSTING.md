@@ -60,7 +60,9 @@ sudo journalctl -u object-log-git -u caddy -u object-log-maintenance
 sudo systemctl list-timers object-log-maintenance.timer
 ```
 
-Spin binds to `127.0.0.1:3000`; Caddy serves public HTTPS. The systemd timer runs
+Spin binds to `127.0.0.1:3000`; Caddy serves public HTTPS. The local maintenance
+worker calls that loopback listener with its Cognito token, so cleanup does not
+depend on the Git service's public DNS or certificate renewal. The systemd timer runs
 after boot, then `host_maintenance_interval` seconds after each completed run,
 without overlap. A run starts with `/maintenance` per repository, then uses
 `/collect` after `more` or `retained`. Every repository has an absolute
