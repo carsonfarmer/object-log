@@ -396,8 +396,9 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns an error when the head is absent, unreadable, or invalid, or its
-    /// durable options differ from `options`. An absent head is not initialized.
+    /// Returns [`Error::LogNotFound`] when the head is absent, without
+    /// initializing it. Other errors report an unreadable or invalid head, or
+    /// durable options that differ from `options`.
     pub async fn open_existing(
         backend: &ValidatedBackend,
         log_id: &LogId,
@@ -2528,7 +2529,7 @@ impl Log {
         let stored = store
             .read(StoreKey::Head, options.max_head_bytes)
             .await?
-            .ok_or_else(|| Error::InvalidFormat("the opened log has no durable head".to_owned()))?;
+            .ok_or(Error::LogNotFound)?;
         Self::incarnation_from_stored(store, options, &stored)
     }
 
@@ -3439,7 +3440,7 @@ mod tests {
         faults.reset();
         assert!(matches!(
             Log::open_existing(&backend, &id, Options::default()).await,
-            Err(Error::InvalidFormat(_))
+            Err(Error::LogNotFound)
         ));
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
@@ -3485,11 +3486,10 @@ mod tests {
             )
             .await?;
         faults.reset();
-        assert!(
-            Log::open_existing(&backend, &id, Options::default())
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            Log::open_existing(&backend, &id, Options::default()).await,
+            Err(Error::InvalidFormat(_))
+        ));
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
         Ok(())
     }

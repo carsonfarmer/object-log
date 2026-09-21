@@ -486,6 +486,9 @@ pub struct PendingCheckpoint {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Opening an existing log found no durable head.
+    #[error("the requested log has no durable head")]
+    LogNotFound,
     /// A logical log identifier is unsafe or outside its size limit.
     #[error("invalid log identifier")]
     InvalidLogId,
