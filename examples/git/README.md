@@ -17,9 +17,10 @@ Supported behavior includes:
 - atomic ref and catalog publication;
 - restart recovery, checkpoints, reader retention, and bounded collection.
 
-The example is tested against local MinIO. Run the provider suite against your
-remote storage and host before deployment. It is pre-release: use a fresh
-object-store prefix when changing incompatible revisions.
+The example is tested against local MinIO and a remotely hosted EC2/Cognito/S3
+service over HTTPS. Run the provider suite for your intended workload and host
+capacity before deployment. It is pre-release: use a fresh object-store prefix
+when changing incompatible revisions.
 
 ## Build
 
@@ -254,8 +255,10 @@ physical objects; it does not repeat the Git graph walk. An installed plan is
 resumed before opening the catalog. New plans use `wal_collection_candidates`;
 an installed larger plan always needs enough budget to finish in full.
 Candidate counts are plan entries, not guaranteed unique physical deletions.
-Each new plan still authenticates the complete live WAL graph. Continuous
-readers can delay cleanup; scheduling alone does not remove that constraint.
+Each new plan authenticates live metadata and preserves referenced blob keys
+without reading opaque leaf payloads. Ordinary reads and publication still
+verify those bytes. Continuous readers can delay cleanup; scheduling alone
+does not remove that constraint.
 
 Every fetch acquires WAL retention before opening catalog data and releases it
 after the last response byte. If a stopped instance loses a retention ID, stop

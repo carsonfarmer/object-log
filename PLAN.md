@@ -52,10 +52,13 @@ recovery, and configuration-only repository addition. All five live core S3
 tests pass. Automatic-maintenance issue #46 is closed after independent review.
 
 The remote long-history workloads passed 1,025 additional pushes per hash format
-with concurrent fetches and matching cold histories and files. Issue #45 remains
-open for concurrent 513 MiB object lifecycles now running, combined cleanup
-verification, final review and teardown. Unmodified go-git buffers incoming delta
-bases and results, so the large-object gate must measure deployed host memory.
+with concurrent fetches and matching cold histories and files. Concurrent 513 MiB
+object lifecycles passed with matching bytes and a 5.30 GiB service cgroup peak
+on the 16 GiB host. Unmodified go-git buffers incoming delta bases and results;
+qualify the intended concurrency before choosing host capacity. Final automatic
+cleanup, unchanged refs, cold mirrors, full fsck and independent review passed.
+Issue #45 records completed remote qualification, including independently
+verified removal of the created infrastructure.
 
 ## Release gate
 

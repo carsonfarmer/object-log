@@ -119,10 +119,10 @@ export GIT_PROBE_LOG="$qualification_state/spin.log"
 make git-provider-test
 
 cd examples/git
-GIT_REPEATED_PUSHES=1 go test -race -count=1 -parallel=4 \
+GIT_REPEATED_PUSHES=1 go test -race -count=1 -parallel=4 -timeout=60m \
   -run '^TestRepeatedPushes$' -v ./tests
 GIT_LARGE_OBJECT_MIB=513 GIT_CONCURRENT_LARGE=1 \
-  go test -race -count=1 -parallel=2 -run '^TestLargeBlob$' -v ./tests
+  go test -race -count=1 -parallel=2 -timeout=30m -run '^TestLargeBlob$' -v ./tests
 ```
 
 To qualify the core directly, export the same backend and temporary credentials

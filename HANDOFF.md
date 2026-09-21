@@ -97,7 +97,7 @@ Use `make gc-acceptance` for large collection changes and the provider commands
 in `examples/git/README.md` for service changes. Network-backed tests are
 opt-in, isolated, and disposable.
 
-The active service-readiness queue and remote HTTPS gate are in issue #45.
+The service-readiness and remote HTTPS qualification in issue #45 are complete.
 Issue #10 retains its completed local-Spin/live-S3 scope. Issue #47 is complete:
 collection plans have an independent candidate cap. Issue #46 is closed after
 deployed automatic-maintenance qualification and independent review.
@@ -144,11 +144,21 @@ with 421 and 403 concurrent fetch/fsck cycles in the two runs. Cold clones match
 the full histories and files. The recorded cgroup peak was 247,934,976 bytes
 (236.4 MiB), with push medians of about 1.70–1.76 seconds for this workload.
 
-Issue #45 remains open. Concurrent remote 513 MiB object lifecycles are running;
-combined cleanup verification, final review and teardown remain. The local
-large-object run passed and sampled about 5.27 GiB across Spin processes on macOS,
-not an exact peak or Linux capacity claim. The configurable EC2 default is 16 GiB
-for qualification.
+Concurrent remote 513 MiB object lifecycles passed for both hash formats,
+including related versions, clone, update and fetch with matching file bytes.
+They completed in 646–650 seconds; service cgroup peak was 5,685,891,072 bytes
+(5.30 GiB), with no unexpected restarts, on the 16 GiB EC2 host. This is a measured
+workload, not an arbitrary-concurrency capacity guarantee. Bridge counters
+include IMDS and retries and measure HTTP attempts/body bytes, not billed S3
+requests or network traffic.
+
+The final automatic cycle completed all eight repositories after the combined
+workloads. All refs were unchanged; fresh mirror clones and full fsck passed
+with 1,144 reachable commits in each main hash repository. Independent final
+review passed. All created test infrastructure was removed and its absence
+verified through AWS APIs. The domain registration was preserved and its
+original delegation restored. The local client and temporary credentials are
+removed after qualification.
 
 Keep final documentation user-facing and current. Plans capture internal intent;
 executable tests and concise commits replace raw evidence archives.

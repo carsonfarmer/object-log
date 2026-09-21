@@ -20,8 +20,9 @@ an explicit subnet. The host has an Elastic IP and accepts ports 80/443 only.
 Management uses SSM, with no SSH port or key.
 
 The configurable default is `t3.xlarge` (16 GiB) for the concurrent large-object
-qualification fixtures. This is host sizing for those tests, not an application
-memory limit or a production capacity guarantee.
+qualification fixtures. Two concurrent 513 MiB push/clone/update/fetch lifecycles
+passed on this host size with a 5.30 GiB service cgroup peak. This is a tested
+workload, not an application memory limit or an arbitrary-concurrency guarantee.
 
 `host_repositories` provisions canonical names, unique stable WAL IDs, SHA-1 or
 SHA-256 formats, default branches, and independent read/write/admin groups.

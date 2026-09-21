@@ -67,9 +67,8 @@ The upstream-go-git service passes local MinIO tests and the full provider suite
 against public EC2 HTTPS with S3. Real Cognito login, helper refresh, repository
 permissions, role replacement, process/host recovery and configuration-only
 repository addition have passed. All five live core S3 tests also pass.
-The remote long-history gate has passed. Service readiness still requires the
-large-object gate, combined cleanup verification, final review and teardown
-against the exact deployed revision.
+The remote long-history and concurrent large-object gates have passed. Service
+readiness checks, independent review and verified teardown are complete.
 
 ## Dependency policy
 
@@ -81,7 +80,7 @@ ordinary Spin and unmodified object storage.
 
 ## Service readiness
 
-Issue #45 tracks the remaining remote workload gates, final review and teardown.
+Issue #45 records the completed remote qualification and verified teardown.
 Automatic-maintenance issue #46 is closed after deployed qualification and
 independent review. Issue #6 tracks core performance; completed issue #10 retains
 its original local-Spin/live-S3 scope. Root integrates reviewed tranches;
@@ -159,7 +158,7 @@ runs automatically. Cleanup failure must not turn a committed push into a
 reported rejected push. The worker adds no durable job authority or detached
 component calls.
 
-### 4. Complete the remote workload gates
+### 4. Remote workload qualification
 
 Terraform deploys one disposable EC2 host with stock Spin, Caddy HTTPS, systemd,
 Cognito, S3 and restricted workload identity. A separate client has passed the
@@ -172,15 +171,18 @@ repositories passed after scheduled cleanup.
 
 The remote workload passed 1,025 additional pushes per hash format with concurrent
 fetch/fsck cycles and matching full cold histories and files. Concurrent remote
-513 MiB object lifecycles are running; this workload has passed locally. Record
-deployed memory, latency and S3 request/byte costs without treating local
-measurements as remote capacity evidence. Use response `X-Request-ID` values to
+513 MiB object lifecycles also passed, with matching bytes after clone and update.
+Their service cgroup peak was 5.30 GiB on the 16 GiB host. Bridge counters include
+IMDS and retries; they are HTTP attempts/body bytes, not billed S3-only traffic.
+Use response `X-Request-ID` values to
 match complete usage records delivered from the service journal through SSM.
 
-Issue #45 remains open through the large-object workload, combined cleanup
-verification, final independent review and verified teardown of the host,
-network resources, identities and test storage. Use disposable namespaces and
-no user data.
+The final timer cycle completed all eight repositories after the combined
+workloads, with unchanged refs. Fresh mirror clones and full fsck passed with
+1,144 reachable commits in each main hash repository. Independent final review
+passed. Hosting, network resources, identities and test storage were removed;
+AWS absence checks passed. The domain registration was preserved and its
+original delegation restored. Issue #45 records completion.
 
 ### 5. Review and release claims
 
