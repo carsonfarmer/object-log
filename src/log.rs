@@ -602,6 +602,35 @@ impl Log {
     /// Returns an error for a foreign view, invalid live data, a configured
     /// bound, or a storage failure before the head update.
     pub async fn start_collection(&self, view: &View) -> Result<CollectionStart, Error> {
+        self.start_collection_with_limit(view, self.options.max_collection_objects)
+            .await
+    }
+
+    /// Starts collection with at most `max_candidates` entries in a new plan.
+    ///
+    /// The limit must be positive and no greater than
+    /// [`Options::max_collection_objects`]. It bounds new deletion plans and
+    /// their namespace scans, independently of the durable live-graph limit.
+    /// The complete live graph is still verified before selecting candidates.
+    ///
+    /// An already active plan is returned unchanged, even when it exceeds this
+    /// limit. Resuming always retries that entire plan. Callers must budget for
+    /// reading the head and plan, deleting all candidates, clearing the fence,
+    /// and best-effort plan cleanup; reducing this limit cannot make an active
+    /// plan fit a smaller execution budget.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid limit before storage I/O. Other errors match
+    /// [`Self::start_collection`].
+    pub async fn start_collection_with_limit(
+        &self,
+        view: &View,
+        max_candidates: usize,
+    ) -> Result<CollectionStart, Error> {
+        if max_candidates == 0 || max_candidates > self.options.max_collection_objects {
+            return Err(Error::LimitExceeded("collection candidate objects"));
+        }
         self.validate_view(view)?;
         if view.head().active_plan.is_some() {
             return Ok(CollectionStart::Active(view.clone()));
@@ -611,12 +640,9 @@ impl Log {
         }
 
         let live = self.mark_live(view).await?;
-        if self.options.max_collection_objects == 0 {
-            return Err(Error::LimitExceeded("collection scan objects"));
-        }
         let scan_limit = live
             .len()
-            .checked_add(self.options.max_collection_objects)
+            .checked_add(max_candidates)
             .and_then(|limit| limit.checked_add(1))
             .ok_or(Error::LimitExceeded("collection scan objects"))?;
         let mut candidates = BTreeMap::new();
@@ -637,7 +663,7 @@ impl Log {
                 {
                     return Err(Error::CorruptObject);
                 }
-                if candidates.len() == self.options.max_collection_objects {
+                if candidates.len() == max_candidates {
                     break;
                 }
             }

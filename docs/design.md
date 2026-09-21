@@ -238,13 +238,20 @@ These are the checkpoint trust boundaries.
 Garbage collection follows the Cursor-style positive-plan model. The head is
 the only mutable authority.
 
-`start_collection` requires no retention and no active plan. It validates the
+When no plan is active, `start_collection` requires no retention. It validates the
 active tail, current checkpoint, and their complete transitive object graph.
 It then lists one bounded log scope. Unknown entries count against the scan
 limit but cannot enter the deletion set. If unreachable immutable objects
 exist, the method writes one sorted positive plan and installs its reference
 with the head CAS that increments the collection epoch. Candidate deletion
 starts only after that fence is durable.
+
+`start_collection_with_limit` selects a smaller positive candidate count for
+one new plan without changing the log's durable live-graph limit. The count
+must be positive and at most `max_collection_objects`; invalid values fail
+before storage work. Its listing examines at most the live-object count plus
+the candidate limit plus one entries. Graph verification still covers the
+complete live graph, including blob contents.
 
 Every head update preserves an active plan. Commit and checkpoint publication
 read that plan. They reject a direct or transitive reference to a planned key.
@@ -260,6 +267,14 @@ missing key is success. An error or cancellation leaves the plan active. A
 retry submits the complete set again. After all candidate submissions succeed,
 one head CAS clears the exact plan. The protocol has no progress bitmap,
 collector lease, background worker, or second authority.
+
+Both start methods return an existing active plan unchanged. A smaller limit
+cannot shrink that plan. Execution budgets must cover its head and plan reads,
+all candidate deletions, the fence-clear CAS, and best-effort plan cleanup.
+Repeatedly stopping at a fixed deletion budget smaller than the plan can retry
+the same already deleted prefix indefinitely. Choose new plan sizes that fit
+the caller's full execution budget; reserve additional capacity for retries
+when storage failures or concurrent head updates occur.
 
 The plan object is not in its positive set. After a definite rejected fence
 CAS or a successful clear, the library deletes the plan object on a
