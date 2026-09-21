@@ -2,10 +2,11 @@
 
 A small byte-key/value library on object-log. Each atomic batch publishes one
 immutable compressed radix-tree root through the WAL's conditional head. Reads
-load only the requested paths; mutations evaluate and copy each path in one
-traversal and reuse unchanged subtrees. Reopening materializes root proofs from
-the checkpoint and bounded WAL tail, without reading the database. There is no
-local database or second head.
+load only the requested paths. An atomic batch evaluates commands in order,
+keeps changed paths transient, then stages each final changed node once while
+reusing unchanged subtrees. Reopening materializes root proofs from the checkpoint
+and bounded WAL tail, without reading the database. There is no local database
+or second head.
 
 ```rust,no_run
 # async fn example(log: object_log::Log) -> Result<(), Box<dyn std::error::Error>> {
@@ -98,20 +99,21 @@ following the WAL's fencing and drained-reader recovery contract. Lost checkpoin
 leave a recoverable WAL; reopen before starting new maintenance.
 
 Limits bound key/value sizes, batch inputs, response bytes, and cumulative tree
-bytes read/written and scan-prefix bytes allocated per call. Large values are
-rejected rather than streamed.
+work per call. Tree work includes stored node bytes read, transient nodes created
+or revisited within a batch, and scan-prefix allocation. Large values are rejected
+rather than streamed.
 The default value limit is 64 KiB. Mutation results contain only booleans or
 integers, so their size does not depend on stored value size. The WAL's result
 allowance still bounds the encoded batch results.
-The tree budget includes repeated path reads and every command in a batch. It
+The tree budget includes repeated path work and every command in a batch. It
 excludes WAL metadata: WAL options separately bound tail, commit, checkpoint,
 and head sizes. Use a shared WAL request guard across retries for cumulative
 logical storage calls; provider-internal HTTP attempts remain provider-specific.
 No automatic conflict retries, unbounded index cache, or background work exist.
 
-Ordered multi-key batches currently read and write each path separately. Work
-admission is a byte bound, not an exact allocator/RSS accounting system; decoded
-nodes, path stacks, result encoding, and caller-owned inputs add bounded memory overlap.
+Batch-local tree state is discarded after preparation. Work admission is a byte
+bound, not an exact allocator/RSS accounting system; decoded nodes, path stacks,
+result encoding, and caller-owned inputs add bounded memory overlap.
 The finite local `MinIO` checks below qualify the stated bounded small-record
 workload. Streaming values and exact allocator quotas are outside this profile.
 Callers own the checkpoint, recovery, retention and collection schedule. Remote deployments
@@ -156,8 +158,8 @@ publication, cancellation after head mutation, process-loss recovery and expired
 evidence, definite noncommit, pending checkpoints, retained scans, and resumed
 collection after a lost deletion response, stale writer fencing, and fresh
 publication while collection is active. It also checks deep value-bearing prefix
-chains with byte-limited pages, and whole-batch rejection after staging exhausts
-the tree budget. Faults are injected around real provider operations; they do
+chains with byte-limited pages, and whole-batch rejection when the tree budget is
+exhausted. Faults are injected around real provider operations; they do
 not simulate network partitions or process kills.
 
 The growth tests use a fixed seed, ordered `records/` keys and 1 KiB values. The

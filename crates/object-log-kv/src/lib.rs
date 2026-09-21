@@ -27,8 +27,8 @@ pub struct Limits {
     pub page_entries: usize,
     /// Maximum combined key and value bytes returned by a page or multi-get.
     pub response_bytes: usize,
-    /// Cumulative encoded tree bytes read/written and scan-prefix bytes allocated.
-    /// Includes repeated reads and all commands in a batch; excludes WAL envelopes.
+    /// Cumulative stored-node and transient tree work, plus scan-prefix bytes.
+    /// Includes repeated path work and all commands in a batch; excludes WAL envelopes.
     pub tree_bytes: usize,
 }
 
@@ -320,13 +320,14 @@ impl KvSnapshot {
             }
         }
         let mut tree = self.tree();
-        let mut root = self.root.clone();
+        let mut root = self.root.clone().map(tree::Link::Stored);
         let mut results = Vec::with_capacity(commands.len());
         for command in commands {
             let (next, result) = tree.apply(root, command).await?;
             root = next;
             results.push(result);
         }
+        let root = tree.finish(root).await?;
         let result = encode(&results)?;
         Ok(self.store.log.prepare(
             &self.view,

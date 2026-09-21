@@ -56,7 +56,7 @@ fn kv(c: &mut Criterion) {
                     faults.reset();
                     faults.record_events(true);
                     let started = Instant::now();
-                    black_box(
+                    let _prepared = black_box(
                         snapshot
                             .prepare(TransactionId::new(), &commands)
                             .await

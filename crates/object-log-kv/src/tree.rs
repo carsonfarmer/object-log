@@ -11,11 +11,50 @@ pub(crate) struct Tree<'a> {
     pub budget: Budget,
 }
 
-struct Node {
+pub(super) enum Link {
+    Stored(StagedObject),
+    Dirty(Box<Node>),
+}
+
+pub(super) struct Node {
     prefix: Bytes,
     value: Option<Bytes>,
     edges: Vec<u8>,
-    children: Vec<StagedObject>,
+    children: Vec<Link>,
+    source: Option<StagedObject>,
+}
+
+impl Node {
+    fn into_link(mut self) -> Link {
+        self.source
+            .take()
+            .map_or_else(|| Link::Dirty(Box::new(self)), Link::Stored)
+    }
+
+    fn transient_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.prefix.len())
+            .saturating_add(self.value.as_ref().map_or(0, Bytes::len))
+            .saturating_add(self.edges.capacity())
+            .saturating_add(self.children.capacity().saturating_mul(size_of::<Link>()))
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.children);
+        while let Some(mut link) = pending.pop() {
+            if let Link::Dirty(node) = &mut link {
+                pending.append(&mut node.children);
+            }
+        }
+    }
+}
+
+struct FlushFrame {
+    node: Node,
+    children: std::vec::IntoIter<Link>,
+    staged: Vec<StagedObject>,
 }
 
 #[derive(CborLen, Decode, Encode)]
@@ -30,7 +69,14 @@ struct Wire<'a> {
 }
 
 impl Tree<'_> {
-    async fn read(&mut self, object: &StagedObject) -> Result<Node, KvError> {
+    async fn read(&mut self, link: Link) -> Result<Node, KvError> {
+        let object = match link {
+            Link::Dirty(node) => {
+                self.budget.charge(node.transient_bytes())?;
+                return Ok(*node);
+            }
+            Link::Stored(object) => object,
+        };
         let len =
             usize::try_from(object.reference().len()).map_err(|_| KvError::Limit("node bytes"))?;
         // Bound the core decoder before allocating child references or payloads.
@@ -41,7 +87,7 @@ impl Tree<'_> {
             .saturating_add(32 * 1024);
         ensure(len <= max, "node bytes")?;
         self.budget.charge(len)?;
-        let (payload, children) = self.log.read_staged_node(self.view, object).await?;
+        let (payload, children) = self.log.read_staged_node(self.view, &object).await?;
         let wire: Wire<'_> = decode(&payload)?;
         if wire.edges.len() != children.len()
             || wire.edges.windows(2).any(|edges| edges[0] >= edges[1])
@@ -58,23 +104,25 @@ impl Tree<'_> {
             prefix: Bytes::copy_from_slice(wire.prefix),
             value: wire.value.map(Bytes::copy_from_slice),
             edges: wire.edges.to_vec(),
-            children,
+            children: children.into_iter().map(Link::Stored).collect(),
+            source: Some(object),
         })
     }
 
-    async fn save(&mut self, mut node: Node) -> Result<Option<StagedObject>, KvError> {
+    async fn dirty(&mut self, mut node: Node) -> Result<Option<Link>, KvError> {
+        node.source = None;
         if node.value.is_none() {
             match node.children.len() {
                 0 => return Ok(None),
                 1 => {
-                    let child = self.read(&node.children[0]).await?;
+                    let child = node.children.pop().ok_or(KvError::InvalidEncoding)?;
+                    let mut child = self.read(child).await?;
                     let mut prefix = node.prefix.to_vec();
                     prefix.push(node.edges[0]);
                     prefix.extend_from_slice(&child.prefix);
-                    node = Node {
-                        prefix: Bytes::from(prefix),
-                        ..child
-                    };
+                    child.prefix = Bytes::from(prefix);
+                    child.source = None;
+                    node = child;
                 }
                 _ => {}
             }
@@ -84,41 +132,89 @@ impl Tree<'_> {
             node.value.as_ref().map_or(0, Bytes::len) <= self.limits.value_bytes,
             "value bytes",
         )?;
+        self.budget.charge(node.transient_bytes())?;
+        Ok(Some(Link::Dirty(Box::new(node))))
+    }
+
+    async fn stage(
+        &mut self,
+        node: Node,
+        children: Vec<StagedObject>,
+    ) -> Result<StagedObject, KvError> {
+        ensure(node.edges.len() == children.len(), "node children")?;
         let wire = Wire {
             prefix: &node.prefix,
             value: node.value.as_deref(),
             edges: &node.edges,
         };
         let payload_len = minicbor::len(&wire);
-        let len = self.log.node_size(
-            payload_len,
-            node.children.iter().map(StagedObject::reference),
-        )?;
+        let len = self
+            .log
+            .node_size(payload_len, children.iter().map(StagedObject::reference))?;
         self.budget.charge(len)?;
-        Ok(Some(
-            self.log
-                .put_node(self.view, encode(&wire)?, node.children)
-                .await?,
-        ))
+        Ok(self
+            .log
+            .put_node(self.view, encode(&wire)?, children)
+            .await?)
+    }
+
+    pub async fn finish(&mut self, root: Option<Link>) -> Result<Option<StagedObject>, KvError> {
+        let Some(mut current) = root else {
+            return Ok(None);
+        };
+        let mut parents = Vec::<FlushFrame>::new();
+        loop {
+            let mut staged = match current {
+                Link::Stored(object) => object,
+                Link::Dirty(node) => {
+                    let mut node = *node;
+                    let mut children = std::mem::take(&mut node.children).into_iter();
+                    if let Some(first) = children.next() {
+                        let capacity = children.len() + 1;
+                        parents.push(FlushFrame {
+                            node,
+                            children,
+                            staged: Vec::with_capacity(capacity),
+                        });
+                        current = first;
+                        continue;
+                    }
+                    self.stage(node, Vec::new()).await?
+                }
+            };
+            loop {
+                let Some(parent) = parents.last_mut() else {
+                    return Ok(Some(staged));
+                };
+                parent.staged.push(staged);
+                if let Some(next) = parent.children.next() {
+                    current = next;
+                    break;
+                }
+                let parent = parents.pop().ok_or(KvError::InvalidEncoding)?;
+                staged = self.stage(parent.node, parent.staged).await?;
+            }
+        }
     }
 
     pub async fn get(
         &mut self,
-        mut root: Option<StagedObject>,
+        root: Option<StagedObject>,
         mut key: &[u8],
     ) -> Result<Option<Bytes>, KvError> {
-        while let Some(object) = root {
-            let node = self.read(&object).await?;
+        let mut root = root.map(Link::Stored);
+        while let Some(link) = root {
+            let mut node = self.read(link).await?;
             let Some(suffix) = key.strip_prefix(node.prefix.as_ref()) else {
                 return Ok(None);
             };
             if suffix.is_empty() {
-                return Ok(node.value);
+                return Ok(node.value.take());
             }
             let Ok(index) = node.edges.binary_search(&suffix[0]) else {
                 return Ok(None);
             };
-            root = Some(node.children[index].clone());
+            root = Some(node.children.remove(index));
             key = &suffix[1..];
         }
         Ok(None)
@@ -126,18 +222,17 @@ impl Tree<'_> {
 
     pub async fn apply(
         &mut self,
-        mut root: Option<StagedObject>,
+        mut root: Option<Link>,
         command: &KvCommand,
-    ) -> Result<(Option<StagedObject>, KvResult), KvError> {
-        let original = root.clone();
+    ) -> Result<(Option<Link>, KvResult), KvError> {
         let mut key = command.key().as_ref();
         let mut parents = Vec::new();
         // Keep the decoded path through evaluation so a mutation reads it once.
         let (node, common) = loop {
-            let Some(object) = root else {
+            let Some(link) = root else {
                 break (None, 0);
             };
-            let node = self.read(&object).await?;
+            let mut node = self.read(link).await?;
             let common = key
                 .iter()
                 .zip(&node.prefix)
@@ -149,7 +244,7 @@ impl Tree<'_> {
             let Ok(index) = node.edges.binary_search(&key[common]) else {
                 break (Some(node), common);
             };
-            root = Some(node.children[index].clone());
+            root = Some(node.children.remove(index));
             parents.push((node, index));
             key = &key[common + 1..];
         };
@@ -158,18 +253,23 @@ impl Tree<'_> {
             .filter(|node| common == node.prefix.len() && common == key.len())
             .and_then(|node| node.value.clone());
         let (value, result) = command.evaluate(previous.clone())?;
-        if value == previous {
-            return Ok((original, result));
-        }
-        let mut replacement = self.replace(node, key, common, value).await?;
+        let changed = value != previous;
+        let mut replacement = if changed {
+            self.replace(node, key, common, value).await?
+        } else {
+            node.map(Node::into_link)
+        };
         while let Some((mut node, index)) = parents.pop() {
-            if let Some(object) = replacement {
-                node.children[index] = object;
+            if let Some(link) = replacement {
+                node.children.insert(index, link);
             } else {
-                node.children.remove(index);
                 node.edges.remove(index);
             }
-            replacement = self.save(node).await?;
+            replacement = if changed {
+                self.dirty(node).await?
+            } else {
+                Some(node.into_link())
+            };
         }
         Ok((replacement, result))
     }
@@ -180,14 +280,15 @@ impl Tree<'_> {
         key: &[u8],
         common: usize,
         value: Option<Bytes>,
-    ) -> Result<Option<StagedObject>, KvError> {
+    ) -> Result<Option<Link>, KvError> {
         let Some(mut node) = node else {
             return self
-                .save(Node {
+                .dirty(Node {
                     prefix: Bytes::copy_from_slice(key),
                     value,
                     edges: Vec::new(),
                     children: Vec::new(),
+                    source: None,
                 })
                 .await;
         };
@@ -198,19 +299,21 @@ impl Tree<'_> {
                 value: None,
                 edges: vec![node.prefix[common]],
                 children: Vec::new(),
+                source: None,
             };
             node.prefix = Bytes::copy_from_slice(&node.prefix[common + 1..]);
-            let old = self.save(node).await?.ok_or(KvError::InvalidEncoding)?;
+            let old = self.dirty(node).await?.ok_or(KvError::InvalidEncoding)?;
             parent.children.push(old);
             if common == key.len() {
                 parent.value = value;
             } else {
                 let leaf = self
-                    .save(Node {
+                    .dirty(Node {
                         prefix: Bytes::copy_from_slice(&key[common + 1..]),
                         value,
                         edges: Vec::new(),
                         children: Vec::new(),
+                        source: None,
                     })
                     .await?
                     .ok_or(KvError::InvalidEncoding)?;
@@ -218,17 +321,18 @@ impl Tree<'_> {
                 parent.edges.insert(at, key[common]);
                 parent.children.insert(at, leaf);
             }
-            return self.save(parent).await;
+            return self.dirty(parent).await;
         }
         if common == key.len() {
             node.value = value;
         } else {
             let leaf = self
-                .save(Node {
+                .dirty(Node {
                     prefix: Bytes::copy_from_slice(&key[common + 1..]),
                     value,
                     edges: Vec::new(),
                     children: Vec::new(),
+                    source: None,
                 })
                 .await?
                 .ok_or(KvError::InvalidEncoding)?;
@@ -236,7 +340,7 @@ impl Tree<'_> {
             node.edges.insert(index, key[common]);
             node.children.insert(index, leaf);
         }
-        self.save(node).await
+        self.dirty(node).await
     }
 
     pub async fn scan(
@@ -247,14 +351,17 @@ impl Tree<'_> {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<KvPage, KvError> {
-        let mut stack: Vec<_> = root.into_iter().map(|root| (Vec::new(), root)).collect();
+        let mut stack: Vec<_> = root
+            .into_iter()
+            .map(|root| (Vec::new(), Link::Stored(root)))
+            .collect();
         let mut entries: Vec<(Bytes, Bytes)> = Vec::new();
         let mut remaining = self.limits.response_bytes;
         while let Some((mut key, object)) = stack.pop() {
             if outside(&key, start, end, after) {
                 continue;
             }
-            let node = self.read(&object).await?;
+            let mut node = self.read(object).await?;
             ensure(
                 key.len().saturating_add(node.prefix.len()) <= self.limits.key_bytes,
                 "key bytes",
@@ -263,7 +370,7 @@ impl Tree<'_> {
             if outside(&key, start, end, after) {
                 continue;
             }
-            if let Some(value) = node.value
+            if let Some(value) = node.value.take()
                 && key.as_slice() >= start
                 && after.is_none_or(|after| key.as_slice() > after)
             {
@@ -287,7 +394,11 @@ impl Tree<'_> {
                     });
                 }
             }
-            for (edge, child) in node.edges.into_iter().zip(node.children).rev() {
+            for (edge, child) in std::mem::take(&mut node.edges)
+                .into_iter()
+                .zip(std::mem::take(&mut node.children))
+                .rev()
+            {
                 self.budget.charge(key.len().saturating_add(1))?;
                 let mut prefix = key.clone();
                 prefix.push(edge);
@@ -314,4 +425,91 @@ fn outside(prefix: &[u8], start: &[u8], end: Option<&[u8]>, after: Option<&[u8]>
     end.is_some_and(|end| prefix >= end)
         || (prefix < start && !start.starts_with(prefix))
         || after.is_some_and(|after| prefix < after && !after.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{error::Error, sync::Arc, thread};
+
+    use bytes::Bytes;
+    use object_log::{LogId, Options, ValidatedBackend, sim::FaultStore};
+    use object_store::{memory::InMemory, path::Path};
+
+    use super::{Link, Node, Tree, Wire};
+    use crate::{Budget, KvError, Limits};
+
+    #[test]
+    fn deep_dirty_tree_drops_on_a_small_stack() -> Result<(), Box<dyn Error>> {
+        let handle = thread::Builder::new().stack_size(64 * 1024).spawn(|| {
+            let mut link = Link::Dirty(Box::new(Node {
+                prefix: Bytes::new(),
+                value: Some(Bytes::new()),
+                edges: Vec::new(),
+                children: Vec::new(),
+                source: None,
+            }));
+            for _ in 0..10_000 {
+                link = Link::Dirty(Box::new(Node {
+                    prefix: Bytes::new(),
+                    value: None,
+                    edges: vec![0],
+                    children: vec![link],
+                    source: None,
+                }));
+            }
+            drop(link);
+        })?;
+        handle
+            .join()
+            .map_err(|_| std::io::Error::other("drop thread panicked"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_encoded_node_counts_against_tree_budget() -> Result<(), Box<dyn Error>> {
+        let faults = FaultStore::new(Arc::new(InMemory::new()));
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("kv-budget")).await?;
+        let log = object_log::Log::open(&backend, &LogId::new("kv")?, Options::default()).await?;
+        let view = log.load().await?;
+        let value = Bytes::from_static(b"value");
+        let wire = Wire {
+            prefix: b"key",
+            value: Some(&value),
+            edges: &[],
+        };
+        let encoded = log.node_size(
+            minicbor::len(&wire),
+            std::iter::empty::<&object_log::ObjectRef>(),
+        )?;
+        let leaf = || Node {
+            prefix: Bytes::from_static(b"key"),
+            value: Some(value.clone()),
+            edges: Vec::new(),
+            children: Vec::new(),
+            source: None,
+        };
+        let transient = leaf().transient_bytes();
+        let mut tree = Tree {
+            log: &log,
+            view: &view,
+            limits: Limits::default(),
+            budget: Budget(transient + encoded - 1),
+        };
+        let root = tree.dirty(leaf()).await?;
+        faults.reset();
+        assert!(matches!(tree.finish(root).await, Err(KvError::Limit(_))));
+        assert_eq!(faults.metrics().uploaded_bytes(), 0);
+
+        let mut tree = Tree {
+            log: &log,
+            view: &view,
+            limits: Limits::default(),
+            budget: Budget(transient + encoded),
+        };
+        let root = tree.dirty(leaf()).await?;
+        assert!(tree.finish(root).await?.is_some());
+        assert!(faults.metrics().uploaded_bytes() > 0);
+        Ok(())
+    }
 }

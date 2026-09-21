@@ -631,6 +631,55 @@ async fn sparse_calls_stay_small_as_database_outgrows_tree_budget() -> TestResul
 }
 
 #[tokio::test]
+async fn adjacent_batch_reuses_shared_tree_paths() -> TestResult {
+    let (_, store, faults) = fixture(Options::default()).await?;
+    for batch in (0..4096_u32).collect::<Vec<_>>().chunks(128) {
+        commit(
+            &store,
+            &batch
+                .iter()
+                .map(|key| set(&key.to_be_bytes(), &[7; 64]))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    }
+    checkpoint(&store).await?;
+    let commands: Vec<_> = (2048..2056_u32)
+        .map(|key| set(&key.to_be_bytes(), &[8; 64]))
+        .collect();
+    let snapshot = store.snapshot().await?;
+    faults.reset();
+    let prepared = snapshot.prepare(TransactionId::new(), &commands).await?;
+    let metrics = faults.metrics();
+    eprintln!(
+        "adjacent_batch_8 prepare_gets={} prepare_puts={} downloaded={} uploaded={}",
+        metrics.operation(Operation::Get).requests,
+        metrics.operation(Operation::Put).requests,
+        metrics.downloaded_bytes(),
+        metrics.uploaded_bytes(),
+    );
+    assert!(metrics.operation(Operation::Get).requests <= 10);
+    assert!(metrics.operation(Operation::Put).requests <= 10);
+    assert!(metrics.downloaded_bytes() + metrics.uploaded_bytes() < 64 * 1024);
+    assert_eq!(
+        decode_results(prepared.result())?,
+        vec![KvResult::Changed(true); commands.len()]
+    );
+    assert!(matches!(
+        store.log().commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
+    let updated = store.snapshot().await?;
+    for key in 2048..2056_u32 {
+        assert_eq!(
+            updated.get(&key.to_be_bytes()).await?.as_deref(),
+            Some([8; 64].as_slice())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn limits_fail_without_publication_and_pages_bound_returned_bytes() -> TestResult {
     let (_, store, faults) = fixture(Options::default()).await?;
     commit(
@@ -980,10 +1029,7 @@ async fn exhausted_tree_budget_never_publishes_a_partial_batch(
             .await,
         Err(KvError::Limit(_))
     ));
-    assert!(
-        faults.metrics().operation(Operation::Put).requests > 0,
-        "failure must follow staging"
-    );
+    assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
     assert_eq!(store.log().load().await?.generation(), generation);
     assert_eq!(
         store
