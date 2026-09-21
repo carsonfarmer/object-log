@@ -2,7 +2,7 @@ use bytes::Bytes;
 use minicbor::{CborLen, Decode, Encode};
 use object_log::{Log, StagedObject, View};
 
-use crate::{Budget, KvError, KvPage, Limits, decode, encode, ensure};
+use crate::{Budget, KvCommand, KvError, KvPage, KvResult, Limits, decode, encode, ensure};
 
 pub(crate) struct Tree<'a> {
     pub log: &'a Log,
@@ -124,87 +124,44 @@ impl Tree<'_> {
         Ok(None)
     }
 
-    pub async fn set(
+    pub async fn apply(
         &mut self,
         mut root: Option<StagedObject>,
-        mut key: &[u8],
-        value: Option<Bytes>,
-    ) -> Result<Option<StagedObject>, KvError> {
+        command: &KvCommand,
+    ) -> Result<(Option<StagedObject>, KvResult), KvError> {
+        let original = root.clone();
+        let mut key = command.key().as_ref();
         let mut parents = Vec::new();
-        let replacement = loop {
+        // Keep the decoded path through evaluation so a mutation reads it once.
+        let (node, common) = loop {
             let Some(object) = root else {
-                break self
-                    .save(Node {
-                        prefix: Bytes::copy_from_slice(key),
-                        value,
-                        edges: Vec::new(),
-                        children: Vec::new(),
-                    })
-                    .await?;
+                break (None, 0);
             };
-            let mut node = self.read(&object).await?;
+            let node = self.read(&object).await?;
             let common = key
                 .iter()
                 .zip(&node.prefix)
                 .take_while(|(left, right)| left == right)
                 .count();
-            if common < node.prefix.len() {
-                // This branch only inserts: callers skip unchanged missing deletes.
-                let mut parent = Node {
-                    prefix: Bytes::copy_from_slice(&key[..common]),
-                    value: None,
-                    edges: vec![node.prefix[common]],
-                    children: Vec::new(),
-                };
-                node.prefix = Bytes::copy_from_slice(&node.prefix[common + 1..]);
-                let old = self.save(node).await?.ok_or(KvError::InvalidEncoding)?;
-                parent.children.push(old);
-                if common == key.len() {
-                    parent.value = value;
-                } else {
-                    let leaf = self
-                        .save(Node {
-                            prefix: Bytes::copy_from_slice(&key[common + 1..]),
-                            value,
-                            edges: Vec::new(),
-                            children: Vec::new(),
-                        })
-                        .await?
-                        .ok_or(KvError::InvalidEncoding)?;
-                    let at = usize::from(parent.edges[0] < key[common]);
-                    parent.edges.insert(at, key[common]);
-                    parent.children.insert(at, leaf);
-                }
-                break self.save(parent).await?;
+            if common < node.prefix.len() || common == key.len() {
+                break (Some(node), common);
             }
-            key = &key[common..];
-            if key.is_empty() {
-                node.value = value;
-                break self.save(node).await?;
-            }
-            match node.edges.binary_search(&key[0]) {
-                Ok(index) => {
-                    root = Some(node.children[index].clone());
-                    parents.push((node, index));
-                    key = &key[1..];
-                }
-                Err(index) => {
-                    let leaf = self
-                        .save(Node {
-                            prefix: Bytes::copy_from_slice(&key[1..]),
-                            value,
-                            edges: Vec::new(),
-                            children: Vec::new(),
-                        })
-                        .await?
-                        .ok_or(KvError::InvalidEncoding)?;
-                    node.edges.insert(index, key[0]);
-                    node.children.insert(index, leaf);
-                    break self.save(node).await?;
-                }
-            }
+            let Ok(index) = node.edges.binary_search(&key[common]) else {
+                break (Some(node), common);
+            };
+            root = Some(node.children[index].clone());
+            parents.push((node, index));
+            key = &key[common + 1..];
         };
-        let mut replacement = replacement;
+        let previous = node
+            .as_ref()
+            .filter(|node| common == node.prefix.len() && common == key.len())
+            .and_then(|node| node.value.clone());
+        let (value, result) = command.evaluate(previous.clone())?;
+        if value == previous {
+            return Ok((original, result));
+        }
+        let mut replacement = self.replace(node, key, common, value).await?;
         while let Some((mut node, index)) = parents.pop() {
             if let Some(object) = replacement {
                 node.children[index] = object;
@@ -214,7 +171,72 @@ impl Tree<'_> {
             }
             replacement = self.save(node).await?;
         }
-        Ok(replacement)
+        Ok((replacement, result))
+    }
+
+    async fn replace(
+        &mut self,
+        node: Option<Node>,
+        key: &[u8],
+        common: usize,
+        value: Option<Bytes>,
+    ) -> Result<Option<StagedObject>, KvError> {
+        let Some(mut node) = node else {
+            return self
+                .save(Node {
+                    prefix: Bytes::copy_from_slice(key),
+                    value,
+                    edges: Vec::new(),
+                    children: Vec::new(),
+                })
+                .await;
+        };
+        if common < node.prefix.len() {
+            // Only insertion reaches a divergent prefix; absent no-ops return above.
+            let mut parent = Node {
+                prefix: Bytes::copy_from_slice(&key[..common]),
+                value: None,
+                edges: vec![node.prefix[common]],
+                children: Vec::new(),
+            };
+            node.prefix = Bytes::copy_from_slice(&node.prefix[common + 1..]);
+            let old = self.save(node).await?.ok_or(KvError::InvalidEncoding)?;
+            parent.children.push(old);
+            if common == key.len() {
+                parent.value = value;
+            } else {
+                let leaf = self
+                    .save(Node {
+                        prefix: Bytes::copy_from_slice(&key[common + 1..]),
+                        value,
+                        edges: Vec::new(),
+                        children: Vec::new(),
+                    })
+                    .await?
+                    .ok_or(KvError::InvalidEncoding)?;
+                let at = usize::from(parent.edges[0] < key[common]);
+                parent.edges.insert(at, key[common]);
+                parent.children.insert(at, leaf);
+            }
+            return self.save(parent).await;
+        }
+        if common == key.len() {
+            node.value = value;
+        } else {
+            let leaf = self
+                .save(Node {
+                    prefix: Bytes::copy_from_slice(&key[common + 1..]),
+                    value,
+                    edges: Vec::new(),
+                    children: Vec::new(),
+                })
+                .await?
+                .ok_or(KvError::InvalidEncoding)?;
+            let index = node.edges.partition_point(|edge| *edge < key[common]);
+            node.edges.insert(index, key[common]);
+            node.children.insert(index, leaf);
+        }
+        self.save(node).await
     }
 
     pub async fn scan(

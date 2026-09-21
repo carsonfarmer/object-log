@@ -323,11 +323,8 @@ impl KvSnapshot {
         let mut root = self.root.clone();
         let mut results = Vec::with_capacity(commands.len());
         for command in commands {
-            let previous = tree.get(root.clone(), command.key()).await?;
-            let (next, result) = command.evaluate(previous.clone())?;
-            if next != previous {
-                root = tree.set(root, command.key(), next).await?;
-            }
+            let (next, result) = tree.apply(root, command).await?;
+            root = next;
             results.push(result);
         }
         let result = encode(&results)?;

@@ -13,7 +13,11 @@ minicbor = { version = "2.3", features = ["derive", "std"] }
 object-log = { path = "../.." }
 thiserror = "2.0"
 
+[features]
+aws = ["object-log/aws", "object_store/aws"]
+
 [dev-dependencies]
+async-trait = "0.1"
 criterion = { version = "0.7", features = ["async_tokio"] }
 futures = "0.3"
 object-log = { path = "../..", features = ["test-util"] }

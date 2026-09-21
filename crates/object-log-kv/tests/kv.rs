@@ -9,7 +9,49 @@ use object_log::{
 use object_log_kv::{KvCommand, KvError, KvResult, KvStore, Limits, decode_results};
 use object_store::{ObjectStore, local::LocalFileSystem, memory::InMemory, path::Path};
 
+#[cfg(feature = "aws")]
+#[path = "support/minio.rs"]
+mod minio;
+
+type StoreFactory = dyn Fn() -> Result<Arc<dyn ObjectStore>, Box<dyn StdError>>;
+
 type TestResult = Result<(), Box<dyn StdError>>;
+
+// Keep the provider and memory assertions identical, including injected lost replies.
+macro_rules! backend_cases {
+    ($($case:ident),+ $(,)?) => {
+        mod memory {
+            use super::*;
+            $(#[tokio::test]
+            async fn $case() -> TestResult {
+                super::$case(&|| Ok(Arc::new(InMemory::new()))).await
+            })+
+        }
+
+        #[cfg(feature = "aws")]
+        #[tokio::test]
+        #[ignore = "requires isolated local MinIO; see README"]
+        async fn minio_correctness_matrix() -> TestResult {
+            $({
+                let (storage, counts) = minio::build()?;
+                $case(&move || Ok(Arc::clone(&storage)))
+                    .await.map_err(|error| format!("{}: {error}", stringify!($case)))?;
+                eprintln!("{} http=[attempts,upload_body_bytes,conflicts,transport_or_5xx_errors] {:?}",
+                    stringify!($case), counts.snapshot());
+            })+
+            Ok(())
+        }
+    };
+}
+
+backend_cases! {
+    ordered_batches_missing_empty_cas_and_integer_results,
+    model_survives_splits_merges_binary_ranges_and_cold_checkpoints,
+    conflicting_writers_cannot_publish_stale_conditions,
+    lost_publication_cancellation_and_expired_evidence_remain_distinct,
+    retention_pins_scan_and_checkpoint_gc_can_resume_after_failure,
+    rejected_uncertain_candidate_resolves_without_replaying_over_winner,
+}
 
 async fn open(backend: &ValidatedBackend, options: Options) -> Result<KvStore, Box<dyn StdError>> {
     Ok(KvStore::new(
@@ -20,7 +62,14 @@ async fn open(backend: &ValidatedBackend, options: Options) -> Result<KvStore, B
 async fn fixture(
     options: Options,
 ) -> Result<(ValidatedBackend, KvStore, FaultStore), Box<dyn StdError>> {
-    let faults = FaultStore::new(InMemory::new());
+    fixture_on(Arc::new(InMemory::new()), options).await
+}
+
+async fn fixture_on(
+    storage: Arc<dyn ObjectStore>,
+    options: Options,
+) -> Result<(ValidatedBackend, KvStore, FaultStore), Box<dyn StdError>> {
+    let faults = FaultStore::from_arc(storage);
     let backend = ValidatedBackend::new(Arc::new(faults.clone()), Path::from("tests")).await?;
     let store = open(&backend, options).await?;
     Ok((backend, store, faults))
@@ -55,9 +104,10 @@ async fn checkpoint(store: &KvStore) -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn ordered_batches_missing_empty_cas_and_integer_results() -> TestResult {
-    let (_, store, _) = fixture(Options::default()).await?;
+async fn ordered_batches_missing_empty_cas_and_integer_results(
+    new_store: &StoreFactory,
+) -> TestResult {
+    let (_, store, _) = fixture_on(new_store()?, Options::default()).await?;
     let commands = [
         set(b"", b""),
         set(b"a", b"one"),
@@ -151,9 +201,10 @@ async fn ordered_batches_missing_empty_cas_and_integer_results() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn model_survives_splits_merges_binary_ranges_and_cold_checkpoints() -> TestResult {
-    let (backend, mut store, _) = fixture(Options::default()).await?;
+async fn model_survives_splits_merges_binary_ranges_and_cold_checkpoints(
+    new_store: &StoreFactory,
+) -> TestResult {
+    let (backend, mut store, _) = fixture_on(new_store()?, Options::default()).await?;
     let mut model = BTreeMap::<Vec<u8>, Bytes>::new();
     let mut random = 0x1234_5678_u64;
     let keys: Vec<_> = (0..128_u8)
@@ -283,9 +334,10 @@ async fn assert_model(store: &KvStore, model: &BTreeMap<Vec<u8>, Bytes>) -> Test
     Ok(())
 }
 
-#[tokio::test]
-async fn conflicting_writers_cannot_publish_stale_conditions() -> TestResult {
-    let (_, store, _) = fixture(Options::default()).await?;
+async fn conflicting_writers_cannot_publish_stale_conditions(
+    new_store: &StoreFactory,
+) -> TestResult {
+    let (_, store, _) = fixture_on(new_store()?, Options::default()).await?;
     let snapshot = store.snapshot().await?;
     let candidates = futures::future::try_join_all((0..8).map(|_| async {
         snapshot
@@ -333,13 +385,14 @@ async fn conflicting_writers_cannot_publish_stale_conditions() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn lost_publication_cancellation_and_expired_evidence_remain_distinct() -> TestResult {
+async fn lost_publication_cancellation_and_expired_evidence_remain_distinct(
+    new_store: &StoreFactory,
+) -> TestResult {
     let options = Options {
         resolution_window: 1,
         ..Options::default()
     };
-    let (backend, store, faults) = fixture(options).await?;
+    let (backend, store, faults) = fixture_on(new_store()?, options).await?;
     let candidate = store
         .snapshot()
         .await?
@@ -395,9 +448,10 @@ async fn lost_publication_cancellation_and_expired_evidence_remain_distinct() ->
     Ok(())
 }
 
-#[tokio::test]
-async fn retention_pins_scan_and_checkpoint_gc_can_resume_after_failure() -> TestResult {
-    let (backend, store, faults) = fixture(Options::default()).await?;
+async fn retention_pins_scan_and_checkpoint_gc_can_resume_after_failure(
+    new_store: &StoreFactory,
+) -> TestResult {
+    let (backend, store, faults) = fixture_on(new_store()?, Options::default()).await?;
     commit(
         &store,
         &[set(b"a", b"old"), set(b"b", b"old"), set(b"c", b"old")],
@@ -449,13 +503,7 @@ async fn retention_pins_scan_and_checkpoint_gc_can_resume_after_failure() -> Tes
             .await?,
         RetentionStatus::Applied(_)
     ));
-    let CollectionStart::Installed(view, _) = store
-        .log()
-        .start_collection(&store.log().load().await?)
-        .await?
-    else {
-        return Err("expected collection".into());
-    };
+    let view = collect_with_competing_writers(&store).await?;
     faults.fail_next(Operation::Delete, FailurePhase::After);
     assert!(matches!(
         store.log().resume_collection(&view).await?,
@@ -475,9 +523,34 @@ async fn retention_pins_scan_and_checkpoint_gc_can_resume_after_failure() -> Tes
     ));
     assert_eq!(
         reopened.snapshot().await?.get(b"b").await?,
-        Some(Bytes::from("new"))
+        Some(Bytes::from("during-gc"))
     );
     Ok(())
+}
+
+async fn collect_with_competing_writers(
+    store: &KvStore,
+) -> Result<object_log::View, Box<dyn StdError>> {
+    let stale = store
+        .snapshot()
+        .await?
+        .prepare(TransactionId::new(), &[set(b"b", b"stale-gc")])
+        .await?;
+    let CollectionStart::Installed(view, _) = store
+        .log()
+        .start_collection(&store.log().load().await?)
+        .await?
+    else {
+        return Err("expected collection".into());
+    };
+    // Staged nodes from the old epoch are collectible and must never publish.
+    assert!(matches!(
+        store.log().commit(stale).await?,
+        CommitStatus::Conflict(_)
+    ));
+    // A fresh writer can publish while that positive deletion plan is active.
+    commit(store, &[set(b"b", b"during-gc")]).await?;
+    Ok(view)
 }
 
 #[tokio::test]
@@ -522,7 +595,21 @@ async fn sparse_calls_stay_small_as_database_outgrows_tree_budget() -> TestResul
             )
             .await?;
         let write = faults.metrics();
-        assert!(write.operation(Operation::Get).requests <= 6);
+        assert!(write.operation(Operation::Get).requests <= 3);
+        // A changed point operation reads each immutable path node only once.
+        let paths: Vec<_> = write
+            .events
+            .iter()
+            .filter(|event| event.operation == Operation::Get)
+            .map(|event| &event.path)
+            .collect();
+        assert_eq!(
+            paths.len(),
+            paths
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        );
         assert!(write.operation(Operation::Put).requests <= 3);
         assert!(write.downloaded_bytes() + write.uploaded_bytes() < 96 * 1024);
         assert!(matches!(
@@ -756,9 +843,10 @@ async fn rejects_incompatible_roots_malformed_nodes_and_result_bytes() -> TestRe
     Ok(())
 }
 
-#[tokio::test]
-async fn rejected_uncertain_candidate_resolves_without_replaying_over_winner() -> TestResult {
-    let (backend, store, faults) = fixture(Options::default()).await?;
+async fn rejected_uncertain_candidate_resolves_without_replaying_over_winner(
+    new_store: &StoreFactory,
+) -> TestResult {
+    let (backend, store, faults) = fixture_on(new_store()?, Options::default()).await?;
     let candidate = store
         .snapshot()
         .await?

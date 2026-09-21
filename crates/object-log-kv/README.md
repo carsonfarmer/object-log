@@ -2,8 +2,8 @@
 
 A small byte-key/value library on object-log. Each atomic batch publishes one
 immutable compressed radix-tree root through the WAL's conditional head. Reads
-load only the requested paths; writes copy those paths and reuse unchanged
-subtrees. Reopening materializes root proofs from the checkpoint and bounded WAL
+load only the requested paths; mutations evaluate and copy each path in one
+traversal and reuse unchanged subtrees. Reopening materializes root proofs from the checkpoint and bounded WAL
 tail, without reading the database. There is no local database or second head.
 
 ```rust,no_run
@@ -74,8 +74,9 @@ Inline values make path copying expensive for value-bearing ancestors. Ordered
 multi-key batches currently read and write each path separately. Work admission
 is a byte bound, not an exact allocator/RSS accounting system; decoded nodes,
 path stacks, result encoding, and caller-owned inputs add bounded memory overlap.
-Remote S3 performance, streaming large values, global memory admission, and
-long-running growth/provider qualification remain future work. The format is
+Remote S3 performance, streaming large values, precise allocator admission, and
+multi-hour growth/soak qualification remain future work. Local `MinIO` qualification
+for finite growth, contention, recovery and collection is opt-in below. The format is
 pre-release and incompatible with the former materialized-map demonstration;
 use a fresh WAL namespace. Every writer to a namespace must use this format.
 
@@ -87,3 +88,74 @@ a checkpointed root and then one key. `prepare_set` measures staging an overwrit
 not WAL publication: detailed fault-store events identify its unpublished nodes
 for untimed cleanup, keeping benchmark storage bounded. The other cases disable
 event recording. These measurements are local in-memory results, not S3 latency.
+
+
+## Local `MinIO` qualification
+
+Run memory and filesystem capability checks before the provider tests. The
+filesystem backend is expected to reject conditional updates. From the repository
+root (Docker, AWS CLI, curl, and `ps` installed):
+
+```sh
+cargo test --workspace --all-features
+export CARGO_PROFILE_TEST_OPT_LEVEL=3 CARGO_PROFILE_TEST_DEBUG=0
+cargo test -p object-log-kv --all-features
+./scripts/test-minio.sh kv minio_correctness_matrix object-log-kv aws
+./scripts/test-minio.sh qualification minio_growth_and_contention object-log-kv aws
+```
+
+Each command starts the existing pinned `MinIO` image on a random loopback port
+with its own container and disposable bucket, and verifies container removal.
+Each scenario uses a random KV prefix. The tests require explicit `aws` and
+`--ignored` opt-ins, reject non-loopback endpoints, and never provision AWS.
+Manual invocations must use a disposable local bucket; random test prefixes are
+left for inspection until the instance is removed. The existing native `MinIO`
+runner option is also supported.
+
+The correctness matrix runs the same assertions as memory: ordered batches,
+binary-key reference-model checks, conflicting conditions, hidden successful
+publication, cancellation after head mutation, process-loss recovery and expired
+evidence, definite noncommit, pending checkpoints, retained scans, and resumed
+collection after a lost deletion response, stale writer fencing, and fresh
+publication while collection is active. Faults are injected around real
+provider operations; they do not simulate network partitions or process kills.
+
+The growth test uses a fixed seed, ordered `records/` keys, 1 KiB values, and
+256/1,024/4,096-key spaces in one namespace. It grows in 64-command batches,
+checkpoints every eight growth batches, then mixes 32 rounds of point reads,
+fresh-snapshot reads, eight-key multi-gets, 32-entry scans, and alternating
+one/eight-command overwrites and deletes. Every fourth round targets a hot key;
+others use deterministic random keys. Each size also runs four writers with
+32 total two-key increments, two readers checking atomic visibility, retained
+snapshot scans, cold reopen, full model comparison, and collection. Retries are
+bounded and occur only on definite conflicts; any pending result stops that
+workload. The separate fault matrix verifies pending-result resolution.
+
+Acceptance gates require exact model equality, untorn batches, definite
+conflicts, recoverable maintenance, and smaller storage after collection.
+Checkpointed snapshot loading takes at most two logical GETs; point reads use at
+most six GETs and 32 KiB, within a 128 KiB tree allowance even when live key/value data
+exceeds 4 MiB. The existing sparse-call test additionally requires at most three
+path GETs and PUTs for an overwrite on its binary-key fixture and no repeated
+path reads. Latency is reported, not used as a machine-dependent pass/fail gate.
+
+Output includes p50/p95 operation latency and sample counts, phase elapsed time,
+logical calls and payload bytes, provider HTTP attempts (including retries and
+list pagination), offered HTTP request-body bytes, conflict responses and transport/5xx errors,
+stored object counts/bytes before and after GC, and process RSS at phase
+boundaries. These HTTP counters wrap the established provider transport; they
+are not a second storage client. HTTP body bytes include bulk-delete XML, exclude
+headers/TLS, and are attempted bytes rather than proof of delivery. Logical
+write amplification is uploaded object bytes divided by accepted command key
+and value bytes (delete keys only); GC is reported separately through the direct provider so bulk deletion remains
+intact; logical counters are unavailable for that phase. The fault wrapper used
+by other phases serializes deletes to inject individual-object failures. Exact numerators
+and denominators are printed, including live application bytes for storage
+amplification. Operation samples include oracle comparisons; phase elapsed time also includes
+untimed snapshot loads, checkpoints, and instrumentation.
+RSS includes the oracle, runtime, transport, and allocator slack; it is neither
+peak RSS nor an exact allocator/admission measure. No per-request event archive
+is kept. Preserve raw command/Criterion output locally under ignored `target/`
+when comparing runs. Fresh-snapshot reads include bounded WAL replay, but do not
+flush provider or OS caches. These are local `MinIO` results, not remote-S3 or
+production-readiness evidence.
