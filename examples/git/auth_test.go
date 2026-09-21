@@ -214,6 +214,41 @@ func TestCognitoAuthenticateSignedAccessTokens(t *testing.T) {
 	}
 }
 
+func TestCognitoAuthenticateSigningKeyRotation(t *testing.T) {
+	t.Parallel()
+	claims := authTestClaims(time.Now())
+	original := authSignedToken(t, claims, nil)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key},
+		(&jose.SignerOptions{}).WithHeader("kid", "key-two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := authTestJWKS(t)
+	auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
+		return authKeyResponse(t, set), nil
+	}))
+	if principal, err := auth.Authenticate(authRequest(original)); err != nil || principal.subject != claims.Subject {
+		t.Fatalf("original key: principal=%+v error=%v", principal, err)
+	}
+	set = jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+		Key: &key.PublicKey, KeyID: "key-two", Algorithm: string(jose.RS256), Use: "sig",
+	}}}
+	if principal, err := auth.Authenticate(authRequest(rotated)); err != nil || principal.subject != claims.Subject {
+		t.Fatalf("rotated key: principal=%+v error=%v", principal, err)
+	}
+	if principal, err := auth.Authenticate(authRequest(original)); !errors.Is(err, errAuthInvalid) || principal.subject != "" {
+		t.Fatalf("retired key: principal=%+v error=%v", principal, err)
+	}
+}
+
 func TestCognitoAuthenticateRejectsSignatureAndHeaderAttacks(t *testing.T) {
 	t.Parallel()
 	claims := authTestClaims(time.Now())
