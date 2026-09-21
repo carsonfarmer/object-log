@@ -18,8 +18,8 @@ Read `AGENTS.md`, `PLAN.md`, and `GIT_PLAN.md` before changing behavior.
   workloads and remote qualification remain.
 - `examples/git/`: go-git smart-HTTP service and provider tests.
 - `examples/wal-component/`: WASIp2 bridge from the Git service to the Rust WAL.
-- `examples/git/qualification/aws/`: optional disposable S3 Terraform setup and
-  temporary-credential helper.
+- `examples/git/qualification/aws/`: disposable S3 Terraform setup, temporary
+  credentials, and optional EC2/Caddy/Cognito hosting with automatic maintenance.
 - `docs/design.md` and `schema/object-log-v1.cddl`: durable protocol description
   and current pre-release schema.
 
@@ -95,8 +95,9 @@ in `examples/git/README.md` for service changes. Network-backed tests are
 opt-in, isolated, and disposable.
 
 The active service-readiness queue and remote HTTPS gate are new issue #45.
-Issue #10 retains its completed local-Spin/live-S3 scope. Maintenance design and
-the bounded periodic host worker remain in new issue #46.
+Issue #10 retains its completed local-Spin/live-S3 scope. Issue #47 is complete:
+collection plans have an independent candidate cap. The bounded periodic host
+worker is implemented; its deployed progress/cost gate remains in issue #46.
 KV's finite provider qualification and single-traversal mutation improvement
 have been independently reviewed; larger production workloads remain in #39.
 
@@ -104,13 +105,27 @@ Maintenance now resumes an active WAL deletion plan before loading the Git
 catalog. Logical pruning/checkpointing is separate from physical /collect
 followups. New plans have a per-operation candidate cap independent of the
 live-graph limit. Each new plan still audits the full live graph; continuous
-reader retention can starve collection. Optional host admission gaps and bounded
-scheduling are being reviewed in #46; never clear retentions automatically.
+reader retention can starve collection. The optional host worker starts with
+logical maintenance, then uses physical collection after `more` or `retained`,
+within finite per-repository budgets. An enabled pause can retry logical
+conflicts or pending results before that transition.
+An optional admission pause defaults off; Caddy preserves admitted requests,
+and systemd cleans the pause after worker failure. Local process tests pass;
+deployed progress/cost measurements remain. Never clear retentions automatically.
 The bridge now explicitly selects static credentials or object_store IMDSv2
 role acquisition/renewal. Native and composed stock-Spin fixtures pass, including
 renewal failure. Actual EC2 credentials and hosted HTTPS tests remain in #45.
 Signing-key fetches have a five-second WASI deadline, including slow bodies;
 stock-Spin TLS tests verify timeout and same-instance cleanup without an SDK fork.
+
+Latest accepted local tests include the complete provider suite, 1,025 pushes
+per hash format with concurrent fetches, interruption/concurrent-maintenance
+drills followed by a real Spin restart, and concurrent 513 MiB object lifecycles.
+The large-object run sampled about 5.27 GiB across Spin processes on macOS;
+this is not an exact peak or a Linux capacity claim. The configurable EC2 default
+is 16 GiB for qualification. Ubuntu bootstrap rehearsal caught and fixed missing
+AWS CLI packaging, invalid Spin logging arguments and inactive Caddy startup.
+Real hosted TLS, Cognito and EC2 tests still require renewed AWS SSO access.
 
 Keep final documentation user-facing and current. Plans capture internal intent;
 executable tests and concise commits replace raw evidence archives.

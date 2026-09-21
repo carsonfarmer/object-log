@@ -101,7 +101,8 @@ in its own terminal:
 ```sh
 make git-build
 (cd examples/git && spin up --listen 127.0.0.1:19100 \
-  --variable @"$qualification_state/spin.toml")
+  --variable @"$qualification_state/spin.toml" \
+  >"$qualification_state/spin.log" 2>&1)
 ```
 
 From the repository root in another terminal, run the ordinary provider suite
@@ -110,6 +111,7 @@ first, followed by any opt-in large workloads:
 ```sh
 export GIT_PROBE_URL=http://127.0.0.1:19100
 export GIT_PROBE_PASSWORD=TEMPORARY-TEST-PASSWORD
+export GIT_PROBE_LOG="$qualification_state/spin.log"
 make git-provider-test
 
 cd examples/git

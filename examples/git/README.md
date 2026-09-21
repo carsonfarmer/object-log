@@ -227,6 +227,10 @@ from normal development and must never target production data.
 
 ## Maintenance
 
+The optional [AWS deployment](qualification/aws/HOSTING.md) runs maintenance
+automatically through a systemd timer. Other hosts can schedule the same calls
+with an authenticated operator identity.
+
 Automatic checkpointing keeps the WAL tail bounded; it does not remove
 unreachable Git objects. Run authenticated maintenance periodically and after
 ref deletion:

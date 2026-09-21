@@ -1,8 +1,8 @@
 # Optional remote Git host
 
-This setup defines the remote qualification environment. Live Cognito login,
-TLS, S3 credential renewal, and capacity remain untested until the deployed
-service passes the gate in `GIT_PLAN.md`.
+Run the Git service on one disposable EC2 host with HTTPS, Cognito and S3.
+Local configuration and process tests pass. Live Cognito login, TLS, role
+credentials and host capacity still require qualification on the deployed service.
 
 Use the protected external directory and Terraform commands in [README.md](README.md).
 Build the integrated service and stage its archive outside the checkout:
@@ -56,8 +56,8 @@ sudo systemctl list-timers object-log-maintenance.timer
 
 Spin binds to `127.0.0.1:3000`; Caddy serves public HTTPS. The systemd timer runs
 after boot, then `host_maintenance_interval` seconds after each completed run,
-without overlap. A run calls `/maintenance` once per repository, then `/collect`
-while the response is `more`. Every repository has an absolute
+without overlap. A run starts with `/maintenance` per repository, then uses
+`/collect` after `more` or `retained`. Every repository has an absolute
 `host_maintenance_budget_seconds` deadline; systemd also limits the total run to
 that budget times the repository count plus 65 seconds for setup/cleanup.
 Unmaterialized repositories are skipped; an error does not prevent other
@@ -107,7 +107,8 @@ registered public client; the random loopback-port default is unsuitable.
 Cognito supports PKCE but this client setting does not require it server-side.
 Refresh uses the token endpoint; the issuer/JWKS hostname is a different endpoint.
 For the finite live expiry test, set `host_access_token_minutes = 5` through
-Terraform, then restore its default of 60 minutes after qualification.
+Terraform. Restore its default of 60 minutes and obtain a fresh token before
+the full provider suite, which uses one fixed access token.
 The separate confidential maintenance client has only the client-credentials
 grant and `git/access git/maintenance` scopes. Its tokens authorize administrative
 service actions only, never Git reads or writes.
@@ -118,6 +119,61 @@ and [token](https://docs.aws.amazon.com/cognito/latest/developerguide/token-endp
 contracts. Browser login, Basic delivery, refresh, group permissions, signing-key
 rotation, and IMDS renewal still need live tests. Signed test tokens do not prove
 Cognito interoperability. Local JWT checks cannot immediately detect revocation.
+
+## Test the hosted service
+
+Use a disposable user with read/write/admin groups for the test repositories.
+Qualify the separate permission levels and credential helper before running the
+full provider suite, using a different repository for those checks. Keep the
+service URL public HTTPS throughout. The provider fixtures must have fresh WAL
+IDs or a fresh prefix before the first run and every rerun.
+
+The suite uses `sha1.git` (SHA-1) and `sha256.git` (SHA-256), each configured with
+default branch `main` and a distinct WAL ID. To include repository isolation,
+also configure `alpha/project.git` and `beta/project.git` as SHA-1 and
+`hash256/project.git` as SHA-256, with separate IDs and the same test permissions;
+set `GIT_MULTI_REPOSITORIES=1`. These are fixture names, not service restrictions.
+
+The deterministic provider tests assert exact cleanup counts. In the SSM host
+session, stop the timer and let any running worker finish before starting them:
+
+```sh
+sudo systemctl stop object-log-maintenance.timer
+sudo systemctl show object-log-maintenance.service --property=ActiveState
+```
+
+Wait for `inactive` or `failed`; do not kill a worker in the middle of collection.
+After the suite, start `object-log-maintenance.timer` again and test automatic
+cleanup separately with ordinary pushes/ref deletions and idle repositories.
+Stopping the timer for deterministic assertions does not qualify automation.
+
+Stock Spin may omit response trailers. Stream the actual component counters from
+the host so the provider tests can still check sparse-read costs. In a separate
+terminal, with the AWS Session Manager plugin installed:
+
+```sh
+umask 077
+aws --profile "$admin_profile" --region "$region" ssm start-session \
+  --target "$instance_id" --document-name AWS-StartInteractiveCommand \
+  --parameters '{"command":["sudo journalctl -u object-log-git.service --follow --lines=0 --output=cat --no-pager"]}' \
+  >> "$qualification_state/spin.log"
+```
+
+After interactive login has configured the credential helper, obtain the token
+without printing it and run the existing tests from the repository root:
+
+```sh
+export GIT_PROBE_URL="$(terraform -chdir="$terraform_dir" output -raw host_service_url)"
+export GIT_PROBE_LOG="$qualification_state/spin.log"
+GIT_PROBE_PASSWORD="$(printf 'url=%s\n\n' "$GIT_PROBE_URL" | git credential fill | sed -n 's/^password=//p')"
+export GIT_PROBE_PASSWORD
+test -n "$GIT_PROBE_PASSWORD" && make git-provider-test
+unset GIT_PROBE_PASSWORD
+```
+
+Confirm the log stream is current before testing. SSM carries only logs; Git
+traffic goes through public HTTPS. Avoid unrelated requests to those repositories
+during counter assertions.
 
 ## Local validation and teardown
 

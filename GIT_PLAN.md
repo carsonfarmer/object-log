@@ -135,6 +135,17 @@ key rotation, token refresh, and S3 credential renewal do not lose committed dat
 Native and WASIp2 checks remain required. Verify key-fetch deadlines through
 the actual WASI transport; a native context-timeout test is not enough.
 
+Keep live credential tests finite. Temporarily use five-minute Cognito tokens
+for the helper/expiry test, then restore the configured lifetime before running
+the provider suite with its fixed test token. Prove both rejection of the expired
+token and success through the helper's refreshed token. For EC2, swap to a
+temporary instance profile without S3 access, observe the new IMDS identity and
+failed Git storage access, then restore the original profile and verify exact
+data plus a new push without restarting Spin. Always restore and delete the
+temporary profile. This proves live credential replacement and reacquisition;
+natural expiry within one cached provider remains covered by the composed
+metadata fixture, not by a multi-hour remote wait.
+
 ### 3. Automatic maintenance
 
 Preserve the existing cheap write-triggered tail checkpoint. Logical Git
@@ -144,8 +155,9 @@ scan on every push or start detached component calls after an HTTP handler retur
 
 The first selected changes in #46 are separate logical/physical passes and a
 per-call deletion-plan cap. A periodic host worker with finite work budgets is
-being implemented. An optional disposable ingress marker can pause new requests
-while admitted requests finish; evaluate it without changing the WAL authority.
+implemented and locally tested. An optional disposable ingress marker can pause
+new requests while admitted requests finish; it defaults off and does not change
+the WAL authority. Deployed progress and cost measurements remain.
 No scheduling approach alone guarantees progress with continuous readers.
 Compare request-triggered work, publication events, periodic invocation and
 checkpoint/epoch-driven approaches. Evaluate scheduling separately from the

@@ -38,6 +38,7 @@ git-check: git-qualification-tools-test
 
 git-qualification-tools-test:
 	./examples/git/qualification/aws/test-issue-session.sh
+	python3 -m unittest discover -s examples/git/qualification/aws -p 'test_*.py'
 
 git-build:
 	cargo build --locked --release --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2
