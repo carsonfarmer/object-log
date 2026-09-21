@@ -118,11 +118,14 @@ position, including the roots of every object that state still needs. The
 head can then retire the covered prefix while retaining recent outcome
 evidence for recovery.
 
-Collection uses that same head as its authority. The library validates the
-live graph, writes an explicit list of objects to delete, and conditionally
-installs that plan in the head before deleting anything. Publication checks
-the collection fence so a concurrent writer cannot bring a planned object
-back into the live graph.
+Collection uses that same head as its authority. The library authenticates the
+checkpoint, active tail, and reference nodes that define the live graph. It
+preserves referenced blob keys without downloading their opaque payloads;
+ordinary reads and publication validation still verify those bytes. It then
+writes an explicit list of objects to delete and conditionally installs that
+plan in the head before deleting anything. Publication checks the collection
+fence so a concurrent writer cannot bring a planned object back into the live
+graph.
 
 If deletion stops halfway through, another process resumes the same plan.
 Already-missing objects are harmless. The plan is cleared only after its
@@ -152,9 +155,9 @@ and collection required explicit reader retention.
 
 The key-value example uses a compressed radix tree for sparse reads, path-copy
 writes, and ordered scans. It publishes one root per atomic batch and reuses
-the WAL's snapshots, recovery, and collection. Its local tests compare results
-against an independent in-memory map; provider and sustained-load testing are
-still ahead.
+the WAL's snapshots, recovery, and collection. Its tests compare results against
+an independent in-memory map. Filesystem and finite MinIO growth, contention,
+and recovery tests also pass.
 
 The API and durable format are still pre-release. The repository contains
 memory, filesystem, fault-injection, MinIO, and Git-client tests, alongside

@@ -1,7 +1,6 @@
 # Running Git on an object-storage WAL
 
-*Draft for review. Describes the current service; the dependency design is
-under review before publication.*
+*Draft for review.*
 
 The Git service in `object-log` accepts an ordinary `git push`, stores the
 repository in object storage, and serves it back through an ordinary
@@ -39,6 +38,11 @@ ordinary Git client
 
 Spin is the host for this example. The core WAL is a Rust library independent
 of both Spin and Git, and can also run natively.
+
+Configuration maps repository paths to stable WAL identities and SHA-1 or
+SHA-256 formats. Each repository has its own storage namespace. An authorized
+writer's first push discovery creates its durable state; reads only open
+existing repositories.
 
 ## From a push to durable refs
 
@@ -111,6 +115,7 @@ wal_prefix = "$test_id"
 wal_access_key = "objectlog"
 wal_secret_key = "local-test-secret"
 git_boot_id = "$test_id"
+git_auth_mode = "anonymous"
 EOF
 )
 spin up --from examples/git/spin.toml --listen 127.0.0.1:19100 \
@@ -159,10 +164,15 @@ their own workload settings; an ordinary test run does not run all of them.
 
 For the provider suite, start a fresh namespace rather than reuse the demo
 repository. The [example guide](../../examples/git/README.md#test) gives the
-commands and workload settings. The repository also has an optional disposable
-AWS S3 setup for running the provider tests remotely. Those checks complement
-testing the public deployment's TLS, routing, identity, and capacity controls;
-they do not establish arbitrary scale.
+commands and workload settings.
+
+The optional [AWS deployment](../../examples/git/qualification/aws/HOSTING.md)
+runs Spin behind Caddy on EC2, with public HTTPS, Cognito authentication, and
+S3 storage accessed through an instance role. A browser-based OAuth credential
+helper supplies access tokens to ordinary Git clients. Each repository has
+independent read, write, and administrator groups. A separate machine identity
+can administer repositories but cannot clone or push. The host schedules
+maintenance automatically, including cleanup after uploads that never publish.
 
 There are costs I do not want to hide. The service uses unmodified go-git,
 including its normal buffering of incoming delta bases and results. Large
