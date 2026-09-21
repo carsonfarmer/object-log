@@ -32,9 +32,9 @@ object_store = { version = "0.14", default-features = false }
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
 ```
 
-The default crate compiles for native targets and WASIp2. The convenience `aws`
+The default crate compiles for native targets and `WASIp2`. The convenience `aws`
 feature enables `object_store`'s native AWS and HTTP stack and does not compile
-for WASIp2. A WASI host must inject an `ObjectStore` implementation with a
+for `WASIp2`. A WASI host must inject an `ObjectStore` implementation with a
 compatible transport; the Git example does this with `object_store`'s AWS
 signing layer and a WASI HTTP connector.
 
@@ -238,7 +238,7 @@ formats are intentionally absent. A tagged durable-format release will require a
 new format version for incompatible changes.
 
 The crate forbids unsafe Rust and denies missing public documentation. Native
-and WASIp2 builds, deterministic fault simulation, MinIO provider tests, large
+and `WASIp2` builds, deterministic fault simulation, `MinIO` provider tests, large
 collection tests, and API doctests run in the project gates. Consumers should
 still qualify their object-store provider, limits, and maintenance schedule with
 their own workload before deploying it.
