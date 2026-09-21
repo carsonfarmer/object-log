@@ -1,7 +1,5 @@
 # Running Git on an object-storage WAL
 
-*Draft for review.*
-
 The Git service in `object-log` accepts an ordinary `git push`, stores the
 repository in object storage, and serves it back through an ordinary
 `git clone`. The server has no local repository to recover after a restart.
@@ -39,10 +37,11 @@ ordinary Git client
 Spin is the host for this example. The core WAL is a Rust library independent
 of both Spin and Git, and can also run natively.
 
-Configuration maps repository paths to stable WAL identities and SHA-1 or
-SHA-256 formats. Each repository has its own storage namespace. An authorized
-writer's first push discovery creates its durable state; reads only open
-existing repositories.
+Configuration maps repository paths to stable WAL identities, hash formats,
+default branches, and permissions. Each repository has its own storage
+namespace. An authorized writer's first push discovery creates its durable
+state; reads only open existing repositories. Adding a repository changes
+configuration, not the component binary.
 
 ## From a push to durable refs
 
@@ -74,8 +73,8 @@ small as Git's repacking machinery would produce.
 ## Run it on a laptop
 
 The local setup needs Git, Go 1.27.1, the repository's pinned Rust toolchain,
-Spin 4, `wac`, MinIO, and MinIO's `mc` client. It uses two local processes:
-MinIO for storage and Spin for HTTP. No cloud account is needed.
+Spin 4, `wac`, MinIO, and MinIO's `mc` client. It uses MinIO for storage and
+Spin for HTTP. No cloud account is needed.
 
 From the repository root, build the component:
 
@@ -87,7 +86,7 @@ make git-build
 
 The result is `examples/git/git.wasm`. The first build also compiles the
 component build tool; later builds reuse it. This
-is currently a source-build workflow, not a prebuilt one-command install.
+is currently a source-build workflow. There is no prebuilt one-command install.
 
 In one terminal, start an isolated local object store:
 
@@ -110,22 +109,23 @@ mc --config-dir "$local_config/mc" mb local-git/wal-proof
 test_id="local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 (
   umask 077
-  cat >"$local_config/variables.toml" <<EOF
+  cat >"$local_config/variables.toml" <<EOF_VARS
 wal_prefix = "$test_id"
 wal_access_key = "objectlog"
 wal_secret_key = "local-test-secret"
 git_boot_id = "$test_id"
-git_auth_mode = "anonymous"
-EOF
+git_auth_mode = "password"
+git_password = "local-git-password"
+EOF_VARS
 )
-spin up --from examples/git/spin.toml --listen 127.0.0.1:19100 \
+cd examples/git
+spin up --listen 127.0.0.1:19100 \
   --variable "@$local_config/variables.toml"
 ```
 
-Run that block from the repository root. The two repository URLs are
+Run that block from the repository root. The default configuration exposes
 `http://127.0.0.1:19100/sha1.git` and
-`http://127.0.0.1:19100/sha256.git`. Authentication is disabled for this
-loopback-only example.
+`http://127.0.0.1:19100/sha256.git`.
 
 In a third terminal, push a commit and clone it back. Use an empty working
 directory for these commands and keep your ordinary Git author configuration:
@@ -144,6 +144,10 @@ git -c protocol.version=2 clone \
 git -C demo-clone fsck --full
 ```
 
+When Git prompts, use any username and `local-git-password`. The local password
+mode uses HTTP Basic authentication; hosted deployments should use the Cognito
+mode described in the example guide.
+
 The SHA-1 version uses `--object-format=sha1` and `/sha1.git`. You can stop
 Spin, restart it with the same configuration and MinIO data, and clone again.
 Keeping the prefix is necessary for that restart check: a fresh prefix opens
@@ -154,7 +158,7 @@ the second terminal and `"$minio_data"` in the first if you want to discard
 the test data. The variables refer only to the temporary directories created
 above.
 
-## What this proves so far
+## What we tested
 
 The local test suite runs installed Git clients against Spin and MinIO. It
 covers both hash formats, clone and incremental fetch, push, shallow history,
@@ -166,13 +170,29 @@ For the provider suite, start a fresh namespace rather than reuse the demo
 repository. The [example guide](../../examples/git/README.md#test) gives the
 commands and workload settings.
 
-The optional [AWS deployment](../../examples/git/qualification/aws/HOSTING.md)
-runs Spin behind Caddy on EC2, with public HTTPS, Cognito authentication, and
-S3 storage accessed through an instance role. A browser-based OAuth credential
-helper supplies access tokens to ordinary Git clients. Each repository has
-independent read, write, and administrator groups. A separate machine identity
-can administer repositories but cannot clone or push. The host schedules
-maintenance automatically, including cleanup after uploads that never publish.
+The [AWS deployment](../../examples/git/qualification/aws/HOSTING.md) was also
+run with Spin behind Caddy on EC2, public HTTPS, Cognito authentication, and S3
+access through an instance role. An OAuth credential helper supplied access
+tokens to stock Git. Each repository had independent read, write, and
+administrator groups; a separate machine identity could run maintenance but
+could not clone or push.
+
+That deployment survived concurrent writers, interrupted requests, a killed
+service process, an EC2 reboot, and scheduled cleanup across eight repositories.
+A storage drill removed the usable instance role and observed denied access.
+After the role was restored, the service recovered exact data and accepted a
+new push without restarting Spin. Fresh mirror clones and `git fsck --full`
+verified all refs after the final maintenance cycle. Two concurrent workflows
+with 513 MiB files completed for both object formats without an unexpected
+restart. The service cgroup peaked at 5.30 GiB on that workload, which is a host
+capacity measurement from that run. Deployments need limits based on their own
+file sizes and concurrency.
+
+Scheduled maintenance first removes unreachable entries from the Git catalog,
+then asks the WAL to delete unreferenced storage in bounded batches. Running it
+outside request traffic also covers idle repositories and uploads that never
+published. Active reader retentions can delay collection; registrations lost by
+a stopped process require an explicit drain-and-recover procedure.
 
 There are costs I do not want to hide. The service uses unmodified go-git,
 including its normal buffering of incoming delta bases and results. Large
@@ -181,12 +201,15 @@ size. Pushes advertise Git's `no-thin` capability, so clients include delta base
 in the upload. This can cost bandwidth, but uses Git's existing negotiation
 without changing clients.
 
-The Go component pins a proposed upstream SDK fix, described in
-[THIRD_PARTY.md](../../THIRD_PARTY.md). Minimizing that remaining maintenance
-burden is unfinished work.
+The Go component uses unmodified go-git, Spin, MinIO, and componentize-go. It
+pins the unchanged contributor revision from an unmerged go-pkg pull request so
+garbage collection does not run during a restricted component allocation step.
+[THIRD_PARTY.md](../../THIRD_PARTY.md) records the exact revision and license.
 
 Branch updates must be fast-forward, including when a client requests a force
-push. The service supports the Git operations listed above, but not partial-clone
-filters or packfile URIs. It does not generate new outgoing deltas. Resource
-limits are configurable; the deployment host must also control total memory
-and concurrency. The durable format is pre-release.
+push. Partial-clone filters and packfile URIs are outside the current service.
+The service reuses suitable deltas received from clients but does not search for
+new ones during fetch, so some outgoing packs are larger than packs produced by
+Git's repacking machinery. Resource limits are configurable, and the deployment
+host must account for total memory and concurrent requests. The durable format
+is pre-release.

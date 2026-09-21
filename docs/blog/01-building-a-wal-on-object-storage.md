@@ -1,7 +1,5 @@
 # Building a WAL on object storage
 
-*Draft for review.*
-
 I want to build storage-backed applications without making every application
 solve ordering, recovery, and garbage collection again.
 
@@ -15,7 +13,8 @@ the result works.
 The library underneath that example is a Rust write-ahead log over conditional
 object storage. An application supplies bytes describing its operations and
 state. The log supplies their durable order, explicit recovery outcomes, and
-the machinery to keep referenced data alive.
+the machinery to keep referenced data alive. Git is the demanding proof; a
+small key-value library is a second consumer of the same API.
 
 ## Publish through one object
 
@@ -51,8 +50,8 @@ provide transactions across unrelated logs.
 
 The backend must support the required conditional operations and consistent
 reads. `object-log` probes those capabilities when creating a validated
-backend handle. An S3-shaped API alone is not enough. The current implementation
-uses the established Rust `object_store` crate for storage access.
+backend handle. An S3-shaped API alone is not enough. The implementation uses
+the Rust `object_store` crate for storage access.
 
 ## A timeout is an uncertain result
 
@@ -75,9 +74,9 @@ persist that token before committing. Resuming it checks the original
 candidate and its original publication position. It does not turn it into a
 new command against current state.
 
-Recovery evidence has a bounded lifetime. If enough history has been retired,
-the answer can be `Expired`. That means the outcome is indeterminate, not
-that the operation failed. Applications still need a policy for that case.
+Recovery evidence has a configured lifetime. If enough history has been
+retired, the answer can be `Expired`. The outcome is then indeterminate; an
+application must decide how to reconcile it.
 
 This is also why the log cannot transparently give an ordinary Git client a
 new recovery protocol. After losing a push response, a user can inspect remote
@@ -98,8 +97,9 @@ the entire value. This keeps chunk bookkeeping out of each consumer.
 Immutable object keys include both a content digest and a random physical
 identity. Those serve different purposes. The digest lets the library verify
 the bytes it reads. The physical identity prevents an old deletion from
-accidentally targeting a later write of identical content. This is not a
-global deduplication scheme.
+accidentally targeting a later write of identical content. Identical bytes may
+therefore be stored more than once; global deduplication is outside the
+protocol.
 
 The explicit references also define the graph the collector must preserve.
 An application cannot hide a necessary object reference inside opaque bytes
@@ -139,10 +139,11 @@ stopping new traffic and draining readers first.
 
 These choices avoid a separate durable coordinator, but they come with
 operational obligations. External bucket lifecycle rules must not delete
-protocol objects, and applications must checkpoint before reaching the
-configured tail limit.
+protocol objects. Applications must checkpoint before reaching the configured
+tail limit, schedule collection, and recover reader registrations left behind
+by a stopped process only after draining active readers.
 
-## Put the abstraction under load
+## Test the abstraction with real consumers
 
 The Git example publishes its refs and sparse object catalog together through
 one WAL commit. It uses the generic byte streams and reference nodes, while
@@ -153,14 +154,22 @@ sparse reads. Pushes with uncertain responses required honest publication
 outcomes. Concurrent fetch
 and collection required explicit reader retention.
 
-The key-value example uses a compressed radix tree for sparse reads, path-copy
+The key-value library uses a compressed radix tree for sparse reads, path-copy
 writes, and ordered scans. It publishes one root per atomic batch and reuses
 the WAL's snapshots, recovery, and collection. Its tests compare results against
-an independent in-memory map. Filesystem and finite MinIO growth, contention,
-and recovery tests also pass.
+an independent in-memory map. The qualified local workload grows to 65,536
+one-KiB records in memory and 16,384 on MinIO, then exercises contention,
+retained scans, cold recovery, and collection.
 
-The API and durable format are still pre-release. The repository contains
-memory, filesystem, fault-injection, MinIO, and Git-client tests, alongside
-the [protocol description](../design.md). The core can be tried with an
-in-memory backend using the [README example](../../README.md); running the
-Git service is the subject of the next post.
+The core benchmarks measure the protocol separately from those applications.
+On local MinIO, appending a small record used two writes whether the active tail
+contained zero, 64, 256, or 1,024 entries. Median latency in that run rose from
+about 4.7 to 6.0 milliseconds as the encoded head grew. The two-write request
+shape held across all four tail depths. Latency will vary with the machine and
+provider.
+
+The API and durable format are pre-release. The repository contains memory,
+filesystem, fault-injection, MinIO, and Git-client tests, alongside the
+[protocol description](../design.md). You can try the core with an in-memory
+backend using the [README example](../../README.md). The next post follows the
+Git service from a push to durable refs and shows how to run it locally.

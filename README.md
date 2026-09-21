@@ -11,6 +11,33 @@ The library supplies ordering, recovery, authenticated object references,
 checkpoints, reader retention, and bounded garbage collection. Applications
 supply their own operation, result, and snapshot formats.
 
+Use it when an application needs to publish related immutable objects as one
+ordered update, recover after an uncertain write, and eventually collect data
+that is no longer reachable. The library handles durability and ordering;
+queries, indexes, conflict policy, authentication, and application formats stay
+with the consumer.
+
+## Add the library
+
+The crate has not been published to crates.io, and its API and durable format
+have not reached a stable release. Depend on a reviewed repository revision and
+use a fresh storage prefix after an incompatible format change. These are the
+dependencies used by the example below:
+
+```toml
+[dependencies]
+object-log = { git = "https://github.com/carsonfarmer/object-log", rev = "<commit>" }
+bytes = "1.10"
+object_store = { version = "0.14", default-features = false }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
+```
+
+The default crate compiles for native targets and WASIp2. The convenience `aws`
+feature enables `object_store`'s native AWS and HTTP stack and does not compile
+for WASIp2. A WASI host must inject an `ObjectStore` implementation with a
+compatible transport; the Git example does this with `object_store`'s AWS
+signing layer and a WASI HTTP connector.
+
 ## Storage contract
 
 A backend must provide:
@@ -19,12 +46,24 @@ A backend must provide:
 - version-based conditional updates;
 - conditional reads;
 - consistent read-after-write behavior; and
-- stable immutable bytes until `object-log` garbage collection removes them.
+- stable immutable bytes until `object-log` garbage collection removes them;
+- deletion for capability-probe cleanup; and
+- prefix listing and repeatable deletion when collection is enabled.
 
 `ValidatedBackend::new` probes those capabilities once and rejects unsupported
 stores. `object_store::local::LocalFileSystem` is useful for immutable-object
 tests but cannot host a log because it lacks conditional updates. The memory
 backend, `MinIO`, and AWS S3 satisfy the tested protocol.
+
+The application owns the bucket and access policy. `ValidatedBackend::new`
+writes, reads, conditionally updates, and deletes one object under an isolated
+probe log. Normal publication needs reads and conditional writes. Collection
+also lists the log prefix and deletes immutable objects. A single deployment
+credential therefore needs read, write, list, and delete access under its root
+prefix; deployments that separate publication from maintenance can scope those
+phases independently, while the process constructing `ValidatedBackend` still
+needs permission to delete its probe object. Prevent external lifecycle rules
+from expiring protocol objects.
 
 Only `<prefix>/v1/logs/<log-id>/index.cbor` is mutable. A conditional update to
 that object is the publication point. Everything else has a create-only key
@@ -38,10 +77,13 @@ the storage contract.
 use std::sync::Arc;
 
 use bytes::Bytes;
-use object_log::{CommitStatus, Log, LogId, Options, TransactionId, ValidatedBackend};
+use object_log::{
+    CommitStatus, Log, LogId, Options, Resolution, TransactionId, ValidatedBackend,
+};
 use object_store::{memory::InMemory, path::Path};
 
-# async fn example() -> Result<(), object_log::Error> {
+#[tokio::main]
+async fn main() -> Result<(), object_log::Error> {
 let backend = ValidatedBackend::new(
     Arc::new(InMemory::new()),
     Path::from("object-log-demo"),
@@ -58,30 +100,54 @@ let prepared = log.prepare(
     Vec::new(),
 )?;
 
-// Persist this before publication when the operation must survive process loss.
+// Persist these before publication when the request must survive process loss.
 let recovery_token = prepared.recovery_token()?;
+let result = prepared.result().clone();
 
 match log.commit(prepared).await? {
     CommitStatus::Committed(next) => {
-        println!("published generation {}", next.generation());
+        println!(
+            "published generation {}; return {} result bytes",
+            next.generation(),
+            result.len()
+        );
     }
     CommitStatus::Conflict(winner) => {
         println!("retry against generation {} after revalidation", winner.generation());
     }
-    CommitStatus::Pending(_) => {
-        // The write may have succeeded. Preserve the token and resolve it with
-        // `Log::resume`; never replay non-idempotent work as a new operation.
-        println!("publication outcome is uncertain: {} token bytes", recovery_token.len());
-    }
+    CommitStatus::Pending(_) => match log.resume(&recovery_token).await? {
+        Resolution::Committed(next) => {
+            println!(
+                "published generation {}; return {} result bytes",
+                next.generation(),
+                result.len()
+            );
+        }
+        Resolution::NotCommitted(winner) => {
+            println!("revalidate generation {} before a deliberate retry", winner.generation());
+        }
+        Resolution::StillPending(_) => println!("retain the token and resolve it later"),
+        Resolution::Expired(_) => println!("outcome unknown; do not replay the operation"),
+    },
 }
-# Ok(())
-# }
+Ok(())
+}
 ```
 
 A candidate is prepared against one immutable `View`. Publication returns a
 confirmed commit, a definite conflict with a newer view, or an explicit pending
 result when a storage failure can hide success. The core never silently rebases
 application work.
+
+The recovery token identifies this exact candidate and publication position,
+including its operation and result bytes. Durably retain it, along with any
+other application response or state needed to finish the request, before
+calling `commit`. Resolve a pending result with `Log::resume`; do not submit
+non-idempotent work again under a new transaction ID. `Committed` permits
+returning the saved result. `NotCommitted` permits a deliberate retry after the
+application revalidates current state. Preserve `StillPending` evidence and
+resolve it later. Once the answer is `Expired`, the library cannot prove whether
+the candidate committed, so the application must not replay it.
 
 Large values can be written through `ByteWriter` and read with authenticated,
 bounded `read_at` calls. Reference nodes form application-defined trees without
@@ -124,19 +190,24 @@ for the durable format and recovery invariants. The schema is defined in
 - [`object-log-kv`](https://github.com/carsonfarmer/object-log/tree/main/crates/object-log-kv)
   is a byte-key/value store with sparse reads and writes, atomic batches,
   immutable snapshots, ordered scans, and checkpoint recovery. Its guide defines
-  a bounded small-record profile, local qualification and the caller's recovery
-  and maintenance responsibilities.
+  the locally qualified small-record profile and the caller's recovery and
+  maintenance responsibilities.
 - [`examples/git`](https://github.com/carsonfarmer/object-log/tree/main/examples/git)
   is a working Git service using go-git and the
   same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
   clients, SHA-1 and SHA-256, protocol-v2 clone/fetch, classic push, shallow
   history, configured repository names, Cognito permissions, recovery, and
-  automatic maintenance. The optional
+  bounded maintenance endpoints. The optional
   [AWS host](https://github.com/carsonfarmer/object-log/blob/main/examples/git/qualification/aws/HOSTING.md)
-  supplies HTTPS, instance-role credentials and a bounded maintenance worker.
+  supplies HTTPS, instance-role credentials, and a worker that schedules those
+  endpoints.
   Use the provider suite to qualify the intended storage, client and host limits.
 
 The core library has no Git, Spin, or serverless-runtime dependency.
+
+The Git service has also been qualified over public HTTPS with Cognito and S3.
+That deployment demonstrates one operating model; it does not add hosting or
+authentication concerns to the Rust library.
 
 ## Development
 
@@ -165,6 +236,12 @@ The API and durable format are pre-release. Development revisions may require a
 fresh object-store namespace; compatibility readers for earlier development
 formats are intentionally absent. A tagged durable-format release will require a
 new format version for incompatible changes.
+
+The crate forbids unsafe Rust and denies missing public documentation. Native
+and WASIp2 builds, deterministic fault simulation, MinIO provider tests, large
+collection tests, and API doctests run in the project gates. Consumers should
+still qualify their object-store provider, limits, and maintenance schedule with
+their own workload before deploying it.
 
 `object-log` is licensed under
 [Apache-2.0](https://github.com/carsonfarmer/object-log/blob/main/LICENSE).
