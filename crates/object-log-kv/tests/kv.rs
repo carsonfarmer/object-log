@@ -738,6 +738,47 @@ async fn limits_fail_without_publication_and_pages_bound_returned_bytes() -> Tes
 }
 
 #[tokio::test]
+async fn result_limit_is_checked_before_tree_staging() -> TestResult {
+    let result_bytes = minicbor::to_vec(vec![KvResult::Changed(true)])?.len();
+
+    let (_, exact, exact_faults) = fixture(Options {
+        max_inline_result_bytes: result_bytes,
+        ..Options::default()
+    })
+    .await?;
+    exact_faults.reset();
+    let candidate = exact
+        .snapshot()
+        .await?
+        .prepare(TransactionId::new(), &[set(b"key", b"value")])
+        .await?;
+    assert_eq!(candidate.result().len(), result_bytes);
+    assert!(exact_faults.metrics().operation(Operation::Put).requests > 0);
+
+    let (_, limited, limited_faults) = fixture(Options {
+        max_inline_result_bytes: result_bytes - 1,
+        ..Options::default()
+    })
+    .await?;
+    limited_faults.reset();
+    assert!(matches!(
+        limited
+            .snapshot()
+            .await?
+            .prepare(TransactionId::new(), &[set(b"key", b"value")])
+            .await,
+        Err(KvError::Log(object_log::Error::LimitExceeded(
+            "inline result bytes"
+        )))
+    ));
+    assert_eq!(
+        limited_faults.metrics().operation(Operation::Put).requests,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn filesystem_backend_is_rejected_before_kv_use() -> TestResult {
     let directory = tempfile::tempdir()?;
     let filesystem: Arc<dyn ObjectStore> =

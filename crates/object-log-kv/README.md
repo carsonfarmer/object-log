@@ -100,20 +100,34 @@ leave a recoverable WAL; reopen before starting new maintenance.
 
 Limits bound key/value sizes, batch inputs, response bytes, and cumulative tree
 work per call. Tree work includes stored node bytes read, transient nodes created
-or revisited within a batch, and scan-prefix allocation. Large values are rejected
-rather than streamed.
+or revisited within a batch, final encoded nodes, and every traversal prefix.
+Prefix and encoding buffers are size-checked before allocation and request their
+final capacity directly. Large values are rejected rather than streamed.
 The default value limit is 64 KiB. Mutation results contain only booleans or
 integers, so their size does not depend on stored value size. The WAL's result
-allowance still bounds the encoded batch results.
+allowance still bounds the encoded batch results. Preparation checks that exact
+encoded length before flushing the tree, so an oversized result stages nothing.
 The tree budget includes repeated path work and every command in a batch. It
 excludes WAL metadata: WAL options separately bound tail, commit, checkpoint,
 and head sizes. Use a shared WAL request guard across retries for cumulative
 logical storage calls; provider-internal HTTP attempts remain provider-specific.
 No automatic conflict retries, unbounded index cache, or background work exist.
 
-Batch-local tree state is discarded after preparation. Work admission is a byte
-bound, not an exact allocator/RSS accounting system; decoded nodes, path stacks,
-result encoding, and caller-owned inputs add bounded memory overlap.
+For the documented small-record profile, a conservative per-call envelope for
+KV-owned variable buffers is about 4.07 MiB: the 4 MiB cumulative tree allowance,
+up to 64 KiB of returned key/value bytes, the WAL's 4 KiB default result allowance,
+and one 64-byte range prefix. Calls do not normally use all four at once. Rust
+container bookkeeping is additional but finite: its item counts are bounded by
+the key, batch, page, and byte-fanout limits. Batch-local tree state is discarded
+when preparation returns.
+
+This is not a process-memory or allocator quota. Input `Bytes` backing belongs to
+the caller and can retain a larger allocation than the admitted slice. WAL view,
+decode, head, materialization, and collection buffers; provider and error bodies;
+the async runtime; allocator slack; and returned values retained by the caller
+are separate. Concurrent calls multiply their respective envelopes. Whole-process
+RSS therefore corroborates the selected deployment profile but does not prove
+the per-call bound.
 The finite local `MinIO` checks below qualify the stated bounded small-record
 workload. Streaming values and exact allocator quotas are outside this profile.
 Callers own the checkpoint, recovery, retention and collection schedule. Remote deployments

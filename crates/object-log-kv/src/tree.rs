@@ -117,9 +117,7 @@ impl Tree<'_> {
                 1 => {
                     let child = node.children.pop().ok_or(KvError::InvalidEncoding)?;
                     let mut child = self.read(child).await?;
-                    let mut prefix = node.prefix.to_vec();
-                    prefix.push(node.edges[0]);
-                    prefix.extend_from_slice(&child.prefix);
+                    let prefix = self.prefix(&node.prefix, Some(node.edges[0]), &child.prefix)?;
                     child.prefix = Bytes::from(prefix);
                     child.source = None;
                     node = child;
@@ -362,11 +360,7 @@ impl Tree<'_> {
                 continue;
             }
             let mut node = self.read(object).await?;
-            ensure(
-                key.len().saturating_add(node.prefix.len()) <= self.limits.key_bytes,
-                "key bytes",
-            )?;
-            key.extend_from_slice(&node.prefix);
+            key = self.prefix(&key, None, &node.prefix)?;
             if outside(&key, start, end, after) {
                 continue;
             }
@@ -399,9 +393,7 @@ impl Tree<'_> {
                 .zip(std::mem::take(&mut node.children))
                 .rev()
             {
-                self.budget.charge(key.len().saturating_add(1))?;
-                let mut prefix = key.clone();
-                prefix.push(edge);
+                let prefix = self.prefix(&key, Some(edge), &[])?;
                 if !outside(&prefix, start, end, after) {
                     stack.push((prefix, child));
                 }
@@ -411,6 +403,23 @@ impl Tree<'_> {
             entries,
             after: None,
         })
+    }
+
+    fn prefix(&mut self, left: &[u8], edge: Option<u8>, right: &[u8]) -> Result<Vec<u8>, KvError> {
+        let len = left
+            .len()
+            .checked_add(usize::from(edge.is_some()))
+            .and_then(|len| len.checked_add(right.len()))
+            .ok_or(KvError::Limit("key bytes"))?;
+        ensure(len <= self.limits.key_bytes, "key bytes")?;
+        self.budget.charge(len)?;
+        let mut prefix = Vec::with_capacity(len);
+        prefix.extend_from_slice(left);
+        if let Some(edge) = edge {
+            prefix.push(edge);
+        }
+        prefix.extend_from_slice(right);
+        Ok(prefix)
     }
 }
 
@@ -510,6 +519,30 @@ mod tests {
         let root = tree.dirty(leaf()).await?;
         assert!(tree.finish(root).await?.is_some());
         assert!(faults.metrics().uploaded_bytes() > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn constructed_prefixes_have_no_growth_slack() -> Result<(), Box<dyn Error>> {
+        let backend =
+            ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("kv-prefix-capacity"))
+                .await?;
+        let log = object_log::Log::open(&backend, &LogId::new("kv")?, Options::default()).await?;
+        let view = log.load().await?;
+        let mut tree = Tree {
+            log: &log,
+            view: &view,
+            limits: Limits::default(),
+            budget: Budget(32),
+        };
+
+        let merged = tree.prefix(b"left", Some(b'/'), b"right")?;
+        assert_eq!(merged, b"left/right");
+        assert_eq!(merged.capacity(), merged.len());
+        let scan = tree.prefix(&merged, Some(b'/'), &[])?;
+        assert_eq!(scan, b"left/right/");
+        assert_eq!(scan.capacity(), scan.len());
+        assert_eq!(tree.budget.0, 11);
         Ok(())
     }
 }

@@ -4,7 +4,7 @@
 mod tree;
 
 use bytes::Bytes;
-use minicbor::{Decode, Encode, encode::Write};
+use minicbor::{CborLen, Decode, Encode, encode::Write};
 use object_log::{
     CheckpointStatus, Log, MaterializeError, Materializer, PreparedCommit, StagedObject,
     TransactionId, View, materialize,
@@ -27,8 +27,8 @@ pub struct Limits {
     pub page_entries: usize,
     /// Maximum combined key and value bytes returned by a page or multi-get.
     pub response_bytes: usize,
-    /// Cumulative stored-node and transient tree work, plus scan-prefix bytes.
-    /// Includes repeated path work and all commands in a batch; excludes WAL envelopes.
+    /// Cumulative stored-node, transient-tree, encoded-node, and traversal-prefix bytes.
+    /// Includes repeated path work and all commands in a batch; excludes WAL work.
     pub tree_bytes: usize,
 }
 
@@ -131,7 +131,7 @@ impl KvCommand {
 }
 
 /// A small result recorded in command order in the same atomic WAL publication.
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, PartialEq)]
+#[derive(CborLen, Clone, Copy, Debug, Decode, Encode, Eq, PartialEq)]
 pub enum KvResult {
     /// Whether a set or delete changed the value, including creating an empty value.
     #[n(0)]
@@ -327,8 +327,12 @@ impl KvSnapshot {
             root = next;
             results.push(result);
         }
+        let result_len = minicbor::len(&results);
+        if result_len > self.store.log.options().max_inline_result_bytes {
+            return Err(object_log::Error::LimitExceeded("inline result bytes").into());
+        }
         let root = tree.finish(root).await?;
-        let result = encode(&results)?;
+        let result = encode_len(&results, result_len)?;
         Ok(self.store.log.prepare(
             &self.view,
             transaction,
@@ -460,10 +464,17 @@ fn ensure(condition: bool, limit: &'static str) -> Result<(), KvError> {
         Err(KvError::Limit(limit))
     }
 }
-fn encode(value: &impl Encode<()>) -> Result<Bytes, KvError> {
-    minicbor::to_vec(value)
-        .map(Bytes::from)
-        .map_err(|_| KvError::InvalidEncoding)
+fn encode(value: &(impl CborLen<()> + Encode<()>)) -> Result<Bytes, KvError> {
+    let len = minicbor::len(value);
+    encode_len(value, len)
+}
+fn encode_len(value: &impl Encode<()>, len: usize) -> Result<Bytes, KvError> {
+    let mut encoded = Vec::with_capacity(len);
+    minicbor::encode(value, &mut encoded).map_err(|_| KvError::InvalidEncoding)?;
+    if encoded.len() != len {
+        return Err(KvError::InvalidEncoding);
+    }
+    Ok(Bytes::from(encoded))
 }
 fn decode<'a, T: Decode<'a, ()> + Encode<()>>(bytes: &'a [u8]) -> Result<T, KvError> {
     let mut decoder = minicbor::Decoder::new(bytes);
