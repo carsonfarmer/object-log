@@ -11,7 +11,9 @@ integration tests. It creates:
 Optional [remote hosting](HOSTING.md) adds one Ubuntu EC2 host, Caddy HTTPS,
 stock Spin 4.0.2, restricted workload identity, Cognito, and periodic maintenance.
 That option stores a generated maintenance client secret in sensitive Terraform
-state and an SSM SecureString parameter.
+state and an SSM SecureString parameter. Follow the hosting guide's
+[client requirements](HOSTING.md#interactive-git-authentication) for OAuth and
+HTTP/2, including Git's linked libcurl version.
 
 `force_destroy = false` prevents Terraform from deleting an unexpected non-empty
 bucket. Never point this setup at production data.
@@ -106,7 +108,9 @@ make git-build
 ```
 
 From the repository root in another terminal, run the ordinary provider suite
-first, followed by any opt-in large workloads:
+first, followed by any opt-in large workloads. For extended remote runs, add an
+explicit Go test `-timeout` that covers the planned workload and obtain temporary
+credentials with enough remaining lifetime before starting.
 
 ```sh
 export GIT_PROBE_URL=http://127.0.0.1:19100

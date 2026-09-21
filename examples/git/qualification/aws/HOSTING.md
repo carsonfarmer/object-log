@@ -1,8 +1,6 @@
 # Optional remote Git host
 
 Run the Git service on one disposable EC2 host with HTTPS, Cognito and S3.
-Local configuration and process tests pass. Live Cognito login, TLS, role
-credentials and host capacity still require qualification on the deployed service.
 
 Use the protected external directory and Terraform commands in [README.md](README.md).
 Build the integrated service and stage its archive outside the checkout:
@@ -90,8 +88,15 @@ the worker never clears them.
 ## Interactive Git authentication
 
 Use released `git-credential-oauth` v0.17.2 and Git 2.45 or newer for expiry and
-refresh support. Keep a secure credential storage helper configured **before**
-`oauth`. Read `terraform output -json host_cognito` and substitute its client and
+refresh support. For HTTP/2, Git's linked libcurl must include the
+[upload EOF fix](https://github.com/curl/curl/commit/6a095da1f3c836fa7e06510720555746b1353506),
+released in curl 8.5.0; a backport also suffices. libcurl 7.88.1 can hang after a
+streamed Git upload. Stock Git 2.47.3 with libcurl 8.14.1 passed that transfer.
+Check the library linked to Git; upgrading the standalone `curl` command alone
+may leave Git using the older library.
+
+Keep a secure credential storage helper configured **before** `oauth`.
+Read `terraform output -json host_cognito` and substitute its client and
 endpoint values below. Use the `host_service_url` output in place of
 `https://git.example.com`, including when connecting by IP.
 
@@ -113,14 +118,16 @@ and initial branch before trying to clone it.
 The helper uses authorization-code S256 PKCE and sends the access token as an
 ordinary Basic password. Its fixed `http://localhost:53119` callback matches the
 registered public client; the random loopback-port default is unsuitable.
-Request both scopes: the live Cognito authorization-code flow omitted
-`cognito:groups` with only `git/access`, and included the repository groups with
-`openid git/access`. The service still requires an access token and `git/access`.
+Request both scopes so Cognito includes the `cognito:groups` claim used for
+repository permissions. The service requires an access token with `git/access`.
 Cognito supports PKCE but this client setting does not require it server-side.
 Refresh uses the token endpoint; the issuer/JWKS hostname is a different endpoint.
 For the finite live expiry test, set `host_access_token_minutes = 5` through
-Terraform. Restore its default of 60 minutes and obtain a fresh token before
-the full provider suite, which uses one fixed access token.
+Terraform. The default is 60 minutes. The provider suite captures one fixed
+access token and does not refresh it during a run. For longer finite tests,
+temporarily choose a lifetime that covers the planned run and obtain a fresh
+token after applying it. Restore the default when testing is finished.
+
 The separate confidential maintenance client has only the client-credentials
 grant and `git/access git/maintenance` scopes. Its tokens authorize administrative
 service actions only, never Git reads or writes.
@@ -128,9 +135,9 @@ service actions only, never Git reads or writes.
 These settings follow the [helper's tagged source](https://github.com/hickford/git-credential-oauth/blob/v0.17.2/main.go)
 and Cognito's [authorization](https://docs.aws.amazon.com/cognito/latest/developerguide/authorization-endpoint.html)
 and [token](https://docs.aws.amazon.com/cognito/latest/developerguide/token-endpoint.html)
-contracts. Browser login, Basic delivery, refresh, group permissions, signing-key
-rotation, and IMDS renewal still need live tests. Signed test tokens do not prove
-Cognito interoperability. Local JWT checks cannot immediately detect revocation.
+contracts. For interactive users, repository read, write and admin groups are
+independent; an empty group list denies that action. Local JWT checks cannot
+immediately detect revocation of either interactive or maintenance tokens.
 
 ## Test the hosted service
 
@@ -159,9 +166,15 @@ After the suite, start `object-log-maintenance.timer` again and test automatic
 cleanup separately with ordinary pushes/ref deletions and idle repositories.
 Stopping the timer for deterministic assertions does not qualify automation.
 
-Stock Spin may omit response trailers. Stream the actual component counters from
-the host so the provider tests can still check sparse-read costs. In a separate
-terminal, with the AWS Session Manager plugin installed:
+Stock Spin may omit response trailers. Use the response's `X-Request-ID` to match
+a Git storage operation to its component usage record, formatted as
+`wal POST /repository.git/git-upload-pack id=... calls=... bytes=...`.
+When trailers are absent, the provider tests use `GIT_PROBE_LOG` and wait up to
+10 seconds for that request's complete log line. Only complete lines with the
+matching request ID supply its counters.
+
+Stream the component logs through SSM to the client running the tests. In a
+separate terminal, with the AWS Session Manager plugin installed:
 
 ```sh
 umask 077
@@ -183,9 +196,11 @@ test -n "$GIT_PROBE_PASSWORD" && make git-provider-test
 unset GIT_PROBE_PASSWORD
 ```
 
-Confirm the log stream is current before testing. SSM carries only logs; Git
-traffic goes through public HTTPS. Avoid unrelated requests to those repositories
-during counter assertions.
+Start the log stream before testing and keep it running without rotating the
+file. Confirm complete usage lines arrive promptly; stalled SSM delivery prevents
+the counter assertions from passing. SSM carries only logs; Git traffic goes
+through public HTTPS. Avoid unrelated requests to those repositories during
+counter assertions.
 
 ## Local validation and teardown
 
