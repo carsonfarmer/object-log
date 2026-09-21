@@ -374,6 +374,6 @@ async fn reopened_pending_checkpoint_validates_its_aggregate_count() -> TestResu
     let CheckpointResolution::Published(view) = cold.resolve_checkpoint(pending).await? else {
         return Err("valid checkpoint did not resolve".into());
     };
-    cold.start_collection(&view).await?;
+    let _outcome = cold.start_collection(&view).await?;
     Ok(())
 }

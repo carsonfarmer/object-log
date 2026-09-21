@@ -29,7 +29,11 @@ enum GraphWalk {
 #[path = "storage_accounting_tests.rs"]
 mod storage_accounting_tests;
 
-/// Limits applied by one log writer.
+/// Durable limits for one logical log namespace.
+///
+/// The complete value is recorded when the log is created. Every writer must
+/// reopen that namespace with the same options; changing limits requires a new
+/// namespace because format version 1 has no options-migration operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
     /// Maximum commit references in the active tail.
@@ -84,6 +88,7 @@ impl Default for Options {
 }
 
 /// The immediate result of publishing one prepared commit.
+#[must_use = "the publication outcome must be handled"]
 #[derive(Debug)]
 pub enum CommitStatus {
     /// The exact candidate is durable and visible.
@@ -95,6 +100,7 @@ pub enum CommitStatus {
 }
 
 /// The result of resolving one uncertain publication.
+#[must_use = "the recovered publication outcome must be handled"]
 #[derive(Debug)]
 pub enum Resolution {
     /// The exact candidate is durable and visible.
@@ -111,6 +117,7 @@ pub enum Resolution {
 }
 
 /// The result of publishing a checkpoint.
+#[must_use = "the checkpoint publication outcome must be handled"]
 #[derive(Debug)]
 pub enum CheckpointStatus {
     /// The exact checkpoint is durable and visible.
@@ -122,6 +129,7 @@ pub enum CheckpointStatus {
 }
 
 /// The result of resolving one uncertain checkpoint publication.
+#[must_use = "the recovered checkpoint outcome must be handled"]
 #[derive(Debug)]
 pub enum CheckpointResolution {
     /// The exact checkpoint is durable and visible.
@@ -135,6 +143,7 @@ pub enum CheckpointResolution {
 }
 
 /// The result of one retention head update.
+#[must_use = "the retention outcome must be handled"]
 #[derive(Debug)]
 pub enum RetentionStatus {
     /// The requested retention state is durable.
@@ -184,6 +193,7 @@ impl CollectionReport {
 }
 
 /// The result of creating or observing a collection fence.
+#[must_use = "the collection-start outcome must be handled"]
 #[derive(Debug)]
 pub enum CollectionStart {
     /// No immutable objects need deletion.
@@ -201,6 +211,7 @@ pub enum CollectionStart {
 }
 
 /// The result of deleting and clearing one active collection plan.
+#[must_use = "the collection outcome must be handled"]
 #[derive(Debug)]
 pub enum CollectionFinish {
     /// Every candidate is absent and the exact fence is clear.
@@ -3625,7 +3636,7 @@ mod tests {
             assert_eq!(children[0].reference(), branch.reference());
             assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
             assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
-            log.prepare(
+            let _prepared = log.prepare(
                 &view,
                 TransactionId::new(),
                 Bytes::new(),

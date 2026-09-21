@@ -76,7 +76,7 @@ async fn admission_includes_commit_and_checkpoint_envelopes() -> TestResult {
     ));
     assert_eq!(log.load().await?.generation(), view.generation());
     let view = checkpoint(&log, &view, vec![fitting]).await?;
-    log.start_collection(&view).await?;
+    let _outcome = log.start_collection(&view).await?;
     Ok(())
 }
 
@@ -109,7 +109,7 @@ async fn zero_and_one_object_limits_apply_to_empty_publications() -> TestResult 
     ));
     let view = publish(&log, &view, Vec::new()).await?;
     let view = checkpoint(&log, &view, Vec::new()).await?;
-    log.start_collection(&view).await?;
+    let _outcome = log.start_collection(&view).await?;
     Ok(())
 }
 
@@ -139,7 +139,7 @@ async fn shared_descendants_have_conservative_admission() -> TestResult {
             ));
         } else {
             let view = publish(&log, &view, vec![root]).await?;
-            log.start_collection(&view).await?;
+            let _outcome = log.start_collection(&view).await?;
         }
     }
     Ok(())
@@ -159,6 +159,6 @@ async fn admitted_states_need_checkpointing_when_their_tail_union_exceeds_collec
         Err(Error::LimitExceeded("collection live objects"))
     ));
     let view = checkpoint(&log, &view, vec![latest]).await?;
-    log.start_collection(&view).await?;
+    let _outcome = log.start_collection(&view).await?;
     Ok(())
 }

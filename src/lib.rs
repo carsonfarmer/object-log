@@ -412,6 +412,7 @@ impl View {
 }
 
 /// One exact commit candidate prepared against an observed view.
+#[must_use = "a prepared commit has no effect until it is committed or encoded for recovery"]
 #[derive(Clone, Debug)]
 pub struct PreparedCommit {
     pub(crate) view: View,
@@ -450,6 +451,7 @@ impl PreparedCommit {
 }
 
 /// Evidence needed to resolve one uncertain commit publication.
+#[must_use = "uncertain publication evidence must be resolved or preserved for recovery"]
 #[derive(Clone, Debug)]
 pub struct PendingCommit {
     pub(crate) prepared: Box<PreparedCommit>,
@@ -474,6 +476,7 @@ impl PendingCommit {
 }
 
 /// Evidence for one checkpoint publication with an uncertain outcome.
+#[must_use = "uncertain checkpoint evidence must be resolved"]
 #[derive(Clone, Debug)]
 pub struct PendingCheckpoint {
     pub(crate) view: View,
