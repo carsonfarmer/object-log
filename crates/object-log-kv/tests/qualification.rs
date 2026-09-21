@@ -163,14 +163,14 @@ fn report(
     provider: &ProviderCounts,
     logical_written: u64,
     elapsed: Duration,
-) -> TestResult {
+) {
     let http = provider();
     let delta = std::array::from_fn::<_, 4, _>(|i| http[i] - http_before[i]);
     eprintln!(
         "{label} elapsed_ms={} application_written={} http=[attempts,upload_body_bytes,conflicts,transport_or_5xx_errors]{delta:?} rss_kib={}",
         elapsed.as_millis(),
         logical_written,
-        rss_kib()?,
+        rss_kib().map_or_else(|_| "unavailable".to_owned(), |rss| rss.to_string()),
     );
     if let Some(faults) = faults {
         let metrics = faults.metrics();
@@ -193,7 +193,6 @@ fn report(
     } else {
         eprintln!("{label} logical_io=unmeasured (direct provider bulk deletion)");
     }
-    Ok(())
 }
 
 fn reset(faults: &FaultStore) {
@@ -249,7 +248,7 @@ async fn qualify(
             provider,
             written,
             started.elapsed(),
-        )?;
+        );
         // Sparse admission remains below total data size at the final stage.
         let bounded = KvStore::new(
             store.log().clone(),
@@ -291,7 +290,7 @@ async fn qualify(
             provider,
             0,
             started.elapsed(),
-        )?;
+        );
         let after = stored(storage.as_ref()).await?;
         assert!(after.0 < before.0);
         // Mutable head encoding can change size when the collection epoch advances.
@@ -307,6 +306,7 @@ async fn qualify(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One ordered read/write workload against its oracle.
 async fn mixed(
     store: &KvStore,
     faults: &FaultStore,
@@ -414,7 +414,8 @@ async fn mixed(
         provider,
         written,
         phase.elapsed(),
-    )
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)] // One complete reader/writer/retention lifecycle.
@@ -505,7 +506,7 @@ async fn contention(
         provider,
         32 * (7 + 12 + 16),
         started.elapsed(),
-    )?;
+    );
     let value = Bytes::copy_from_slice(&(initial + 32).to_be_bytes());
     model.insert(Bytes::from("counter"), value.clone());
     model.insert(Bytes::from("counter-copy"), value);

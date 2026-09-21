@@ -3,8 +3,9 @@
 A small byte-key/value library on object-log. Each atomic batch publishes one
 immutable compressed radix-tree root through the WAL's conditional head. Reads
 load only the requested paths; mutations evaluate and copy each path in one
-traversal and reuse unchanged subtrees. Reopening materializes root proofs from the checkpoint and bounded WAL
-tail, without reading the database. There is no local database or second head.
+traversal and reuse unchanged subtrees. Reopening materializes root proofs from
+the checkpoint and bounded WAL tail, without reading the database. There is no
+local database or second head.
 
 ```rust,no_run
 # async fn example(log: object_log::Log) -> Result<(), Box<dyn std::error::Error>> {
@@ -75,9 +76,9 @@ multi-key batches currently read and write each path separately. Work admission
 is a byte bound, not an exact allocator/RSS accounting system; decoded nodes,
 path stacks, result encoding, and caller-owned inputs add bounded memory overlap.
 Remote S3 performance, streaming large values, precise allocator admission, and
-multi-hour growth/soak qualification remain future work. Local `MinIO` qualification
-for finite growth, contention, recovery and collection is opt-in below. The format is
-pre-release and incompatible with the former materialized-map demonstration;
+larger production workloads remain future work. Local `MinIO` qualification for
+finite growth, contention, recovery and collection is opt-in below. The format
+is pre-release and incompatible with the former materialized-map demonstration;
 use a fresh WAL namespace. Every writer to a namespace must use this format.
 
 Run `cargo test -p object-log-kv` for deterministic correctness and logical-I/O
@@ -94,7 +95,7 @@ event recording. These measurements are local in-memory results, not S3 latency.
 
 Run memory and filesystem capability checks before the provider tests. The
 filesystem backend is expected to reject conditional updates. From the repository
-root (Docker, AWS CLI, curl, and `ps` installed):
+root (Docker, AWS CLI, and curl installed; `ps` is optional for RSS reporting):
 
 ```sh
 cargo test --workspace --all-features
@@ -154,7 +155,8 @@ and denominators are printed, including live application bytes for storage
 amplification. Operation samples include oracle comparisons; phase elapsed time also includes
 untimed snapshot loads, checkpoints, and instrumentation.
 RSS includes the oracle, runtime, transport, and allocator slack; it is neither
-peak RSS nor an exact allocator/admission measure. No per-request event archive
+peak RSS nor an exact allocator/admission measure. It reports `unavailable` when
+the platform cannot measure it. No per-request event archive
 is kept. Preserve raw command/Criterion output locally under ignored `target/`
 when comparing runs. Fresh-snapshot reads include bounded WAL replay, but do not
 flush provider or OS caches. These are local `MinIO` results, not remote-S3 or

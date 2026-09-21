@@ -13,8 +13,9 @@ Read `AGENTS.md`, `PLAN.md`, and `GIT_PLAN.md` before changing behavior.
 - `src/`: Rust WAL, authenticated object graph, recovery, checkpoints,
   retention, collection, simulator, and request limits.
 - `crates/object-log-kv/`: experimental sparse radix-tree consumer with atomic
-  batches, exact snapshots, scans, and root checkpoints. Local correctness and
-  logical-I/O tests pass; provider and sustained-load qualification remain.
+  batches, exact snapshots, scans, and root checkpoints. Local correctness,
+  filesystem and finite MinIO growth/contention/recovery tests pass. Production
+  workloads and remote qualification remain.
 - `examples/git/`: go-git smart-HTTP service and provider tests.
 - `examples/wal-component/`: WASIp2 bridge from the Git service to the Rust WAL.
 - `examples/git/qualification/aws/`: optional disposable S3 Terraform setup and
@@ -96,7 +97,8 @@ opt-in, isolated, and disposable.
 The active service-readiness queue and remote HTTPS gate are new issue #45.
 Issue #10 retains its completed local-Spin/live-S3 scope. Maintenance design and
 the bounded periodic host worker remain in new issue #46.
-Authentication and KV workers use separate worktrees. KV provider qualification remains in #39.
+KV's finite provider qualification and single-traversal mutation improvement
+have been independently reviewed; larger production workloads remain in #39.
 
 Maintenance now resumes an active WAL deletion plan before loading the Git
 catalog. Logical pruning/checkpointing is separate from physical /collect
