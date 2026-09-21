@@ -3,6 +3,7 @@ package main
 import (
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +66,8 @@ func init() { wasihttp.HandleFunc(serve) }
 func main() {}
 func serve(response http.ResponseWriter, r *http.Request) {
 	response = componentResponse{response}
+	requestID := rand.Text()
+	response.Header().Set("X-Request-ID", requestID)
 	if r.Body != nil {
 		r.Body = &componentBody{ReadCloser: r.Body}
 		defer r.Body.Close()
@@ -159,7 +162,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		u := session.Usage()
 		w.Header().Set("X-Wal-Calls", fmt.Sprint(u.Calls))
 		w.Header().Set("X-Wal-Bytes", fmt.Sprint(u.Bytes))
-		log.Printf("wal %s %s calls=%d bytes=%d", r.Method, r.URL.Path, u.Calls, u.Bytes)
+		log.Printf("wal %s %s id=%s calls=%d bytes=%d", r.Method, r.URL.Path, requestID, u.Calls, u.Bytes)
 	}()
 	refresh := func() error {
 		if err := r.Context().Err(); err != nil {

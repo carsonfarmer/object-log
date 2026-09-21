@@ -276,9 +276,14 @@ func post(t *testing.T, url, service string, body []byte) ([]byte, http.Header) 
 	}
 	trailers := response.Trailer
 	if trailers.Get("X-Wal-Bytes") == "" && logPath != "" {
-		// Some Spin versions discard outgoing HTTP trailers; use the same actual transport counters from this request's log line.
-		prefix := "wal POST " + r.URL.Path + " calls="
-		deadline := time.Now().Add(time.Second)
+		// Some Spin versions discard trailers. Match this response's ID so a
+		// delayed remote log line from another request cannot supply its counters.
+		requestID := response.Header.Get("X-Request-ID")
+		if requestID == "" {
+			t.Fatal("missing request ID for log counters")
+		}
+		prefix := "wal POST " + r.URL.Path + " id=" + requestID + " calls="
+		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			contents, err := os.ReadFile(logPath)
 			if err != nil {
@@ -287,24 +292,46 @@ func post(t *testing.T, url, service string, body []byte) ([]byte, http.Header) 
 			if int64(len(contents)) < offset {
 				t.Fatal("component log rotated during test")
 			}
-			for _, line := range strings.Split(string(contents[offset:]), "\n") {
-				if i := strings.Index(line, prefix); i >= 0 {
-					var calls, count uint64
-					if n, _ := fmt.Sscanf(line[i+len(prefix):], "%d bytes=%d", &calls, &count); n == 2 {
-						if trailers == nil {
-							trailers = make(http.Header)
-						}
-						trailers.Set("X-Wal-Calls", fmt.Sprint(calls))
-						trailers.Set("X-Wal-Bytes", fmt.Sprint(count))
-						return data, trailers
-					}
+			if calls, count, ok := logUsage(contents[offset:], prefix); ok {
+				if trailers == nil {
+					trailers = make(http.Header)
 				}
+				trailers.Set("X-Wal-Calls", fmt.Sprint(calls))
+				trailers.Set("X-Wal-Bytes", fmt.Sprint(count))
+				return data, trailers
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	return data, trailers
 }
+func logUsage(contents []byte, prefix string) (uint64, uint64, bool) {
+	lines := strings.Split(string(contents), "\n")
+	for _, line := range lines[:len(lines)-1] {
+		if i := strings.Index(line, prefix); i >= 0 {
+			var calls, count uint64
+			if n, _ := fmt.Sscanf(line[i+len(prefix):], "%d bytes=%d", &calls, &count); n == 2 {
+				return calls, count, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func TestLogUsage(t *testing.T) {
+	prefix := "wal POST /repo.git/git-upload-pack id=current calls="
+	line := "2026/09/21 18:00:00 " + prefix + "2 bytes=345\r\n"
+	stale := strings.Replace(line, "id=current", "id=previous", 1)
+	for _, input := range []string{stale, strings.TrimSuffix(line, "\r\n"), stale + prefix + "2 bytes=34"} {
+		if _, _, ok := logUsage([]byte(input), prefix); ok {
+			t.Fatal("accepted another request or an incomplete record")
+		}
+	}
+	if calls, count, ok := logUsage([]byte(stale+line), prefix); !ok || calls != 2 || count != 345 {
+		t.Fatalf("complete matching record: calls=%d bytes=%d found=%v", calls, count, ok)
+	}
+}
+
 func assertThinBase(t *testing.T, pack []byte, base string) {
 	t.Helper()
 	if len(pack) < 12 || string(pack[:4]) != "PACK" {
