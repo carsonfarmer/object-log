@@ -61,7 +61,19 @@ WantedBy=multi-user.target
 UNIT
 
 cat > /etc/caddy/Caddyfile <<'CADDY'
+%{ if public_ip_https ~}
+{
+    default_sni ${hostname}
+}
+%{ endif ~}
 ${hostname} {
+%{ if public_ip_https ~}
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+        }
+    }
+%{ endif ~}
     @admin {
         method POST
         expression `{http.request.uri.path} in ${admin_paths}`

@@ -97,6 +97,8 @@ class AdmissionTest(unittest.TestCase):
         cls.cleanup.callback(backend.shutdown)
         threading.Thread(target=backend.serve_forever, daemon=True).start()
         snippet = template_section("<<'CADDY'\n", "\nCADDY")
+        # This local HTTP fixture omits the public-IP certificate configuration.
+        snippet = re.sub(r"%\{ if public_ip_https ~\}.*?%\{ endif ~\}\n", "", snippet, flags=re.S)
         paths = [f"/{name}/{operation}" for name in ("alpha/project.git", "star*project.git")
                  for operation in ("maintenance", "collect", "recover-retentions-after-drain")]
         snippet = snippet.replace("${hostname}", "http://:8080")

@@ -12,8 +12,10 @@ make git-build
 tar -C examples/git -czf "$qualification_state/git.tar.gz" spin.toml git.wasm
 ```
 
-Enable the commented `host_*` inputs in `terraform.tfvars.example`. Supply an
-unused hostname in an **existing public Route53 zone**; no domain is registered.
+Enable the commented `host_*` inputs in `terraform.tfvars.example`. For a domain,
+supply an unused `host_name` in an existing public `host_route53_zone_id`.
+Alternatively, leave both empty to use the Elastic IP with a publicly trusted
+certificate; no registered domain or DNS zone is needed.
 Choose an existing public subnet with internet routing. Empty `host_subnet_id`
 selects a default subnet in the account's default VPC; accounts without one need
 an explicit subnet. The host has an Elastic IP and accepts ports 80/443 only.
@@ -39,10 +41,14 @@ The maintenance secret still exists in **Terraform state and saved plans**;
 protect those local files as credentials and never commit them.
 
 Review and apply the plan using the README commands. Caddy obtains and renews
-HTTPS certificates after DNS points at the host. Allow bootstrap and DNS
-propagation to finish. Artifact or configuration changes replace this disposable
-host; this is not a rolling deployment. Drain readers before replacement. Lost
-retentions require the service's explicit drained recovery procedure.
+HTTPS certificates after the Elastic IP is associated and, for domain hosting,
+DNS points at the host. The IP path requires Caddy 2.11.4 or later and uses
+Let's Encrypt's `shortlived` profile with [160-hour certificates](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability).
+Allow bootstrap and certificate issuance to finish before testing. Use the
+`host_service_url` output with normal certificate verification. Artifact or
+configuration changes replace this disposable host; this is not a rolling
+deployment. Drain readers before replacement. Lost retentions require the
+service's explicit drained recovery procedure.
 
 ```sh
 instance_id="$(terraform -chdir="$terraform_dir" output -raw host_instance_id)"
@@ -83,8 +89,9 @@ the worker never clears them.
 
 Use released `git-credential-oauth` v0.17.2 and Git 2.45 or newer for expiry and
 refresh support. Keep a secure credential storage helper configured **before**
-`oauth`. Read `terraform output -json host_cognito`, substitute its client and
-endpoint values below, and use the configured service hostname:
+`oauth`. Read `terraform output -json host_cognito` and substitute its client and
+endpoint values below. Use the `host_service_url` output in place of
+`https://git.example.com`, including when connecting by IP.
 
 ```sh
 git config --global credential.https://git.example.com.oauthClientId CLIENT_ID
@@ -186,5 +193,6 @@ terraform -chdir="$terraform_dir" test # Mock provider only; no AWS resources.
 
 For teardown, stop the timer and Git service through SSM, drain traffic, then
 follow the README's prefix cleanup and destroy procedure. The same Terraform
-state owns the host, Elastic IP, DNS record, instance role, Cognito pool/clients,
-SSM parameter, artifact, and bucket. The existing domain and subnet are retained.
+state owns the host, Elastic IP, optional DNS record, instance role, Cognito
+pool/clients, SSM parameter, artifact, and bucket. The existing domain and subnet
+are retained.

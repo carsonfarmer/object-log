@@ -5,7 +5,7 @@ run_id        = "replace-with-run-id"
 bucket_name   = "replace-with-globally-unique-bucket-name"
 object_prefix = "object-log-qualification/replace-with-run-id"
 
-# Optional remote HTTPS service. Use an unused name in an existing public zone.
+# Optional remote HTTPS service. Omit both DNS inputs to use a public-IP certificate.
 # host_service         = true
 # host_name            = "git.example.com"
 # host_route53_zone_id = "ZEXISTINGZONE"

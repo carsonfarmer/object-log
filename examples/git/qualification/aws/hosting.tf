@@ -11,13 +11,13 @@ variable "host_subnet_id" {
 }
 
 variable "host_route53_zone_id" {
-  description = "Existing public Route53 zone; no domain is registered."
+  description = "Existing public Route53 zone for host_name; leave both empty to use the Elastic IP."
   type        = string
   default     = ""
 }
 
 variable "host_name" {
-  description = "Unused DNS name in host_route53_zone_id."
+  description = "Unused DNS name in host_route53_zone_id; empty uses public HTTPS on the Elastic IP."
   type        = string
   default     = ""
   validation {
@@ -118,7 +118,7 @@ data "aws_subnet" "host" {
 }
 
 data "aws_route53_zone" "host" {
-  count        = var.host_service ? 1 : 0
+  count        = var.host_service && var.host_name != "" && var.host_route53_zone_id != "" ? 1 : 0
   zone_id      = var.host_route53_zone_id
   private_zone = false
 }
@@ -138,6 +138,8 @@ data "aws_ami" "ubuntu" {
 }
 
 locals {
+  host_address      = var.host_service ? (var.host_name != "" ? var.host_name : aws_eip.host[0].public_ip) : ""
+  host_service_url  = var.host_service ? "https://${local.host_address}" : null
   host_artifact_sha = var.host_service ? filesha256(var.host_artifact_path) : ""
   host_artifact_key = "${var.object_prefix}/artifacts/${local.host_artifact_sha}.tar.gz"
   host_wal_prefix   = "${var.object_prefix}/git"
@@ -160,14 +162,15 @@ locals {
     artifact_uri       = "s3://${aws_s3_bucket.qualification.bucket}/${aws_s3_object.host_artifact[0].key}"
     artifact_sha       = local.host_artifact_sha
     variables_base64   = base64encode(jsonencode(local.host_variables))
-    hostname           = var.host_name
+    hostname           = local.host_address
+    public_ip_https    = var.host_name == ""
     maintenance_script = base64encode(file("${path.module}/maintenance.py"))
     maintenance_config = base64encode(jsonencode({
       region           = var.aws_region
       secret_parameter = aws_ssm_parameter.maintenance_secret[0].name
       client_id        = aws_cognito_user_pool_client.maintenance[0].id
       token_url        = "${local.cognito_login_origin}/oauth2/token"
-      service_url      = "https://${var.host_name}"
+      service_url      = local.host_service_url
       repositories     = sort(keys(var.host_repositories))
       budget_seconds   = var.host_maintenance_budget_seconds
       pause_seconds    = var.host_maintenance_pause_seconds
@@ -291,12 +294,12 @@ resource "aws_instance" "host" {
   depends_on = [aws_iam_role_policy.host, aws_iam_role_policy_attachment.host_ssm]
   lifecycle {
     precondition {
-      condition = (
+      condition = var.host_name == "" ? var.host_route53_zone_id == "" : (var.host_route53_zone_id != "" ? (
         !data.aws_route53_zone.host[0].private_zone &&
         (var.host_name == trimsuffix(data.aws_route53_zone.host[0].name, ".") ||
         endswith(var.host_name, ".${trimsuffix(data.aws_route53_zone.host[0].name, ".")}"))
-      )
-      error_message = "host_name must belong to the existing public Route53 zone."
+      ) : false)
+      error_message = "Leave host_name and host_route53_zone_id empty for public-IP HTTPS, or set both to a name in an existing public Route53 zone."
     }
     precondition {
       condition     = length(var.host_repositories) > 0 && length(jsonencode(var.host_repositories)) <= 65536
@@ -316,13 +319,19 @@ resource "aws_instance" "host" {
 }
 
 resource "aws_eip" "host" {
-  count    = var.host_service ? 1 : 0
-  domain   = "vpc"
-  instance = aws_instance.host[0].id
+  count  = var.host_service ? 1 : 0
+  domain = "vpc"
+}
+
+# Allocate before rendering user data; associating inside aws_eip would cycle.
+resource "aws_eip_association" "host" {
+  count         = var.host_service ? 1 : 0
+  allocation_id = aws_eip.host[0].id
+  instance_id   = aws_instance.host[0].id
 }
 
 resource "aws_route53_record" "host" {
-  count   = var.host_service ? 1 : 0
+  count   = length(data.aws_route53_zone.host)
   zone_id = data.aws_route53_zone.host[0].zone_id
   name    = var.host_name
   type    = "A"
@@ -331,7 +340,7 @@ resource "aws_route53_record" "host" {
 }
 
 output "host_service_url" {
-  value = var.host_service ? "https://${var.host_name}" : null
+  value = local.host_service_url
 }
 
 output "host_instance_id" {
