@@ -67,8 +67,9 @@ The upstream-go-git service passes local MinIO tests and the full provider suite
 against public EC2 HTTPS with S3. Real Cognito login, helper refresh, repository
 permissions, role replacement, process/host recovery and configuration-only
 repository addition have passed. All five live core S3 tests also pass.
-Service readiness still requires the remote long-history and large-object gates,
-final review and teardown against the exact deployed revision.
+The remote long-history gate has passed. Service readiness still requires the
+large-object gate, combined cleanup verification, final review and teardown
+against the exact deployed revision.
 
 ## Dependency policy
 
@@ -114,7 +115,9 @@ both `git/access` and `git/maintenance` and permits administration only.
 
 Actual hosted browser login with git-credential-oauth, ordinary Basic token
 delivery to Git clone/fetch/push, expired-token rejection and browser-free helper
-refresh passed. Requesting `openid git/access` supplies Cognito's group claim.
+refresh passed. Stock Linux Git also directly invoked the helper to refresh
+expired credentials before reader fetches and a writer push over verified HTTPS.
+Requesting `openid git/access` supplies Cognito's group claim.
 Live disjoint reader/writer/admin and machine-client checks passed. Wrong-issuer
 rejection and controlled key rotation have native tests; these are not live
 alternate-pool or Cognito key-rotation results. Composed stock-Spin TLS tests
@@ -167,15 +170,17 @@ and again after an EC2 reboot. The failure drills cold-cloned and ran fsck on
 the two main hash repositories. Separate cold clones of idle and active
 repositories passed after scheduled cleanup.
 
-The remote 1,025-push workload per hash format is running. Concurrent 513 MiB
-object lifecycles follow; both workloads have passed locally. Record deployed
-memory, latency and S3 request/byte costs without treating local measurements as
-remote capacity evidence. Use response `X-Request-ID` values to match complete
-usage records delivered from the service journal through SSM.
+The remote workload passed 1,025 additional pushes per hash format with concurrent
+fetch/fsck cycles and matching full cold histories and files. Concurrent remote
+513 MiB object lifecycles are running; this workload has passed locally. Record
+deployed memory, latency and S3 request/byte costs without treating local
+measurements as remote capacity evidence. Use response `X-Request-ID` values to
+match complete usage records delivered from the service journal through SSM.
 
-Issue #45 remains open through these workloads, final independent review and
-verified teardown of the host, network resources, identities and test storage.
-Use disposable namespaces and no user data.
+Issue #45 remains open through the large-object workload, combined cleanup
+verification, final independent review and verified teardown of the host,
+network resources, identities and test storage. Use disposable namespaces and
+no user data.
 
 ### 5. Review and release claims
 

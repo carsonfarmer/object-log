@@ -51,10 +51,11 @@ repository permissions, IMDSv2 role replacement and restoration, process/host
 recovery, and configuration-only repository addition. All five live core S3
 tests pass. Automatic-maintenance issue #46 is closed after independent review.
 
-Issue #45 remains open for the remote 1,025-push workloads per hash format now
-running, then concurrent 513 MiB object lifecycles, final review and teardown.
-Unmodified go-git buffers incoming delta bases and results, so the large-object
-gate must measure the deployed host's memory use.
+The remote long-history workloads passed 1,025 additional pushes per hash format
+with concurrent fetches and matching cold histories and files. Issue #45 remains
+open for concurrent 513 MiB object lifecycles now running, combined cleanup
+verification, final review and teardown. Unmodified go-git buffers incoming delta
+bases and results, so the large-object gate must measure deployed host memory.
 
 ## Release gate
 

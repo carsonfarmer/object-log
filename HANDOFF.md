@@ -49,8 +49,10 @@ Cognito access-token validation and a separate administration-only machine
 client are wired. Password mode is the explicit local default and requires a
 password. Public EC2 HTTPS qualification has passed real Cognito browser login,
 Git credential-helper refresh, expired-token rejection, independent repository
-permissions, and machine-client administration. Request `openid git/access`
-with the helper so Cognito includes repository group claims.
+permissions, and machine-client administration. Stock Linux Git directly invoked
+git-credential-oauth to refresh expired credentials before reader fetches and a
+writer push. Request `openid git/access` with the helper so Cognito includes
+repository group claims.
 
 Incoming packs are staged as WAL streams. Unmodified go-git buffers delta bases
 and results during import; object limits do not bound peak memory. Receive-pack
@@ -133,15 +135,20 @@ The failure drills cold-cloned and ran fsck on the two main hash repositories.
 Separate cold clones of idle and active repositories passed after scheduled
 cleanup. A new nested repository was added through configuration with the same
 component artifact; persisted HEAD survived a configured default-branch change.
-Incompatible format configuration failed predictably before exact restoration. HTTP redirects
-to HTTPS preserve the requested path and query, and normal certificate validation
-passes.
+Incompatible format configuration failed predictably before exact restoration.
+HTTP redirects to HTTPS preserve the requested path and query, and normal
+certificate validation passes.
 
-Issue #45 remains open. The remote 1,025-push workload for each hash format is
-running; concurrent 513 MiB object lifecycles, final review and teardown follow.
-Both workloads passed locally. The local large-object run sampled about 5.27 GiB
-across Spin processes on macOS, not an exact peak or Linux capacity claim. The
-configurable EC2 default is 16 GiB for qualification.
+The remote long-history workload passed 1,025 additional pushes per hash format,
+with 421 and 403 concurrent fetch/fsck cycles in the two runs. Cold clones matched
+the full histories and files. The recorded cgroup peak was 247,934,976 bytes
+(236.4 MiB), with push medians of about 1.70–1.76 seconds for this workload.
+
+Issue #45 remains open. Concurrent remote 513 MiB object lifecycles are running;
+combined cleanup verification, final review and teardown remain. The local
+large-object run passed and sampled about 5.27 GiB across Spin processes on macOS,
+not an exact peak or Linux capacity claim. The configurable EC2 default is 16 GiB
+for qualification.
 
 Keep final documentation user-facing and current. Plans capture internal intent;
 executable tests and concise commits replace raw evidence archives.
