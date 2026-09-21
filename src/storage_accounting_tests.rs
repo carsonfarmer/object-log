@@ -65,7 +65,143 @@ async fn cold_graph_counts_preserve_sparse_reads_and_exact_collection_deduplicat
     );
     faults.reset();
     assert_eq!(cold.mark_live(&view).await?.len(), 5);
-    assert_eq!(faults.metrics().operation(Operation::Get).requests, 5);
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_collection_reads_only_edges_across_capped_and_empty_passes() -> TestResult {
+    let (log, backend, faults) = fixture(8).await?;
+    let initial = log.load().await?;
+    let mut leaves = Vec::new();
+    for value in [1, 2] {
+        leaves.push(
+            log.put_object(&initial, Bytes::from(vec![value; 4096]))
+                .await?,
+        );
+    }
+    let root = log.put_node(&initial, Bytes::new(), leaves.clone()).await?;
+    let prepared = log.prepare(
+        &initial,
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![root.clone()],
+    )?;
+    let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
+        return Err("live publication failed".into());
+    };
+    let CheckpointStatus::Published(checkpointed) = log
+        .publish_checkpoint(
+            &committed,
+            &committed.tail()[0],
+            Bytes::new(),
+            vec![root.clone()],
+        )
+        .await?
+    else {
+        return Err("checkpoint did not publish".into());
+    };
+    let prepared = log.prepare(
+        &checkpointed,
+        TransactionId::new(),
+        Bytes::new(),
+        Bytes::new(),
+        vec![root.clone()],
+    )?;
+    let CommitStatus::Committed(live) = log.commit(prepared).await? else {
+        return Err("tail publication failed".into());
+    };
+    // The checkpoint and tail share the root. Its edges are read only once.
+    let edge_bytes = live.tail()[0].len()
+        + root.reference().len()
+        + live
+            .checkpoint()
+            .ok_or("missing checkpoint")?
+            .object()
+            .len();
+    for _ in 0..9 {
+        log.put_object(&live, Bytes::from_static(b"orphan")).await?;
+    }
+    // Nine abandoned uploads and the checkpointed commit are unreachable.
+    for candidates in [4, 4, 2, 0, 0] {
+        let cold = Log::open_existing(&backend, log.store.log_id(), log.options()).await?;
+        let view = cold.load().await?;
+        faults.reset();
+        let start = cold.start_collection_with_limit(&view, 4).await?;
+        let reads = faults.metrics().operation(Operation::Get);
+        assert_eq!(reads.requests, 3); // checkpoint, commit and node, no leaf payloads
+        assert_eq!(reads.downloaded_bytes, edge_bytes);
+        match (candidates, start) {
+            (0, CollectionStart::Empty(_)) => {
+                assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+                assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
+            }
+            (_, CollectionStart::Installed(fenced, report)) => {
+                assert_eq!(report.candidate_count(), candidates);
+                let CollectionFinish::Complete(current, _) =
+                    cold.resume_collection(&fenced).await?
+                else {
+                    return Err("collection did not finish".into());
+                };
+                assert_eq!(current.tail(), live.tail());
+            }
+            _ => return Err("unexpected collection result".into()),
+        }
+        assert!(
+            !faults
+                .metrics()
+                .events
+                .iter()
+                .any(|event| event.operation == Operation::Get && event.path.contains("/blobs/"))
+        );
+    }
+    let current = log.load().await?;
+    for (leaf, value) in leaves.iter().zip([1, 2]) {
+        assert_eq!(
+            log.read_object(&current, leaf.reference()).await?,
+            Bytes::from(vec![value; 4096])
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn reachability_preserves_blob_reference_bounds_and_conflicting_metadata_checks() -> TestResult
+{
+    let (log, _, faults) = fixture(8).await?;
+    let view = log.load().await?;
+    let leaf = log.put_object(&view, Bytes::from_static(b"leaf")).await?;
+    let mut oversized = leaf.reference().clone();
+    oversized.len = u64::try_from(log.options().max_object_bytes)? + 1;
+    let mut invalid_count = leaf.reference().clone();
+    invalid_count.subtree_objects = 2;
+    let mut conflicting = leaf.reference().clone();
+    conflicting.len += 1;
+    for (roots, expected) in [
+        (vec![oversized], Error::LimitExceeded("object bytes")),
+        (vec![invalid_count], Error::CorruptObject),
+        (
+            vec![leaf.reference().clone(), conflicting],
+            Error::CorruptObject,
+        ),
+    ] {
+        faults.reset();
+        let error = log
+            .mark_object_graph(&roots, &mut HashMap::new(), None, GraphWalk::Reachability)
+            .await
+            .err()
+            .ok_or("invalid references were accepted")?;
+        assert!(matches!(
+            (error, expected),
+            (Error::CorruptObject, Error::CorruptObject)
+                | (
+                    Error::LimitExceeded("object bytes"),
+                    Error::LimitExceeded("object bytes")
+                )
+        ));
+        assert_eq!(faults.metrics().total_requests(), 0);
+    }
     Ok(())
 }
 
@@ -83,7 +219,17 @@ async fn cold_reads_reject_understated_and_overstated_node_counts() -> TestResul
             Err(Error::CorruptObject)
         ));
         assert!(matches!(
-            cold.stage_objects(&view, vec![reference]).await,
+            cold.stage_objects(&view, vec![reference.clone()]).await,
+            Err(Error::CorruptObject)
+        ));
+        assert!(matches!(
+            cold.mark_object_graph(
+                &[reference],
+                &mut HashMap::new(),
+                None,
+                GraphWalk::Reachability
+            )
+            .await,
             Err(Error::CorruptObject)
         ));
     }

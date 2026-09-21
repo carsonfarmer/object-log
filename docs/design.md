@@ -238,8 +238,12 @@ These are the checkpoint trust boundaries.
 Garbage collection follows the Cursor-style positive-plan model. The head is
 the only mutable authority.
 
-When no plan is active, `start_collection` requires no retention. It validates the
-active tail, current checkpoint, and their complete transitive object graph.
+When no plan is active, `start_collection` requires no retention. It authenticates
+the active tail, current checkpoint, and every transitive reference-node edge.
+Opaque blob references mark live keys without reading their payloads. Collection
+does not audit missing or corrupt leaf contents; ordinary reads and publication
+validation still verify them. Missing or corrupt commits, checkpoints, or
+reference nodes stop collection.
 It then lists one bounded log scope. Unknown entries count against the scan
 limit but cannot enter the deletion set. If unreachable immutable objects
 exist, the method writes one sorted positive plan and installs its reference
@@ -250,8 +254,8 @@ starts only after that fence is durable.
 one new plan without changing the log's durable live-graph limit. The count
 must be positive and at most `max_collection_objects`; invalid values fail
 before storage work. Its listing examines at most the live-object count plus
-the candidate limit plus one entries. Graph verification still covers the
-complete live graph, including blob contents.
+the candidate limit plus one entries. Graph authentication still covers every
+live reference, independently of the candidate limit.
 
 Every head update preserves an active plan. Commit and checkpoint publication
 read that plan. They reject a direct or transitive reference to a planned key.

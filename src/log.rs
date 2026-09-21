@@ -19,6 +19,12 @@ use crate::{
 const MAX_CONCURRENT_READS: usize = 32;
 const MAX_FRESH_OBJECT_ATTEMPTS: usize = 16;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphWalk {
+    Reachability,
+    VerifyBlobs,
+}
+
 #[cfg(test)]
 #[path = "storage_accounting_tests.rs"]
 mod storage_accounting_tests;
@@ -593,14 +599,16 @@ impl Log {
 
     /// Creates a positive deletion plan and installs its head fence.
     ///
-    /// Verifies the complete live graph, then scans a bounded namespace prefix
+    /// Authenticates the live graph's edges, then scans a bounded namespace prefix
     /// for a positive deletion set. Repeat after completing each plan to reclaim
     /// a larger backlog. Unknown entries survive; an unknown-entry flood can
     /// exhaust the scan bound without finding candidates. No objects are deleted.
+    /// Opaque blob contents are not read: collection protects their referenced
+    /// keys but does not audit missing or corrupt leaf payloads.
     ///
     /// # Errors
     ///
-    /// Returns an error for a foreign view, invalid live data, a configured
+    /// Returns an error for a foreign view, invalid live graph edges, a configured
     /// bound, or a storage failure before the head update.
     pub async fn start_collection(&self, view: &View) -> Result<CollectionStart, Error> {
         self.start_collection_with_limit(view, self.options.max_collection_objects)
@@ -612,7 +620,8 @@ impl Log {
     /// The limit must be positive and no greater than
     /// [`Options::max_collection_objects`]. It bounds new deletion plans and
     /// their namespace scans, independently of the durable live-graph limit.
-    /// The complete live graph is still verified before selecting candidates.
+    /// All live graph edges are authenticated before selecting candidates;
+    /// opaque blob contents are not read.
     ///
     /// An already active plan is returned unchanged, even when it exceeds this
     /// limit. Resuming always retries that entire plan. Callers must budget for
@@ -2159,14 +2168,20 @@ impl Log {
             return Ok(None);
         };
         let mut visited = HashMap::with_capacity(objects.len());
-        self.mark_object_graph(objects, &mut visited, Some(&blocked))
-            .await?;
+        self.mark_object_graph(
+            objects,
+            &mut visited,
+            Some(&blocked),
+            GraphWalk::VerifyBlobs,
+        )
+        .await?;
         Ok(Some(blocked))
     }
 
     async fn verify_object_graph(&self, objects: &[ObjectRef]) -> Result<(), Error> {
         let mut visited = HashMap::with_capacity(objects.len());
-        self.mark_object_graph(objects, &mut visited, None).await
+        self.mark_object_graph(objects, &mut visited, None, GraphWalk::VerifyBlobs)
+            .await
     }
 
     async fn active_collection_candidates(
@@ -2210,7 +2225,8 @@ impl Log {
             }
             roots.extend(checkpoint.objects);
         }
-        self.mark_object_graph(&roots, &mut live, None).await?;
+        self.mark_object_graph(&roots, &mut live, None, GraphWalk::Reachability)
+            .await?;
         Ok(live)
     }
 
@@ -2219,6 +2235,7 @@ impl Log {
         roots: &[ObjectRef],
         visited: &mut HashMap<ImmutableKey, (u64, u64)>,
         blocked: Option<&[CollectionCandidate]>,
+        mode: GraphWalk,
     ) -> Result<(), Error> {
         let mut pending = VecDeque::new();
         for object in roots {
@@ -2231,7 +2248,11 @@ impl Log {
                 let Some(object) = pending.pop_front() else {
                     break;
                 };
-                reads.push(async move { self.read_graph_children(&object).await });
+                // Blob references carry no edges. GC protects their keys without
+                // auditing payloads; publication still verifies the complete graph.
+                if mode == GraphWalk::VerifyBlobs || object.kind != ObjectKind::Blob {
+                    reads.push(async move { self.read_graph_children(&object).await });
+                }
             }
             let Some(children) = reads.try_next().await? else {
                 break;
@@ -2269,6 +2290,11 @@ impl Log {
             visited.insert(key, metadata);
             if visited.len() > self.options.max_collection_objects {
                 return Err(Error::LimitExceeded("collection live objects"));
+            }
+            let len = usize::try_from(object.len)
+                .map_err(|_| Error::LimitExceeded("object byte length"))?;
+            if len > self.options.max_object_bytes {
+                return Err(Error::LimitExceeded("object bytes"));
             }
             pending.push_back(object.clone());
         }

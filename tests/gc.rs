@@ -19,6 +19,7 @@ type TestResult = Result<(), Box<dyn StdError>>;
 
 struct Fixture {
     log: Log,
+    backend: ValidatedBackend,
     store: FaultStore,
     raw: Arc<dyn ObjectStore>,
     scope: Path,
@@ -35,6 +36,7 @@ impl Fixture {
         let scope = root.join("v1").join("logs").join(id.as_str());
         Ok(Self {
             log,
+            backend,
             store,
             raw,
             scope,
@@ -761,32 +763,7 @@ async fn failed_plan_cleanup_is_collected_by_the_next_run() -> TestResult {
 }
 
 #[tokio::test]
-async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() -> TestResult {
-    let missing = Fixture::new("missing-live", Options::default()).await?;
-    let source = missing.log.load().await?;
-    let object = missing
-        .log
-        .put_object(&source, Bytes::from_static(b"required"))
-        .await?;
-    let prepared = missing.log.prepare(
-        &source,
-        TransactionId::new(),
-        Bytes::new(),
-        Bytes::new(),
-        vec![object.clone()],
-    )?;
-    let CommitStatus::Committed(live_view) = missing.log.commit(prepared).await? else {
-        return Err("live reference did not commit".into());
-    };
-    let path = missing.object_path(object.reference().digest()).await?;
-    missing.raw.delete(&path).await?;
-    missing.store.reset();
-    assert!(matches!(
-        missing.log.start_collection(&live_view).await,
-        Err(Error::InvalidFormat(_))
-    ));
-    assert_collection_not_started(&missing);
-
+async fn live_graph_bounds_fail_before_listing_or_deletion() -> TestResult {
     let bounded = Fixture::new(
         "bounded-live",
         Options {
@@ -821,74 +798,143 @@ async fn invalid_live_data_and_graph_bounds_fail_before_listing_or_deletion() ->
 }
 
 #[tokio::test]
-async fn corrupt_live_blob_fails_before_collection_io() -> TestResult {
-    let corrupt = Fixture::new("corrupt-live", Options::default()).await?;
-    let source = corrupt.log.load().await?;
-    let object = corrupt
-        .log
-        .put_object(&source, Bytes::from_static(b"required"))
-        .await?;
-    let prepared = corrupt.log.prepare(
-        &source,
-        TransactionId::new(),
-        Bytes::new(),
-        Bytes::new(),
-        vec![object.clone()],
-    )?;
-    let CommitStatus::Committed(live_view) = corrupt.log.commit(prepared).await? else {
-        return Err("corrupt reference did not commit".into());
-    };
-    corrupt
-        .raw
-        .put(
-            &corrupt.object_path(object.reference().digest()).await?,
-            Bytes::from_static(b"requirEd").into(),
+async fn collection_protects_missing_and_corrupt_live_blobs_without_auditing_them() -> TestResult {
+    for corrupt in [false, true] {
+        let fixture = Fixture::new("invalid-live-blob", Options::default()).await?;
+        let source = fixture.log.load().await?;
+        let object = fixture
+            .log
+            .put_object(&source, Bytes::from_static(b"required"))
+            .await?;
+        let node = fixture
+            .log
+            .put_node(&source, Bytes::new(), vec![object.clone()])
+            .await?;
+        let prepared = fixture.log.prepare(
+            &source,
+            TransactionId::new(),
+            Bytes::new(),
+            Bytes::new(),
+            vec![node.clone()],
+        )?;
+        let CommitStatus::Committed(live_view) = fixture.log.commit(prepared).await? else {
+            return Err("live reference did not commit".into());
+        };
+        let orphan = fixture
+            .log
+            .put_object(&live_view, Bytes::from_static(b"orphan"))
+            .await?;
+        let path = fixture.object_path(object.reference().digest()).await?;
+        if corrupt {
+            fixture
+                .raw
+                .put(&path, Bytes::from_static(b"requirEd").into())
+                .await?;
+        } else {
+            fixture.raw.delete(&path).await?;
+        }
+        let cold = Log::open_existing(
+            &fixture.backend,
+            &LogId::new("invalid-live-blob")?,
+            fixture.log.options(),
         )
         .await?;
-    corrupt.store.reset();
-    assert!(matches!(
-        corrupt.log.start_collection(&live_view).await,
-        Err(Error::CorruptObject)
-    ));
-    assert_collection_not_started(&corrupt);
+        // Existing graphs must still be verified before they earn publication proofs.
+        let staged = cold
+            .stage_objects(&live_view, vec![node.reference().clone()])
+            .await;
+        match (corrupt, staged) {
+            (true, Err(Error::CorruptObject)) | (false, Err(Error::InvalidFormat(_))) => {}
+            _ => return Err("invalid leaf earned a publication proof".into()),
+        }
+        fixture.store.reset();
+        let CollectionStart::Installed(fenced, report) = cold.start_collection(&live_view).await?
+        else {
+            return Err("unrelated garbage did not install a plan".into());
+        };
+        assert_eq!(report.candidate_count(), 1);
+        assert_eq!(report.candidate_bytes(), 6);
+        let CollectionFinish::Complete(current, _) = cold.resume_collection(&fenced).await? else {
+            return Err("unrelated garbage was not collected".into());
+        };
+        assert!(
+            !fixture
+                .store
+                .metrics()
+                .events
+                .iter()
+                .any(|event| event.operation == Operation::Get && event.path.contains("/blobs/"))
+        );
+        assert!(matches!(
+            cold.read_object(&current, orphan.reference()).await,
+            Err(Error::CorruptObject)
+        ));
+        assert!(matches!(
+            cold.read_object(&current, object.reference()).await,
+            Err(Error::CorruptObject)
+        ));
+        if corrupt {
+            assert_eq!(
+                fixture.raw.get(&path).await?.bytes().await?,
+                Bytes::from_static(b"requirEd")
+            );
+        }
+        assert!(matches!(
+            cold.start_collection(&current).await?,
+            CollectionStart::Empty(_)
+        ));
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn corrupt_live_node_fails_before_collection_io() -> TestResult {
-    let corrupt_node = Fixture::new("corrupt-live-node", Options::default()).await?;
-    let source = corrupt_node.log.load().await?;
-    let child = corrupt_node
-        .log
-        .put_object(&source, Bytes::from_static(b"child"))
-        .await?;
-    let node = corrupt_node
-        .log
-        .put_node(&source, Bytes::from_static(b"node"), vec![child])
-        .await?;
-    let prepared = corrupt_node.log.prepare(
-        &source,
-        TransactionId::new(),
-        Bytes::new(),
-        Bytes::new(),
-        vec![node.clone()],
-    )?;
-    let CommitStatus::Committed(live_view) = corrupt_node.log.commit(prepared).await? else {
-        return Err("corrupt node reference did not commit".into());
-    };
-    corrupt_node
-        .raw
-        .put(
-            &corrupt_node.object_path(node.reference().digest()).await?,
-            Bytes::from(vec![0; usize::try_from(node.reference().len())?]).into(),
+async fn missing_and_corrupt_live_nodes_fail_before_collection_io() -> TestResult {
+    for corrupt in [false, true] {
+        let corrupt_node = Fixture::new("corrupt-live-node", Options::default()).await?;
+        let source = corrupt_node.log.load().await?;
+        let child = corrupt_node
+            .log
+            .put_object(&source, Bytes::from_static(b"child"))
+            .await?;
+        let node = corrupt_node
+            .log
+            .put_node(&source, Bytes::from_static(b"node"), vec![child])
+            .await?;
+        let prepared = corrupt_node.log.prepare(
+            &source,
+            TransactionId::new(),
+            Bytes::new(),
+            Bytes::new(),
+            vec![node.clone()],
+        )?;
+        let CommitStatus::Committed(live_view) = corrupt_node.log.commit(prepared).await? else {
+            return Err("corrupt node reference did not commit".into());
+        };
+        let path = corrupt_node.object_path(node.reference().digest()).await?;
+        if corrupt {
+            corrupt_node
+                .raw
+                .put(
+                    &path,
+                    Bytes::from(vec![0; usize::try_from(node.reference().len())?]).into(),
+                )
+                .await?;
+        } else {
+            corrupt_node.raw.delete(&path).await?;
+        }
+        let cold = Log::open_existing(
+            &corrupt_node.backend,
+            &LogId::new("corrupt-live-node")?,
+            corrupt_node.log.options(),
         )
         .await?;
-    corrupt_node.store.reset();
-    assert!(matches!(
-        corrupt_node.log.start_collection(&live_view).await,
-        Err(Error::CorruptObject)
-    ));
-    assert_collection_not_started(&corrupt_node);
+        corrupt_node.store.reset();
+        match (corrupt, cold.start_collection(&live_view).await) {
+            (true, Err(Error::CorruptObject)) | (false, Err(Error::InvalidFormat(_))) => {}
+            _ => return Err("invalid node did not block collection".into()),
+        }
+        assert_collection_not_started(&corrupt_node);
+    }
     Ok(())
 }
 

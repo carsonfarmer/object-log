@@ -93,10 +93,14 @@ and the active tail while preserving process-local publication proofs.
 The mutable head and every encoded object have configurable limits. Applications
 publish checkpoints before the tail reaches its limit. Collection then:
 
-1. validates the current checkpoint, tail, and complete live object graph;
+1. authenticates the current checkpoint, tail, and every live reference-node edge;
 2. publishes a positive deletion plan through the same conditional head;
 3. deletes only the objects named by that durable plan; and
 4. clears the exact plan after all deletions succeed.
+
+Collection protects referenced blob keys without reading their opaque payloads.
+It does not audit leaf corruption or missing contents; ordinary reads and
+publication validation still verify those bytes.
 
 The WAL checks each publication's dependency count, including its enclosing
 commit or checkpoint, against `max_collection_objects`. Consumers do not count
