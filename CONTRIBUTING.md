@@ -30,6 +30,29 @@ Git changes should follow the build and provider-test instructions in
 [`examples/git/README.md`](examples/git/README.md). Network-backed tests are
 opt-in and must use isolated disposable storage.
 
+## Performance measurements
+
+Run optimized benchmarks and the finite operation measurements separately:
+
+```sh
+cargo bench --workspace --all-features
+cargo test --release --features test-util --test performance memory_performance -- --ignored --nocapture
+CARGO_PROFILE_TEST_OPT_LEVEL=3 ./scripts/test-minio.sh performance minio_performance
+```
+
+Criterion covers payload sizes, replay depth, writer contention and collection
+graph shapes. The finite tests report append cost as the tail grows, conflicts,
+exact recovery, checkpoints and reader retention, including logical storage
+calls and bytes. These counters exclude provider-internal HTTP retries.
+
+Build before measuring process memory, avoid concurrent test workloads, and keep
+raw output under ignored `target/`. Record the revision, machine, tool versions,
+provider and cache conditions with each run. Fixtures use fresh namespaces;
+neither suite flushes operating-system caches. The filesystem capability test
+correctly rejects backends without conditional updates; local MinIO supplies
+writable filesystem-backed measurements. Local results do not predict remote
+storage latency.
+
 ## Change guidelines
 
 - Keep the public API byte-oriented and small.

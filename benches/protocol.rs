@@ -64,8 +64,8 @@ fn benchmark_batch_size(criterion: &mut Criterion) {
                                 Vec::new(),
                             ));
                             state.view = require_committed(state.log.commit(prepared).await);
-                            black_box(state);
-                        });
+                            black_box(state)
+                        })
                     },
                     BatchSize::PerIteration,
                 );
@@ -101,8 +101,8 @@ fn benchmark_inline_bytes(criterion: &mut Criterion) {
                                 Vec::new(),
                             ));
                             state.view = require_committed(state.log.commit(prepared).await);
-                            black_box(state);
-                        });
+                            black_box(state)
+                        })
                     },
                     BatchSize::PerIteration,
                 );
@@ -162,8 +162,8 @@ fn benchmark_staged_bytes(criterion: &mut Criterion) {
                                 vec![object],
                             ));
                             state.view = require_committed(state.log.commit(prepared).await);
-                            black_box(state);
-                        });
+                            black_box(state)
+                        })
                     },
                     BatchSize::PerIteration,
                 );
@@ -222,8 +222,8 @@ fn benchmark_writer_contention(criterion: &mut Criterion) {
                             if committed != 1 || conflicts != writer_count.saturating_sub(1) {
                                 std::process::abort();
                             }
-                            black_box((state, committed, conflicts));
-                        });
+                            black_box((state, committed, conflicts))
+                        })
                     },
                     BatchSize::PerIteration,
                 );
@@ -247,11 +247,10 @@ fn benchmark_collection(criterion: &mut Criterion) {
             bencher.iter_batched(
                 || runtime.block_on(collection_state(shape)),
                 |state| {
-                    black_box(require(
-                        runtime.block_on(state.log.start_collection(&state.view)),
-                    ));
+                    let result = require(runtime.block_on(state.log.start_collection(&state.view)));
+                    black_box((state, result))
                 },
-                BatchSize::LargeInput,
+                BatchSize::PerIteration,
             );
         });
     }
@@ -285,9 +284,9 @@ fn benchmark_collection(criterion: &mut Criterion) {
                     if !matches!(result, CollectionFinish::Complete(_, _)) {
                         std::process::abort();
                     }
-                    black_box(result);
+                    black_box((state, result))
                 },
-                BatchSize::LargeInput,
+                BatchSize::PerIteration,
             );
         });
     }
