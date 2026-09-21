@@ -89,8 +89,13 @@ git config --global credential.https://git.example.com.oauthAuthURL https://COGN
 git config --global credential.https://git.example.com.oauthTokenURL https://COGNITO_DOMAIN/oauth2/token
 git config --global credential.https://git.example.com.oauthRedirectURL http://localhost:53119
 git config --global --add credential.https://git.example.com.helper oauth
+# After an authorized writer has pushed to this repository:
 git clone https://git.example.com/team/project.git
 ```
+
+A fresh configured repository returns 404 to reads until a writer's first push
+materializes it. Push from a local repository with the configured object format
+and initial branch before trying to clone it.
 
 The helper uses authorization-code S256 PKCE and sends the access token as an
 ordinary Basic password. Its fixed `http://localhost:53119` callback matches the

@@ -1,4 +1,5 @@
 import contextlib
+import http.client
 import io
 from pathlib import Path
 import tempfile
@@ -36,7 +37,9 @@ class MaintenanceTest(unittest.TestCase):
                     ])
 
     def test_failure_does_not_starve_other_repository_or_print_credentials(self):
-        for failure in [ValueError("secret"), urllib.error.HTTPError("https://host", 503, "secret", {}, None)]:
+        for failure in [ValueError("secret"),
+                        urllib.error.HTTPError("https://host", 503, "secret", {}, None),
+                        http.client.IncompleteRead(b"secret")]:
             with self.subTest(failure=type(failure)):
                 with patch("maintenance.Client.post", side_effect=[failure, "complete"]) as post:
                     stderr = io.StringIO()

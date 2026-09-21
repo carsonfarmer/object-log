@@ -3,6 +3,7 @@
 
 import base64
 import contextlib
+import http.client
 import json
 from pathlib import Path
 import signal
@@ -82,12 +83,9 @@ def time_budget(seconds):
 def maintain(repositories, post, budget_seconds=300, pause_seconds=0,
              marker=Path("/run/object-log-maintenance/pause")):
     failed = False
-    run_deadline = time.monotonic() + budget_seconds * len(repositories)
     for repository in repositories:
         try:
-            seconds = min(pause_seconds or budget_seconds, run_deadline - time.monotonic())
-            if seconds <= 0:
-                raise TimeoutError("run budget exhausted")
+            seconds = pause_seconds or budget_seconds
             deadline = time.monotonic() + seconds
             if pause_seconds:
                 marker.touch()
@@ -113,7 +111,7 @@ def maintain(repositories, post, budget_seconds=300, pause_seconds=0,
         except urllib.error.HTTPError as error:
             print(f"{repository}: HTTP {error.code}", file=sys.stderr, flush=True)
             failed = True
-        except (OSError, ValueError, KeyError) as error:
+        except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
             # Avoid logging token responses or credential-bearing request objects.
             print(f"{repository}: {type(error).__name__}", file=sys.stderr, flush=True)
             failed = True
