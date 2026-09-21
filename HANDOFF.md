@@ -15,7 +15,8 @@ Read `AGENTS.md`, `PLAN.md`, and `GIT_PLAN.md` before changing behavior.
 - `crates/object-log-kv/`: sparse radix-tree consumer for bounded small records,
   with atomic batches, exact snapshots, scans, and root checkpoints. The guide
   defines its local qualification and caller-owned recovery/maintenance duties.
-  Quantified working-memory bounds remain in #49; remote hosting is separate.
+  Its qualified profile documents KV-owned per-call buffers separately from
+  caller, WAL, provider, runtime, allocator, and concurrency costs.
 - `examples/git/`: go-git smart-HTTP service and provider tests.
 - `examples/wal-component/`: WASIp2 bridge from the Git service to the Rust WAL.
 - `examples/git/qualification/aws/`: disposable S3 Terraform setup, temporary
@@ -101,13 +102,14 @@ The service-readiness and remote HTTPS qualification in issue #45 are complete.
 Issue #10 retains its completed local-Spin/live-S3 scope. Issue #47 is complete:
 collection plans have an independent candidate cap. Issue #46 is closed after
 deployed automatic-maintenance qualification and independent review.
-KV's bounded small-record delivery is tracked in #39. The local workload reaches
+KV's bounded small-record delivery in #39 is complete. The local workload reaches
 65,536 one-KiB records in memory and 16,384 on MinIO, with model equality,
 contention, retained scans, cold recovery and collection. Existing publication
-and per-call limits remain unchanged. Whole-process RSS includes the provider
-and test oracle; it is not the working-memory bound tracked in #49.
-Issue #50 tracks repeated shared-ancestor reads/writes within ordered batches;
-the measured MinIO workload makes that cost visible without raising limits.
+and per-call limits remain unchanged. Issue #49 now documents a 4.07 MiB
+KV-owned variable-buffer envelope for the qualified profile; whole-process RSS
+also includes the database/provider, test oracle, WAL, runtime, allocator, and
+concurrent calls. Issue #50 is complete: one ordered batch reuses shared paths
+and stages each final node once, without raising limits.
 
 Core performance measurements cover append through a 1,024-entry tail,
 conflicts, exact recovery, checkpoints, retention and collection. Reproduction
