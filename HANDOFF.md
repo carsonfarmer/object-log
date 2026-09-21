@@ -41,8 +41,12 @@ The Git service supports unchanged SHA-1 and SHA-256 clients, protocol-v2 clone
 and have-aware fetch, shallow history, classic push, branches, tags, access
 control, cold recovery, automatic tail checkpoints, and explicit maintenance.
 Refs and its sparse object catalog publish atomically through one WAL commit.
-Local MinIO tests pass with unmodified go-git. Repeat remote qualification
-before relying on its changed memory and upload behavior.
+Local MinIO tests pass with unmodified go-git. The current service still exposes
+only two demonstration repository paths and a shared password. Opening a WAL
+can create its head; read-only access must be separated from creation. Complete
+the repository, identity, automatic-maintenance and remote-host gates in
+GIT_PLAN.md before calling the service ready. Earlier live S3 qualification ran
+Spin locally; it did not qualify a remotely hosted HTTPS service.
 
 Incoming packs are staged as WAL streams. Unmodified go-git buffers delta bases
 and results during import; object limits do not bound peak memory. Receive-pack
@@ -87,8 +91,14 @@ Use `make gc-acceptance` for large collection changes and the provider commands
 in `examples/git/README.md` for service changes. Network-backed tests are
 opt-in, isolated, and disposable.
 
-Before public deployment, qualify the exact TLS, routing, identity, monitoring,
-and host-level admission layer. This is deployment work, not a new WAL protocol.
+The active service-readiness queue is issue #11; #10 must qualify the complete
+remote HTTPS service, not only its S3 backend. Authentication and KV workers
+use separate worktrees. KV provider qualification remains in #39.
+
+Full maintenance scans the Git graph before bounded WAL deletion. Automate its
+invocation without assuming the entire call is a small incremental operation.
+S3 session credentials currently enter through explicit configuration; deployed
+workload-identity renewal still needs implementation and tests.
 
 Keep final documentation user-facing and current. Plans capture internal intent;
 executable tests and concise commits replace raw evidence archives.

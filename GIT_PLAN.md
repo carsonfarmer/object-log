@@ -11,10 +11,14 @@ rules remain outside the Rust core.
 - Classic receive-pack push, branches, annotated tags, stale-write rejection,
   fast-forward policy, connectivity validation, and malformed-input rejection.
 - Atomic publication of refs and the sparse object catalog.
-- Authentication, read-only mode, a persisted default branch, and recovery
-  without a local repository cache.
-- Maintenance that prunes unreachable Git objects and invokes bounded WAL
-  collection while preserving active readers.
+- Arbitrary configured repository paths with isolated WAL identities and an
+  explicit SHA-1 or SHA-256 format. Adding a repository requires configuration,
+  not source changes.
+- Per-repository reader, writer, and administrator permissions; read-only mode;
+  a persisted default branch; and recovery without a local repository cache.
+- Automatic maintenance that prunes unreachable Git objects and invokes bounded
+  WAL collection while preserving active readers. Manual maintenance remains an
+  operator recovery tool, not the normal cleanup workflow.
 
 Partial-clone filters and packfile URIs are outside the current proof. Add them
 through the Git library when real workloads justify them; do not build a second
@@ -59,10 +63,10 @@ component. Provider suites use ordinary Git as the external oracle and cover
 both hash formats, clone/fetch/push, large files, repeated history, access
 control, restarts, maintenance, and collection.
 
-The upstream-go-git service passes local MinIO tests; remote tests remain.
-Public-host work includes deployment-specific TLS, routing, identity integration,
-host-wide request admission, monitoring, and qualification through that exact
-edge.
+The upstream-go-git service passes local MinIO tests. Earlier live S3 testing
+ran Spin locally and does not qualify a remotely hosted service. The current
+routes and shared password remain demonstration setup. Service readiness
+requires completing the work below against the exact deployed revision.
 
 ## Dependency policy
 
@@ -72,3 +76,118 @@ review. Exact revisions, licenses, and upstream references
 live in `THIRD_PARTY.md`. New fork-only behavior requires owner review and
 focused tests. The service uses
 ordinary Spin and unmodified object storage.
+
+
+## Service readiness work
+
+Use issue #11 as the queue, #10 for complete remote-service qualification,
+and #6 for core performance. Root integrates reviewed tranches; implementing
+workers use exclusive worktrees. KV provider qualification runs separately in
+#39 and must not delay or broaden the Git work.
+
+### 1. Repository identity and access
+
+Replace the two hardcoded paths with a small declarative repository map: canonical
+path, stable WAL identity, immutable object format, and read/write/admin groups.
+Support nested names such as team/project.git without a repository database or
+another mutable storage head. Validate duplicate identities, aliases, malformed
+paths and incompatible format changes. Unknown repositories fail closed.
+
+Separate opening an existing WAL from authorized creation. The core already has
+open_existing; expose the needed distinction at the component boundary. Missing
+repositories must not be initialized by reads. Config provision authorizes the
+name and format; an authorized first-push discovery can materialize the WAL
+before accepting a pack. Preserve format across creation races and later config
+changes. Existing reader-retention writes and backend capability probes remain
+part of the storage contract.
+
+Acceptance: ordinary clients create/use several independently named repositories
+of both formats; add one through configuration without rebuilding; prove refs,
+objects, recovery and collection stay isolated. Read-only callers cannot create
+repositories or push; unknown paths and configured-but-missing read discovery
+leave that repository head absent. Format mismatch and conflicting creation
+fail predictably.
+
+### 2. User identity and storage credentials
+
+Use Cognito and an established Git OAuth credential helper. Keep token validation
+in the Git service with an established Go library, outside the generic WAL. Check
+issuer, signature, expiry, access-token use, client identity and scope. Enforce
+repository group policy and separate maintenance/recovery administration from
+ordinary writes. Test the actual browser login, credential delivery and refresh
+flow; signed test tokens alone do not establish Cognito interoperability.
+
+S3 authenticates the service separately through IAM. The deployed host receives
+a role restricted to its data prefix. The current bridge takes explicit session
+credentials and does not refresh them. Prefer the established object_store
+IMDSv2 credential provider through the existing WASI HTTP connector, selected
+explicitly for the deployed host. First test it with a controlled metadata
+endpoint in the composed component, then prove role credential renewal on EC2.
+Do not assume native metadata access proves WASI compatibility or introduce
+long-lived access keys.
+
+Acceptance: real Git clone/fetch/push using the helper; expired and wrong-issuer
+tokens rejected; read/write/admin permissions enforced per repository; signing
+key rotation, token refresh, and S3 credential renewal do not lose committed data.
+Native and WASIp2 checks remain required. Verify key-fetch deadlines through
+the actual WASI transport; a native context-timeout test is not enough.
+
+### 3. Automatic maintenance
+
+Preserve the existing cheap write-triggered tail checkpoint. Full Git maintenance
+currently walks reachable objects and the catalog; only its WAL deletion phase
+is batch-bounded. Do not put a full graph scan on every push or start detached
+component calls after an HTTP handler returns.
+
+Keep cheap checkpointing triggered by writes. Ship a deployment timer that
+automatically services every configured repository after restart and periodically,
+including tail-zero repositories and those with no new successful writes. Reuse
+the existing endpoint, retention and fenced collection protocol; bound each
+request and retry through
+ordinary new HTTP requests. Existing WAL state permits resumption without a
+durable job store. Add a write-event wakeup only if it simplifies the deployed
+path. Keep graph work under configured admission limits and measure its cost.
+Persistent graph-limit exhaustion must be visible and acted on, not retried
+forever as though it were a temporary conflict.
+
+Acceptance: ordinary pushes/ref deletions and abandoned uploads are eventually
+cleaned without manual curl commands; idle repositories are serviced; concurrent
+readers and writers remain correct; interrupted cleanup resumes. Cleanup failure
+must not turn a committed push into a reported rejected push. Lost-reader
+recovery remains an explicit drain operation, never an automatic unsafe timeout.
+
+### 4. Deploy and qualify the complete service
+
+Extend existing Terraform rather than create a deployment framework. Start with
+one disposable remote host running stock Spin, an established HTTPS proxy,
+process supervision, Cognito, S3 and restricted workload identity. Define the
+hostname/certificate and credential renewal paths before provisioning. Retain
+only necessary health checks, logs, admission settings and automatic maintenance.
+
+Run the existing provider scenarios from a different machine through the actual
+HTTPS address. Remove loopback-only orchestration assumptions without weakening
+checks of target identity or disposable namespaces. Exercise multiple named
+repositories and both formats, login/refresh/permissions, shallow and have-aware
+fetch, large transfers, concurrent push/fetch/collection, disconnected clients,
+service/host restarts, S3 errors and temporary-credential renewal. After each
+failure scenario, cold clone and verify acknowledged refs/objects independently.
+
+Measure host memory, latency and S3 request/byte costs for finite representative
+workloads. Set acceptance limits before running; a duration-only soak is not a
+substitute for scenarios. No user data is used. Verify teardown of the host,
+network resources, test identity, storage and other resources created by the run.
+Issue #10 closes only after the exact deployed revision passes this gate.
+
+### 5. Review and release claims
+
+Every tranche gets focused tests and independent correctness/simplification
+review before root integration. Keep existing native, WASIp2, memory, filesystem,
+MinIO, recovery and collection gates. Complete #6 measurements using existing
+benchmarks. Run the final integrated service through the remote gate after any
+behavioral change made during qualification.
+
+Update public setup instructions from a clean checkout and have a reviewer
+follow them. Remove stale claims; report remaining limitations explicitly.
+No fixed line quota, new Git engine, dependency fork, or second durable authority
+is justified merely by this work. The completion claim is a qualified deployment
+for its tested workload, not unlimited scale or high availability.
