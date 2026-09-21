@@ -80,9 +80,10 @@ ordinary Spin and unmodified object storage.
 
 ## Service readiness work
 
-Use issue #11 as the queue, #10 for complete remote-service qualification,
-and #6 for core performance. Root integrates reviewed tranches; implementing
-workers use exclusive worktrees. KV provider qualification runs separately in
+Use new issue #45 for the service queue and complete remote qualification,
+#46 for maintenance design, and #6 for core performance. Completed issue #10
+retains its original local-Spin/live-S3 scope. Root integrates reviewed tranches;
+implementing workers use exclusive worktrees. KV provider qualification runs separately in
 #39 and must not delay or broaden the Git work.
 
 ### 1. Repository identity and access
@@ -139,16 +140,25 @@ currently walks reachable objects and the catalog; only its WAL deletion phase
 is batch-bounded. Do not put a full graph scan on every push or start detached
 component calls after an HTTP handler returns.
 
-Keep cheap checkpointing triggered by writes. Ship a deployment timer that
-automatically services every configured repository after restart and periodically,
-including tail-zero repositories and those with no new successful writes. Reuse
-the existing endpoint, retention and fenced collection protocol; bound each
-request and retry through
-ordinary new HTTP requests. Existing WAL state permits resumption without a
-durable job store. Add a write-event wakeup only if it simplifies the deployed
-path. Keep graph work under configured admission limits and measure its cost.
-Persistent graph-limit exhaustion must be visible and acted on, not retried
-forever as though it were a temporary conflict.
+Select the maintenance design in #46 before implementing automatic triggers.
+Compare request-triggered work, publication events, periodic invocation and
+checkpoint/epoch-driven approaches. Evaluate scheduling separately from the
+reachability and deletion algorithms: repeating a full scan on every small
+collection pass is not an adequate default.
+
+Measure repeated Git traversal, full live-blob verification, scoped listing and
+retry costs as live data and garbage grow. Examine resume-first collection,
+separate logical pruning and physical reclamation, exact-root mark reuse, and
+generic bounded-progress improvements. Keep successful-push pack staging,
+abandoned uploads and idle repositories in scope. Continuous reader retention
+can prevent collection from starting; do not promise progress merely because a
+scheduler retries. Never clear active readers automatically.
+
+Choose the smallest design with demonstrated correctness and useful cost/progress
+guarantees, including fair service across repositories and interruption recovery.
+A timer remains one candidate, not a settled architecture. Do not add a durable
+job authority or speculative format rewrite; identify owner-review requirements
+if a change to the collection contract is justified.
 
 Acceptance: ordinary pushes/ref deletions and abandoned uploads are eventually
 cleaned without manual curl commands; idle repositories are serviced; concurrent
@@ -176,7 +186,7 @@ Measure host memory, latency and S3 request/byte costs for finite representative
 workloads. Set acceptance limits before running; a duration-only soak is not a
 substitute for scenarios. No user data is used. Verify teardown of the host,
 network resources, test identity, storage and other resources created by the run.
-Issue #10 closes only after the exact deployed revision passes this gate.
+Issue #45 closes only after the exact deployed revision passes this gate.
 
 ### 5. Review and release claims
 

@@ -91,12 +91,14 @@ Use `make gc-acceptance` for large collection changes and the provider commands
 in `examples/git/README.md` for service changes. Network-backed tests are
 opt-in, isolated, and disposable.
 
-The active service-readiness queue is issue #11; #10 must qualify the complete
-remote HTTPS service, not only its S3 backend. Authentication and KV workers
-use separate worktrees. KV provider qualification remains in #39.
+The active service-readiness queue and remote HTTPS gate are new issue #45.
+Issue #10 retains its completed local-Spin/live-S3 scope. Maintenance design
+needs the deeper comparison in new issue #46 before selecting a trigger.
+Authentication and KV workers use separate worktrees. KV provider qualification remains in #39.
 
-Full maintenance scans the Git graph before bounded WAL deletion. Automate its
-invocation without assuming the entire call is a small incremental operation.
+Full maintenance scans the Git graph before bounded WAL deletion. Compare
+algorithmic costs, safe reader coordination and forward progress in #46; simply
+automating the existing call is not yet the selected solution.
 S3 session credentials currently enter through explicit configuration; deployed
 workload-identity renewal still needs implementation and tests.
 

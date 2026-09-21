@@ -35,6 +35,12 @@
 - Record benchmark conditions and raw Criterion output.
 - Never claim remote object-store performance from simulated latency alone.
 
+## Issue tracking
+
+- Create new tickets for new work or scope.
+- Do not reopen or rewrite existing tickets to repurpose them; preserve the
+  original scope and completion history.
+
 ## Commit attribution
 
 End Codex commits with this trailer exactly once, separated from the body by
