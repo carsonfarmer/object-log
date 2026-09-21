@@ -39,8 +39,8 @@ Incoming packs use WAL streams; go-git buffers delta bases and results during
 import. Receive-pack advertises `no-thin`, allowing ordinary clients to send
 self-contained packs. The catalog retains compact client-provided deltas within
 its existing inline allowance. Fetch uses go-git's stored-delta path without
-generating new deltas; full objects remain
-available when a representation or its base is unavailable. Negotiation still
+generating new deltas; full objects remain available when a representation or its
+base is unavailable. Negotiation still
 omits objects the client already has.
 
 ## Recovery and maintenance
@@ -63,156 +63,127 @@ component. Provider suites use ordinary Git as the external oracle and cover
 both hash formats, clone/fetch/push, large files, repeated history, access
 control, restarts, maintenance, and collection.
 
-The upstream-go-git service passes local MinIO tests, including three isolated
-configured repository names and both hash formats. Cognito validation is wired;
-real sign-in and helper refresh await remote qualification. Earlier live S3
-testing ran Spin locally and does not qualify a remotely hosted service.
-Service readiness requires completing the remaining gates below against the
-exact deployed revision.
+The upstream-go-git service passes local MinIO tests and the full provider suite
+against public EC2 HTTPS with S3. Real Cognito login, helper refresh, repository
+permissions, role replacement, process/host recovery and configuration-only
+repository addition have passed. All five live core S3 tests also pass.
+Service readiness still requires the remote long-history and large-object gates,
+final review and teardown against the exact deployed revision.
 
 ## Dependency policy
 
 The service uses unmodified upstream go-git and componentize-go, including its
 bundled adapter. It pins the unchanged go-pkg PR #13 revision pending upstream
-review. Exact revisions, licenses, and upstream references
-live in `THIRD_PARTY.md`. New fork-only behavior requires owner review and
-focused tests. The service uses
+review. Exact revisions, licenses, and upstream references live in `THIRD_PARTY.md`.
+New fork-only behavior requires owner review and focused tests. The service uses
 ordinary Spin and unmodified object storage.
 
+## Service readiness
 
-## Service readiness work
-
-Use new issue #45 for the service queue and complete remote qualification,
-#46 for maintenance design, and #6 for core performance. Completed issue #10
-retains its original local-Spin/live-S3 scope. Root integrates reviewed tranches;
-implementing workers use exclusive worktrees. KV provider qualification runs separately in
-#39 and must not delay or broaden the Git work.
+Issue #45 tracks the remaining remote workload gates, final review and teardown.
+Automatic-maintenance issue #46 is closed after deployed qualification and
+independent review. Issue #6 tracks core performance; completed issue #10 retains
+its original local-Spin/live-S3 scope. Root integrates reviewed tranches;
+implementing workers use exclusive worktrees. KV qualification remains separate
+in #39.
 
 ### 1. Repository identity and access
 
-Replace the two hardcoded paths with a small declarative repository map: canonical
-path, stable WAL identity, immutable object format, and read/write/admin groups.
-Support nested names such as team/project.git without a repository database or
-another mutable storage head. Validate duplicate identities, aliases, malformed
-paths and incompatible format changes. Unknown repositories fail closed.
+The declarative repository map supplies canonical nested paths, stable WAL
+identities, immutable object formats, default branches and independent
+read/write/admin groups. Duplicate identities, aliases and malformed paths are
+rejected. Unknown repositories fail closed. Reads and administration open
+existing WALs; an authorized first-push discovery can materialize a configured
+repository before accepting a pack.
 
-Separate opening an existing WAL from authorized creation. The core already has
-open_existing; expose the needed distinction at the component boundary. Missing
-repositories must not be initialized by reads. Config provision authorizes the
-name and format; an authorized first-push discovery can materialize the WAL
-before accepting a pack. Preserve format across creation races and later config
-changes. Existing reader-retention writes and backend capability probes remain
-part of the storage contract.
-
-Acceptance: ordinary clients create/use several independently named repositories
-of both formats; add one through configuration without rebuilding; prove refs,
-objects, recovery and collection stay isolated. Read-only callers cannot create
-repositories or push; unknown paths and configured-but-missing read discovery
-leave that repository head absent. Format mismatch and conflicting creation
-fail predictably.
+Remote tests added a nested SHA-256 repository through configuration while
+preserving the component artifact. Read discovery returned 404 with no durable
+head before authorized writer discovery and push; a cold clone and fsck passed.
+All eight original repositories kept exact refs. A changed configured default
+branch preserved persisted HEAD. Incompatible format configuration returned a
+predictable error, and restoring the exact configuration preserved the refs.
+Creation races and conflicting formats also retain local test coverage.
 
 ### 2. User identity and storage credentials
 
-Use Cognito and an established Git OAuth credential helper. Keep token validation
-in the Git service with an established Go library, outside the generic WAL. Check
-issuer, signature, expiry, access-token use, client identity and scope. Enforce
-repository group policy and separate maintenance/recovery administration from
-ordinary writes. Test the actual browser login, credential delivery and refresh
-flow; signed test tokens alone do not establish Cognito interoperability.
+Cognito token validation uses an established Go library in the Git service,
+outside the WAL. It checks issuer, signature, expiry, access-token use, client
+identity and scope before storage access. Repository groups independently grant
+read, write and administration. A separate client-credentials identity requires
+both `git/access` and `git/maintenance` and permits administration only.
 
-S3 authenticates the service separately through IAM. The deployed host receives
-a role restricted to its data prefix. The bridge now selects explicit static
-credentials or the established object_store IMDSv2 credential provider through
-the WASI HTTP connector.
-Controlled metadata tests pass in the composed component, including renewal
-and failure; still prove role credential renewal on EC2.
-Do not assume native metadata access proves WASI compatibility or introduce
-long-lived access keys.
+Actual hosted browser login with git-credential-oauth, ordinary Basic token
+delivery to Git clone/fetch/push, expired-token rejection and browser-free helper
+refresh passed. Requesting `openid git/access` supplies Cognito's group claim.
+Live disjoint reader/writer/admin and machine-client checks passed. Wrong-issuer
+rejection and controlled key rotation have native tests; these are not live
+alternate-pool or Cognito key-rotation results. Composed stock-Spin TLS tests
+cover the signing-key deadline, slow bodies and cleanup. Local JWT validation
+cannot immediately detect revocation of interactive or machine tokens.
 
-Acceptance: real Git clone/fetch/push using the helper; expired and wrong-issuer
-tokens rejected; read/write/admin permissions enforced per repository; signing
-key rotation, token refresh, and S3 credential renewal do not lose committed data.
-Native and WASIp2 checks remain required. Verify key-fetch deadlines through
-the actual WASI transport; a native context-timeout test is not enough.
+S3 authenticates the service through a prefix-restricted instance role and the
+established object_store IMDSv2 provider through WASI HTTP. Live role replacement
+denied Git storage access; restoring the original role recovered exact data and
+accepted a new push without restarting Spin. Natural expiry and renewal failure
+remain covered by the composed metadata fixture. No long-lived S3 keys are
+needed on the host.
 
-Keep live credential tests finite. Temporarily use five-minute Cognito tokens
-for the helper/expiry test, then restore the configured lifetime before running
-the provider suite with its fixed test token. Prove both rejection of the expired
-token and success through the helper's refreshed token. For EC2, swap to a
-temporary instance profile without S3 access, observe the new IMDS identity and
-failed Git storage access, then restore the original profile and verify exact
-data plus a new push without restarting Spin. Always restore and delete the
-temporary profile. This proves live credential replacement and reacquisition;
-natural expiry within one cached provider remains covered by the composed
-metadata fixture, not by a multi-hour remote wait.
+Credential tests remain finite. The helper test used five-minute access tokens;
+the provider suite uses a fixed token with a lifetime covering its planned run.
+Keep the public Terraform default at 60 minutes and remove run-specific lifetime
+overrides after qualification.
 
 ### 3. Automatic maintenance
 
-Preserve the existing cheap write-triggered tail checkpoint. Logical Git
-maintenance walks reachable objects and the catalog. Physical followups skip
-that walk and resume installed deletion plans first. Do not put a full graph
-scan on every push or start detached component calls after an HTTP handler returns.
+Push admission retains its tail checkpoint. The periodic host worker starts with
+logical Git pruning/checkpointing, then uses physical `/collect` followups after
+`more` or `retained`. Physical followups resume installed deletion plans before
+loading the catalog. New plans have a separate candidate cap, audit the live
+reference graph and protect referenced blob keys without reading opaque payloads.
+Each new plan still scans the live graph; collection is not constant-cost work.
 
-The first selected changes in #46 are separate logical/physical passes and a
-per-call deletion-plan cap. A periodic host worker with finite work budgets is
-implemented and locally tested. An optional disposable ingress marker can pause
-new requests while admitted requests finish; it defaults off and does not change
-the WAL authority. Deployed progress and cost measurements remain.
-No scheduling approach alone guarantees progress with continuous readers.
-Compare request-triggered work, publication events, periodic invocation and
-checkpoint/epoch-driven approaches. Evaluate scheduling separately from the
-reachability and deletion algorithms: repeating a full scan on every small
-collection pass is not an adequate default.
+Finite per-repository deadlines and a systemd run deadline bound the worker.
+An optional admission pause defaults off and rejects new ordinary requests while
+admitted requests finish. Exact administrative POST paths still require service
+authentication. Worker exit and systemd cleanup remove the pause marker.
+Deployed automatic cleanup, concurrency and interruption recovery passed
+independent review in #46.
 
-Measure repeated Git traversal, full live-blob verification, scoped listing and
-retry costs as live data and garbage grow. Examine resume-first collection,
-separate logical pruning and physical reclamation, exact-root mark reuse, and
-generic bounded-progress improvements. Keep successful-push pack staging,
-abandoned uploads and idle repositories in scope. Continuous reader retention
-can prevent collection from starting; do not promise progress merely because a
-scheduler retries. Never clear active readers automatically.
+Continuous retention can prevent collection from starting. Even with the pause,
+progress depends on admitted requests finishing within it; a timer alone cannot
+guarantee progress. Lost-reader recovery requires an explicit drain and never
+runs automatically. Cleanup failure must not turn a committed push into a
+reported rejected push. The worker adds no durable job authority or detached
+component calls.
 
-Choose the smallest design with demonstrated correctness and useful cost/progress
-guarantees, including fair service across repositories and interruption recovery.
-A timer remains one candidate, not a settled architecture. Do not add a durable
-job authority or speculative format rewrite; identify owner-review requirements
-if a change to the collection contract is justified.
+### 4. Complete the remote workload gates
 
-Acceptance: ordinary pushes/ref deletions and abandoned uploads are eventually
-cleaned without manual curl commands; idle repositories are serviced; concurrent
-readers and writers remain correct; interrupted cleanup resumes. Cleanup failure
-must not turn a committed push into a reported rejected push. Lost-reader
-recovery remains an explicit drain operation, never an automatic unsafe timeout.
+Terraform deploys one disposable EC2 host with stock Spin, Caddy HTTPS, systemd,
+Cognito, S3 and restricted workload identity. A separate client has passed the
+full provider suite through public HTTPS with normal certificate validation.
+HTTP-to-HTTPS redirection preserves authority, path and query. Exact complete refs
+were checked across all eight repositories after process kill/automatic restart
+and again after an EC2 reboot. The failure drills cold-cloned and ran fsck on
+the two main hash repositories. Separate cold clones of idle and active
+repositories passed after scheduled cleanup.
 
-### 4. Deploy and qualify the complete service
+The remote 1,025-push workload per hash format is running. Concurrent 513 MiB
+object lifecycles follow; both workloads have passed locally. Record deployed
+memory, latency and S3 request/byte costs without treating local measurements as
+remote capacity evidence. Use response `X-Request-ID` values to match complete
+usage records delivered from the service journal through SSM.
 
-Extend existing Terraform rather than create a deployment framework. Start with
-one disposable remote host running stock Spin, an established HTTPS proxy,
-process supervision, Cognito, S3 and restricted workload identity. Define the
-hostname/certificate and credential renewal paths before provisioning. Retain
-only necessary health checks, logs, admission settings and automatic maintenance.
-
-Run the existing provider scenarios from a different machine through the actual
-HTTPS address. Remove loopback-only orchestration assumptions without weakening
-checks of target identity or disposable namespaces. Exercise multiple named
-repositories and both formats, login/refresh/permissions, shallow and have-aware
-fetch, large transfers, concurrent push/fetch/collection, disconnected clients,
-service/host restarts, S3 errors and temporary-credential renewal. After each
-failure scenario, cold clone and verify acknowledged refs/objects independently.
-
-Measure host memory, latency and S3 request/byte costs for finite representative
-workloads. Set acceptance limits before running; a duration-only soak is not a
-substitute for scenarios. No user data is used. Verify teardown of the host,
-network resources, test identity, storage and other resources created by the run.
-Issue #45 closes only after the exact deployed revision passes this gate.
+Issue #45 remains open through these workloads, final independent review and
+verified teardown of the host, network resources, identities and test storage.
+Use disposable namespaces and no user data.
 
 ### 5. Review and release claims
 
 Every tranche gets focused tests and independent correctness/simplification
 review before root integration. Keep existing native, WASIp2, memory, filesystem,
 MinIO, recovery and collection gates. Complete #6 measurements using existing
-benchmarks. Run the final integrated service through the remote gate after any
-behavioral change made during qualification.
+benchmarks. Re-run affected remote gates after behavioral changes during
+qualification.
 
 Update public setup instructions from a clean checkout and have a reviewer
 follow them. Remove stale claims; report remaining limitations explicitly.

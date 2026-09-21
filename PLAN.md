@@ -9,8 +9,9 @@ Applications own their operation and snapshot formats.
 
 The Git service is the primary proof: unchanged Git clients exercise the WAL
 through an established Git implementation. The key-value consumer uses sparse
-radix-tree paths and the same recovery and collection contract. Its next gate
-is provider and sustained-load qualification, after the Git dependency review.
+radix-tree paths and the same recovery and collection contract. Its finite MinIO
+growth, contention and recovery tests pass; it remains experimental, with larger
+production workloads and remote qualification in #39.
 
 ## Authority and storage
 
@@ -44,9 +45,16 @@ The core implements and tests:
 
 The Git proof supports SHA-1 and SHA-256 repositories, protocol-v2 clone and
 fetch, classic push, shallow history, tags, access control, cold recovery, and
-maintenance. Its implementation remains outside the core. The move to
-unmodified go-git passes local checks and needs a fresh remote capacity check
-because incoming deltas now use the library's normal buffers.
+automatic maintenance. Its implementation remains outside the core. The public
+EC2 HTTPS service passes the provider suite with Cognito/helper authentication,
+repository permissions, IMDSv2 role replacement and restoration, process/host
+recovery, and configuration-only repository addition. All five live core S3
+tests pass. Automatic-maintenance issue #46 is closed after independent review.
+
+Issue #45 remains open for the remote 1,025-push workloads per hash format now
+running, then concurrent 513 MiB object lifecycles, final review and teardown.
+Unmodified go-git buffers incoming delta bases and results, so the large-object
+gate must measure the deployed host's memory use.
 
 ## Release gate
 

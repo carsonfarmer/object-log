@@ -124,15 +124,16 @@ for the durable format and recovery invariants. The schema is defined in
 - [`object-log-kv`](https://github.com/carsonfarmer/object-log/tree/main/crates/object-log-kv)
   is a byte-key/value store with sparse reads and writes, atomic batches,
   immutable snapshots, ordered scans, and checkpoint recovery. It remains
-  experimental; provider and sustained-load qualification are unfinished.
+  experimental; qualify it against the intended workload before production use.
 - [`examples/git`](https://github.com/carsonfarmer/object-log/tree/main/examples/git)
   is a working Git service using go-git and the
   same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
   clients, SHA-1 and SHA-256, protocol-v2 clone/fetch, classic push, shallow
-  history, configured repository names, Cognito permissions, recovery, and garbage
-  collection. Local `MinIO`
-  tests cover the current implementation. Qualify remote storage and host
-  capacity with the provider suite before deployment.
+  history, configured repository names, Cognito permissions, recovery, and
+  automatic maintenance. The optional
+  [AWS host](https://github.com/carsonfarmer/object-log/blob/main/examples/git/qualification/aws/HOSTING.md)
+  supplies HTTPS, instance-role credentials and a bounded maintenance worker.
+  Use the provider suite to qualify the intended storage, client and host limits.
 
 The core library has no Git, Spin, or serverless-runtime dependency.
 

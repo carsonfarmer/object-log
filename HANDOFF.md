@@ -47,9 +47,10 @@ branches and per-action groups now come from configuration. Only an authorized
 writer can materialize a configured repository; reads open existing state.
 Cognito access-token validation and a separate administration-only machine
 client are wired. Password mode is the explicit local default and requires a
-password. Actual Cognito/helper interoperability remains a remote gate.
-Earlier live S3 qualification ran Spin locally; it did not qualify a remotely
-hosted HTTPS service.
+password. Public EC2 HTTPS qualification has passed real Cognito browser login,
+Git credential-helper refresh, expired-token rejection, independent repository
+permissions, and machine-client administration. Request `openid git/access`
+with the helper so Cognito includes repository group claims.
 
 Incoming packs are staged as WAL streams. Unmodified go-git buffers delta bases
 and results during import; object limits do not bound peak memory. Receive-pack
@@ -94,38 +95,53 @@ Use `make gc-acceptance` for large collection changes and the provider commands
 in `examples/git/README.md` for service changes. Network-backed tests are
 opt-in, isolated, and disposable.
 
-The active service-readiness queue and remote HTTPS gate are new issue #45.
+The active service-readiness queue and remote HTTPS gate are in issue #45.
 Issue #10 retains its completed local-Spin/live-S3 scope. Issue #47 is complete:
-collection plans have an independent candidate cap. The bounded periodic host
-worker is implemented; its deployed progress/cost gate remains in issue #46.
+collection plans have an independent candidate cap. Issue #46 is closed after
+deployed automatic-maintenance qualification and independent review.
 KV's finite provider qualification and single-traversal mutation improvement
 have been independently reviewed; larger production workloads remain in #39.
 
 Maintenance now resumes an active WAL deletion plan before loading the Git
 catalog. Logical pruning/checkpointing is separate from physical /collect
 followups. New plans have a per-operation candidate cap independent of the
-live-graph limit. Each new plan still audits the full live graph; continuous
-reader retention can starve collection. The optional host worker starts with
-logical maintenance, then uses physical collection after `more` or `retained`,
-within finite per-repository budgets. An enabled pause can retry logical
+live-graph limit. Each new plan authenticates live metadata and preserves opaque
+blob keys without reading leaf payloads; normal reads and publication still
+verify those bytes. Continuous reader retention can starve collection.
+The optional host worker starts with logical maintenance, then uses physical
+collection after `more` or `retained`, within finite per-repository budgets.
+An enabled pause can retry logical
 conflicts or pending results before that transition.
 An optional admission pause defaults off; Caddy preserves admitted requests,
-and systemd cleans the pause after worker failure. Local process tests pass;
-deployed progress/cost measurements remain. Never clear retentions automatically.
+and systemd cleans the pause after worker failure. Progress during a pause
+depends on admitted requests finishing within it. Never clear retentions
+automatically; lost readers still require explicit drained recovery.
 The bridge now explicitly selects static credentials or object_store IMDSv2
 role acquisition/renewal. Native and composed stock-Spin fixtures pass, including
-renewal failure. Actual EC2 credentials and hosted HTTPS tests remain in #45.
+renewal failure. Live EC2 role replacement denied storage access, then restoring
+the original role recovered exact data and accepted a new push without restarting
+Spin. Natural credential expiry remains covered by the composed metadata fixture.
 Signing-key fetches have a five-second WASI deadline, including slow bodies;
 stock-Spin TLS tests verify timeout and same-instance cleanup without an SDK fork.
+Wrong-issuer rejection and controlled signing-key rotation have native coverage;
+the run did not rotate Cognito's actual signing keys or use an alternate pool.
 
-Latest accepted local tests include the complete provider suite, 1,025 pushes
-per hash format with concurrent fetches, interruption/concurrent-maintenance
-drills followed by a real Spin restart, and concurrent 513 MiB object lifecycles.
-The large-object run sampled about 5.27 GiB across Spin processes on macOS;
-this is not an exact peak or a Linux capacity claim. The configurable EC2 default
-is 16 GiB for qualification. Ubuntu bootstrap rehearsal caught and fixed missing
-AWS CLI packaging, invalid Spin logging arguments and inactive Caddy startup.
-Real hosted TLS, Cognito and EC2 tests still require renewed AWS SSO access.
+The full provider suite passes against the public HTTPS deployment; all five
+live core S3 tests also pass. Exact complete refs were checked across all eight
+repositories after process kill/automatic restart and again after an EC2 reboot.
+The failure drills cold-cloned and ran fsck on the two main hash repositories.
+Separate cold clones of idle and active repositories passed after scheduled
+cleanup. A new nested repository was added through configuration with the same
+component artifact; persisted HEAD survived a configured default-branch change.
+Incompatible format configuration failed predictably before exact restoration. HTTP redirects
+to HTTPS preserve the requested path and query, and normal certificate validation
+passes.
+
+Issue #45 remains open. The remote 1,025-push workload for each hash format is
+running; concurrent 513 MiB object lifecycles, final review and teardown follow.
+Both workloads passed locally. The local large-object run sampled about 5.27 GiB
+across Spin processes on macOS, not an exact peak or Linux capacity claim. The
+configurable EC2 default is 16 GiB for qualification.
 
 Keep final documentation user-facing and current. Plans capture internal intent;
 executable tests and concise commits replace raw evidence archives.
