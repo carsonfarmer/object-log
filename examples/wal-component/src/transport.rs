@@ -170,6 +170,16 @@ impl Service {
                 .headers
                 .insert(http::header::CONTENT_LENGTH, length.into());
         }
+        // object_store bounds metadata connects to one second but inherits the
+        // S3 read deadline. Metadata is local and small; bound its waits too.
+        let metadata = parts.uri.authority().is_some_and(|authority| {
+            authority.as_str() == super::INSTANCE_METADATA_ENDPOINT.trim_start_matches("http://")
+        }) && parts.uri.path().starts_with("/latest/");
+        let read_timeout = if metadata {
+            Some(1_000_000_000)
+        } else {
+            self.read
+        };
         let (outgoing, _) = http::Request::from_parts(parts, ())
             .try_into_outgoing_request()
             .map_err(http_error)?;
@@ -184,10 +194,10 @@ impl Service {
             .set_connect_timeout(self.connect)
             .map_err(|()| http_error(std::io::Error::other("unsupported connect timeout")))?;
         options
-            .set_first_byte_timeout(self.read)
+            .set_first_byte_timeout(read_timeout)
             .map_err(|()| http_error(std::io::Error::other("unsupported first-byte timeout")))?;
         options
-            .set_between_bytes_timeout(self.read)
+            .set_between_bytes_timeout(read_timeout)
             .map_err(|()| http_error(std::io::Error::other("unsupported read timeout")))?;
         let pending =
             spin_sdk::wit::wasi::http0_2_0::outgoing_handler::handle(outgoing, Some(options))

@@ -1,10 +1,13 @@
 package object-log:storage@0.1.0;
 
 interface wal {
+    enum credential-mode { static-credentials, instance-role }
     record config {
         endpoint: string,
         bucket: string,
         region: string,
+        // Instance-role requires empty static keys and no session token.
+        credential-mode: credential-mode,
         access-key: string,
         secret-key: string,
         session-token: option<string>,
@@ -12,7 +15,7 @@ interface wal {
         log-id: string,
         max-collection-objects: u64,
     }
-    variant failure { expired, limit(string), other(string) }
+    variant failure { missing, expired, limit(string), other(string) }
     variant outcome { committed, conflict, pending(list<u8>), expired }
     enum retention-state { applied, active-collection, conflict, pending }
     enum maintenance-state { complete, more, conflict, pending, retained }
@@ -33,13 +36,16 @@ interface wal {
         read-at: func(offset: u64, max-len: u32) -> result<list<u8>, failure>;
     }
     resource session {
+        // Reads the cached view; refresh to observe another session's changes.
+        has-active-collection: func() -> bool;
         retain: func(id: list<u8>) -> result<retention-state, failure>;
         release-retention: func(id: list<u8>) -> result<retention-state, failure>;
         clear-retentions-after-drain: func() -> result<retention-state, failure>;
         write-bytes: func() -> result<own<byte-writer>, failure>;
         open-bytes: func(value: borrow<object>) -> result<own<byte-reader>, failure>;
         checkpoint: func(data: list<u8>, roots: list<borrow<object>>) -> result<maintenance-state, failure>;
-        collect: func() -> result<collection-result, failure>;
+        // Caps a new plan; an existing plan is resumed without shrinking it.
+        collect: func(max-candidates: u64) -> result<collection-result, failure>;
         usage: func() -> usage;
         refresh: func() -> result<own<session>, failure>;
         // Records must describe complete states; delta consumers require another fold.
@@ -49,5 +55,7 @@ interface wal {
         prepare: func(data: list<u8>, roots: list<borrow<object>>) -> result<own<candidate>, failure>;
     }
     open: func(settings: config) -> result<own<session>, failure>;
+    // Returns missing without creating the requested log.
+    open-existing: func(settings: config) -> result<own<session>, failure>;
 }
 world storage { export wal; }

@@ -40,11 +40,14 @@ pub(super) async fn checkpoint(
 }
 
 // One durable deletion plan per call; a later call resumes an interrupted plan.
-pub(super) async fn collect(session: &SessionState) -> Result<CollectionResult, Failure> {
+pub(super) async fn collect(
+    session: &SessionState,
+    max_candidates: usize,
+) -> Result<CollectionResult, Failure> {
     let current = session.current_view();
     let view = match session
         .log
-        .start_collection(&current)
+        .start_collection_with_limit(&current, max_candidates)
         .await
         .map_err(failure)?
     {

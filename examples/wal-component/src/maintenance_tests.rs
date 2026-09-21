@@ -48,6 +48,7 @@ async fn append(s: &mut SessionState, roots: Vec<StagedObject>) {
 #[tokio::test]
 async fn checkpoint_and_resumed_batches_keep_live_objects() {
     let mut s = session().await;
+    assert!(!GuestSession::has_active_collection(&s));
     let live = s
         .log
         .put_object(&s.current_view(), Bytes::from_static(b"keep"))
@@ -77,10 +78,15 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
         s.log.start_collection(&s.current_view()).await.unwrap(),
         CollectionStart::Installed(..)
     ));
+    // This reports only the cached view; observing another operation's fence
+    // requires refreshing, without a hidden storage read from this method.
+    assert!(!GuestSession::has_active_collection(&s));
+    s.view.replace(s.log.load().await.unwrap());
+    assert!(GuestSession::has_active_collection(&s));
     let mut complete = false;
     for _ in 0..8 {
         s.view.replace(s.log.load().await.unwrap());
-        let report = maintenance::collect(&s).await.unwrap();
+        let report = maintenance::collect(&s, 4).await.unwrap();
         if matches!(report.state, MaintenanceState::Complete) {
             complete = true;
             break;
@@ -89,6 +95,7 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
     }
     assert!(complete);
     s.view.replace(s.log.load().await.unwrap());
+    assert!(!GuestSession::has_active_collection(&s));
     assert_eq!(
         s.log
             .read_object(&s.current_view(), live.reference())
@@ -102,6 +109,26 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn collection_calls_bound_new_plans_and_reject_invalid_caps() {
+    let s = session().await;
+    for value in 0..3 {
+        s.log
+            .put_object(&s.current_view(), Bytes::from(vec![value]))
+            .await
+            .unwrap();
+    }
+    for cap in [0, 5] {
+        assert!(matches!(
+            maintenance::collect(&s, cap).await,
+            Err(Failure::Limit(_))
+        ));
+    }
+    let report = maintenance::collect(&s, 1).await.unwrap();
+    assert!(matches!(report.state, MaintenanceState::More));
+    assert_eq!(report.objects, 1);
 }
 #[tokio::test]
 async fn checkpoint_does_not_overwrite_a_concurrent_append() {
@@ -133,7 +160,7 @@ async fn session_retention_blocks_collection_and_drained_recovery_clears_it() {
         RetentionState::Applied
     );
     assert!(matches!(
-        maintenance::collect(&s).await.unwrap().state,
+        maintenance::collect(&s, 4).await.unwrap().state,
         MaintenanceState::Retained
     ));
     assert_eq!(
@@ -149,7 +176,7 @@ async fn session_retention_blocks_collection_and_drained_recovery_clears_it() {
         RetentionState::Applied
     );
     assert!(matches!(
-        maintenance::collect(&s).await.unwrap().state,
+        maintenance::collect(&s, 4).await.unwrap().state,
         MaintenanceState::More
     ));
     assert!(GuestSession::retain(&s, vec![0; 15]).is_err());

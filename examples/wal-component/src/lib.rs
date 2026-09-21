@@ -39,14 +39,15 @@ impl SessionState {
 
 fn s3_builder(
     settings: &Config,
-    transport: transport::Transport,
-) -> object_store::aws::AmazonS3Builder {
+    transport: impl object_store::client::HttpConnector,
+) -> Result<object_store::aws::AmazonS3Builder, Failure> {
+    if settings.region.is_empty() {
+        return Err(Failure::Other("S3 region is required".into()));
+    }
     let mut builder = object_store::aws::AmazonS3Builder::new()
         .with_endpoint(settings.endpoint.as_str())
         .with_bucket_name(settings.bucket.as_str())
         .with_region(settings.region.as_str())
-        .with_access_key_id(settings.access_key.as_str())
-        .with_secret_access_key(settings.secret_key.as_str())
         .with_virtual_hosted_style_request(false)
         .with_disable_bulk_delete(false)
         .with_client_options(
@@ -62,14 +63,54 @@ fn s3_builder(
             max_retries: 0,
             ..Default::default()
         });
-    if let Some(token) = settings.session_token.as_deref() {
-        builder = builder.with_token(token);
+    match settings.credential_mode {
+        CredentialMode::StaticCredentials => {
+            if settings.access_key.is_empty()
+                || settings.secret_key.is_empty()
+                || settings.session_token.as_deref() == Some("")
+            {
+                return Err(Failure::Other(
+                    "static S3 credentials are incomplete".into(),
+                ));
+            }
+            builder = builder
+                .with_access_key_id(&settings.access_key)
+                .with_secret_access_key(&settings.secret_key);
+            if let Some(token) = &settings.session_token {
+                builder = builder.with_token(token);
+            }
+        }
+        CredentialMode::InstanceRole => {
+            if !settings.access_key.is_empty()
+                || !settings.secret_key.is_empty()
+                || settings.session_token.is_some()
+            {
+                return Err(Failure::Other(
+                    "instance-role credentials cannot include static keys or a token".into(),
+                ));
+            }
+            // No static setters: object_store obtains and refreshes IMDSv2
+            // credentials through the same injected WASI HTTP connector.
+            builder = builder
+                .with_metadata_endpoint(INSTANCE_METADATA_ENDPOINT)
+                .with_config(
+                    object_store::aws::AmazonS3ConfigKey::ImdsV1Fallback,
+                    "false",
+                );
+        }
     }
-    builder
+    Ok(builder)
 }
+
+#[cfg(not(feature = "test-imds"))]
+const INSTANCE_METADATA_ENDPOINT: &str = "http://169.254.169.254";
+// The opt-in composed test uses only this loopback fixture, never caller input.
+#[cfg(feature = "test-imds")]
+const INSTANCE_METADATA_ENDPOINT: &str = "http://127.0.0.1:19092";
 
 fn failure(error: object_log::Error) -> Failure {
     match error {
+        object_log::Error::LogNotFound => Failure::Missing,
         object_log::Error::ViewExpired => Failure::Expired,
         object_log::Error::LimitExceeded(limit) => Failure::Limit(limit.into()),
         error => Failure::Other(error.to_string()),
@@ -146,6 +187,9 @@ impl GuestByteReader for ReaderState {
 }
 impl GuestObject for StagedObject {}
 impl GuestSession for SessionState {
+    fn has_active_collection(&self) -> bool {
+        self.view.borrow().collection_plan_bytes().is_some()
+    }
     fn retain(&self, id: Vec<u8>) -> Result<RetentionState, Failure> {
         let view = self.current_view();
         let status =
@@ -185,8 +229,10 @@ impl GuestSession for SessionState {
     ) -> Result<MaintenanceState, Failure> {
         spin_executor::run(maintenance::checkpoint(self, data, proofs(&roots)))
     }
-    fn collect(&self) -> Result<CollectionResult, Failure> {
-        spin_executor::run(maintenance::collect(self))
+    fn collect(&self, max_candidates: u64) -> Result<CollectionResult, Failure> {
+        let max_candidates = usize::try_from(max_candidates)
+            .map_err(|_| Failure::Limit("collection candidate objects".into()))?;
+        spin_executor::run(maintenance::collect(self, max_candidates))
     }
     fn usage(&self) -> Usage {
         let (calls, bytes) = self.transport.usage();
@@ -268,76 +314,49 @@ impl Guest for Component {
     type Session = SessionState;
     type Object = StagedObject;
     fn open(settings: Config) -> Result<Session, Failure> {
-        spin_executor::run(async {
-            let transport = transport::Transport::default();
-            let store = s3_builder(&settings, transport.clone())
-                .build()
-                .map_err(|error| Failure::Other(error.to_string()))?;
-            let backend = object_log::ValidatedBackend::new(
-                Arc::new(store),
-                object_store::path::Path::from(settings.prefix),
-            )
-            .await
-            .map_err(failure)?;
-            let log = Log::open(
-                &backend,
-                &object_log::LogId::new(settings.log_id).map_err(failure)?,
-                object_log::Options {
-                    max_object_bytes: 2 * 1024 * 1024,
-                    max_collection_objects: usize::try_from(settings.max_collection_objects)
-                        .map_err(|_| Failure::Other("invalid collection object limit".into()))?,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(failure)?;
-            let view = log.load().await.map_err(failure)?;
-            Ok(Session::new(SessionState {
-                log,
-                view: RefCell::new(view),
-                transport,
-            }))
-        })
+        open_session(settings, true)
     }
+    fn open_existing(settings: Config) -> Result<Session, Failure> {
+        open_session(settings, false)
+    }
+}
+
+fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
+    spin_executor::run(async {
+        let transport = transport::Transport::default();
+        let store = s3_builder(&settings, transport.clone())?
+            .build()
+            .map_err(|error| Failure::Other(error.to_string()))?;
+        let backend = object_log::ValidatedBackend::new(
+            Arc::new(store),
+            object_store::path::Path::from(settings.prefix),
+        )
+        .await
+        .map_err(failure)?;
+        let log_id = object_log::LogId::new(settings.log_id).map_err(failure)?;
+        let options = object_log::Options {
+            max_object_bytes: 2 * 1024 * 1024,
+            max_collection_objects: usize::try_from(settings.max_collection_objects)
+                .map_err(|_| Failure::Other("invalid collection object limit".into()))?,
+            ..Default::default()
+        };
+        let log = if create {
+            Log::open(&backend, &log_id, options).await
+        } else {
+            Log::open_existing(&backend, &log_id, options).await
+        }
+        .map_err(failure)?;
+        let view = log.load().await.map_err(failure)?;
+        Ok(Session::new(SessionState {
+            log,
+            view: RefCell::new(view),
+            transport,
+        }))
+    })
 }
 
 #[cfg(test)]
-mod credential_tests {
-    use super::*;
-    use object_store::aws::AmazonS3ConfigKey;
-
-    fn settings(session_token: Option<&str>) -> Config {
-        Config {
-            endpoint: "https://s3.us-west-2.amazonaws.com".into(),
-            bucket: "qualification".into(),
-            region: "us-west-2".into(),
-            access_key: "temporary-access-key".into(),
-            secret_key: "temporary-secret-key".into(),
-            session_token: session_token.map(str::to_owned),
-            prefix: "isolated-prefix".into(),
-            log_id: "repo-sha1".into(),
-            max_collection_objects: 100_000,
-        }
-    }
-
-    #[test]
-    fn supplies_temporary_credential_token_to_s3_signing() {
-        let builder = s3_builder(
-            &settings(Some("temporary-session-token")),
-            transport::Transport::default(),
-        );
-        assert_eq!(
-            builder.get_config_value(&AmazonS3ConfigKey::Token),
-            Some("temporary-session-token".into())
-        );
-    }
-
-    #[test]
-    fn leaves_session_token_unset_for_long_lived_credentials() {
-        let builder = s3_builder(&settings(None), transport::Transport::default());
-        assert_eq!(builder.get_config_value(&AmazonS3ConfigKey::Token), None);
-    }
-}
+mod credential_tests;
 export!(Component);
 
 #[cfg(test)]

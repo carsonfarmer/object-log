@@ -7,6 +7,13 @@ license = "Apache-2.0"
 [workspace]
 [lib]
 crate-type = ["cdylib", "rlib"]
+[features]
+test-imds = []
+[[example]]
+name = "credential-client"
+path = "tests/fixtures/credential-client.rs"
+crate-type = ["cdylib"]
+required-features = ["test-imds"]
 [dependencies]
 object-log = { path = "../.." }
 object_store = { version = "=0.14.1", default-features = false, features = ["aws-base"] }
