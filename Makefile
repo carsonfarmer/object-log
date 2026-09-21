@@ -49,5 +49,5 @@ git-spin-config-test: git-build
 	./scripts/test-git-spin-config.sh
 
 git-provider-test:
-	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to your local Spin/MinIO service"; exit 1)
-	cd $(GIT_EXAMPLE_DIR) && go test ./tests -v -timeout 15m
+	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to an isolated Git test service"; exit 1)
+	cd $(GIT_EXAMPLE_DIR) && go test ./tests -count=1 -v -timeout 15m
