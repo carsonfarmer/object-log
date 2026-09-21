@@ -35,7 +35,7 @@ variable "host_artifact_path" {
 variable "host_instance_type" {
   description = "x86_64 EC2 instance type; qualify capacity before choosing workloads."
   type        = string
-  default     = "t3.medium"
+  default     = "t3.xlarge"
 }
 
 variable "host_repositories" {

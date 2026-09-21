@@ -19,6 +19,10 @@ selects a default subnet in the account's default VPC; accounts without one need
 an explicit subnet. The host has an Elastic IP and accepts ports 80/443 only.
 Management uses SSM, with no SSH port or key.
 
+The configurable default is `t3.xlarge` (16 GiB) for the concurrent large-object
+qualification fixtures. This is host sizing for those tests, not an application
+memory limit or a production capacity guarantee.
+
 `host_repositories` provisions canonical names, unique stable WAL IDs, SHA-1 or
 SHA-256 formats, default branches, and independent read/write/admin groups.
 Declare all referenced groups in `host_groups`. Users and membership are managed
@@ -102,6 +106,8 @@ ordinary Basic password. Its fixed `http://localhost:53119` callback matches the
 registered public client; the random loopback-port default is unsuitable.
 Cognito supports PKCE but this client setting does not require it server-side.
 Refresh uses the token endpoint; the issuer/JWKS hostname is a different endpoint.
+For the finite live expiry test, set `host_access_token_minutes = 5` through
+Terraform, then restore its default of 60 minutes after qualification.
 The separate confidential maintenance client has only the client-credentials
 grant and `git/access git/maintenance` scopes. Its tokens authorize administrative
 service actions only, never Git reads or writes.

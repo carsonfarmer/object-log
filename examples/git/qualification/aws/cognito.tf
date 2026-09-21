@@ -1,3 +1,16 @@
+variable "host_access_token_minutes" {
+  description = "Interactive access-token lifetime; use five minutes for the live helper expiry test."
+  type        = number
+  default     = 60
+  validation {
+    condition = (
+      var.host_access_token_minutes >= 5 && var.host_access_token_minutes <= 1440 &&
+      floor(var.host_access_token_minutes) == var.host_access_token_minutes
+    )
+    error_message = "host_access_token_minutes must be an integer from 5 to 1440."
+  }
+}
+
 data "aws_caller_identity" "host" {
   count = var.host_service ? 1 : 0
 }
@@ -46,7 +59,7 @@ resource "aws_cognito_user_pool_client" "git" {
   prevent_user_existence_errors        = "ENABLED"
   enable_token_revocation              = true
   explicit_auth_flows                  = ["ALLOW_REFRESH_TOKEN_AUTH"]
-  access_token_validity                = 60
+  access_token_validity                = var.host_access_token_minutes
   refresh_token_validity               = 30
   token_validity_units {
     access_token  = "minutes"

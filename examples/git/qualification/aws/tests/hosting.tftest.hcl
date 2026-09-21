@@ -32,9 +32,10 @@ run "s3_only" {
 run "host" {
   command = apply
   variables {
-    host_service         = true
-    host_route53_zone_id = "zone-test"
-    host_name            = "git.example.com"
+    host_service              = true
+    host_route53_zone_id      = "zone-test"
+    host_name                 = "git.example.com"
+    host_access_token_minutes = 5
     # Only the file checksum is used by the mocked plan; this is not an app bundle.
     host_artifact_path = "./maintenance.py"
     host_groups        = ["readers", "writers"]
@@ -55,6 +56,7 @@ run "host" {
   assert {
     condition = (
       aws_cognito_user_pool_client.git[0].generate_secret == false &&
+      aws_cognito_user_pool_client.git[0].access_token_validity == 5 &&
       aws_cognito_user_pool_client.git[0].allowed_oauth_flows == toset(["code"]) &&
       aws_cognito_user_pool_client.git[0].callback_urls == toset(["http://localhost:53119"]) &&
       aws_cognito_user_pool_client.maintenance[0].allowed_oauth_flows == toset(["client_credentials"]) &&

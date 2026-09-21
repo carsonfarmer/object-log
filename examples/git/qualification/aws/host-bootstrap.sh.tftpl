@@ -4,7 +4,7 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl gnupg debian-keyring debian-archive-keyring apt-transport-https awscli python3
+apt-get install -y ca-certificates curl gnupg debian-keyring debian-archive-keyring apt-transport-https unzip python3
 curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
 chmod 644 /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
@@ -17,6 +17,10 @@ snap start --enable amazon-ssm-agent
 
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
+# Ubuntu 24.04 has no awscli apt package. The official installer verifies its
+# downloaded CLI package signature before installing it system-wide.
+curl -fsSL https://awscli.amazonaws.com/v2/install.sh -o "$workdir/install-aws.sh"
+bash "$workdir/install-aws.sh" --system
 curl -fsSL --retry 3 https://github.com/spinframework/spin/releases/download/v4.0.2/spin-v4.0.2-linux-amd64.tar.gz -o "$workdir/spin.tar.gz"
 printf '%s  %s\n' 79523cfc93424d555b3493c7ea07e0fb482e1fd9972f29a83bea0ba7d764bf00 "$workdir/spin.tar.gz" | sha256sum --check
 tar -xzf "$workdir/spin.tar.gz" -C "$workdir" spin
@@ -43,7 +47,7 @@ Wants=network-online.target
 User=object-log-git
 Group=object-log-git
 WorkingDirectory=/opt/object-log-git
-ExecStart=/usr/local/bin/spin up --from /opt/object-log-git/spin.toml --listen 127.0.0.1:3000 --variable @/etc/object-log-git/variables.json --state-dir /var/lib/object-log-git --log-dir ""
+ExecStart=/usr/local/bin/spin up --from /opt/object-log-git/spin.toml --listen 127.0.0.1:3000 --variable @/etc/object-log-git/variables.json --state-dir /var/lib/object-log-git --truncate-logs
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -112,5 +116,6 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable --now object-log-git.service
-systemctl reload caddy.service
+systemctl enable caddy.service
+systemctl restart caddy.service
 systemctl enable --now object-log-maintenance.timer
