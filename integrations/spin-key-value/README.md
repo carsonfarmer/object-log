@@ -125,8 +125,12 @@ updates. It is not a durable fallback.
 Each logical store has one conditional-write head. All trees, commits,
 checkpoints, and collection plans use object-log's immutable objects. There is
 no local database, durable queue, owner lease, or second publication authority.
-Every operation reconstructs an exact snapshot from the store. Restart recovery
-needs only S3 and the same configuration.
+Reads reconstruct an exact snapshot from the store. Each configured manager
+shares one disposable write owner per open namespace. The owner collects
+currently queued set/delete calls after one scheduler yield and publishes them
+in order as one WAL batch when they fit. Other managers can write concurrently;
+the conditional head decides which publication wins. Restart recovery needs
+only S3 and the same configuration.
 
 - Get distinguishes absence from an empty value. Deleting an absent key succeeds.
 - Multi-get preserves input order, duplicates, and missing-value positions.
@@ -149,8 +153,11 @@ needs only S3 and the same configuration.
   process loss, or lost response. Guests must reconcile their application state
   instead of blindly repeating an increment. Durable KV data still recovers.
 - Admitted work runs in a Tokio task and keeps its permit after guest cancellation.
-  Process/runtime shutdown can still interrupt it. Overload fails immediately;
-  there is no adapter queue. Hosts own overall admission and graceful shutdown.
+  Set/delete calls enter a bounded per-namespace queue. The manager admission
+  or input allowance rejects overload immediately; work that has waited too long fails before it
+  starts. `Manager::drain(deadline)` stops admission and waits for admitted work;
+  a timeout leaves that work running. Hosts call it before runtime shutdown.
+  An abrupt process loss can still interrupt admitted work.
 
 Optional `[key_value_store.<label>.limits]` fields and defaults:
 
@@ -165,6 +172,9 @@ Optional `[key_value_store.<label>.limits]` fields and defaults:
 | `tree_bytes` | 33,554,432 | KV traversal/staging work per call or scan page |
 | `list_keys` | 4,096 | Complete key listing; overflow is an error |
 | `concurrent_operations` | 16 | Per manager, shared across its open handles |
+| `owner_count` | 128 | Distinct live namespace owners per manager |
+| `owner_input_bytes` | 16,777,216 | Input bytes across admitted set/delete calls |
+| `owner_wait_ms` | 1,000 | Maximum admission-to-start wait for a queued write |
 | `attempts` | 8 | Conflict attempts and exact pending resolutions |
 | `requests` | 100,000 | Cumulative logical WAL client calls per operation |
 | `checkpoint_entries` | 64 | Automatic checkpoint threshold before mutations |
@@ -179,15 +189,26 @@ and `key_bytes + value_bytes`. Existence checks read a value without copying it
 into a returned buffer. These limits are not a whole-process RSS cap: guest
 lifting, caller inputs, WAL decoding, native clients, allocator overhead, and
 concurrency add memory. The embedding also owns guest memory, instance count,
-and Spin resource-table limits; `HostLimits` does not cap open store/CAS handles.
-The request guard excludes backend probing/opening and
-provider-internal retries, listing pagination, and delete batching.
+and Spin resource-table limits. `owner_count` bounds distinct live store names,
+but does not cap handles to one name or CAS handles. The request guard applies
+to a whole grouped publication, including conflict retries. It excludes backend
+probing/opening and provider-internal retries, listing pagination, and delete
+batching.
 
 Optional `[key_value_store.<label>.wal]` fields are the twelve public
 `object_log::Options` fields, with the core defaults. They are durable: all
 openers must agree. The initial format is pre-release; use a fresh prefix after
 an incompatible format change. Host limit changes can make existing data
 unreadable if reduced below its required bounds.
+
+In a 64-write hot-namespace sample on local native MinIO (Apple M4 Pro,
+optimized Rust test build, 64-byte values), eight concurrent clients completed
+about 104 writes/s before grouping and 504–565 writes/s with the owner across
+two runs. The p95 write latency fell from 240 ms to 16–35 ms; logical
+object-store calls fell from 3,524 to 202–231, and HTTP conditional-write
+conflicts from 32 to zero. One client remained near 140 writes/s. Reads retain
+their independent path. The conditions and raw results are recorded in issue
+#57; these numbers do not predict remote S3 throughput.
 
 ## Maintenance and diagnostics
 

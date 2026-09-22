@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 
 use object_log::{
     Options,
-    sim::{Failure, FailurePhase, FaultStore, Operation},
+    sim::{Failure, FailurePhase, FaultStore, Operation, RequestOutcome},
 };
 use object_log_spin_key_value::{HostLimits, Maintenance, Manager};
 use object_store::{ObjectStore, memory::InMemory};
@@ -24,6 +24,18 @@ async fn fixture(limits: HostLimits) -> Result<(Arc<FaultStore>, Manager, Arc<dy
 async fn head_put() -> Result<u64> {
     let (fault, _, store) = fixture(HostLimits::default()).await?;
     store.increment("counter".into(), 1).await?;
+    Ok(fault
+        .metrics()
+        .events
+        .iter()
+        .find(|e| e.operation == Operation::Put && e.path.ends_with("index.cbor"))
+        .unwrap()
+        .occurrence)
+}
+
+async fn set_head_put() -> Result<u64> {
+    let (fault, _, store) = fixture(HostLimits::default()).await?;
+    store.set("first", b"one").await?;
     Ok(fault
         .metrics()
         .events
@@ -127,6 +139,43 @@ async fn definite_conflict_is_retried() -> Result {
 }
 
 #[tokio::test]
+async fn independent_write_owners_are_fenced_by_the_head() -> Result {
+    let occurrence = set_head_put().await?;
+    let fault = Arc::new(FaultStore::new(InMemory::new()));
+    let backend: Arc<dyn ObjectStore> = fault.clone();
+    let limits = HostLimits {
+        attempts: 64,
+        ..HostLimits::default()
+    };
+    let first = Manager::new(backend.clone(), "owner-fence", Options::default(), limits)?;
+    let second = Manager::new(backend, "owner-fence", Options::default(), limits)?;
+    let first = first.get("default").await?;
+    let second = second.get("default").await?;
+    fault.reset();
+
+    let mut paused = fault.pause_put_at(occurrence, FailurePhase::Before);
+    let writer = tokio::spawn(async move { first.set("first", b"one").await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    second.set("second", b"two").await?;
+    assert!(paused.release());
+    writer.await??;
+    assert!(fault.metrics().events.iter().any(|event| {
+        event.operation == Operation::Put
+            && event.path.ends_with("index.cbor")
+            && event.outcome == RequestOutcome::BackendError
+    }));
+    assert_eq!(
+        second.get("first", usize::MAX).await?,
+        Some(b"one".to_vec())
+    );
+    assert_eq!(
+        second.get("second", usize::MAX).await?,
+        Some(b"two".to_vec())
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancellation_keeps_admitted_work_and_permit_until_completion() -> Result {
     let limits = HostLimits {
         concurrent_operations: 1,
@@ -152,6 +201,121 @@ async fn cancellation_keeps_admitted_work_and_permit_until_completion() -> Resul
     })
     .await?;
     assert_eq!(value, Some(b"value".to_vec()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn owner_input_limit_rejects_while_admitted_write_finishes() -> Result {
+    let limits = HostLimits {
+        concurrent_operations: 2,
+        batch_bytes: 4,
+        owner_input_bytes: 4,
+        ..HostLimits::default()
+    };
+    let (fault, _, store) = fixture(limits).await?;
+    let mut paused = fault.pause_next_put(FailurePhase::Before);
+    let writer = store.clone();
+    let task = tokio::spawn(async move { writer.set("aa", b"bb").await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    let error = store.set("cc", b"dd").await.unwrap_err();
+    assert!(error.to_string().contains("owner input limit"));
+    assert!(paused.release());
+    task.await??;
+    assert_eq!(store.get("aa", usize::MAX).await?, Some(b"bb".to_vec()));
+    assert_eq!(store.get("cc", usize::MAX).await?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_write_expires_before_it_starts() -> Result {
+    let limits = HostLimits {
+        concurrent_operations: 2,
+        owner_wait_ms: 20,
+        ..HostLimits::default()
+    };
+    let (fault, _, store) = fixture(limits).await?;
+    let mut paused = fault.pause_next_put(FailurePhase::Before);
+    let first = store.clone();
+    let first = tokio::spawn(async move { first.set("first", b"one").await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    let second = store.clone();
+    let second = tokio::spawn(async move { second.set("second", b"two").await });
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(paused.release());
+    first.await??;
+    assert!(
+        second
+            .await?
+            .unwrap_err()
+            .to_string()
+            .contains("owner wait limit")
+    );
+    assert_eq!(store.get("first", usize::MAX).await?, Some(b"one".to_vec()));
+    assert_eq!(store.get("second", usize::MAX).await?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn drain_waits_for_admitted_publication_and_closes_manager() -> Result {
+    let (fault, host, store) = fixture(HostLimits::default()).await?;
+    let mut paused = fault.pause_next_put(FailurePhase::Before);
+    let writer = store.clone();
+    let task = tokio::spawn(async move { writer.set("key", b"value").await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    assert!(!host.drain(Duration::from_millis(10)).await);
+    assert!(store.get("key", usize::MAX).await.is_err());
+    assert!(paused.release());
+    task.await??;
+    assert!(host.drain(Duration::from_secs(5)).await);
+    assert!(host.drain(Duration::from_secs(5)).await);
+    assert!(host.get("default").await.is_err());
+    let reopened = Manager::new(fault, "faults", Options::default(), HostLimits::default())?;
+    assert_eq!(
+        reopened
+            .get("default")
+            .await?
+            .get("key", usize::MAX)
+            .await?,
+        Some(b"value".to_vec())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn canceled_caller_keeps_owner_slot_until_publication_finishes() -> Result {
+    let limits = HostLimits {
+        owner_count: 1,
+        ..HostLimits::default()
+    };
+    let (fault, host, store) = fixture(limits).await?;
+    let mut paused = fault.pause_next_put(FailurePhase::Before);
+    let writer = store.clone();
+    let task = tokio::spawn(async move { writer.set("key", b"value").await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(store);
+    assert!(host.get("other").await.is_err());
+    assert!(paused.release());
+    let other = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match host.get("other").await {
+                Ok(store) => break store,
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await?;
+    other.set("separate", b"value").await?;
+    let reopened = Manager::new(fault, "faults", Options::default(), limits)?;
+    assert_eq!(
+        reopened
+            .get("default")
+            .await?
+            .get("key", usize::MAX)
+            .await?,
+        Some(b"value".to_vec())
+    );
     Ok(())
 }
 

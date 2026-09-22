@@ -1,4 +1,13 @@
-use std::{any::Any, env, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    collections::HashMap,
+    env,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, ensure};
 use object_log::{Log, LogId, Options, ValidatedBackend};
@@ -12,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use spin_factor_key_value::{Error, Store, StoreManager, runtime_config::spin::MakeKeyValueStore};
 use tokio::sync::{OnceCell, Semaphore};
 
-use crate::store::{BackendStore, Maintenance, public_error};
+use crate::store::{BackendStore, Maintenance, Owner, public_error};
 
 /// A registered runtime-config provider (`type = "object-log"`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -66,6 +75,12 @@ pub struct HostLimits {
     pub list_keys: usize,
     /// Maximum concurrent operations per configured manager; no waiting queue.
     pub concurrent_operations: usize,
+    /// Maximum live process-local namespace owners.
+    pub owner_count: usize,
+    /// Maximum input bytes admitted to all owners at once.
+    pub owner_input_bytes: usize,
+    /// Maximum time a write may wait before its owner begins it.
+    pub owner_wait_ms: u64,
     /// Maximum definite-conflict attempts per mutation.
     pub attempts: usize,
     /// Maximum logical object-store invocations, including adapter retries.
@@ -89,6 +104,9 @@ impl Default for HostLimits {
             tree_bytes: 32 * 1024 * 1024,
             list_keys: 4096,
             concurrent_operations: 16,
+            owner_count: 128,
+            owner_input_bytes: 16 * 1024 * 1024,
+            owner_wait_ms: 1_000,
             attempts: 8,
             requests: 100_000,
             checkpoint_entries: 64,
@@ -112,9 +130,17 @@ impl HostLimits {
 
     fn validate(self, wal: Options) -> anyhow::Result<()> {
         ensure!(
-            self.concurrent_operations > 0 && self.concurrent_operations <= Semaphore::MAX_PERMITS,
+            self.concurrent_operations > 0
+                && self.concurrent_operations <= Semaphore::MAX_PERMITS
+                && self.concurrent_operations <= u32::MAX as usize,
             "invalid concurrent_operations"
         );
+        ensure!(self.owner_count > 0, "owner_count must be positive");
+        ensure!(
+            self.owner_input_bytes >= self.batch_bytes,
+            "owner_input_bytes must admit one batch"
+        );
+        ensure!(self.owner_wait_ms > 0, "owner_wait_ms must be positive");
         ensure!(
             self.attempts > 0 && self.requests > 0,
             "attempts and requests must be positive"
@@ -276,6 +302,9 @@ pub struct Manager {
     wal: Options,
     limits: HostLimits,
     admission: Arc<Semaphore>,
+    owners: Arc<Mutex<HashMap<String, Weak<Owner>>>>,
+    owner_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    closing: Arc<AtomicBool>,
 }
 
 impl Manager {
@@ -300,10 +329,16 @@ impl Manager {
             wal,
             limits,
             admission: Arc::new(Semaphore::new(limits.concurrent_operations)),
+            owners: Arc::new(Mutex::new(HashMap::new())),
+            owner_bytes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            closing: Arc::new(AtomicBool::new(false)),
         })
     }
 
     async fn open(&self, name: &str) -> Result<BackendStore, Error> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Error::Other("object-log manager is draining".into()));
+        }
         if name.is_empty() || name.len() > 256 {
             return Err(Error::NoSuchStore);
         }
@@ -311,6 +346,9 @@ impl Manager {
             .admission
             .try_acquire()
             .map_err(|_| Error::Other("object-log busy: concurrent operation limit".into()))?;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Error::Other("object-log manager is draining".into()));
+        }
         let backend = self
             .backend
             .get_or_try_init(|| async {
@@ -324,11 +362,45 @@ impl Manager {
         let log = Log::open(backend, &id, self.wal)
             .await
             .map_err(public_error)?;
+        let mut owners = self.owners.lock().map_err(public_error)?;
+        owners.retain(|_, owner| owner.strong_count() > 0);
+        let owner = if let Some(owner) = owners.get(name).and_then(Weak::upgrade) {
+            owner
+        } else {
+            if owners.len() >= self.limits.owner_count {
+                return Err(Error::Other("object-log busy: owner limit".into()));
+            }
+            let owner = Owner::spawn(KvStore::new(log.clone(), self.limits.kv()), self.limits);
+            owners.insert(name.to_owned(), Arc::downgrade(&owner));
+            owner
+        };
         Ok(BackendStore {
             kv: KvStore::new(log, self.limits.kv()),
             limits: self.limits,
             admission: self.admission.clone(),
+            owner,
+            owner_bytes: self.owner_bytes.clone(),
+            closing: self.closing.clone(),
         })
+    }
+
+    /// Stop accepting operations and wait for admitted work to finish.
+    /// Returns `false` if the deadline elapsed; admitted work continues.
+    pub async fn drain(&self, deadline: Duration) -> bool {
+        self.closing.store(true, Ordering::Release);
+        match tokio::time::timeout(
+            deadline,
+            self.admission
+                .acquire_many(self.limits.concurrent_operations as u32),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => {
+                drop(permit);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Perform one bounded checkpoint/collection pass from the host.

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use object_log::{Log, LogId, Options, RetentionId, RetentionStatus, ValidatedBackend};
 use object_log_spin_key_value::{Config, HostLimits, Maintenance, Manager, ObjectLogKeyValueStore};
@@ -270,6 +270,54 @@ async fn independent_writers_retry_conflicts_and_checkpoint() -> Result {
             .await?,
         Some(48i64.to_le_bytes().to_vec())
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_sets_share_one_bounded_owner_and_recover() -> Result {
+    let limits = HostLimits {
+        owner_count: 1,
+        ..HostLimits::default()
+    };
+    let host = manager(Arc::new(InMemory::new()), "grouped", limits)?;
+    let stores = [host.get("default").await?, host.get("default").await?];
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut tasks = Vec::new();
+    for index in 0..8 {
+        let store = stores[index % 2].clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            store.set(&format!("key-{index}"), &[index as u8]).await
+        }));
+    }
+    barrier.wait().await;
+    for task in tasks {
+        task.await??;
+    }
+    for index in 0..8 {
+        assert_eq!(
+            stores[0].get(&format!("key-{index}"), usize::MAX).await?,
+            Some(vec![index as u8])
+        );
+    }
+    assert!(host.drain(Duration::from_secs(1)).await);
+    assert!(host.get("default").await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn owner_count_is_bounded_and_released_with_handles() -> Result {
+    let limits = HostLimits {
+        owner_count: 1,
+        ..HostLimits::default()
+    };
+    let host = manager(Arc::new(InMemory::new()), "owner-count", limits)?;
+    let first = host.get("first").await?;
+    assert!(host.get("second").await.is_err());
+    drop(first);
+    let second = host.get("second").await?;
+    second.set("key", b"value").await?;
     Ok(())
 }
 

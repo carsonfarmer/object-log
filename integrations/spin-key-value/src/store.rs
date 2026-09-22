@@ -2,19 +2,19 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use object_log::{
     CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus,
-    Request, RequestDenied, RequestGuard, Resolution, TransactionId,
+    PreparedCommit, Request, RequestDenied, RequestGuard, Resolution, TransactionId,
 };
 use object_log_kv::{KvCommand, KvSnapshot, KvStore};
 use spin_factor_key_value::{Cas, Error, Store, SwapError, v3};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tracing::Instrument;
 
 use crate::HostLimits;
@@ -24,6 +24,244 @@ pub(crate) struct BackendStore {
     pub kv: KvStore,
     pub limits: HostLimits,
     pub admission: Arc<Semaphore>,
+    pub owner: Arc<Owner>,
+    pub owner_bytes: Arc<AtomicUsize>,
+    pub closing: Arc<AtomicBool>,
+}
+
+pub(crate) struct Owner {
+    sender: mpsc::Sender<WriteJob>,
+}
+
+struct WriteJob {
+    commands: Vec<KvCommand>,
+    input: InputCharge,
+    admitted: Instant,
+    done: oneshot::Sender<Result<(), Error>>,
+}
+
+struct InputCharge {
+    bytes: usize,
+    total: Arc<AtomicUsize>,
+}
+
+impl Drop for InputCharge {
+    fn drop(&mut self) {
+        self.total.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+struct Writer {
+    kv: KvStore,
+    limits: HostLimits,
+}
+
+enum GroupFailure {
+    BeforePublication,
+    Other(Error),
+}
+
+impl Owner {
+    pub(crate) fn spawn(kv: KvStore, limits: HostLimits) -> Arc<Self> {
+        let (sender, mut receiver) = mpsc::channel(limits.concurrent_operations);
+        tokio::spawn(async move {
+            let mut next: Option<WriteJob> = None;
+            loop {
+                let first = match next.take() {
+                    Some(job) => job,
+                    None => match receiver.recv().await {
+                        Some(job) => job,
+                        None => return,
+                    },
+                };
+                let mut count = first.commands.len();
+                let mut bytes = first.input.bytes;
+                let mut jobs = vec![first];
+                if count < limits.batch_entries && bytes < limits.batch_bytes {
+                    tokio::task::yield_now().await;
+                }
+                while let Ok(job) = receiver.try_recv() {
+                    if count
+                        .checked_add(job.commands.len())
+                        .is_some_and(|next| next <= limits.batch_entries)
+                        && bytes.saturating_add(job.input.bytes) <= limits.batch_bytes
+                    {
+                        count += job.commands.len();
+                        bytes += job.input.bytes;
+                        jobs.push(job);
+                    } else {
+                        next = Some(job);
+                        break;
+                    }
+                }
+                let jobs = jobs
+                    .into_iter()
+                    .filter_map(|job| {
+                        if job.admitted.elapsed() >= Duration::from_millis(limits.owner_wait_ms) {
+                            let _ = job
+                                .done
+                                .send(Err(other("object-log busy: owner wait limit")));
+                            None
+                        } else {
+                            Some(job)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !jobs.is_empty() {
+                    Self::publish_group(&kv, limits, jobs).await;
+                }
+            }
+        });
+        Arc::new(Self { sender })
+    }
+
+    async fn publish_group(kv: &KvStore, limits: HostLimits, jobs: Vec<WriteJob>) {
+        if jobs.len() == 1 {
+            let writer = Writer::new(kv.clone(), limits);
+            let result = writer.write(&jobs[0].commands).await;
+            if let Some(job) = jobs.into_iter().next() {
+                let _ = job.done.send(result);
+            }
+            return;
+        }
+        let commands = jobs
+            .iter()
+            .flat_map(|job| job.commands.iter().cloned())
+            .collect::<Vec<_>>();
+        let writer = Writer::new(kv.clone(), limits);
+        match writer.write_group(&commands).await {
+            Ok(()) => {
+                for job in jobs {
+                    let _ = job.done.send(Ok(()));
+                }
+            }
+            Err(GroupFailure::BeforePublication) => {
+                for job in jobs {
+                    let writer = Writer::new(kv.clone(), limits);
+                    let result = writer.write(&job.commands).await;
+                    let _ = job.done.send(result);
+                }
+            }
+            Err(GroupFailure::Other(error)) => {
+                let message = error.to_string();
+                for job in jobs {
+                    let _ = job.done.send(Err(other(&message)));
+                }
+            }
+        }
+    }
+
+    async fn write(
+        &self,
+        commands: Vec<KvCommand>,
+        input: InputCharge,
+        admitted: Instant,
+    ) -> Result<(), Error> {
+        let (done, result) = oneshot::channel();
+        self.sender
+            .try_send(WriteJob {
+                commands,
+                input,
+                admitted,
+                done,
+            })
+            .map_err(|_| other("object-log owner unavailable"))?;
+        result.await.map_err(|_| unknown())?
+    }
+}
+
+impl Writer {
+    fn new(kv: KvStore, limits: HostLimits) -> Self {
+        let log = kv
+            .log()
+            .with_request_guard(Arc::new(Requests(AtomicUsize::new(limits.requests))));
+        Self {
+            kv: KvStore::new(log, limits.kv()),
+            limits,
+        }
+    }
+
+    async fn snapshot(&self) -> Result<KvSnapshot, Error> {
+        self.kv.snapshot().await.map_err(public_error)
+    }
+
+    async fn write_snapshot(&self) -> Result<KvSnapshot, Error> {
+        let snapshot = self.snapshot().await?;
+        if snapshot.view().tail().len() >= self.limits.checkpoint_entries {
+            BackendStore::checkpoint(&snapshot, &self.kv).await?;
+            self.snapshot().await
+        } else {
+            Ok(snapshot)
+        }
+    }
+
+    async fn publish(&self, snapshot: &KvSnapshot, commands: &[KvCommand]) -> Result<bool, Error> {
+        let candidate = snapshot
+            .prepare(TransactionId::new(), commands)
+            .await
+            .map_err(public_error)?;
+        self.commit(candidate).await
+    }
+
+    async fn commit(&self, candidate: PreparedCommit) -> Result<bool, Error> {
+        match self
+            .kv
+            .log()
+            .commit(candidate)
+            .await
+            .map_err(public_error)?
+        {
+            CommitStatus::Committed(_) => Ok(true),
+            CommitStatus::Conflict(_) => Ok(false),
+            CommitStatus::Pending(mut pending) => {
+                for _ in 0..self.limits.attempts {
+                    match self.kv.log().resolve(pending).await.map_err(|error| {
+                        tracing::warn!(error = %error, "object-log pending resolution failed");
+                        unknown()
+                    })? {
+                        Resolution::Committed(_) => return Ok(true),
+                        Resolution::NotCommitted(_) => return Ok(false),
+                        Resolution::StillPending(next) => pending = next,
+                        Resolution::Expired(_) => return Err(unknown()),
+                    }
+                }
+                Err(unknown())
+            }
+        }
+    }
+
+    async fn write(&self, commands: &[KvCommand]) -> Result<(), Error> {
+        for attempt in 0..self.limits.attempts {
+            let snapshot = self.write_snapshot().await?;
+            if self.publish(&snapshot, commands).await? {
+                return Ok(());
+            }
+            if attempt + 1 < self.limits.attempts {
+                back_off(attempt).await;
+            }
+        }
+        Err(other("object-log contention limit"))
+    }
+
+    async fn write_group(&self, commands: &[KvCommand]) -> Result<(), GroupFailure> {
+        for attempt in 0..self.limits.attempts {
+            let snapshot = self.write_snapshot().await.map_err(GroupFailure::Other)?;
+            let candidate = match snapshot.prepare(TransactionId::new(), commands).await {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    tracing::warn!(error = %error, "group preparation failed");
+                    return Err(GroupFailure::BeforePublication);
+                }
+            };
+            if self.commit(candidate).await.map_err(GroupFailure::Other)? {
+                return Ok(());
+            }
+            if attempt + 1 < self.limits.attempts {
+                back_off(attempt).await;
+            }
+        }
+        Err(GroupFailure::Other(other("object-log contention limit")))
+    }
 }
 
 /// Outcome of one host-only maintenance pass. `More` may require another pass.
@@ -69,19 +307,24 @@ impl RequestGuard for Requests {
 }
 
 impl BackendStore {
-    // No queued operations, and the permit remains owned by admitted work even
-    // when a guest disconnects. JoinHandle drop detaches rather than cancels it.
+    // The permit remains owned by admitted work after guest cancellation.
     async fn run<T, F, Fut>(&self, work: F) -> Result<T, Error>
     where
         T: Send + 'static,
         F: FnOnce(Self) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, Error>> + Send + 'static,
     {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(other("object-log manager is draining"));
+        }
         let permit = self
             .admission
             .clone()
             .try_acquire_owned()
             .map_err(|_| other("object-log busy: concurrent operation limit"))?;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(other("object-log manager is draining"));
+        }
         let log = self
             .kv
             .log()
@@ -163,63 +406,52 @@ impl BackendStore {
     }
 
     async fn write_snapshot(&self) -> Result<KvSnapshot, Error> {
-        let snapshot = self.snapshot().await?;
-        if snapshot.view().tail().len() >= self.limits.checkpoint_entries {
-            Self::checkpoint(&snapshot, &self.kv).await?;
-            self.snapshot().await
-        } else {
-            Ok(snapshot)
+        Writer {
+            kv: self.kv.clone(),
+            limits: self.limits,
         }
+        .write_snapshot()
+        .await
     }
 
     // Only a definite rejection allows revalidation/re-preparation. Pending work
     // retains its exact candidate and is resolved a bounded number of times.
     async fn publish(&self, snapshot: &KvSnapshot, commands: &[KvCommand]) -> Result<bool, Error> {
-        let candidate = snapshot
-            .prepare(TransactionId::new(), commands)
-            .await
-            .map_err(public_error)?;
-        match self
-            .kv
-            .log()
-            .commit(candidate)
-            .await
-            .map_err(public_error)?
-        {
-            CommitStatus::Committed(_) => Ok(true),
-            CommitStatus::Conflict(_) => Ok(false),
-            CommitStatus::Pending(mut pending) => {
-                for _ in 0..self.limits.attempts {
-                    match self.kv.log().resolve(pending).await.map_err(|error| {
-                        tracing::warn!(error = %error, "object-log pending resolution failed");
-                        unknown()
-                    })? {
-                        Resolution::Committed(_) => return Ok(true),
-                        Resolution::NotCommitted(_) => return Ok(false),
-                        Resolution::StillPending(next) => pending = next,
-                        Resolution::Expired(_) => return Err(unknown()),
-                    }
-                }
-                Err(unknown())
-            }
+        Writer {
+            kv: self.kv.clone(),
+            limits: self.limits,
         }
+        .publish(snapshot, commands)
+        .await
     }
 
     async fn write(&self, commands: Vec<KvCommand>) -> Result<(), Error> {
         if commands.is_empty() {
-            return Ok(());
+            return if self.closing.load(Ordering::Acquire) {
+                Err(other("object-log manager is draining"))
+            } else {
+                Ok(())
+            };
         }
+        let admitted = Instant::now();
         self.run(move |store| async move {
-            for attempt in 0..store.limits.attempts {
-                let snapshot = store.write_snapshot().await?;
-                if store.publish(&snapshot, &commands).await? {
-                    return Ok(());
-                }
-                if attempt + 1 < store.limits.attempts {
-                    back_off(attempt).await;
-                }
-            }
-            Err(other("object-log contention limit"))
+            let bytes = commands.iter().fold(0usize, |total, command| {
+                total.saturating_add(match command {
+                    KvCommand::Set { key, value } => key.len().saturating_add(value.len()),
+                    KvCommand::Delete { key } => key.len(),
+                    _ => 0,
+                })
+            });
+            let total = store.owner_bytes.clone();
+            total
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(bytes)
+                        .filter(|n| *n <= store.limits.owner_input_bytes)
+                })
+                .map_err(|_| other("object-log busy: owner input limit"))?;
+            let input = InputCharge { bytes, total };
+            store.owner.write(commands, input, admitted).await
         })
         .await
     }
@@ -580,5 +812,68 @@ impl Cas for CompareSwap {
     }
     async fn key(&self) -> String {
         String::from_utf8_lossy(&self.key).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_log::{
+        Log, LogId, Options, ValidatedBackend,
+        sim::{Failure, FailurePhase, FaultStore, Operation},
+    };
+    use object_store::{ObjectStore, memory::InMemory, path::Path};
+
+    #[tokio::test]
+    async fn prepublication_failure_isolated_to_original_call()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = Arc::new(FaultStore::new(InMemory::new()));
+        let backend = ValidatedBackend::new(
+            faults.clone() as Arc<dyn ObjectStore>,
+            Path::from("group-fault"),
+        )
+        .await?;
+        let log = Log::open(&backend, &LogId::new("store")?, Options::default()).await?;
+        let kv = KvStore::new(log, HostLimits::default().kv());
+        faults.reset();
+        // The group fails before publication; its first original call then
+        // fails independently, leaving the second original call free to commit.
+        for occurrence in [1, 2] {
+            faults.schedule(Failure {
+                operation: Operation::Put,
+                occurrence,
+                phase: FailurePhase::Before,
+            });
+        }
+        let total = Arc::new(AtomicUsize::new(4));
+        let (first_done, first) = oneshot::channel();
+        let (second_done, second) = oneshot::channel();
+        let job = |key: &'static [u8], value: &'static [u8], done| WriteJob {
+            commands: vec![KvCommand::Set {
+                key: Bytes::from_static(key),
+                value: Bytes::from_static(value),
+            }],
+            input: InputCharge {
+                bytes: 2,
+                total: total.clone(),
+            },
+            admitted: Instant::now(),
+            done,
+        };
+        Owner::publish_group(
+            &kv,
+            HostLimits::default(),
+            vec![job(b"a", b"1", first_done), job(b"b", b"2", second_done)],
+        )
+        .await;
+        assert!(first.await?.is_err());
+        assert!(second.await?.is_ok());
+        assert_eq!(kv.snapshot().await?.get(b"a").await?, None);
+        assert_eq!(
+            kv.snapshot().await?.get(b"b").await?,
+            Some(Bytes::from_static(b"2"))
+        );
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        Ok(())
     }
 }
