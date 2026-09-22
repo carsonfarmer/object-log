@@ -133,7 +133,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="object-log-imds-") as directory:
             directory = pathlib.Path(directory)
             subprocess.run([
-                "wac", "plug", "--plug", str(artifacts / "wal_component_probe.wasm"),
+                "wac", "plug", "--plug", str(artifacts / "object_log_component.wasm"),
                 str(artifacts / "examples" / "credential_client.wasm"), "-o", str(directory / "probe.wasm"),
             ], check=True)
             (directory / "spin.toml").write_text('''spin_manifest_version = 2

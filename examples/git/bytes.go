@@ -18,7 +18,7 @@ func (s *store) newByteWriter() (*byteWriter, error) {
 	if err := s.ctx.Err(); err != nil {
 		return nil, err
 	}
-	value, err := unwrap(s.session.WriteBytes)
+	value, err := unwrap(s.recovery.WriteBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func (s *store) openBytes(root *wal.Object) (*byteReader, error) {
 		observeRead(&s.failure, err)
 		return nil, err
 	}
-	reader, err := unwrap(func() wt.Result[*wal.ByteReader, wal.Failure] { return s.session.OpenBytes(root) })
+	reader, err := unwrap(func() wt.Result[*wal.ByteReader, wal.Failure] { return s.recovery.OpenBytes(root) })
 	observeRead(&s.failure, err)
 	if err != nil {
 		return nil, err

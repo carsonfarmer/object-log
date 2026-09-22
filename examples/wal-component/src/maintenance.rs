@@ -1,42 +1,21 @@
 use super::{CollectionResult, Failure, MaintenanceState, SessionState, failure};
 use object_log::{
-    CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionReport, CollectionStart,
-    StagedObject,
+    CheckpointStatus, CollectionFinish, CollectionReport, CollectionStart, Log, StagedObject, View,
 };
 
 pub(super) async fn checkpoint(
-    session: &SessionState,
+    log: &Log,
+    view: &View,
     data: Vec<u8>,
     roots: Vec<StagedObject>,
-) -> Result<MaintenanceState, Failure> {
-    let view = session.current_view();
+) -> Result<CheckpointStatus, Failure> {
     let through = view
         .tail()
         .last()
         .ok_or_else(|| Failure::Other("checkpoint requires an active tail".into()))?;
-    match session
-        .log
-        .publish_checkpoint(&view, through, data.into(), roots)
+    log.publish_checkpoint(view, through, data.into(), roots)
         .await
-        .map_err(failure)?
-    {
-        CheckpointStatus::Published(_) => Ok(MaintenanceState::Complete),
-        CheckpointStatus::Conflict(_) => Ok(MaintenanceState::Conflict),
-        CheckpointStatus::Pending(pending) => {
-            match session
-                .log
-                .resolve_checkpoint(pending)
-                .await
-                .map_err(failure)?
-            {
-                CheckpointResolution::Published(_) => Ok(MaintenanceState::Complete),
-                CheckpointResolution::NotPublished(_) => Ok(MaintenanceState::Conflict),
-                CheckpointResolution::StillPending(_) | CheckpointResolution::Expired(_) => {
-                    Ok(MaintenanceState::Pending)
-                }
-            }
-        }
-    }
+        .map_err(failure)
 }
 
 // One durable deletion plan per call; a later call resumes an interrupted plan.

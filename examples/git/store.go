@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ type store struct {
 	failure     error
 	tailEntries uint64
 	session     *wal.Session
+	recovery    *wal.Recovery
 	stateRoot   *wal.Object
 	meta        rootMeta
 	buckets     map[string]*wal.Object
@@ -56,18 +58,16 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 		}
 	}()
 	s.meta = rootMeta{Format: format, Refs: map[string]string{}}
-	recovered, e := unwrap(session.LatestCompleteState)
+	recovery, e := unwrap(session.Recover)
 	if e != nil {
 		return nil, e
 	}
-	s.tailEntries = recovered.TailEntries
-	if recovered.Latest.IsSome() {
-		last := recovered.Latest.Some()
-		s.owned = append(s.owned, last.Objects...)
-		if len(last.Objects) != 1 {
-			return nil, fmt.Errorf("invalid root record")
-		}
-		s.stateRoot = last.Objects[0]
+	s.recovery = recovery
+	s.stateRoot, s.tailEntries, e = s.acceptRecovery(recovery)
+	if e != nil {
+		return nil, e
+	}
+	if s.stateRoot != nil {
 		root, e := s.readNode(s.stateRoot)
 		if e != nil {
 			return nil, e
@@ -87,7 +87,7 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 	head := s.meta.Head
 	if head == "" {
 		branch := "main"
-		if configured := repository.DefaultBranch; !recovered.Latest.IsSome() && configured != "" {
+		if configured := repository.DefaultBranch; s.stateRoot == nil && configured != "" {
 			branch = configured
 		}
 		head = "refs/heads/" + branch
@@ -397,7 +397,13 @@ func (s *store) publishRoot(root *wal.Object) (wal.Outcome, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.Outcome{}, err
 	}
-	candidate, e := unwrap(func() wt.Result[*wal.Candidate, wal.Failure] { return s.session.Prepare(nil, []*wal.Object{root}) })
+	transactionID := make([]byte, 16)
+	if _, e := rand.Read(transactionID); e != nil {
+		return wal.Outcome{}, e
+	}
+	candidate, e := unwrap(func() wt.Result[*wal.Candidate, wal.Failure] {
+		return s.recovery.Prepare(transactionID, nil, nil, []*wal.Object{root})
+	})
 	if e != nil {
 		return wal.Outcome{}, e
 	}
@@ -406,6 +412,49 @@ func (s *store) publishRoot(root *wal.Object) (wal.Outcome, error) {
 		return wal.Outcome{}, e
 	}
 	return unwrap(candidate.Publish)
+}
+
+func (s *store) acceptRecovery(recovery *wal.Recovery) (*wal.Object, uint64, error) {
+	var latest []*wal.Object
+	var tail uint64
+	for {
+		item, err := unwrap(recovery.Next)
+		if err != nil {
+			dropObjects(latest)
+			return nil, 0, err
+		}
+		if item.IsNone() {
+			break
+		}
+		var objects []*wal.Object
+		switch value := item.Some(); value.Tag() {
+		case wal.HistoryItemCheckpoint:
+			objects = value.Checkpoint().Objects
+		case wal.HistoryItemCommit:
+			objects = value.Commit().Objects
+			tail++
+		default:
+			dropObjects(latest)
+			return nil, 0, fmt.Errorf("unknown history item %d", value.Tag())
+		}
+		dropObjects(latest)
+		latest = objects
+	}
+	if latest == nil {
+		return nil, tail, nil
+	}
+	if len(latest) != 1 {
+		dropObjects(latest)
+		return nil, 0, fmt.Errorf("invalid root record")
+	}
+	s.owned = append(s.owned, latest[0])
+	return latest[0], tail, nil
+}
+
+func dropObjects(objects []*wal.Object) {
+	for _, object := range objects {
+		object.Drop()
+	}
 }
 
 func (s *store) stageRoot(refs map[string]string) (*wal.Object, error) {
@@ -433,13 +482,17 @@ func (s *store) Close() {
 		o.Drop()
 	}
 	s.owned = nil
+	if s.recovery != nil {
+		s.recovery.Drop()
+		s.recovery = nil
+	}
 }
 func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
 	if err := s.ctx.Err(); err != nil {
 		observeRead(&s.failure, err)
 		return wal.Entry{}, err
 	}
-	entry, e := unwrap(func() wt.Result[wal.Entry, wal.Failure] { return s.session.ReadNode(root) })
+	entry, e := unwrap(func() wt.Result[wal.Entry, wal.Failure] { return s.recovery.ReadNode(root) })
 	observeRead(&s.failure, e)
 	if e == nil {
 		s.owned = append(s.owned, entry.Objects...)
@@ -450,7 +503,7 @@ func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
 	if err := s.ctx.Err(); err != nil {
 		return nil, err
 	}
-	o, e := unwrap(func() wt.Result[*wal.Object, wal.Failure] { return s.session.PutNode(b, children) })
+	o, e := unwrap(func() wt.Result[*wal.Object, wal.Failure] { return s.recovery.PutNode(b, children) })
 	if e == nil {
 		s.owned = append(s.owned, o)
 	}

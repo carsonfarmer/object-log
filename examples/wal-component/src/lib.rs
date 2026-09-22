@@ -1,10 +1,12 @@
-//! Feasibility binding of the existing WAL; no Git rules or new authority.
+//! Reusable WASIp2 binding for object-log with S3 transport.
 use bytes::Bytes;
 use exports::object_log::storage::wal::*;
 use object_log::{
-    CommitStatus, Log, Materializer, RetentionId, RetentionStatus, StagedObject, View,
+    CheckpointResolution as LogCheckpointResolution, CheckpointStatus, CommitStatus,
+    HistoryItem as LogHistoryItem, Log, PendingCheckpoint as LogPendingCheckpoint,
+    Resolution as LogResolution, RetentionId, RetentionStatus, StagedObject, TransactionId, View,
 };
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::sync::Arc;
 mod maintenance;
 mod transport;
@@ -18,7 +20,15 @@ struct SessionState {
 }
 struct CandidateState {
     log: Log,
-    prepared: object_log::PreparedCommit,
+    prepared: RefCell<Option<object_log::PreparedCommit>>,
+}
+struct RecoveryState {
+    log: Log,
+    cursor: RefCell<object_log::HistoryCursor>,
+}
+struct PendingCheckpointState {
+    log: Log,
+    pending: RefCell<Option<LogPendingCheckpoint>>,
 }
 impl SessionState {
     fn current_view(&self) -> View {
@@ -116,12 +126,6 @@ fn failure(error: object_log::Error) -> Failure {
         error => Failure::Other(error.to_string()),
     }
 }
-fn entry((data, objects): (Bytes, Vec<StagedObject>)) -> Entry {
-    Entry {
-        data: data.into(),
-        objects: objects.into_iter().map(Object::new).collect(),
-    }
-}
 fn proofs(objects: &[ObjectBorrow<'_>]) -> Vec<StagedObject> {
     objects
         .iter()
@@ -133,27 +137,7 @@ fn retention_id(value: Vec<u8>) -> Result<RetentionId, Failure> {
         .map(RetentionId::from_uuid)
         .map_err(|_| Failure::Other("retention ID must contain 16 bytes".into()))
 }
-// Each record represents a complete state. Delta consumers must fold differently.
-struct LatestCompleteState;
-impl Materializer for LatestCompleteState {
-    type State = Option<(Bytes, Vec<StagedObject>)>;
-    type Error = std::convert::Infallible;
-    fn empty(&self) -> Self::State {
-        None
-    }
-    fn restore(&self, data: &[u8], objects: &[StagedObject]) -> Result<Self::State, Self::Error> {
-        Ok(Some((Bytes::copy_from_slice(data), objects.to_vec())))
-    }
-    fn apply(
-        &self,
-        state: &mut Self::State,
-        data: &[u8],
-        objects: &[StagedObject],
-    ) -> Result<(), Self::Error> {
-        *state = self.restore(data, objects)?;
-        Ok(())
-    }
-}
+
 struct WriterState(RefCell<Option<object_log::ByteWriter>>);
 struct ReaderState(RefCell<object_log::ByteReader>);
 impl GuestByteWriter for WriterState {
@@ -208,27 +192,6 @@ impl GuestSession for SessionState {
             spin_executor::run(self.log.clear_retentions_after_drain(&view)).map_err(failure)?;
         Ok(self.accept_retention(status))
     }
-    fn write_bytes(&self) -> Result<ByteWriter, Failure> {
-        let view = self.view.borrow();
-        self.log
-            .byte_writer(&view)
-            .map(|writer| ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
-            .map_err(failure)
-    }
-    fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
-        let value = value.get::<StagedObject>();
-        let view = self.view.borrow().clone();
-        spin_executor::run(self.log.open_bytes(&view, value.reference()))
-            .map(|reader| ByteReader::new(ReaderState(RefCell::new(reader))))
-            .map_err(failure)
-    }
-    fn checkpoint(
-        &self,
-        data: Vec<u8>,
-        roots: Vec<ObjectBorrow<'_>>,
-    ) -> Result<MaintenanceState, Failure> {
-        spin_executor::run(maintenance::checkpoint(self, data, proofs(&roots)))
-    }
     fn collect(&self, max_candidates: u64) -> Result<CollectionResult, Failure> {
         let max_candidates = usize::try_from(max_candidates)
             .map_err(|_| Failure::Limit("collection candidate objects".into()))?;
@@ -247,58 +210,212 @@ impl GuestSession for SessionState {
         }))
     }
 
-    fn latest_complete_state(&self) -> Result<RecoveredState, Failure> {
+    fn recover(&self) -> Result<Recovery, Failure> {
         let view = self.current_view();
-        spin_executor::run(async {
-            object_log::materialize(&self.log, view, &LatestCompleteState)
-                .await
-                .map(|value| RecoveredState {
-                    tail_entries: value.view().tail().len() as u64,
-                    latest: value.into_parts().1.map(entry),
+        object_log::history(&self.log, view)
+            .map(|cursor| {
+                Recovery::new(RecoveryState {
+                    log: self.log.clone(),
+                    cursor: RefCell::new(cursor),
                 })
-                .map_err(|error| match error {
-                    object_log::MaterializeError::Log(error) => failure(error),
-                    object_log::MaterializeError::State(never) => match never {},
-                })
-        })
+            })
+            .map_err(failure)
     }
+
+    fn resume(&self, token: Vec<u8>) -> Result<Resolution, Failure> {
+        match spin_executor::run(self.log.resume(&token)).map_err(failure)? {
+            LogResolution::Committed(view) => {
+                self.view.replace(view);
+                Ok(Resolution::Committed)
+            }
+            LogResolution::NotCommitted(view) => {
+                self.view.replace(view);
+                Ok(Resolution::NotCommitted)
+            }
+            LogResolution::StillPending(pending) => Ok(Resolution::StillPending(
+                pending.recovery_token().map_err(failure)?.to_vec(),
+            )),
+            LogResolution::Expired(view) => {
+                self.view.replace(view);
+                Ok(Resolution::Expired)
+            }
+        }
+    }
+}
+impl RecoveryState {
+    fn require_complete(&self) -> Result<Ref<'_, object_log::HistoryCursor>, Failure> {
+        let cursor = self.cursor.borrow();
+        if !cursor.is_complete() {
+            return Err(Failure::Other(
+                "recovery history must be consumed before publication".into(),
+            ));
+        }
+        Ok(cursor)
+    }
+}
+impl GuestRecovery for RecoveryState {
+    fn next(&self) -> Result<Option<HistoryItem>, Failure> {
+        let item = spin_executor::run(self.cursor.borrow_mut().next()).map_err(failure)?;
+        Ok(item.map(|item| match item {
+            LogHistoryItem::Checkpoint(authenticated) => {
+                let (record, objects) = authenticated.into_parts();
+                HistoryItem::Checkpoint(Entry {
+                    data: record.snapshot().to_vec(),
+                    objects: objects.into_iter().map(Object::new).collect(),
+                })
+            }
+            LogHistoryItem::Commit(authenticated) => {
+                let (record, objects) = authenticated.into_parts();
+                HistoryItem::Commit(CommitRecord {
+                    sequence: record.reference().sequence(),
+                    transaction_id: record
+                        .reference()
+                        .transaction_id()
+                        .as_uuid()
+                        .as_bytes()
+                        .to_vec(),
+                    operation: record.operation().to_vec(),
+                    recorded_result: record.result().to_vec(),
+                    objects: objects.into_iter().map(Object::new).collect(),
+                })
+            }
+        }))
+    }
+
+    fn write_bytes(&self) -> Result<ByteWriter, Failure> {
+        let cursor = self.require_complete()?;
+        self.log
+            .byte_writer(cursor.view())
+            .map(|writer| ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
+            .map_err(failure)
+    }
+
+    fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
+        let value = value.get::<StagedObject>();
+        let cursor = self.require_complete()?;
+        spin_executor::run(self.log.open_bytes(cursor.view(), value.reference()))
+            .map(|reader| ByteReader::new(ReaderState(RefCell::new(reader))))
+            .map_err(failure)
+    }
+
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<StagedObject>();
-        let view = self.current_view();
-        spin_executor::run(self.log.read_staged_node(&view, value))
-            .map(entry)
+        let cursor = self.require_complete()?;
+        spin_executor::run(self.log.read_staged_node(cursor.view(), value))
+            .map(|(data, objects)| Entry {
+                data: data.into(),
+                objects: objects.into_iter().map(Object::new).collect(),
+            })
             .map_err(failure)
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {
-        let view = self.current_view();
+        let cursor = self.require_complete()?;
         spin_executor::run(
             self.log
-                .put_node(&view, Bytes::from(data), proofs(&children)),
+                .put_node(cursor.view(), Bytes::from(data), proofs(&children)),
         )
         .map(Object::new)
         .map_err(failure)
     }
-    fn prepare(&self, data: Vec<u8>, roots: Vec<ObjectBorrow<'_>>) -> Result<Candidate, Failure> {
-        let view = self.current_view();
+    fn prepare(
+        &self,
+        transaction_id: Vec<u8>,
+        operation: Vec<u8>,
+        result: Vec<u8>,
+        roots: Vec<ObjectBorrow<'_>>,
+    ) -> Result<Candidate, Failure> {
+        let cursor = self.require_complete()?;
+        let transaction_id = uuid::Uuid::from_slice(&transaction_id)
+            .map(TransactionId::from_uuid)
+            .map_err(|_| Failure::Other("transaction ID must contain 16 bytes".into()))?;
         let prepared = self
             .log
             .prepare(
-                &view,
-                object_log::TransactionId::new(),
-                Bytes::from(data),
-                Bytes::new(),
+                cursor.view(),
+                transaction_id,
+                Bytes::from(operation),
+                Bytes::from(result),
                 proofs(&roots),
             )
             .map_err(failure)?;
         Ok(Candidate::new(CandidateState {
             log: self.log.clone(),
-            prepared,
+            prepared: RefCell::new(Some(prepared)),
         }))
+    }
+
+    fn checkpoint(
+        &self,
+        data: Vec<u8>,
+        roots: Vec<ObjectBorrow<'_>>,
+    ) -> Result<CheckpointOutcome, Failure> {
+        let cursor = self.require_complete()?;
+        match spin_executor::run(maintenance::checkpoint(
+            &self.log,
+            cursor.view(),
+            data,
+            proofs(&roots),
+        ))? {
+            CheckpointStatus::Published(_) => Ok(CheckpointOutcome::Published),
+            CheckpointStatus::Conflict(_) => Ok(CheckpointOutcome::Conflict),
+            CheckpointStatus::Pending(pending) => Ok(CheckpointOutcome::Pending(
+                PendingCheckpoint::new(PendingCheckpointState {
+                    log: self.log.clone(),
+                    pending: RefCell::new(Some(pending)),
+                }),
+            )),
+        }
+    }
+}
+impl GuestPendingCheckpoint for PendingCheckpointState {
+    fn resolve(&self) -> Result<CheckpointResolution, Failure> {
+        let pending = self
+            .pending
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| Failure::Other("resolved checkpoint".into()))?
+            .clone();
+        match spin_executor::run(self.log.resolve_checkpoint(pending)).map_err(failure)? {
+            LogCheckpointResolution::Published(_) => {
+                self.pending.borrow_mut().take();
+                Ok(CheckpointResolution::Published)
+            }
+            LogCheckpointResolution::NotPublished(_) => {
+                self.pending.borrow_mut().take();
+                Ok(CheckpointResolution::NotPublished)
+            }
+            LogCheckpointResolution::StillPending(pending) => {
+                self.pending.replace(Some(pending));
+                Ok(CheckpointResolution::StillPending)
+            }
+            LogCheckpointResolution::Expired(_) => {
+                self.pending.borrow_mut().take();
+                Ok(CheckpointResolution::Expired)
+            }
+        }
     }
 }
 impl GuestCandidate for CandidateState {
+    fn recovery_token(&self) -> Result<Vec<u8>, Failure> {
+        self.prepared
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| Failure::Other("published candidate".into()))?
+            .recovery_token()
+            .map(|token| token.to_vec())
+            .map_err(failure)
+    }
+
     fn publish(&self) -> Result<Outcome, Failure> {
-        match spin_executor::run(self.log.commit(self.prepared.clone())).map_err(failure)? {
+        let prepared = self
+            .prepared
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| Failure::Other("published candidate".into()))?
+            .clone();
+        let status = spin_executor::run(self.log.commit(prepared)).map_err(failure)?;
+        self.prepared.borrow_mut().take();
+        match status {
             CommitStatus::Committed(_) => Ok(Outcome::Committed),
             CommitStatus::Conflict(_) => Ok(Outcome::Conflict),
             CommitStatus::Pending(pending) => Ok(Outcome::Pending(
@@ -311,6 +428,8 @@ impl Guest for Component {
     type ByteWriter = WriterState;
     type ByteReader = ReaderState;
     type Candidate = CandidateState;
+    type PendingCheckpoint = PendingCheckpointState;
+    type Recovery = RecoveryState;
     type Session = SessionState;
     type Object = StagedObject;
     fn open(settings: Config) -> Result<Session, Failure> {
@@ -323,7 +442,11 @@ impl Guest for Component {
 
 fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
     spin_executor::run(async {
-        let transport = transport::Transport::default();
+        let transport = transport::Transport::new(
+            settings.transport_limits.max_calls,
+            settings.transport_limits.max_bytes,
+        )
+        .map_err(|error| Failure::Other(error.into()))?;
         let store = s3_builder(&settings, transport.clone())?
             .build()
             .map_err(|error| Failure::Other(error.to_string()))?;
@@ -334,12 +457,7 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
         .await
         .map_err(failure)?;
         let log_id = object_log::LogId::new(settings.log_id).map_err(failure)?;
-        let options = object_log::Options {
-            max_object_bytes: 2 * 1024 * 1024,
-            max_collection_objects: usize::try_from(settings.max_collection_objects)
-                .map_err(|_| Failure::Other("invalid collection object limit".into()))?,
-            ..Default::default()
-        };
+        let options = log_options(settings.log_limits)?;
         let log = if create {
             Log::open(&backend, &log_id, options).await
         } else {
@@ -352,6 +470,31 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
             view: RefCell::new(view),
             transport,
         }))
+    })
+}
+
+fn log_options(limits: LogLimits) -> Result<object_log::Options, Failure> {
+    let limit =
+        |value, name| usize::try_from(value).map_err(|_| Failure::Other(format!("invalid {name}")));
+    Ok(object_log::Options {
+        max_tail_entries: limit(limits.max_tail_entries, "tail entry limit")?,
+        resolution_window: limit(limits.resolution_window, "resolution window")?,
+        max_inline_operation_bytes: limit(
+            limits.max_inline_operation_bytes,
+            "inline operation limit",
+        )?,
+        max_inline_result_bytes: limit(limits.max_inline_result_bytes, "inline result limit")?,
+        max_object_refs: limit(limits.max_object_refs, "object reference limit")?,
+        max_object_bytes: limit(limits.max_object_bytes, "object byte limit")?,
+        max_commit_bytes: limit(limits.max_commit_bytes, "commit byte limit")?,
+        max_head_bytes: limit(limits.max_head_bytes, "head byte limit")?,
+        max_checkpoint_bytes: limit(limits.max_checkpoint_bytes, "checkpoint byte limit")?,
+        max_retention_ids: limit(limits.max_retention_ids, "retention limit")?,
+        max_collection_objects: limit(limits.max_collection_objects, "collection object limit")?,
+        max_collection_plan_bytes: limit(
+            limits.max_collection_plan_bytes,
+            "collection plan byte limit",
+        )?,
     })
 }
 

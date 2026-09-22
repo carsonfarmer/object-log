@@ -140,7 +140,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		Endpoint: getConfig("WAL_ENDPOINT"), Bucket: getConfig("WAL_BUCKET"), Region: getConfig("WAL_REGION"),
 		CredentialMode: mode, AccessKey: getConfig("WAL_ACCESS_KEY"), SecretKey: getConfig("WAL_SECRET_KEY"),
 		SessionToken: sessionToken(getConfig), Prefix: getConfig("WAL_PREFIX"), LogId: route.Repository.LogID,
-		MaxCollectionObjects: uint64(limits.collectionObjects),
+		LogLimits: walLogLimits(uint64(limits.collectionObjects)), TransportLimits: walTransportLimits(),
 	}
 	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
 		// First-push discovery requires an empty repository advertisement. Only

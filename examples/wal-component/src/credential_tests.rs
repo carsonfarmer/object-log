@@ -19,8 +19,66 @@ fn settings() -> Config {
         session_token: Some("temporary-session-token".into()),
         prefix: "isolated-prefix".into(),
         log_id: "repo".into(),
-        max_collection_objects: 100_000,
+        log_limits: log_limits(),
+        transport_limits: TransportLimits {
+            max_calls: 10,
+            max_bytes: 1024,
+        },
     }
+}
+
+fn log_limits() -> LogLimits {
+    let options = object_log::Options::default();
+    LogLimits {
+        max_tail_entries: options.max_tail_entries as u64,
+        resolution_window: options.resolution_window as u64,
+        max_inline_operation_bytes: options.max_inline_operation_bytes as u64,
+        max_inline_result_bytes: options.max_inline_result_bytes as u64,
+        max_object_refs: options.max_object_refs as u64,
+        max_object_bytes: options.max_object_bytes as u64,
+        max_commit_bytes: options.max_commit_bytes as u64,
+        max_head_bytes: options.max_head_bytes as u64,
+        max_checkpoint_bytes: options.max_checkpoint_bytes as u64,
+        max_retention_ids: options.max_retention_ids as u64,
+        max_collection_objects: options.max_collection_objects as u64,
+        max_collection_plan_bytes: options.max_collection_plan_bytes as u64,
+    }
+}
+
+#[test]
+fn every_durable_limit_maps_to_the_matching_core_option() {
+    let mapped = log_options(LogLimits {
+        max_tail_entries: 1,
+        resolution_window: 2,
+        max_inline_operation_bytes: 3,
+        max_inline_result_bytes: 4,
+        max_object_refs: 5,
+        max_object_bytes: 6,
+        max_commit_bytes: 7,
+        max_head_bytes: 8,
+        max_checkpoint_bytes: 9,
+        max_retention_ids: 10,
+        max_collection_objects: 11,
+        max_collection_plan_bytes: 12,
+    })
+    .unwrap();
+    assert_eq!(
+        [
+            mapped.max_tail_entries,
+            mapped.resolution_window,
+            mapped.max_inline_operation_bytes,
+            mapped.max_inline_result_bytes,
+            mapped.max_object_refs,
+            mapped.max_object_bytes,
+            mapped.max_commit_bytes,
+            mapped.max_head_bytes,
+            mapped.max_checkpoint_bytes,
+            mapped.max_retention_ids,
+            mapped.max_collection_objects,
+            mapped.max_collection_plan_bytes,
+        ],
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    );
 }
 
 fn instance_settings() -> Config {

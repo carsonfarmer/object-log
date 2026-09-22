@@ -2,9 +2,10 @@
 
 This example is a working smart-HTTP Git service backed by `object-log`.
 go-git handles Git protocols, object formats, and packs. A small Rust WASIp2
-component connects the Go service to the same generic WAL used by other
-consumers. The object-log head is the only mutable durable authority; the
-service keeps no local repository.
+component exposes the same generic WAL used by other consumers. The component
+owns S3 transport and exact publication recovery; Git supplies only its catalog,
+refs, and protocol policy. The object-log head is the only mutable durable
+authority, and the service keeps no local repository.
 
 Supported behavior includes:
 

@@ -15,28 +15,28 @@ use spin_sdk::http::conversions::TryIntoOutgoingRequest;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     task::Poll,
 };
 
-// Allow bootstrap and one transport retry per logical bounded pack request.
-const HTTP_CALLS: usize = 1024 + 24 * (1040 * 1024 * 1024_usize).div_ceil(1024 * 1024);
-const HTTP_BYTES: u64 = 24 * (1040 * 1024 * 1024_usize) as u64 + 8 * 1024 * 1024;
+const QUOTA_EXCEEDED: &str = "object storage transport limit exceeded";
 
-const QUOTA_EXCEEDED: &str = "Git HTTP storage quota exceeded";
-
-// One budget per incoming Git handler, including bootstrap and engine retries.
-#[derive(Debug, Default)]
+// One budget per component session, including bootstrap and transport retries.
+#[derive(Debug)]
 struct Budget {
-    calls: AtomicUsize,
+    max_calls: u64,
+    max_bytes: u64,
+    calls: AtomicU64,
     bytes: AtomicU64,
 }
 impl Budget {
     fn call(&self) -> Result<(), HttpError> {
         self.calls
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1).filter(|&next| next <= HTTP_CALLS)
+                current
+                    .checked_add(1)
+                    .filter(|&next| next <= self.max_calls)
             })
             .map(|_| ())
             .map_err(|_| http_error(QUOTA_EXCEEDED))
@@ -47,14 +47,14 @@ impl Budget {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current
                     .checked_add(bytes)
-                    .filter(|&next| next <= HTTP_BYTES)
+                    .filter(|&next| next <= self.max_bytes)
             })
             .map(|_| ())
             .map_err(|_| http_error(QUOTA_EXCEEDED))
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct Transport(Arc<Budget>);
 #[derive(Debug, Clone)]
 struct Service {
@@ -347,9 +347,21 @@ impl CryptoProvider for Crypto {
 }
 
 impl Transport {
+    pub(crate) fn new(max_calls: u64, max_bytes: u64) -> Result<Self, &'static str> {
+        if max_calls == 0 || max_bytes == 0 {
+            return Err("transport limits must be positive");
+        }
+        Ok(Self(Arc::new(Budget {
+            max_calls,
+            max_bytes,
+            calls: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+        })))
+    }
+
     pub(crate) fn usage(&self) -> (u64, u64) {
         (
-            self.0.calls.load(Ordering::Relaxed) as u64,
+            self.0.calls.load(Ordering::Relaxed),
             self.0.bytes.load(Ordering::Relaxed),
         )
     }
@@ -421,15 +433,15 @@ mod tests {
 
     #[test]
     fn rejected_transfers_preserve_the_shared_budget() {
-        let transport = Transport::default();
+        let transport = Transport::new(3, 5).unwrap();
         let shared = transport.clone();
-        shared.0.transfer(HTTP_BYTES).unwrap();
+        shared.0.transfer(5_u64).unwrap();
         let error = transport.0.transfer(1_u64).unwrap_err();
-        assert_eq!(transport.usage(), (0, HTTP_BYTES));
+        assert_eq!(transport.usage(), (0, 5));
         assert!(
             error
                 .to_string()
-                .contains("Git HTTP storage quota exceeded")
+                .contains("object storage transport limit exceeded")
         );
         assert!(
             !std::error::Error::source(&error)
@@ -437,9 +449,11 @@ mod tests {
                 .is::<spin_sdk::http::ErrorCode>()
         );
         assert!(shared.0.transfer(-1_i32).is_err());
-        transport.0.calls.store(HTTP_CALLS - 1, Ordering::Relaxed);
+        transport.0.calls.store(2, Ordering::Relaxed);
         shared.0.call().unwrap();
         assert!(transport.0.call().is_err());
-        assert_eq!(shared.usage(), (HTTP_CALLS as u64, HTTP_BYTES));
+        assert_eq!(shared.usage(), (3, 5));
+        assert!(Transport::new(0, 1).is_err());
+        assert!(Transport::new(1, 0).is_err());
     }
 }

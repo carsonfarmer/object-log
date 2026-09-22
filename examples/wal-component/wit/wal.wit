@@ -2,6 +2,24 @@ package object-log:storage@0.1.0;
 
 interface wal {
     enum credential-mode { static-credentials, instance-role }
+    record log-limits {
+        max-tail-entries: u64,
+        resolution-window: u64,
+        max-inline-operation-bytes: u64,
+        max-inline-result-bytes: u64,
+        max-object-refs: u64,
+        max-object-bytes: u64,
+        max-commit-bytes: u64,
+        max-head-bytes: u64,
+        max-checkpoint-bytes: u64,
+        max-retention-ids: u64,
+        max-collection-objects: u64,
+        max-collection-plan-bytes: u64,
+    }
+    record transport-limits {
+        max-calls: u64,
+        max-bytes: u64,
+    }
     record config {
         endpoint: string,
         bucket: string,
@@ -13,18 +31,30 @@ interface wal {
         session-token: option<string>,
         prefix: string,
         log-id: string,
-        max-collection-objects: u64,
+        log-limits: log-limits,
+        transport-limits: transport-limits,
     }
     variant failure { missing, expired, limit(string), other(string) }
-    variant outcome { committed, conflict, pending(list<u8>), expired }
+    variant outcome { committed, conflict, pending(list<u8>) }
+    variant resolution { committed, not-committed, still-pending(list<u8>), expired }
+    variant checkpoint-outcome { published, conflict, pending(own<pending-checkpoint>) }
+    enum checkpoint-resolution { published, not-published, still-pending, expired }
     enum retention-state { applied, active-collection, conflict, pending }
     enum maintenance-state { complete, more, conflict, pending, retained }
     record collection-result { state: maintenance-state, objects: u64, bytes: u64 }
     record usage { calls: u64, bytes: u64 }
     resource object;
     record entry { data: list<u8>, objects: list<own<object>> }
-    record recovered-state { latest: option<entry>, tail-entries: u64 }
+    record commit-record {
+        sequence: u64,
+        transaction-id: list<u8>,
+        operation: list<u8>,
+        recorded-result: list<u8>,
+        objects: list<own<object>>,
+    }
+    variant history-item { checkpoint(entry), commit(commit-record) }
     resource candidate {
+        recovery-token: func() -> result<list<u8>, failure>;
         publish: func() -> result<outcome, failure>;
     }
     resource byte-writer {
@@ -35,24 +65,41 @@ interface wal {
         length: func() -> u64;
         read-at: func(offset: u64, max-len: u32) -> result<list<u8>, failure>;
     }
+    resource pending-checkpoint {
+        resolve: func() -> result<checkpoint-resolution, failure>;
+    }
+    resource recovery {
+        // Returns the optional checkpoint first, then commits in sequence.
+        next: func() -> result<option<history-item>, failure>;
+        write-bytes: func() -> result<own<byte-writer>, failure>;
+        open-bytes: func(value: borrow<object>) -> result<own<byte-reader>, failure>;
+        read-node: func(value: borrow<object>) -> result<entry, failure>;
+        put-node: func(data: list<u8>, children: list<borrow<object>>) -> result<own<object>, failure>;
+        prepare: func(
+            transaction-id: list<u8>,
+            operation: list<u8>,
+            recorded-result: list<u8>,
+            roots: list<borrow<object>>,
+        ) -> result<own<candidate>, failure>;
+        // Requires next() to have reached the end of this exact view.
+        checkpoint: func(
+            data: list<u8>,
+            roots: list<borrow<object>>,
+        ) -> result<checkpoint-outcome, failure>;
+    }
     resource session {
         // Reads the cached view; refresh to observe another session's changes.
         has-active-collection: func() -> bool;
         retain: func(id: list<u8>) -> result<retention-state, failure>;
         release-retention: func(id: list<u8>) -> result<retention-state, failure>;
         clear-retentions-after-drain: func() -> result<retention-state, failure>;
-        write-bytes: func() -> result<own<byte-writer>, failure>;
-        open-bytes: func(value: borrow<object>) -> result<own<byte-reader>, failure>;
-        checkpoint: func(data: list<u8>, roots: list<borrow<object>>) -> result<maintenance-state, failure>;
         // Caps a new plan; an existing plan is resumed without shrinking it.
         collect: func(max-candidates: u64) -> result<collection-result, failure>;
         usage: func() -> usage;
         refresh: func() -> result<own<session>, failure>;
-        // Records must describe complete states; delta consumers require another fold.
-        latest-complete-state: func() -> result<recovered-state, failure>;
-        read-node: func(value: borrow<object>) -> result<entry, failure>;
-        put-node: func(data: list<u8>, children: list<borrow<object>>) -> result<own<object>, failure>;
-        prepare: func(data: list<u8>, roots: list<borrow<object>>) -> result<own<candidate>, failure>;
+        // Opens a bounded cursor over one exact authenticated view.
+        recover: func() -> result<own<recovery>, failure>;
+        resume: func(token: list<u8>) -> result<resolution, failure>;
     }
     open: func(settings: config) -> result<own<session>, failure>;
     // Returns missing without creating the requested log.

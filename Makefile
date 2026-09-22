@@ -43,7 +43,7 @@ git-qualification-tools-test:
 git-build:
 	cargo build --locked --release --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2
 	$(MAKE) -C $(GIT_EXAMPLE_DIR) build
-	cd $(GIT_EXAMPLE_DIR) && wac plug --plug ../wal-component/target/wasm32-wasip2/release/wal_component_probe.wasm main.wasm -o git.wasm
+	cd $(GIT_EXAMPLE_DIR) && wac plug --plug ../wal-component/target/wasm32-wasip2/release/object_log_component.wasm main.wasm -o git.wasm
 
 git-spin-config-test: git-build
 	./scripts/test-git-spin-config.sh

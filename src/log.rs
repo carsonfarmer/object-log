@@ -1343,6 +1343,32 @@ impl Log {
         Ok(records)
     }
 
+    pub(crate) async fn read_tail_record(
+        &self,
+        view: &View,
+        index: usize,
+    ) -> Result<CommitRecord, Error> {
+        self.validate_view(view)?;
+        let reference = view.tail().get(index).cloned().ok_or_else(|| {
+            Error::InvalidFormat("history cursor exceeds the active tail".to_owned())
+        })?;
+        let expected_tip = if index == 0 {
+            view.checkpoint()
+                .map(|checkpoint| checkpoint.through_commit)
+        } else {
+            Some(view.tail()[index - 1].digest)
+        };
+        let Some(record) = self.read_commit_optional(reference).await? else {
+            return Err(self.missing_read_error(view).await?);
+        };
+        if record.expected_tip != expected_tip {
+            return Err(Error::InvalidFormat(
+                "the commit tail has a broken parent chain".to_owned(),
+            ));
+        }
+        Ok(record)
+    }
+
     // Proofs cover immutable commit bodies and their complete ordered chain,
     // not referenced payloads. They are local to this handle and exact view.
     pub(crate) fn remember_tail(&self, view: &View) {
@@ -1736,7 +1762,7 @@ impl Log {
         }
     }
 
-    fn validate_view(&self, view: &View) -> Result<(), Error> {
+    pub(crate) fn validate_view(&self, view: &View) -> Result<(), Error> {
         if view.head().log_id != *self.store.log_id() {
             return Err(Error::InvalidFormat(
                 "the view belongs to another log".to_owned(),

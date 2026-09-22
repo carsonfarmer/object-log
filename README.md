@@ -34,9 +34,12 @@ tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
 
 The default crate compiles for native targets and `WASIp2`. The convenience `aws`
 feature enables `object_store`'s native AWS and HTTP stack and does not compile
-for `WASIp2`. A WASI host must inject an `ObjectStore` implementation with a
-compatible transport; the Git example does this with `object_store`'s AWS
-signing layer and a WASI HTTP connector.
+for `WASIp2`. Rust applications that embed the library in WASI inject an
+`ObjectStore` with a compatible host transport. Component applications can
+instead compose the reusable
+[`object-log` `WASIp2` component](examples/wal-component/README.md). It keeps S3
+configuration, signing, credentials, HTTP transport, and bounded retries behind
+the WIT interface while leaving the core crate runtime independent.
 
 ## Storage contract
 
@@ -153,6 +156,10 @@ Large values can be written through `ByteWriter` and read with authenticated,
 bounded `read_at` calls. Reference nodes form application-defined trees without
 exposing storage paths. `materialize` can rebuild typed state from a checkpoint
 and the active tail while preserving process-local publication proofs.
+`history` returns a bounded cursor over the same authenticated checkpoint and
+ordered commits, including transaction IDs and recorded results, for bindings
+or consumers that apply their state transitions outside Rust. It returns one
+record at a time and remains bound to the exact view being reconstructed.
 
 ## Checkpoints and collection
 
@@ -194,7 +201,7 @@ for the durable format and recovery invariants. The schema is defined in
   maintenance responsibilities.
 - [`examples/git`](https://github.com/carsonfarmer/object-log/tree/main/examples/git)
   is a working Git service using go-git and the
-  same public WAL API through a small `WASIp2` bridge. It supports ordinary Git
+  same public WAL API through the reusable `WASIp2` component. It supports ordinary Git
   clients, SHA-1 and SHA-256, protocol-v2 clone/fetch, classic push, shallow
   history, configured repository names, Cognito permissions, recovery, and
   bounded maintenance endpoints. The optional

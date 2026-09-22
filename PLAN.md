@@ -45,6 +45,13 @@ The core implements and tests:
   large collection acceptance cases, and Criterion benchmarks; and
 - native and WASIp2 compilation.
 
+The reusable WASIp2 component keeps S3 signing, static or IMDSv2 credentials,
+bounded HTTP transport, and component resources outside the core crate. Its
+recovery cursor returns one authenticated record at a time and binds subsequent
+view-sensitive work to the exact reconstructed view. It preserves uncertain
+commit tokens and in-instance uncertain-checkpoint evidence without adding a
+second durable authority.
+
 The Git proof supports SHA-1 and SHA-256 repositories, protocol-v2 clone and
 fetch, classic push, shallow history, tags, access control, cold recovery, and
 automatic maintenance. Its implementation remains outside the core. The public

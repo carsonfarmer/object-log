@@ -33,13 +33,31 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             "existing"
         }
         .into(),
-        max_collection_objects: 100_000,
+        log_limits: wal::LogLimits {
+            max_tail_entries: 1_024,
+            resolution_window: 1_024,
+            max_inline_operation_bytes: 64 << 10,
+            max_inline_result_bytes: 4 << 10,
+            max_object_refs: 1_024,
+            max_object_bytes: 2 << 20,
+            max_commit_bytes: 1 << 20,
+            max_head_bytes: 256 << 10,
+            max_checkpoint_bytes: 16 << 20,
+            max_retention_ids: 1_024,
+            max_collection_objects: 100_000,
+            max_collection_plan_bytes: 16 << 20,
+        },
+        transport_limits: wal::TransportLimits {
+            max_calls: 25_984,
+            max_bytes: 26_180_206_592,
+        },
     };
     match path {
         "/obtain" => {
             let session = wal::open(&settings)?;
             assert!(!session.has_active_collection());
-            assert!(session.latest_complete_state()?.latest.is_none());
+            let recovery = session.recover()?;
+            assert!(recovery.next()?.is_none());
         }
         "/existing" => {
             let session = wal::open_existing(&settings)?;

@@ -1,9 +1,10 @@
 [package]
-name = "wal-component-probe"
-version = "0.0.0"
+name = "object-log-component"
+version = "0.1.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
+description = "Composable WASIp2 interface for object-log backed by S3"
 [workspace]
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -32,4 +33,5 @@ spin-executor = "=5.2.0"
 wasi = "=0.13.1"
 uuid = { version = "1", default-features = false }
 [dev-dependencies]
+object-log = { path = "../..", features = ["test-util"] }
 tokio = { version = "1", features = ["macros", "rt"] }

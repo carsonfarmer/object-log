@@ -26,14 +26,22 @@ Git protocol engine here.
 
 ## Implementation boundary
 
-`examples/git` is a Go service built on go-git. `examples/wal-component` is the
-small WASIp2 bridge to the unchanged Rust WAL. Spin supplies HTTP hosting.
+`examples/git` is a Go service built on go-git. `examples/wal-component` is a
+reusable WASIp2 interface to the unchanged Rust WAL, rather than a Git-specific
+bridge. It owns S3 signing, credential renewal, bounded transport, and exact-view
+recovery. Spin supplies HTTP hosting.
 
 The WAL owns authenticated chunking, bounded sparse reads, recovery, retention,
 and collection. The Go consumer owns Git negotiation, pack handling, refs, its
 sparse catalog, and repository policy. Compressed small objects live in catalog
 leaves; larger objects and incoming packs use WAL streams. The catalog and refs
 publish in one WAL commit.
+
+Git reconstructs its catalog through the component's one-record-at-a-time
+recovery cursor and immediately drops superseded publication proofs. All reads,
+staging, commits, and checkpoints remain bound to that cursor's exact view.
+Component refreshes preserve cumulative storage counters, and uncertain
+checkpoint evidence remains resolvable while its resource is alive.
 
 Incoming packs use WAL streams; go-git buffers delta bases and results during
 import. Receive-pack advertises `no-thin`, allowing ordinary clients to send

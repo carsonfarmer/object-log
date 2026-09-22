@@ -17,7 +17,10 @@ pub use log::{
     CollectionStart, CommitRecord, CommitStatus, Log, Options, ReferenceNode, Resolution,
     RetentionStatus,
 };
-pub use materialize::{MaterializeError, Materialized, Materializer, materialize};
+pub use materialize::{
+    Authenticated, HistoryCursor, HistoryItem, MaterializeError, Materialized, Materializer,
+    history, materialize,
+};
 pub use store::{
     BackendCapabilities, BackendCapability, Request, RequestDenied, RequestGuard, ValidatedBackend,
 };

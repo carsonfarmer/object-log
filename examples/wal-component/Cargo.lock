@@ -732,6 +732,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "object-log-component"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "hmac",
+ "http",
+ "http-body",
+ "http-body-util",
+ "humantime",
+ "object-log",
+ "object_store",
+ "sha2",
+ "spin-executor",
+ "spin-sdk",
+ "tokio",
+ "uuid",
+ "wasi",
+ "wit-bindgen 0.46.0",
+]
+
+[[package]]
 name = "object_store"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1274,29 +1297,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "wal-component-probe"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "hmac",
- "http",
- "http-body",
- "http-body-util",
- "humantime",
- "object-log",
- "object_store",
- "sha2",
- "spin-executor",
- "spin-sdk",
- "tokio",
- "uuid",
- "wasi",
- "wit-bindgen 0.46.0",
-]
 
 [[package]]
 name = "wasi"

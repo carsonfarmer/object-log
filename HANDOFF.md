@@ -18,7 +18,8 @@ Read `AGENTS.md`, `PLAN.md`, and `GIT_PLAN.md` before changing behavior.
   Its qualified profile documents KV-owned per-call buffers separately from
   caller, WAL, provider, runtime, allocator, and concurrency costs.
 - `examples/git/`: go-git smart-HTTP service and provider tests.
-- `examples/wal-component/`: WASIp2 bridge from the Git service to the Rust WAL.
+- `examples/wal-component/`: reusable WASIp2 object-log component with S3,
+  static or IMDSv2 credentials, bounded transport, and exact recovery.
 - `examples/git/qualification/aws/`: disposable S3 Terraform setup, temporary
   credentials, and optional EC2/Caddy/Cognito hosting with automatic maintenance.
 - `docs/design.md` and `schema/object-log-v1.cddl`: durable protocol description
@@ -38,6 +39,16 @@ graphs; collection deduplicates physical keys. Git and the bridge no longer
 carry chunk counts. Complete-state consumers can checkpoint their admitted
 roots, but the union of historical tail roots can still exceed the bound.
 The reference encoding changed; use a fresh prefix for this revision.
+
+The core also exposes a bounded authenticated-history cursor. It returns at
+most one checkpoint or commit per call, preserves complete commit metadata and
+publication proofs, and remains bound to one exact view. The reusable WASIp2
+component exposes that cursor directly. View-sensitive reads, staging,
+publication, and checkpointing require a fully consumed recovery resource.
+Uncertain commits have durable recovery tokens; uncertain checkpoints retain
+their exact in-instance evidence through an owned resolver resource. The
+component adds no durable authority and keeps Spin dependencies outside the
+core crate.
 
 The Git service supports unchanged SHA-1 and SHA-256 clients, protocol-v2 clone
 and have-aware fetch, shallow history, classic push, branches, tags, access
@@ -136,6 +147,10 @@ role acquisition/renewal. Native and composed stock-Spin fixtures pass, includin
 renewal failure. Live EC2 role replacement denied storage access, then restoring
 the original role recovered exact data and accepted a new push without restarting
 Spin. Natural credential expiry remains covered by the composed metadata fixture.
+The component's S3 transport limits and all twelve durable WAL limits are
+explicit inputs. Refreshes share cumulative transport counters. Composed
+credential fixtures, local MinIO Git provider tests, native strict checks, and
+locked WASIp2 checks cover the reusable interface.
 Signing-key fetches have a five-second WASI deadline, including slow bodies;
 stock-Spin TLS tests verify timeout and same-instance cleanup without an SDK fork.
 Wrong-issuer rejection and controlled signing-key rotation have native coverage;

@@ -78,7 +78,7 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 			return wal.CollectionResult{}, err
 		}
 	}
-	checkpointSession := s.session
+	checkpointRecovery := s.recovery
 	if s.tailEntries == 0 {
 		outcome, err := s.publishRoot(root)
 		if err != nil {
@@ -91,22 +91,26 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 				return wal.CollectionResult{}, err
 			}
 			defer fresh.Drop()
-			current, err := unwrap(fresh.LatestCompleteState)
+			current, err := unwrap(fresh.Recover)
 			if err != nil {
 				return wal.CollectionResult{}, err
 			}
-			if current.Latest.IsNone() || len(current.Latest.Some().Objects) != 1 {
+			defer current.Drop()
+			currentRoot, tailEntries, err := s.acceptRecovery(current)
+			if err != nil {
+				return wal.CollectionResult{}, err
+			}
+			if currentRoot == nil {
 				return wal.CollectionResult{}, fmt.Errorf("invalid published root")
 			}
 			// Another push may have followed pruning. Checkpoint its winning
 			// root, never the stale root we just published.
-			root = current.Latest.Some().Objects[0]
-			defer root.Drop()
-			if current.TailEntries == 0 {
+			root = currentRoot
+			if tailEntries == 0 {
 				return s.collect()
 			}
-			checkpointSession = fresh
-		case wal.OutcomeConflict, wal.OutcomeExpired:
+			checkpointRecovery = current
+		case wal.OutcomeConflict:
 			return wal.CollectionResult{State: wal.MaintenanceStateConflict}, nil
 		case wal.OutcomePending:
 			return wal.CollectionResult{State: wal.MaintenanceStatePending}, nil
@@ -117,9 +121,7 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	state, err := unwrap(func() wt.Result[wal.MaintenanceState, wal.Failure] {
-		return checkpointSession.Checkpoint(nil, []*wal.Object{root})
-	})
+	state, err := checkpoint(checkpointRecovery, root)
 	if err != nil {
 		return wal.CollectionResult{}, err
 	}
@@ -135,9 +137,38 @@ func (s *store) checkpointTail() (wal.MaintenanceState, error) {
 	if err := s.ctx.Err(); err != nil {
 		return 0, err
 	}
-	return unwrap(func() wt.Result[wal.MaintenanceState, wal.Failure] {
-		return s.session.Checkpoint(nil, []*wal.Object{s.stateRoot})
+	return checkpoint(s.recovery, s.stateRoot)
+}
+
+func checkpoint(recovery *wal.Recovery, root *wal.Object) (wal.MaintenanceState, error) {
+	outcome, err := unwrap(func() wt.Result[wal.CheckpointOutcome, wal.Failure] {
+		return recovery.Checkpoint(nil, []*wal.Object{root})
 	})
+	if err != nil {
+		return 0, err
+	}
+	switch outcome.Tag() {
+	case wal.CheckpointOutcomePublished:
+		return wal.MaintenanceStateComplete, nil
+	case wal.CheckpointOutcomeConflict:
+		return wal.MaintenanceStateConflict, nil
+	case wal.CheckpointOutcomePending:
+		pending := outcome.Pending()
+		defer pending.Drop()
+		resolution, err := unwrap(pending.Resolve)
+		if err != nil {
+			return 0, err
+		}
+		switch resolution {
+		case wal.CheckpointResolutionPublished:
+			return wal.MaintenanceStateComplete, nil
+		case wal.CheckpointResolutionNotPublished:
+			return wal.MaintenanceStateConflict, nil
+		case wal.CheckpointResolutionStillPending, wal.CheckpointResolutionExpired:
+			return wal.MaintenanceStatePending, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown checkpoint outcome %d", outcome.Tag())
 }
 
 func (s *store) collect() (wal.CollectionResult, error) {
