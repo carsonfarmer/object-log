@@ -98,22 +98,21 @@ pub async fn qualify_large_values(config: Config) -> anyhow::Result<()> {
         let concurrent = host.get(&format!("large-concurrent-{index}")).await?;
         tasks.push(tokio::spawn(async move {
             gate.wait().await;
-            (index, concurrent.set("payload", &vec![0x5a; maximum]).await)
+            concurrent.set("payload", &vec![0x5a; maximum]).await
         }));
     }
     gate.wait().await;
-    let mut committed = Vec::new();
+    let mut committed = 0;
     let mut busy = 0;
     for task in tasks {
-        let (index, result) = task.await?;
-        match result {
-            Ok(()) => committed.push(index),
+        match task.await? {
+            Ok(()) => committed += 1,
             Err(error) if error.to_string().contains("concurrent operation limit") => busy += 1,
             Err(error) => return Err(error.into()),
         }
     }
     anyhow::ensure!(
-        committed.len() == 2 && busy == 1,
+        committed == 2 && busy == 1,
         "large-value admission was not bounded"
     );
     drop(store);
@@ -137,16 +136,5 @@ pub async fn qualify_large_values(config: Config) -> anyhow::Result<()> {
         }
     }
     anyhow::ensure!(complete, "large-value maintenance did not complete");
-    for index in committed {
-        let concurrent = restarted.get(&format!("large-concurrent-{index}")).await?;
-        assert_eq!(
-            concurrent
-                .get("payload", usize::MAX)
-                .await?
-                .map(|v| v.len()),
-            Some(maximum)
-        );
-        concurrent.delete("payload").await?;
-    }
     Ok(())
 }

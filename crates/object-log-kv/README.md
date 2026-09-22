@@ -252,11 +252,10 @@ the unchanged tree budget without publication. The test also shows why 8 MiB is
 a point-operation ceiling: with an 8 MiB value on a prefix key, one descendant
 mutation fits, while a two-command descendant batch exceeds the same tree-work
 budget. Large values remain inline and buffered, so raising `value_bytes` also
-requires coherent batch/response limits and lower concurrency. Run against an
-isolated prefix and remove that prefix before destroying the Terraform-managed
-bucket.
+requires coherent batch/response limits. Run against an isolated prefix and
+remove that prefix before destroying the Terraform-managed bucket.
 
-Commit `42a75fd` was qualified on 2026-09-22 from a same-region `t3.xlarge`
+The KV measurement suite from commit `42a75fd` ran on 2026-09-22 from a same-region `t3.xlarge`
 Amazon Linux 2023 runner in `us-west-2`, using Rust 1.97.1 and 20 sequential
 set/get samples at each size. Times include the S3 work needed to publish or
 read one point value:
@@ -279,9 +278,8 @@ growth, contention, reopen, and collection workload. A point read used six
 logical reads and downloaded 3.7 KiB. Initial growth had 1.17x logical write
 amplification. Collection reduced 5,560 objects / 5.11 MB to 4,533 objects /
 4.70 MB while preserving 4.23 MB of live key/value data. Phase-boundary RSS
-remained below 29 MiB. Contention is intentionally expensive in this
-store-without-a-server design: four writers completed all 32 batches after 59
-definite conflicts, with one cumulative request budget covering every retry.
+remained below 29 MiB. Four writers completed 32 batches after 59 definite
+conflicts within the cumulative request budget.
 
 Keep 64 KiB as the general default. Up to 1 MiB is a reasonable configurable
 KV profile when batch and response limits are raised together and deployment
