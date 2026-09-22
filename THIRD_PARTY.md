@@ -57,7 +57,7 @@ Micelio is MPL-2.0.
 
 - [`licenses/rust-direct.tsv`](licenses/rust-direct.tsv) records resolved direct
   Rust dependency names, versions, and reviewed license expressions across all
-  all Rust packages across three workspaces.
+  Rust packages in three workspaces.
 - [`licenses/go.csv`](licenses/go.csv) records the Go packages used by the Git
   example. Its Rust component build tools use Apache-2.0 WITH LLVM-exception.
 - Lockfiles remain authoritative for exact dependency versions.
