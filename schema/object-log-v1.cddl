@@ -1,6 +1,7 @@
 ; object-log durable format version 1
 ; All top-level values are stored as an envelope. The envelope payload is the
-; canonical CBOR encoding of one index, entry, base, node, or collection plan.
+; canonical CBOR encoding of one index, entry, base, node, collection plan, or
+; recovery token.
 
 envelope = {
   1: bstr,                         ; encoded payload

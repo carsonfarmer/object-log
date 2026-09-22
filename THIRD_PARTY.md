@@ -56,7 +56,8 @@ Micelio is MPL-2.0.
 ## Dependency inventories
 
 - [`licenses/rust-direct.tsv`](licenses/rust-direct.tsv) records resolved direct
-  Rust dependency names, versions, and declared license expressions.
+  Rust dependency names, versions, and reviewed license expressions across all
+  four Rust workspaces.
 - [`licenses/go.csv`](licenses/go.csv) records the Go packages used by the Git
   example. Its Rust component build tools use Apache-2.0 WITH LLVM-exception.
 - Lockfiles remain authoritative for exact dependency versions.
@@ -65,7 +66,7 @@ Audit the resolved dependencies when lockfiles change:
 
 ```sh
 cargo install cargo-license --version 0.7.0 --locked
-for manifest in Cargo.toml crates/object-log-kv/Cargo.toml examples/wal-component/Cargo.toml; do
+for manifest in Cargo.toml crates/object-log-kv/Cargo.toml examples/wal-component/Cargo.toml integrations/spin-key-value/Cargo.toml; do
     cargo license --manifest-path "$manifest" --all-features --direct-deps-only --tsv
 done
 
@@ -81,3 +82,7 @@ output into the tracked inventories, preserving fork-specific revision URLs.
 Before distributing the composed Git component, collect dependency license and
 notice files from the same locked build inputs and include this project's
 license plus the bundled adapter license.
+
+Before distributing a runtime that embeds the native Spin provider, collect
+licenses and notices from its separate locked workspace as well. Include this
+project's license and Spin's Apache-2.0 WITH LLVM-exception terms.
