@@ -29,7 +29,7 @@ func partition[V any](items map[string]V, width int) (map[string]map[string]V, e
 	return groups, nil
 }
 
-func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[string]V, load func(H) (radixNode[V, H], error), save func(radixNode[V, H]) (H, error)) (H, error) {
+func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[string]V, load func(string, H) (radixNode[V, H], error), save func(radixNode[V, H]) (H, error)) (H, error) {
 	var zero H
 	if node.Children == nil {
 		items := make(map[string]V, len(node.Items)+len(updates))
@@ -49,7 +49,7 @@ func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[stri
 	for key, group := range groups {
 		child := radixNode[V, H]{}
 		if root, ok := children[key]; ok {
-			child, err = load(root)
+			child, err = load(key, root)
 			if err != nil {
 				return zero, err
 			}
@@ -63,10 +63,10 @@ func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[stri
 	return save(radixNode[V, H]{Children: children})
 }
 
-func lookupRadix[V, H any](id string, root H, load func(H) (radixNode[V, H], error)) (V, bool, error) {
+func lookupRadix[V, H any](id, prefix string, root H, load func(string, H) (radixNode[V, H], error)) (V, bool, error) {
 	var zero V
 	for {
-		node, err := load(root)
+		node, err := load(prefix, root)
 		if err != nil {
 			return zero, false, err
 		}
@@ -75,9 +75,9 @@ func lookupRadix[V, H any](id string, root H, load func(H) (radixNode[V, H], err
 			return item, ok, nil
 		}
 		found := false
-		for prefix, child := range node.Children {
-			if len(id) >= len(prefix) && id[:len(prefix)] == prefix {
-				root, found = child, true
+		for childPrefix, child := range node.Children {
+			if len(id) >= len(childPrefix) && id[:len(childPrefix)] == childPrefix {
+				prefix, root, found = childPrefix, child, true
 				break
 			}
 		}
@@ -87,16 +87,16 @@ func lookupRadix[V, H any](id string, root H, load func(H) (radixNode[V, H], err
 	}
 }
 
-func walkRadix[V, H any](root H, load func(H) (radixNode[V, H], error), visit func(string, V)) error {
-	node, err := load(root)
+func walkRadix[V, H any](prefix string, root H, load func(string, H) (radixNode[V, H], error), visit func(string, V)) error {
+	node, err := load(prefix, root)
 	if err != nil {
 		return err
 	}
 	for id, value := range node.Items {
 		visit(id, value)
 	}
-	for _, child := range node.Children {
-		if err := walkRadix(child, load, visit); err != nil {
+	for prefix, child := range node.Children {
+		if err := walkRadix(prefix, child, load, visit); err != nil {
 			return err
 		}
 	}
@@ -105,9 +105,9 @@ func walkRadix[V, H any](root H, load func(H) (radixNode[V, H], error), visit fu
 
 // Filter immutable catalog nodes, retaining the original proof whenever a
 // subtree is unchanged. The caller publishes the replacement root through WAL.
-func filterRadix[V any, H comparable](root H, keep func(string) bool, load func(H) (radixNode[V, H], error), save func(radixNode[V, H]) (H, error)) (H, bool, error) {
+func filterRadix[V any, H comparable](prefix string, root H, keep func(string) bool, load func(string, H) (radixNode[V, H], error), save func(radixNode[V, H]) (H, error)) (H, bool, error) {
 	var zero H
-	node, err := load(root)
+	node, err := load(prefix, root)
 	if err != nil {
 		return zero, false, err
 	}
@@ -145,7 +145,7 @@ func filterRadix[V any, H comparable](root H, keep func(string) bool, load func(
 
 	var children map[string]H
 	for prefix, child := range node.Children {
-		replacement, exists, err := filterRadix(child, keep, load, save)
+		replacement, exists, err := filterRadix(prefix, child, keep, load, save)
 		if err != nil {
 			return zero, false, err
 		}

@@ -220,6 +220,44 @@ func TestRepositoryRootAdmission(t *testing.T) {
 			if _, err = decodeRoot(data, format, 0); err != nil {
 				t.Fatalf("rejected empty root: %v", err)
 			}
+			id := strings.Repeat("a", format.HexSize())
+			valid := rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{"refs/heads/main": id}, Buckets: []string{"0a", "ab"}}
+			invalid := map[string]rootMeta{
+				"head":            {Validated: true, Format: format, Head: "refs/tags/main", Refs: valid.Refs, Buckets: valid.Buckets},
+				"reference":       {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"HEAD": id}, Buckets: valid.Buckets},
+				"hash":            {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.ToUpper(id)}, Buckets: valid.Buckets},
+				"ref collision":   {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": id, "refs/heads/main/nested": id}, Buckets: valid.Buckets},
+				"bucket order":    {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"ab", "0a"}},
+				"bucket encoding": {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"AZ"}},
+			}
+			data, err = json.Marshal(valid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = decodeRoot(data, format, len(valid.Buckets)); err != nil {
+				t.Fatalf("rejected valid root: %v", err)
+			}
+			for name, malformed := range map[string][]byte{
+				"unknown field":  []byte(strings.Replace(string(data), `"Buckets":`, `"Unknown":true,"Buckets":`, 1)),
+				"trailing value": append(append([]byte(nil), data...), []byte(`{}`)...),
+			} {
+				t.Run(name, func(t *testing.T) {
+					if _, err := decodeRoot(malformed, format, len(valid.Buckets)); err == nil {
+						t.Fatal("accepted malformed metadata")
+					}
+				})
+			}
+			for name, root := range invalid {
+				t.Run(name, func(t *testing.T) {
+					data, err := json.Marshal(root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err = decodeRoot(data, format, len(root.Buckets)); err == nil {
+						t.Fatal("accepted invalid root")
+					}
+				})
+			}
 			for _, test := range []struct {
 				name      string
 				marker    any
@@ -246,6 +284,36 @@ func TestRepositoryRootAdmission(t *testing.T) {
 						t.Fatal("accepted missing child")
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestCatalogMetadataAdmission(t *testing.T) {
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		t.Run(format.String(), func(t *testing.T) {
+			id := "ab" + strings.Repeat("1", format.HexSize()-2)
+			item := objectMeta{ID: id, Kind: plumbing.BlobObject, Size: 1, Encoding: "zlib", StoredSize: 1}
+			if !validObjectMeta(item, format, "ab") {
+				t.Fatal("rejected valid object metadata")
+			}
+			for name, mutate := range map[string]func(*objectMeta){
+				"path":     func(m *objectMeta) { m.ID = "ac" + m.ID[2:] },
+				"hash":     func(m *objectMeta) { m.ID = strings.ToUpper(m.ID) },
+				"kind":     func(m *objectMeta) { m.Kind = plumbing.REFDeltaObject },
+				"size":     func(m *objectMeta) { m.Size = -1 },
+				"encoding": func(m *objectMeta) { m.Encoding = "" },
+			} {
+				t.Run(name, func(t *testing.T) {
+					invalid := item
+					mutate(&invalid)
+					if validObjectMeta(invalid, format, "ab") {
+						t.Fatal("accepted invalid object metadata")
+					}
+				})
+			}
+			if !validPrefix("ab0", 3, "ab") || validPrefix("ac0", 3, "ab") || validPrefix("AB0", 3, "ab") {
+				t.Fatal("catalog prefix validation differs from path")
 			}
 		})
 	}

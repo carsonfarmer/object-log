@@ -9,6 +9,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
 	"io"
+	"strings"
 )
 
 type rootMeta struct {
@@ -21,13 +22,82 @@ type rootMeta struct {
 
 func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta, error) {
 	var meta rootMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
+	if err := decodeMetadata(data, &meta); err != nil {
 		return meta, err
 	}
 	if !meta.Validated || meta.Format != format || len(meta.Buckets) != children {
 		return meta, fmt.Errorf("invalid repository root")
 	}
+	if meta.Head != "" {
+		head := plumbing.ReferenceName(meta.Head)
+		if !head.IsBranch() || head.Validate() != nil {
+			return meta, fmt.Errorf("invalid repository head")
+		}
+	}
+	if err := validateRefs(format, meta.Refs); err != nil {
+		return meta, err
+	}
+	for i, prefix := range meta.Buckets {
+		if !validPrefix(prefix, 2, "") || i > 0 && meta.Buckets[i-1] >= prefix {
+			return meta, fmt.Errorf("invalid repository buckets")
+		}
+	}
 	return meta, nil
+}
+
+func decodeMetadata(data []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("invalid trailing metadata")
+	}
+	return nil
+}
+
+func validateRefs(format config.ObjectFormat, refs map[string]string) error {
+	for name, id := range refs {
+		ref := plumbing.ReferenceName(name)
+		if !strings.HasPrefix(name, "refs/") || ref.Validate() != nil || !validID(format, id) {
+			return fmt.Errorf("invalid repository reference")
+		}
+		for parent := name; ; {
+			i := strings.LastIndexByte(parent, '/')
+			if i < 0 {
+				break
+			}
+			parent = parent[:i]
+			if _, exists := refs[parent]; exists {
+				return fmt.Errorf("reference prefix collision")
+			}
+		}
+	}
+	return nil
+}
+
+func validID(format config.ObjectFormat, id string) bool {
+	return len(id) == format.HexSize() && id == strings.ToLower(id) && plumbing.IsHash(id)
+}
+
+func validPrefix(value string, width int, parent string) bool {
+	if len(value) != width || !strings.HasPrefix(value, parent) {
+		return false
+	}
+	for i := range len(value) {
+		if !strings.ContainsRune("0123456789abcdef", rune(value[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+func validObjectMeta(item objectMeta, format config.ObjectFormat, prefix string) bool {
+	validKind := item.Kind == plumbing.BlobObject || item.Kind == plumbing.TreeObject ||
+		item.Kind == plumbing.CommitObject || item.Kind == plumbing.TagObject
+	validStorage := item.validInline() || len(item.Inline) == 0 && item.Encoding == "zlib" && item.StoredSize > 0
+	return validID(format, item.ID) && strings.HasPrefix(item.ID, prefix) && validKind && item.Size >= 0 && validStorage
 }
 
 // Keep full catalog leaves below the WAL node limit, including base64 encoding.

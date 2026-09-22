@@ -55,17 +55,8 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 		}
 		refs[name] = cmd.New.String()
 	}
-	for name := range refs {
-		for parent := name; ; {
-			i := strings.LastIndexByte(parent, '/')
-			if i < 0 {
-				break
-			}
-			parent = parent[:i]
-			if _, exists := refs[parent]; exists {
-				return nil, fmt.Errorf("ref prefix collision")
-			}
-		}
+	if err := validateRefs(st.meta.Format, refs); err != nil {
+		return nil, err
 	}
 	ids := make([]plumbing.Hash, 0, len(st.pending))
 	for id := range st.pending {

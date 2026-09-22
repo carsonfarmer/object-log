@@ -79,7 +79,9 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 			s.buckets[key] = root.Objects[i]
 		}
 		for name, id := range s.meta.Refs {
-			_ = s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
+			if e := s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id))); e != nil {
+				return nil, e
+			}
 		}
 	}
 	// An empty repository has no unchecked objects. Existing roots must certify validation.
@@ -117,7 +119,7 @@ func (s *store) lookup(id plumbing.Hash) (indexed, error) {
 	if !ok {
 		return indexed{}, plumbing.ErrObjectNotFound
 	}
-	item, found, err := lookupRadix(key, root, s.loadBucket)
+	item, found, err := lookupRadix(key, key[:2], root, s.loadBucket)
 	if err != nil {
 		return indexed{}, err
 	}
@@ -162,8 +164,8 @@ func (s *store) EncodedObjectSize(id plumbing.Hash) (int64, error) {
 }
 func (s *store) IterEncodedObjects(kind plumbing.ObjectType) (storer.EncodedObjectIter, error) {
 	items := map[string]indexed{}
-	for _, root := range s.buckets {
-		if e := walkRadix(root, s.loadBucket, func(id string, item indexed) { items[id] = item }); e != nil {
+	for prefix, root := range s.buckets {
+		if e := walkRadix(prefix, root, s.loadBucket, func(id string, item indexed) { items[id] = item }); e != nil {
 			return nil, e
 		}
 	}
@@ -364,7 +366,7 @@ func (s *store) publish(refs map[string]string) error {
 	for key, updates := range changed {
 		node := radixNode[indexed, *wal.Object]{}
 		if root, ok := s.buckets[key]; ok {
-			node, e = s.loadBucket(root)
+			node, e = s.loadBucket(key, root)
 			if e != nil {
 				return e
 			}

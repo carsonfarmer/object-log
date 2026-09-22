@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"maps"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 	"slices"
+	"strings"
 )
 
 type bucketMeta struct {
@@ -13,9 +15,9 @@ type bucketMeta struct {
 	Prefixes []string     `json:",omitempty"`
 }
 
-func (s *store) loadBucket(value *wal.Object) (radixNode[indexed, *wal.Object], error) {
+func (s *store) loadBucket(prefix string, value *wal.Object) (radixNode[indexed, *wal.Object], error) {
 	if node, ok := s.loaded[value]; ok {
-		return node, nil
+		return node, validateBucket(node, s.meta.Format, prefix)
 	}
 	node := radixNode[indexed, *wal.Object]{}
 	entry, err := s.readNode(value)
@@ -27,7 +29,7 @@ func (s *store) loadBucket(value *wal.Object) (radixNode[indexed, *wal.Object], 
 		return node, err
 	}
 	var meta bucketMeta
-	if err = json.Unmarshal(entry.Data, &meta); err != nil {
+	if err = decodeMetadata(entry.Data, &meta); err != nil {
 		return node, err
 	}
 	if len(meta.Prefixes) > 0 {
@@ -36,28 +38,25 @@ func (s *store) loadBucket(value *wal.Object) (radixNode[indexed, *wal.Object], 
 		}
 		node.Children = map[string]*wal.Object{}
 		for i, key := range meta.Prefixes {
-			if _, exists := node.Children[key]; exists {
-				return node, fmt.Errorf("duplicate index child")
+			if !validPrefix(key, len(prefix)+1, prefix) || i > 0 && meta.Prefixes[i-1] >= key {
+				return node, fmt.Errorf("invalid index child")
 			}
 			node.Children[key] = entry.Objects[i]
 		}
 	} else {
-		if len(meta.Items) > indexLeafSize {
+		if len(meta.Items) == 0 || len(meta.Items) > indexLeafSize {
 			return node, fmt.Errorf("invalid index leaf")
 		}
 		node.Items = map[string]indexed{}
 		next := 0
-		for _, item := range meta.Items {
-			if item.Delta != nil && (!item.Delta.valid() || len(item.Delta.Base) != len(item.ID) || len(item.Inline) != 0) {
+		for i, item := range meta.Items {
+			if !validObjectMeta(item, s.meta.Format, prefix) || i > 0 && meta.Items[i-1].ID >= item.ID {
+				return node, fmt.Errorf("invalid indexed object")
+			}
+			if item.Delta != nil && (!item.Delta.valid() || !validID(s.meta.Format, item.Delta.Base) || item.Delta.Base == item.ID || len(item.Inline) != 0) {
 				return node, fmt.Errorf("invalid indexed delta")
 			}
-			if _, exists := node.Items[item.ID]; exists {
-				return node, fmt.Errorf("duplicate index object")
-			}
 			value := indexed{objectMeta: item}
-			if len(item.Inline) > 0 && !item.validInline() {
-				return node, fmt.Errorf("invalid inline object")
-			}
 			if len(item.Inline) == 0 {
 				if next == len(entry.Objects) {
 					return node, fmt.Errorf("missing index object")
@@ -73,6 +72,23 @@ func (s *store) loadBucket(value *wal.Object) (radixNode[indexed, *wal.Object], 
 	}
 	s.loaded[value] = node
 	return node, nil
+}
+
+func validateBucket(node radixNode[indexed, *wal.Object], format config.ObjectFormat, prefix string) error {
+	if len(prefix) < 2 || len(prefix) >= format.HexSize() {
+		return fmt.Errorf("invalid index prefix")
+	}
+	for key := range node.Children {
+		if !validPrefix(key, len(prefix)+1, prefix) {
+			return fmt.Errorf("invalid index child")
+		}
+	}
+	for id, item := range node.Items {
+		if id != item.ID || !strings.HasPrefix(id, prefix) {
+			return fmt.Errorf("invalid indexed object")
+		}
+	}
+	return nil
 }
 
 func (s *store) saveBucket(node radixNode[indexed, *wal.Object]) (*wal.Object, error) {

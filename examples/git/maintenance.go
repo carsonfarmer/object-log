@@ -56,7 +56,7 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 	}
 	changed := false
 	for prefix, root := range s.buckets {
-		replacement, exists, err := filterRadix(root, func(id string) bool { return live[id] }, s.loadBucket, s.saveBucket)
+		replacement, exists, err := filterRadix(prefix, root, func(id string) bool { return live[id] }, s.loadBucket, s.saveBucket)
 		if err != nil {
 			return wal.CollectionResult{}, err
 		}
