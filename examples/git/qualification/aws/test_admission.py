@@ -179,6 +179,23 @@ class AdmissionTest(unittest.TestCase):
         self.marker.unlink()
         self.assertEqual(self.request("GET", "/alpha/project.git/info/refs?service=git-upload-pack")[0], 200)
 
+    def test_baggage_limits_are_enforced_before_spin(self):
+        exact_bytes = "a=" + "x" * 8190
+        self.assertEqual(len(exact_bytes), 8192)
+        self.assertEqual(self.request("GET", "/ready", {"Baggage": exact_bytes})[0], 200)
+        self.assertEqual(Backend.calls, [("GET", "/ready")])
+
+        self.assertEqual(self.request("GET", "/ready", {"Baggage": exact_bytes + "x"})[0], 431)
+        self.assertEqual(Backend.calls, [("GET", "/ready")])
+
+        sixty_four_members = ",".join(f"k{index}=v" for index in range(64))
+        self.assertEqual(self.request("GET", "/ready", {"Baggage": sixty_four_members})[0], 200)
+        self.assertEqual(Backend.calls, [("GET", "/ready"), ("GET", "/ready")])
+
+        sixty_five_members = f"{sixty_four_members},k64=v"
+        self.assertEqual(self.request("GET", "/ready", {"Baggage": sixty_five_members})[0], 431)
+        self.assertEqual(Backend.calls, [("GET", "/ready"), ("GET", "/ready")])
+
     def test_retained_deadline_reopens_without_reader_recovery(self):
         Backend.retained = True
 

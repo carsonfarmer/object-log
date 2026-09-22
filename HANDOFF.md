@@ -87,6 +87,10 @@ go-pkg PR #13 while it remains under review. Dependency provenance and reference
 authority. Use ordinary Spin and unmodified
 S3-compatible storage.
 
+Spin 4.1's affected OpenTelemetry SDK remains pinned pending its coordinated
+upstream upgrade. The optional Caddy host rejects oversized or overlong W3C
+`baggage` before Spin; other HTTP embeddings must enforce the same boundary.
+
 The synchronous WASIp2 service serializes allocating component calls through
 lifting and upstream `Unpin`. Its HTTP body wrapper drains active reads and
 rejects late reads after closure. Recheck that boundary before adding background

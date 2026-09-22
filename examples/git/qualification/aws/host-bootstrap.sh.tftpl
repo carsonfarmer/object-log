@@ -82,7 +82,9 @@ ${hostname} {
         root /run/object-log-maintenance
         try_files pause
     }
+    @invalid_baggage expression `{header.Baggage}.size() > 8192 || header_regexp('Baggage', '^([^,]*,){64}')`
     route {
+        respond @invalid_baggage "Baggage header exceeds propagation limits" 431
         reverse_proxy @admin 127.0.0.1:3000
         handle @paused {
             header Retry-After ${retry_after}

@@ -90,6 +90,13 @@ run "host" {
   }
   assert {
     condition = (
+      strcontains(local.host_bootstrap, "@invalid_baggage expression `{header.Baggage}.size() > 8192 || header_regexp('Baggage', '^([^,]*,){64}')`") &&
+      strcontains(local.host_bootstrap, "respond @invalid_baggage \"Baggage header exceeds propagation limits\" 431")
+    )
+    error_message = "Caddy must reject pathological baggage headers before proxying to Spin."
+  }
+  assert {
+    condition = (
       output.host_service_url == "https://git.example.com" &&
       aws_route53_record.host[0].records == toset(["198.51.100.42"]) &&
       !strcontains(local.host_bootstrap, "default_sni") &&

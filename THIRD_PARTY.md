@@ -39,6 +39,12 @@ that revision's unmodified key-value test component and helper; it does not
 vendor them into this repository. The provider is Apache-2.0 and unpublished.
 Its separate Cargo.lock records its native and development dependencies.
 
+Spin 4.1 transitively resolves the OpenTelemetry SDK version affected by
+[GHSA-w9wp-h8wv-79jx](https://github.com/open-telemetry/opentelemetry-rust/security/advisories/GHSA-w9wp-h8wv-79jx).
+The provider has no HTTP boundary. The optional hosted Git example constrains
+untrusted `baggage` headers in Caddy pending the coordinated upstream upgrade in
+[spinframework/spin#3598](https://github.com/spinframework/spin/issues/3598).
+
 ## Design acknowledgements
 
 The protocol is informed by Cursor's

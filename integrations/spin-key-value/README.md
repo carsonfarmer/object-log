@@ -5,6 +5,15 @@
 it at compile time. Guests keep using the standard Spin key-value interface.
 This crate does not ship a runtime, CLI, trigger, guest transport, or Spin fork.
 
+Spin 4.1 resolves an OpenTelemetry SDK affected by
+[GHSA-w9wp-h8wv-79jx](https://github.com/open-telemetry/opentelemetry-rust/security/advisories/GHSA-w9wp-h8wv-79jx).
+This provider has no HTTP boundary at which to constrain untrusted propagation
+headers. Until Spin ships the coordinated upgrade tracked in
+[spinframework/spin#3598](https://github.com/spinframework/spin/issues/3598), an
+HTTP host must reject `baggage` headers above 8,192 bytes or 64 list members at
+its gateway. The optional Git host demonstrates and tests that boundary in
+[`HOSTING.md`](../../examples/git/qualification/aws/HOSTING.md).
+
 The provider implements upstream `StoreManager`, `Store`, `Cas`, and
 `MakeKeyValueStore`. It pins unmodified Spin **4.1.0**, revision
 `c0b3726aa4857961e20cf8616a0df5f0741af73d`. It is pre-release and unpublished;

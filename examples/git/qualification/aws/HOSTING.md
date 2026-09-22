@@ -71,6 +71,14 @@ Unmaterialized repositories are skipped; an error does not prevent other
 repositories from being serviced. There is no job database or detached component
 work. Graph scans and S3 costs still need measurement on the deployed workload.
 
+Caddy rejects an inbound W3C `baggage` header above 8,192 bytes or 64 list
+members with HTTP 431 before proxying it to Spin. This bounds the availability
+issue in [GHSA-w9wp-h8wv-79jx](https://github.com/open-telemetry/opentelemetry-rust/security/advisories/GHSA-w9wp-h8wv-79jx)
+while Spin 4.1 still resolves the affected OpenTelemetry SDK. Remove this gateway
+rule only after upgrading to a fixed Spin release and rerunning hosted
+qualification. The coordinated upstream upgrade is tracked in
+[spinframework/spin#3598](https://github.com/spinframework/spin/issues/3598).
+
 By default, conflicts, pending publication, and retained readers wait until the
 next timer. Continuous traffic can prevent collection from progressing. Set
 `host_maintenance_pause_seconds` explicitly to enable an optional ingress gap,
