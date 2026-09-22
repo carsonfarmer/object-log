@@ -82,11 +82,14 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
     // This reports only the cached view; observing another operation's fence
     // requires refreshing, without a hidden storage read from this method.
     assert!(!GuestSession::has_active_collection(&s));
-    s.view.replace(s.log.load().await.unwrap());
+    assert!(!GuestSession::has_active_collection(&s));
+    assert!(matches!(
+        maintenance::collect(&s, 4).await.unwrap().state,
+        MaintenanceState::Conflict
+    ));
     assert!(GuestSession::has_active_collection(&s));
     let mut complete = false;
     for _ in 0..8 {
-        s.view.replace(s.log.load().await.unwrap());
         let report = maintenance::collect(&s, 4).await.unwrap();
         if matches!(report.state, MaintenanceState::Complete) {
             complete = true;
@@ -95,7 +98,6 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
         assert!(matches!(report.state, MaintenanceState::More));
     }
     assert!(complete);
-    s.view.replace(s.log.load().await.unwrap());
     assert!(!GuestSession::has_active_collection(&s));
     assert_eq!(
         s.log
@@ -131,6 +133,40 @@ async fn collection_calls_bound_new_plans_and_reject_invalid_caps() {
     assert!(matches!(report.state, MaintenanceState::More));
     assert_eq!(report.objects, 1);
 }
+
+#[tokio::test]
+async fn pending_collection_continues_with_the_cached_fence() {
+    let faults = FaultStore::new(InMemory::new());
+    let s = session_on(Arc::new(faults.clone())).await;
+    s.log
+        .put_object(&s.current_view(), Bytes::from_static(b"orphan"))
+        .await
+        .unwrap();
+
+    faults.reset();
+    faults.schedule(StoreFailure {
+        operation: Operation::Delete,
+        occurrence: 1,
+        phase: FailurePhase::Before,
+    });
+    assert!(matches!(
+        maintenance::collect(&s, 4).await.unwrap().state,
+        MaintenanceState::Pending
+    ));
+    assert!(GuestSession::has_active_collection(&s));
+
+    faults.reset();
+    assert!(matches!(
+        maintenance::collect(&s, 4).await.unwrap().state,
+        MaintenanceState::More
+    ));
+    assert!(!GuestSession::has_active_collection(&s));
+    assert!(matches!(
+        maintenance::collect(&s, 4).await.unwrap().state,
+        MaintenanceState::Complete
+    ));
+}
+
 #[tokio::test]
 async fn recovered_view_does_not_checkpoint_a_concurrent_append() {
     let mut s = session().await;

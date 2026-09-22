@@ -31,10 +31,19 @@ pub(super) async fn collect(
         .map_err(failure)?
     {
         CollectionStart::Empty(report) => return Ok(result(MaintenanceState::Complete, report)),
-        CollectionStart::Installed(view, _) | CollectionStart::Active(view) => view,
-        CollectionStart::Conflict(_) => return Ok(empty(MaintenanceState::Conflict)),
+        CollectionStart::Installed(view, _) | CollectionStart::Active(view) => {
+            session.view.replace(view.clone());
+            view
+        }
+        CollectionStart::Conflict(view) => {
+            session.view.replace(view);
+            return Ok(empty(MaintenanceState::Conflict));
+        }
         CollectionStart::Pending => return Ok(empty(MaintenanceState::Pending)),
-        CollectionStart::Retained(_) => return Ok(empty(MaintenanceState::Retained)),
+        CollectionStart::Retained(view) => {
+            session.view.replace(view);
+            return Ok(empty(MaintenanceState::Retained));
+        }
     };
     let (state, report) = match session
         .log
@@ -42,9 +51,15 @@ pub(super) async fn collect(
         .await
         .map_err(failure)?
     {
-        CollectionFinish::Complete(_, report) => (MaintenanceState::More, report),
+        CollectionFinish::Complete(view, report) => {
+            session.view.replace(view);
+            (MaintenanceState::More, report)
+        }
         CollectionFinish::Pending(report) => (MaintenanceState::Pending, report),
-        CollectionFinish::Conflict(_, report) => (MaintenanceState::Conflict, report),
+        CollectionFinish::Conflict(view, report) => {
+            session.view.replace(view);
+            (MaintenanceState::Conflict, report)
+        }
     };
     Ok(result(state, report))
 }
