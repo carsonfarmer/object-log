@@ -255,3 +255,37 @@ budget. Large values remain inline and buffered, so raising `value_bytes` also
 requires coherent batch/response limits and lower concurrency. Run against an
 isolated prefix and remove that prefix before destroying the Terraform-managed
 bucket.
+
+Commit `42a75fd` was qualified on 2026-09-22 from a same-region `t3.xlarge`
+Amazon Linux 2023 runner in `us-west-2`, using Rust 1.97.1 and 20 sequential
+set/get samples at each size. Times include the S3 work needed to publish or
+read one point value:
+
+| Value | Set p50 / p95 | Get p50 / p95 |
+| ---: | ---: | ---: |
+| 64 KiB | 178 / 228 ms | 82 / 132 ms |
+| 256 KiB | 239 / 347 ms | 127 / 309 ms |
+| 1 MiB | 259 / 562 ms | 142 / 241 ms |
+| 4 MiB | 289 / 373 ms | 138 / 192 ms |
+| 8 MiB | 407 / 515 ms | 192 / 285 ms |
+
+There were no provider conflicts, transport failures, or 5xx responses in the
+value phases. Phase-boundary RSS rose from 20 MiB at 64 KiB to 36 MiB at 8 MiB;
+the test process peaked at 75 MiB. These figures are evidence for this host,
+region, sequential workload, and key layout rather than service-level promises.
+
+The same run passed the complete AWS fault/recovery matrix and the 4,096-record
+growth, contention, reopen, and collection workload. A point read used six
+logical reads and downloaded 3.7 KiB. Initial growth had 1.17x logical write
+amplification. Collection reduced 5,560 objects / 5.11 MB to 4,533 objects /
+4.70 MB while preserving 4.23 MB of live key/value data. Phase-boundary RSS
+remained below 29 MiB. Contention is intentionally expensive in this
+store-without-a-server design: four writers completed all 32 batches after 59
+definite conflicts, with one cumulative request budget covering every retry.
+
+Keep 64 KiB as the general default. Up to 1 MiB is a reasonable configurable
+KV profile when batch and response limits are raised together and deployment
+memory is measured. The 4 MiB and 8 MiB cases are qualified for deliberately
+bounded point workloads, but values remain inline and buffered, and concurrency
+multiplies their memory use. Prefer object/blob storage for larger payloads or
+for workloads that need high large-value concurrency.

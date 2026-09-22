@@ -78,7 +78,10 @@ pub async fn qualify_large_values(config: Config) -> anyhow::Result<()> {
         .enumerate()
     {
         let value = vec![u8::try_from(sample + 1)?; size];
-        store.set("payload", &value).await?;
+        store
+            .set("payload", &value)
+            .await
+            .with_context(|| format!("set {size}-byte point value"))?;
         let read = store
             .get("payload", usize::MAX)
             .await?
@@ -88,28 +91,29 @@ pub async fn qualify_large_values(config: Config) -> anyhow::Result<()> {
 
     let gate = Arc::new(tokio::sync::Barrier::new(4));
     let mut tasks = Vec::new();
+    // Distinct stores share host admission without making this check depend on
+    // the tree-work cost of splitting multiple 8 MiB sibling leaves.
     for index in 0..3 {
         let gate = Arc::clone(&gate);
-        let store = Arc::clone(&store);
+        let concurrent = host.get(&format!("large-concurrent-{index}")).await?;
         tasks.push(tokio::spawn(async move {
             gate.wait().await;
-            store
-                .set(&format!("concurrent/{index}"), &vec![0x5a; maximum])
-                .await
+            (index, concurrent.set("payload", &vec![0x5a; maximum]).await)
         }));
     }
     gate.wait().await;
-    let mut committed = 0;
+    let mut committed = Vec::new();
     let mut busy = 0;
     for task in tasks {
-        match task.await? {
-            Ok(()) => committed += 1,
+        let (index, result) = task.await?;
+        match result {
+            Ok(()) => committed.push(index),
             Err(error) if error.to_string().contains("concurrent operation limit") => busy += 1,
             Err(error) => return Err(error.into()),
         }
     }
     anyhow::ensure!(
-        committed == 2 && busy == 1,
+        committed.len() == 2 && busy == 1,
         "large-value admission was not bounded"
     );
     drop(store);
@@ -125,13 +129,24 @@ pub async fn qualify_large_values(config: Config) -> anyhow::Result<()> {
         maximum,
     );
     store.delete("payload").await?;
-    for index in 0..3 {
-        store.delete(&format!("concurrent/{index}")).await?;
-    }
+    let mut complete = false;
     for _ in 0..20 {
         if restarted.maintain("large").await? == Maintenance::Complete {
-            return Ok(());
+            complete = true;
+            break;
         }
     }
-    anyhow::bail!("large-value maintenance did not complete")
+    anyhow::ensure!(complete, "large-value maintenance did not complete");
+    for index in committed {
+        let concurrent = restarted.get(&format!("large-concurrent-{index}")).await?;
+        assert_eq!(
+            concurrent
+                .get("payload", usize::MAX)
+                .await?
+                .map(|v| v.len()),
+            Some(maximum)
+        );
+        concurrent.delete("payload").await?;
+    }
+    Ok(())
 }
