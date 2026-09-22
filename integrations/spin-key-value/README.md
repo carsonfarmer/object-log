@@ -278,3 +278,14 @@ writers, cold recovery, maintenance, and an explicitly configured value-size
 profile through 8 MiB. The second runs upstream's unchanged Spin guest against
 the same native S3 provider when those variables are present. Neither command
 runs without the explicit ignored-test or remote configuration opt-in.
+
+Commit `a1d4568` was qualified on 2026-09-22 from a same-region `t3.xlarge`
+Amazon Linux 2023 runner in `us-west-2`. The default and explicit 8 MiB native
+profiles passed. The large profile admitted two simultaneous 8 MiB writes to
+independent logical stores and immediately rejected a third through the shared
+manager limit. The original 8 MiB point profile survived a cold reopen and
+collection. The two native test cases ran in parallel and the combined process
+peaked at 155 MiB RSS. The pinned, unmodified Spin guest also passed through the
+S3-backed provider and peaked at 155 MiB in its separately timed process. These
+are qualification figures for this host and test mix, not a runtime-wide memory
+limit.

@@ -255,10 +255,10 @@ budget. Large values remain inline and buffered, so raising `value_bytes` also
 requires coherent batch/response limits. Run against an isolated prefix and
 remove that prefix before destroying the Terraform-managed bucket.
 
-The KV measurement suite from commit `42a75fd` ran on 2026-09-22 from a same-region `t3.xlarge`
-Amazon Linux 2023 runner in `us-west-2`, using Rust 1.97.1 and 20 sequential
-set/get samples at each size. Times include the S3 work needed to publish or
-read one point value:
+The KV measurement suite from commit `da4635f` ran on 2026-09-22 from a
+same-region `t3.xlarge` Amazon Linux 2023 runner in `us-west-2`, using Rust
+1.97.1 and 20 sequential set/get samples at each size. Times include the S3
+work needed to publish or read one point value:
 
 | Value | Set p50 / p95 | Get p50 / p95 |
 | ---: | ---: | ---: |
