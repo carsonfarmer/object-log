@@ -53,14 +53,15 @@ A backend must provide:
 - deletion for capability-probe cleanup; and
 - prefix listing and repeatable deletion when collection is enabled.
 
-`ValidatedBackend::new` probes those capabilities once and rejects unsupported
-stores. `object_store::local::LocalFileSystem` is useful for immutable-object
+`ValidatedBackend::new` probes those capabilities once, including prefix listing
+and two deletions of the same probe object, and rejects unsupported stores.
+`object_store::local::LocalFileSystem` is useful for immutable-object
 tests but cannot host a log because it lacks conditional updates. The memory
 backend, `MinIO`, and AWS S3 satisfy the tested protocol.
 
 The application owns the bucket and access policy. `ValidatedBackend::new`
-writes, reads, conditionally updates, and deletes one object under an isolated
-probe log. Normal publication needs reads and conditional writes. Collection
+writes, reads, conditionally updates, lists, and repeatedly deletes one object
+under an isolated probe log. Normal publication needs reads and conditional writes. Collection
 also lists the log prefix and deletes immutable objects. A single deployment
 credential therefore needs read, write, list, and delete access under its root
 prefix; deployments that separate publication from maintenance can scope those

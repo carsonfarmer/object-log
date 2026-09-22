@@ -25,6 +25,16 @@ async fn backend_conforms(store: Arc<dyn ObjectStore>) -> Result<(), Box<dyn Std
             .capabilities()
             .supports(BackendCapability::ConditionalUpdate)
     );
+    assert!(
+        backend
+            .capabilities()
+            .supports(BackendCapability::PrefixList)
+    );
+    assert!(
+        backend
+            .capabilities()
+            .supports(BackendCapability::RepeatableDelete)
+    );
     let log_id = LogId::new("test-log")?;
     Log::open(&backend, &log_id, Options::default()).await?;
     Ok(())

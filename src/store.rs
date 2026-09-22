@@ -76,7 +76,7 @@ impl RequestGuard for Guards {
     }
 }
 
-/// One backend behavior required by the publication protocol.
+/// One backend behavior required by the complete log protocol.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum BackendCapability {
     /// Create-only writes fail when the key already exists.
@@ -87,6 +87,10 @@ pub enum BackendCapability {
     ConditionalRead,
     /// A successful write is visible to the next read.
     ConsistentReadAfterWrite,
+    /// Listing one private prefix returns the object stored beneath it.
+    PrefixList,
+    /// Deleting one object through the batch interface succeeds repeatedly.
+    RepeatableDelete,
 }
 
 /// Behaviors observed by an isolated backend capability probe.
@@ -149,7 +153,7 @@ impl BackendCapabilities {
     }
 
     fn require_protocol(&self) -> Result<(), Error> {
-        const REQUIRED: [(BackendCapability, &str); 4] = [
+        const REQUIRED: [(BackendCapability, &str); 6] = [
             (BackendCapability::ConditionalCreate, "conditional create"),
             (BackendCapability::ConditionalUpdate, "conditional update"),
             (BackendCapability::ConditionalRead, "conditional read"),
@@ -157,6 +161,8 @@ impl BackendCapabilities {
                 BackendCapability::ConsistentReadAfterWrite,
                 "consistent read after write",
             ),
+            (BackendCapability::PrefixList, "prefix listing"),
+            (BackendCapability::RepeatableDelete, "repeatable delete"),
         ];
 
         for (capability, name) in REQUIRED {
@@ -554,18 +560,38 @@ impl ScopedStore {
     /// Returns a storage error for a failure that is not a supported negative
     /// capability response.
     async fn probe_capabilities(&self) -> Result<BackendCapabilities, Error> {
-        let location = self
-            .scope
-            .clone()
-            .join(".probe")
-            .join(Uuid::new_v4().simple().to_string());
-        let result = self.run_probe(&location).await;
-        let cleanup = self.delete_probe_object(&location).await;
-
-        match (result, cleanup) {
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-            (Ok(capabilities), Ok(())) => Ok(capabilities),
+        let prefix = self.scope.clone().join(".probe");
+        let location = prefix.clone().join(Uuid::new_v4().simple().to_string());
+        let mut capabilities = match self.run_probe(&location).await {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                self.delete_probe_object(&location).await?;
+                return Err(error);
+            }
+        };
+        match self.probe_prefix_listing(&prefix, &location).await {
+            Ok(true) => {
+                capabilities.supported.insert(BackendCapability::PrefixList);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.delete_probe_object(&location).await?;
+                return Err(error);
+            }
         }
+        match self.probe_repeatable_delete(&location).await {
+            Ok(true) => {
+                capabilities
+                    .supported
+                    .insert(BackendCapability::RepeatableDelete);
+            }
+            Ok(false) => self.delete_probe_object(&location).await?,
+            Err(error) => {
+                self.delete_probe_object(&location).await?;
+                return Err(error);
+            }
+        }
+        Ok(capabilities)
     }
 
     fn location(&self, key: StoreKey) -> Path {
@@ -737,9 +763,44 @@ impl ScopedStore {
         }
     }
 
+    async fn probe_prefix_listing(&self, prefix: &Path, location: &Path) -> Result<bool, Error> {
+        let mut listed = self.store.list(Some(prefix));
+        let mut found = false;
+        while let Some(result) = listed.next().await {
+            match result {
+                Ok(metadata) => found |= metadata.location == *location,
+                Err(error) if is_unsupported(&error) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(found)
+    }
+
+    async fn probe_repeatable_delete(&self, location: &Path) -> Result<bool, Error> {
+        if !self.probe_delete_once(location).await? {
+            return Ok(false);
+        }
+        self.probe_delete_once(location).await
+    }
+
+    async fn probe_delete_once(&self, location: &Path) -> Result<bool, Error> {
+        let locations = stream::iter([Ok(location.clone())]).boxed();
+        let mut results = self.store.delete_stream(locations);
+        let Some(result) = results.next().await else {
+            return Ok(false);
+        };
+        match result {
+            Ok(deleted) => Ok(deleted == *location),
+            Err(object_store::Error::NotFound { .. }) => Ok(true),
+            Err(error) if is_unsupported(&error) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn delete_probe_object(&self, location: &Path) -> Result<(), Error> {
         match self.store.delete(location).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) if is_unsupported(&error) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
@@ -847,6 +908,57 @@ mod tests {
     use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
 
     type TestResult = Result<(), Box<dyn StdError>>;
+
+    #[tokio::test]
+    async fn capability_probe_exercises_collection_operations() -> TestResult {
+        let faults = FaultStore::new(InMemory::new());
+        let backend = ValidatedBackend::new(
+            Arc::new(faults.clone()),
+            Path::from("complete-capability-probe"),
+        )
+        .await?;
+        assert!(
+            backend
+                .capabilities()
+                .supports(BackendCapability::PrefixList)
+        );
+        assert!(
+            backend
+                .capabilities()
+                .supports(BackendCapability::RepeatableDelete)
+        );
+        assert_eq!(faults.metrics().operation(Operation::List).requests, 1);
+        assert_eq!(faults.metrics().operation(Operation::Delete).requests, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn complete_protocol_requires_collection_capabilities() {
+        let publication = BTreeSet::from([
+            BackendCapability::ConditionalCreate,
+            BackendCapability::ConditionalUpdate,
+            BackendCapability::ConditionalRead,
+            BackendCapability::ConsistentReadAfterWrite,
+        ]);
+        let capabilities = BackendCapabilities {
+            supported: publication.clone(),
+        };
+        assert!(matches!(
+            capabilities.require_protocol(),
+            Err(Error::UnsupportedBackend("prefix listing"))
+        ));
+
+        let capabilities = BackendCapabilities {
+            supported: publication
+                .into_iter()
+                .chain([BackendCapability::PrefixList])
+                .collect(),
+        };
+        assert!(matches!(
+            capabilities.require_protocol(),
+            Err(Error::UnsupportedBackend("repeatable delete"))
+        ));
+    }
 
     #[tokio::test]
     async fn request_guard_filesystem_refusals_never_reach_backend() -> TestResult {
