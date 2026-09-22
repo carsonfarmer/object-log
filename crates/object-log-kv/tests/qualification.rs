@@ -12,15 +12,19 @@ use object_log::{
     RetentionId, RetentionStatus, TransactionId, ValidatedBackend,
     sim::{FaultStore, Operation},
 };
-use object_log_kv::{KvCommand, KvSnapshot, KvStore, Limits};
+use object_log_kv::{KvCommand, KvError, KvSnapshot, KvStore, Limits};
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 
 #[cfg(feature = "aws")]
-#[path = "support/minio.rs"]
-mod minio;
+#[path = "support/s3.rs"]
+mod s3;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 type Model = BTreeMap<Bytes, Bytes>;
+const VALUE_SAMPLES: usize = 20;
+const VALUE_SIZES: [usize; 5] = [64 << 10, 256 << 10, 1 << 20, 4 << 20, 8 << 20];
+const MAX_VALUE_BYTES: usize = 8 << 20;
+const REJECTED_VALUE_BYTES: usize = 12 << 20;
 
 const LIMITS: Limits = Limits {
     key_bytes: 64,
@@ -69,7 +73,7 @@ async fn memory_large_growth_and_contention() -> TestResult {
 #[tokio::test]
 #[ignore = "requires isolated local MinIO; see README"]
 async fn minio_growth_and_contention() -> TestResult {
-    let (storage, counts) = minio::build()?;
+    let (storage, counts) = s3::minio()?;
     qualify(
         storage,
         &move || counts.snapshot(),
@@ -77,6 +81,205 @@ async fn minio_growth_and_contention() -> TestResult {
         &[(256, 6), (4096, 6), (16_384, 7)],
     )
     .await
+}
+
+#[cfg(feature = "aws")]
+#[tokio::test]
+#[ignore = "requires a disposable AWS S3 prefix; see README"]
+async fn aws_growth_and_contention() -> TestResult {
+    let (storage, counts) = s3::aws()?;
+    qualify(
+        storage,
+        &move || counts.snapshot(),
+        "aws",
+        &[(256, 6), (4096, 6)],
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "finite large-value envelope; see README"]
+async fn memory_value_size_envelope() -> TestResult {
+    qualify_value_sizes(Arc::new(InMemory::new()), &|| [0; 4], "memory").await
+}
+
+#[cfg(feature = "aws")]
+#[tokio::test]
+#[ignore = "requires a disposable AWS S3 prefix; see README"]
+async fn aws_value_size_envelope() -> TestResult {
+    let (storage, counts) = s3::aws()?;
+    qualify_value_sizes(storage, &move || counts.snapshot(), "aws").await
+}
+
+async fn qualify_value_sizes(
+    storage: Arc<dyn ObjectStore>,
+    provider: &ProviderCounts,
+    name: &str,
+) -> TestResult {
+    let limits = Limits {
+        value_bytes: MAX_VALUE_BYTES,
+        batch_bytes: MAX_VALUE_BYTES + 1024,
+        response_bytes: MAX_VALUE_BYTES + 1024,
+        ..Limits::default()
+    };
+    let backend = ValidatedBackend::new(Arc::clone(&storage), Path::from("values")).await?;
+    let log = Log::open(&backend, &LogId::new("value-envelope")?, options()).await?;
+    let store = KvStore::new(log, limits);
+    eprintln!(
+        "backend={name} value_sizes={VALUE_SIZES:?} samples_per_size={VALUE_SAMPLES} tree_budget={} object_budget={}",
+        limits.tree_bytes,
+        store.log().options().max_object_bytes,
+    );
+    for size in VALUE_SIZES {
+        let before = provider();
+        let phase = Instant::now();
+        let mut sets = Vec::new();
+        let mut gets = Vec::new();
+        for sample in 0..VALUE_SAMPLES {
+            let byte = u8::try_from(sample + 1)?;
+            let value = Bytes::from(vec![byte; size]);
+            let started = Instant::now();
+            commit(&store, &[set(Bytes::from("payload"), value)]).await?;
+            sets.push(started.elapsed());
+
+            let started = Instant::now();
+            let read = store
+                .snapshot()
+                .await?
+                .get(b"payload")
+                .await?
+                .ok_or("large value missing after publication")?;
+            gets.push(started.elapsed());
+            assert_eq!(read.len(), size);
+            assert!(read.iter().all(|candidate| *candidate == byte));
+        }
+        sets.sort_unstable();
+        gets.sort_unstable();
+        let p50 = VALUE_SAMPLES.div_ceil(2) - 1;
+        let p95 = (VALUE_SAMPLES * 95).div_ceil(100) - 1;
+        report(
+            &format!(
+                "{name} value_bytes={size} set_p50_us={} set_p95_us={} get_p50_us={} get_p95_us={}",
+                sets[p50].as_micros(),
+                sets[p95].as_micros(),
+                gets[p50].as_micros(),
+                gets[p95].as_micros(),
+            ),
+            None,
+            before,
+            provider,
+            u64::try_from(size + b"payload".len())? * u64::try_from(VALUE_SAMPLES)?,
+            phase.elapsed(),
+        );
+        checkpoint(&store).await?;
+    }
+
+    assert_value_rejected(&store, limits, name, REJECTED_VALUE_BYTES).await?;
+    qualify_large_prefix(&store, name, MAX_VALUE_BYTES).await?;
+
+    checkpoint(&store).await?;
+    drop(store);
+    let reopened = KvStore::new(
+        Log::open(&backend, &LogId::new("value-envelope")?, options()).await?,
+        limits,
+    );
+    assert_eq!(
+        reopened
+            .snapshot()
+            .await?
+            .get(b"payload")
+            .await?
+            .ok_or("large value missing after cold reopen")?
+            .len(),
+        MAX_VALUE_BYTES,
+    );
+    commit(
+        &reopened,
+        &[
+            KvCommand::Delete {
+                key: Bytes::from("payload"),
+            },
+            KvCommand::Delete {
+                key: Bytes::from("payload/x"),
+            },
+        ],
+    )
+    .await?;
+    checkpoint(&reopened).await?;
+    let deleted = collect(&reopened).await?;
+    assert!(deleted > 0);
+    assert_eq!(reopened.snapshot().await?.get(b"payload").await?, None);
+    assert_eq!(reopened.snapshot().await?.get(b"payload/x").await?, None);
+    Ok(())
+}
+
+async fn assert_value_rejected(
+    store: &KvStore,
+    limits: Limits,
+    name: &str,
+    size: usize,
+) -> TestResult {
+    let wider_limits = Limits {
+        value_bytes: size,
+        batch_bytes: size + 1024,
+        response_bytes: size + 1024,
+        ..limits
+    };
+    let wider = KvStore::new(store.log().clone(), wider_limits);
+    let generation = wider.log().load().await?.generation();
+    let result = wider
+        .snapshot()
+        .await?
+        .prepare(
+            TransactionId::new(),
+            &[set(Bytes::from("payload"), Bytes::from(vec![9; size]))],
+        )
+        .await;
+    let Err(error) = result else {
+        return Err("value above the qualified tree envelope was accepted".into());
+    };
+    assert!(matches!(error, KvError::Limit("cumulative bytes")));
+    assert_eq!(wider.log().load().await?.generation(), generation);
+    eprintln!(
+        "{name} value_bytes={size} rejected_by=tree_budget tree_budget={}",
+        wider_limits.tree_bytes,
+    );
+    Ok(())
+}
+
+async fn qualify_large_prefix(store: &KvStore, name: &str, value_bytes: usize) -> TestResult {
+    commit(store, &[set(Bytes::from("payload/x"), Bytes::from("x"))]).await?;
+
+    let generation = store.log().load().await?.generation();
+    let result = store
+        .snapshot()
+        .await?
+        .prepare(
+            TransactionId::new(),
+            &[
+                set(Bytes::from("payload/y"), Bytes::from("y")),
+                set(Bytes::from("payload/z"), Bytes::from("z")),
+            ],
+        )
+        .await;
+    let Err(error) = result else {
+        return Err("large value-bearing ancestor did not bound batch work".into());
+    };
+    assert!(matches!(error, KvError::Limit("cumulative bytes")));
+    assert_eq!(store.log().load().await?.generation(), generation);
+    assert_eq!(
+        store
+            .snapshot()
+            .await?
+            .get(b"payload")
+            .await?
+            .map(|v| v.len()),
+        Some(value_bytes)
+    );
+    eprintln!(
+        "{name} large_prefix_value_bytes={value_bytes} one_descendant=committed two_descendants=rejected_by_tree_budget"
+    );
+    Ok(())
 }
 
 async fn open(backend: &ValidatedBackend) -> TestResult<KvStore> {
@@ -214,8 +417,6 @@ fn report(
             let amplification = metrics.uploaded_bytes() as f64 / logical_written as f64;
             eprintln!("{label} logical_write_amplification={amplification:.2}");
         }
-    } else {
-        eprintln!("{label} logical_io=unmeasured (direct provider bulk deletion)");
     }
 }
 

@@ -1,9 +1,13 @@
-use std::{any::Any, sync::Arc, time::Duration};
+use std::{any::Any, env, sync::Arc, time::Duration};
 
 use anyhow::{Context, ensure};
 use object_log::{Log, LogId, Options, ValidatedBackend};
 use object_log_kv::{KvStore, Limits};
-use object_store::{ClientOptions, ObjectStore, RetryConfig, aws::AmazonS3Builder, path::Path};
+use object_store::{
+    ClientOptions, ObjectStore, RetryConfig,
+    aws::{AmazonS3Builder, AmazonS3ConfigKey},
+    path::Path,
+};
 use serde::{Deserialize, Serialize};
 use spin_factor_key_value::{Error, Store, StoreManager, runtime_config::spin::MakeKeyValueStore};
 use tokio::sync::{OnceCell, Semaphore};
@@ -166,7 +170,7 @@ impl MakeKeyValueStore for ObjectLogKeyValueStore {
             );
             Arc::new(object_store::memory::InMemory::new())
         } else {
-            let mut builder = AmazonS3Builder::from_env()
+            let mut builder = s3_builder_from_environment()
                 .with_bucket_name(config.bucket.as_deref().context("bucket is required")?)
                 .with_client_options(
                     ClientOptions::new()
@@ -187,6 +191,76 @@ impl MakeKeyValueStore for ObjectLogKeyValueStore {
             Arc::new(builder.build().context("invalid native S3 configuration")?)
         };
         Manager::new(store, &config.prefix, config.wal, config.limits)
+    }
+}
+
+fn s3_builder_from_environment() -> AmazonS3Builder {
+    s3_builder_with_credentials(|name| env::var(name).ok())
+}
+
+fn s3_builder_with_credentials(value: impl Fn(&str) -> Option<String>) -> AmazonS3Builder {
+    const CREDENTIALS: &[(&str, AmazonS3ConfigKey)] = &[
+        ("AWS_ACCESS_KEY_ID", AmazonS3ConfigKey::AccessKeyId),
+        ("AWS_SECRET_ACCESS_KEY", AmazonS3ConfigKey::SecretAccessKey),
+        ("AWS_SESSION_TOKEN", AmazonS3ConfigKey::Token),
+        (
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            AmazonS3ConfigKey::WebIdentityTokenFile,
+        ),
+        ("AWS_ROLE_ARN", AmazonS3ConfigKey::RoleArn),
+        ("AWS_ROLE_SESSION_NAME", AmazonS3ConfigKey::RoleSessionName),
+        (
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            AmazonS3ConfigKey::ContainerCredentialsRelativeUri,
+        ),
+        (
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            AmazonS3ConfigKey::ContainerCredentialsFullUri,
+        ),
+        (
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+            AmazonS3ConfigKey::ContainerAuthorizationTokenFile,
+        ),
+    ];
+    CREDENTIALS
+        .iter()
+        .fold(AmazonS3Builder::new(), |builder, (name, key)| {
+            match value(name) {
+                Some(value) => builder.with_config(*key, value),
+                None => builder,
+            }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_environment_cannot_override_storage_transport() {
+        let builder = s3_builder_with_credentials(|name| match name {
+            "AWS_ACCESS_KEY_ID" => Some("key".into()),
+            "AWS_SECRET_ACCESS_KEY" => Some("secret".into()),
+            _ => None,
+        });
+
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::AccessKeyId),
+            Some("key".into())
+        );
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::SecretAccessKey),
+            Some("secret".into())
+        );
+        assert_eq!(builder.get_config_value(&AmazonS3ConfigKey::Endpoint), None);
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::S3Endpoint),
+            None
+        );
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::SkipSignature),
+            Some("false".into())
+        );
     }
 }
 

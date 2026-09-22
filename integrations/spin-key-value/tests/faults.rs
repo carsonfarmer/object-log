@@ -97,6 +97,36 @@ async fn unresolved_publication_reports_unknown_and_never_replays() -> Result {
 }
 
 #[tokio::test]
+async fn definite_conflict_is_retried() -> Result {
+    let occurrence = head_put().await?;
+    let fault = Arc::new(FaultStore::new(InMemory::new()));
+    let backend: Arc<dyn ObjectStore> = fault.clone();
+    let limits = HostLimits::default();
+    let first = Manager::new(
+        backend.clone(),
+        "conflict-retry",
+        Options::default(),
+        limits,
+    )?;
+    let second = Manager::new(backend, "conflict-retry", Options::default(), limits)?;
+    let first = first.get("default").await?;
+    let second = second.get("default").await?;
+    fault.reset();
+
+    let mut paused = fault.pause_put_at(occurrence, FailurePhase::Before);
+    let writer = tokio::spawn(async move { first.increment("counter".into(), 1).await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    assert_eq!(second.increment("counter".into(), 1).await?, 1);
+    assert!(paused.release());
+    assert_eq!(writer.await??, 2);
+    assert_eq!(
+        second.get("counter", usize::MAX).await?,
+        Some(2i64.to_le_bytes().to_vec())
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancellation_keeps_admitted_work_and_permit_until_completion() -> Result {
     let limits = HostLimits {
         concurrent_operations: 1,

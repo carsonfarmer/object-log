@@ -10,8 +10,8 @@ use object_log_kv::{KvCommand, KvError, KvResult, KvStore, Limits, decode_result
 use object_store::{ObjectStore, local::LocalFileSystem, memory::InMemory, path::Path};
 
 #[cfg(feature = "aws")]
-#[path = "support/minio.rs"]
-mod minio;
+#[path = "support/s3.rs"]
+mod s3;
 
 type StoreFactory = dyn Fn() -> Result<Arc<dyn ObjectStore>, Box<dyn StdError>>;
 
@@ -33,7 +33,21 @@ macro_rules! backend_cases {
         #[ignore = "requires isolated local MinIO; see README"]
         async fn minio_correctness_matrix() -> TestResult {
             $({
-                let (storage, counts) = minio::build()?;
+                let (storage, counts) = s3::minio()?;
+                $case(&move || Ok(Arc::clone(&storage)))
+                    .await.map_err(|error| format!("{}: {error}", stringify!($case)))?;
+                eprintln!("{} http=[attempts,upload_body_bytes,conflicts,transport_or_5xx_errors] {:?}",
+                    stringify!($case), counts.snapshot());
+            })+
+            Ok(())
+        }
+
+        #[cfg(feature = "aws")]
+        #[tokio::test]
+        #[ignore = "requires a disposable AWS S3 prefix; see README"]
+        async fn aws_correctness_matrix() -> TestResult {
+            $({
+                let (storage, counts) = s3::aws()?;
                 $case(&move || Ok(Arc::clone(&storage)))
                     .await.map_err(|error| format!("{}: {error}", stringify!($case)))?;
                 eprintln!("{} http=[attempts,upload_body_bytes,conflicts,transport_or_5xx_errors] {:?}",

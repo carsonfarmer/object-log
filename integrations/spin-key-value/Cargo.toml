@@ -20,7 +20,7 @@ object-log = { path = "../..", features = ["aws"] }
 object-log-kv = { path = "../../crates/object-log-kv" }
 object_store = { version = "0.14", default-features = false, features = ["aws"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 spin-factor-key-value = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
 

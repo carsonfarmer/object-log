@@ -99,10 +99,13 @@ this adapter's conventions; direct KV writers can introduce invalid UTF-8 keys
 or incompatible counter bytes.
 
 S3 credentials stay in the host's native `object_store::aws::AmazonS3Builder`
-credential chain (environment credentials or supported workload identity).
-There are no credential fields in the guest manifest or provider TOML. The guest
-needs no outbound S3 permission, WASI HTTP adapter, or composed storage component.
-Configure the host's TLS crypto provider as normal for your Spin embedding.
+credential chain (environment credentials, web identity, container identity, or
+EC2 instance identity). The provider imports only credential-source variables;
+ambient endpoint, HTTP, signing, and transport variables cannot override its
+TOML configuration. There are no credential fields in the guest manifest or
+provider TOML. The guest needs no outbound S3 permission, WASI HTTP adapter, or
+composed storage component. Configure the host's TLS crypto provider as normal
+for your Spin embedding.
 
 The bucket must already exist. Backend validation probes conditional reads and
 writes and deletes its probe object. Grant the host read, write, list, and delete
@@ -135,8 +138,10 @@ needs only S3 and the same configuration.
   checks that exact generation, preventing absent-key races and ABA. Unrelated
   writes, checkpoints, and retention changes can conservatively cause CAS failure;
   Spin supplies the refreshed CAS handle through its existing dispatch.
-- A confirmed conflict revalidates against a fresh snapshot within the attempt
-  budget. An uncertain publication resolves the exact candidate. It is never
+- A confirmed conflict waits for a small randomized, bounded delay, then
+  revalidates against a fresh snapshot within the attempt budget. This keeps
+  equal-latency writers from repeatedly colliding in lockstep. An uncertain
+  publication resolves the exact candidate. It is never
   replayed with a new transaction identity. Unresolved or expired mutation
   outcomes become `Error::Other` with an explicit **outcome unknown** message.
 - Spin's guest interface has no pending token or request identity. Consequently
@@ -255,11 +260,21 @@ and collection. These are correctness tests, not remote-S3 performance claims.
 The native integration is not a WASIp2 target; the unchanged portable cores are
 checked separately for WASIp2 by `make spin-kv-check`.
 
-Source size: **863 production Rust lines**, **27 registration-example lines**,
-and **888 test lines** (physical lines including comments/blank lines; generated
-code, lockfiles, and upstream sources excluded). Reproduce with:
+For opt-in AWS qualification, provision the disposable backend described in
+[`examples/git/qualification/aws/README.md`](../../examples/git/qualification/aws/README.md),
+then set `SPIN_KV_AWS_BUCKET`, `SPIN_KV_AWS_REGION`, and a unique
+`SPIN_KV_AWS_PREFIX`. Use its temporary session for a local process, or leave
+credential variables unset on the same-region runner so it uses the instance
+role. Then run:
 
 ```sh
-wc -l integrations/spin-key-value/src/*.rs
-wc -l integrations/spin-key-value/examples/*.rs integrations/spin-key-value/tests/*.rs
+cargo test --locked --test aws -- --ignored --nocapture
+cd ../..
+make spin-kv-guest-test
 ```
+
+The first command covers the native provider's default profile, concurrent
+writers, cold recovery, maintenance, and an explicitly configured value-size
+profile through 8 MiB. The second runs upstream's unchanged Spin guest against
+the same native S3 provider when those variables are present. Neither command
+runs without the explicit ignored-test or remote configuration opt-in.

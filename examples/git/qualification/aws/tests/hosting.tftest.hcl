@@ -2,8 +2,8 @@ mock_provider "aws" {
   mock_data "aws_subnets" {
     defaults = { ids = ["subnet-test"] }
   }
-  mock_data "aws_subnet" {
-    defaults = { vpc_id = "vpc-test" }
+  mock_data "aws_vpc" {
+    defaults = { id = "vpc-test" }
   }
   mock_data "aws_route53_zone" {
     defaults = { name = "example.com.", private_zone = false }
@@ -35,9 +35,35 @@ run "s3_only" {
     condition = (
       length(aws_instance.host) == 0 && length(aws_cognito_user_pool.git) == 0 &&
       length(aws_eip.host) == 0 && length(aws_eip_association.host) == 0 &&
-      length(data.aws_route53_zone.host) == 0 && length(aws_route53_record.host) == 0
+      length(data.aws_route53_zone.host) == 0 && length(aws_route53_record.host) == 0 &&
+      length(aws_instance.qualification_runner) == 0
     )
     error_message = "Existing S3-only use must not create hosting resources."
+  }
+}
+
+run "qualification_runner" {
+  command = apply
+  variables {
+    qualification_runner               = true
+    qualification_runner_artifact_path = "./maintenance.py"
+    qualification_runner_ami_id        = "ami-runner"
+  }
+  assert {
+    condition = (
+      length(aws_security_group.qualification_runner[0].ingress) == 0 &&
+      aws_instance.qualification_runner[0].metadata_options[0].http_tokens == "required" &&
+      aws_instance.qualification_runner[0].user_data_replace_on_change &&
+      strcontains(aws_instance.qualification_runner[0].user_data, "export HOME=/root")
+    )
+    error_message = "The disposable runner must be egress-only, require IMDSv2, and replace on bootstrap changes."
+  }
+  assert {
+    condition = (
+      jsondecode(aws_iam_role_policy.qualification_runner[0].policy).Statement[1].Resource ==
+      "${aws_s3_bucket.qualification.arn}/qualification/host-test/*"
+    )
+    error_message = "The runner role must stay within the qualification prefix."
   }
 }
 

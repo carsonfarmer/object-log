@@ -1,11 +1,12 @@
 //! Opt-in local MinIO qualification. The parent gives credentials only to a
 //! native host subprocess; its configuration uses the normal provider factory.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-use anyhow::Context;
-use std::{process::Command, sync::Arc};
+use std::process::Command;
 
-use object_log_spin_key_value::{Config, Maintenance, ObjectLogKeyValueStore};
-use spin_factor_key_value::{StoreManager, runtime_config::spin::MakeKeyValueStore};
+use object_log_spin_key_value::Config;
+
+#[path = "support/provider.rs"]
+mod provider;
 
 #[test]
 #[ignore = "requires disposable loopback MinIO; see README"]
@@ -58,58 +59,5 @@ async fn native_host_child() -> anyhow::Result<()> {
         },
         wal: Default::default(),
     };
-    let host = ObjectLogKeyValueStore.make_store(config.clone())?;
-    let other_host = ObjectLogKeyValueStore.make_store(config.clone())?;
-    let store = host.get("default").await.context("open default")?;
-    store
-        .set("saved", b"survives host restart")
-        .await
-        .context("initial set")?;
-    assert_eq!(
-        host.get("audit").await?.get("saved", usize::MAX).await?,
-        None
-    );
-    let other = other_host.get("default").await.context("open default")?;
-    let mut tasks = Vec::new();
-    for writer in [Arc::clone(&store), other] {
-        tasks.push(tokio::spawn(async move {
-            for _ in 0..8 {
-                writer
-                    .increment("counter".into(), 1)
-                    .await
-                    .context("concurrent increment")?;
-            }
-            Ok::<_, anyhow::Error>(())
-        }));
-    }
-    for task in tasks {
-        task.await??;
-    }
-    drop(store);
-    drop(host);
-    drop(other_host);
-    let restarted = ObjectLogKeyValueStore.make_store(config)?;
-    let store = restarted.get("default").await?;
-    assert_eq!(
-        store.get("saved", usize::MAX).await?,
-        Some(b"survives host restart".to_vec())
-    );
-    assert_eq!(
-        store.get("counter", usize::MAX).await?,
-        Some(16i64.to_le_bytes().to_vec())
-    );
-    assert!(store.set("oversize", &[0; 65537]).await.is_err());
-    let mut complete = false;
-    for _ in 0..20 {
-        if restarted.maintain("default").await.context("maintenance")? == Maintenance::Complete {
-            complete = true;
-            break;
-        }
-    }
-    assert!(complete);
-    assert_eq!(
-        store.get("counter", usize::MAX).await?,
-        Some(16i64.to_le_bytes().to_vec())
-    );
-    Ok(())
+    provider::qualify(config).await
 }

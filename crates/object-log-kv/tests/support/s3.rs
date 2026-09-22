@@ -85,7 +85,7 @@ impl HttpService for CountedClient {
 
 type MeasuredStore = (Arc<dyn ObjectStore>, Arc<HttpCounts>);
 
-pub fn build() -> Result<MeasuredStore, Box<dyn Error>> {
+pub fn minio() -> Result<MeasuredStore, Box<dyn Error>> {
     let endpoint = env::var("OBJECT_LOG_MINIO_ENDPOINT")?;
     // Qualification must stay local even if a shell has remote AWS settings.
     let authority = endpoint
@@ -112,6 +112,38 @@ pub fn build() -> Result<MeasuredStore, Box<dyn Error>> {
         Arc::new(PrefixStore::new(
             store,
             Path::from(format!("kv-qualification-{}", TransactionId::new())),
+        )),
+        counts,
+    ))
+}
+
+pub fn aws() -> Result<MeasuredStore, Box<dyn Error>> {
+    let bucket = env::var("OBJECT_LOG_AWS_BUCKET")?;
+    let region = env::var("OBJECT_LOG_AWS_REGION")?;
+    let prefix = Path::parse(env::var("OBJECT_LOG_AWS_PREFIX")?)?;
+    if prefix.as_ref().is_empty() {
+        return Err("AWS qualification requires a nonempty object prefix".into());
+    }
+    let counts = Arc::new(HttpCounts::default());
+    let mut builder = AmazonS3Builder::new()
+        .with_bucket_name(bucket)
+        .with_region(region)
+        .with_disable_bulk_delete(false)
+        .with_http_connector(CountedConnector(Arc::clone(&counts)));
+    if let Ok(access_key) = env::var("AWS_ACCESS_KEY_ID") {
+        builder = builder.with_access_key_id(access_key);
+    }
+    if let Ok(secret_key) = env::var("AWS_SECRET_ACCESS_KEY") {
+        builder = builder.with_secret_access_key(secret_key);
+    }
+    if let Ok(token) = env::var("AWS_SESSION_TOKEN") {
+        builder = builder.with_token(token);
+    }
+    let store = builder.build()?;
+    Ok((
+        Arc::new(PrefixStore::new(
+            store,
+            prefix.join(format!("kv-qualification-{}", TransactionId::new())),
         )),
         counts,
     ))

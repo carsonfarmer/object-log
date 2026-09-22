@@ -225,3 +225,33 @@ is kept. Preserve raw command/Criterion output locally under ignored `target/`
 when comparing runs. Fresh-snapshot reads include bounded WAL replay, but do not
 flush provider or OS caches. These are local `MinIO` results; they do not establish
 remote-S3 latency or capacity for other key layouts and operation mixes.
+
+## Remote AWS qualification
+
+The repository's disposable AWS Terraform root, temporary local credentials,
+and same-region instance-role runner are documented in
+[`examples/git/qualification/aws/README.md`](../../examples/git/qualification/aws/README.md).
+Set `OBJECT_LOG_AWS_BUCKET`, `OBJECT_LOG_AWS_REGION`, and a unique nonempty
+`OBJECT_LOG_AWS_PREFIX`, then run the commands below. Load the temporary session
+only for a local process; leave credential variables unset on the runner.
+
+```sh
+cargo test -p object-log-kv --features aws --test kv \
+  aws_correctness_matrix -- --ignored --nocapture
+cargo test -p object-log-kv --features aws --test qualification \
+  aws_growth_and_contention -- --ignored --nocapture
+cargo test -p object-log-kv --features aws --test qualification \
+  aws_value_size_envelope -- --ignored --nocapture
+```
+
+The value envelope keeps the default 32 MiB cumulative tree allowance and
+64 MiB WAL object allowance. It measures the default 64 KiB value and explicitly
+configured 256 KiB, 1 MiB, 4 MiB, and 8 MiB values. These larger settings are
+qualification profiles, not new defaults. A changed 12 MiB value is rejected by
+the unchanged tree budget without publication. The test also shows why 8 MiB is
+a point-operation ceiling: with an 8 MiB value on a prefix key, one descendant
+mutation fits, while a two-command descendant batch exceeds the same tree-work
+budget. Large values remain inline and buffered, so raising `value_bytes` also
+requires coherent batch/response limits and lower concurrency. Run against an
+isolated prefix and remove that prefix before destroying the Terraform-managed
+bucket.

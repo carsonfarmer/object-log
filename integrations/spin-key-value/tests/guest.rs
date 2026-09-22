@@ -72,11 +72,29 @@ allowed_outbound_hosts = []
     };
     let mut resolver = RuntimeConfigResolver::new();
     resolver.register_store_type(ObjectLogKeyValueStore)?;
-    let table = toml::toml! {
-        [key_value_store.default]
-        type = "object-log"
-        memory = true
-        prefix = "guest-test"
+    let table = if let Ok(bucket) = std::env::var("SPIN_KV_AWS_BUCKET") {
+        let region = std::env::var("SPIN_KV_AWS_REGION")?;
+        let prefix = format!(
+            "{}/guest-{}",
+            std::env::var("SPIN_KV_AWS_PREFIX")?,
+            object_log::TransactionId::new(),
+        );
+        toml::from_str(&format!(
+            r#"
+[key_value_store.default]
+type = "object-log"
+bucket = {bucket:?}
+region = {region:?}
+prefix = {prefix:?}
+"#,
+        ))?
+    } else {
+        toml::toml! {
+            [key_value_store.default]
+            type = "object-log"
+            memory = true
+            prefix = "guest-test"
+        }
     };
     let config = TestFactorsRuntimeConfig {
         key_value: Some(resolver.resolve(Some(&table))?),

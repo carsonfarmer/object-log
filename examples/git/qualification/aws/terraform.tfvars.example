@@ -5,6 +5,12 @@ run_id        = "replace-with-run-id"
 bucket_name   = "replace-with-globally-unique-bucket-name"
 object_prefix = "object-log-qualification/replace-with-run-id"
 
+# Optional same-region qualification runner. Resolve and record an exact AMI as
+# shown in README.md instead of selecting "latest" inside Terraform.
+# qualification_runner               = true
+# qualification_runner_artifact_path = "/absolute/private/path/source.tar.gz"
+# qualification_runner_ami_id        = "ami-EXACT"
+
 # Optional remote HTTPS service. Omit both DNS inputs to use a public-IP certificate.
 # host_service         = true
 # host_name            = "git.example.com"

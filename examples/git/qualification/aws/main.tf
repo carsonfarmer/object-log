@@ -15,7 +15,7 @@ provider "aws" {
   default_tags {
     tags = {
       Project = "object-log"
-      Purpose = "git-qualification"
+      Purpose = "qualification"
       TestRun = var.run_id
     }
   }

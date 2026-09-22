@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -47,6 +48,13 @@ fn other(message: &str) -> Error {
 fn unknown() -> Error {
     tracing::warn!("object-log publication outcome unknown; operation was not replayed");
     other("object-log publication outcome unknown; do not blindly retry mutations")
+}
+
+async fn back_off(attempt: usize) {
+    let ceiling_ms = 2_u64 << attempt.min(7);
+    let random = TransactionId::new();
+    let jitter_ms = u64::from(random.as_uuid().as_bytes()[0]) % ceiling_ms;
+    tokio::time::sleep(Duration::from_millis(ceiling_ms + jitter_ms)).await;
 }
 
 #[derive(Debug)]
@@ -202,10 +210,13 @@ impl BackendStore {
             return Ok(());
         }
         self.run(move |store| async move {
-            for _ in 0..store.limits.attempts {
+            for attempt in 0..store.limits.attempts {
                 let snapshot = store.write_snapshot().await?;
                 if store.publish(&snapshot, &commands).await? {
                     return Ok(());
+                }
+                if attempt + 1 < store.limits.attempts {
+                    back_off(attempt).await;
                 }
             }
             Err(other("object-log contention limit"))
@@ -448,7 +459,7 @@ impl Store for BackendStore {
     async fn increment(&self, key: String, delta: i64) -> Result<i64, Error> {
         let key = self.key(&key)?;
         self.run(move |store| async move {
-            for _ in 0..store.limits.attempts {
+            for attempt in 0..store.limits.attempts {
                 let snapshot = store.write_snapshot().await?;
                 let previous = snapshot.get(&key).await.map_err(public_error)?;
                 // Match Spin's default backend's little-endian representation.
@@ -471,6 +482,9 @@ impl Store for BackendStore {
                 // Even delta=0 creates an absent key, as required by WASI atomics.
                 if store.publish(&snapshot, &[command]).await? {
                     return Ok(next);
+                }
+                if attempt + 1 < store.limits.attempts {
+                    back_off(attempt).await;
                 }
             }
             Err(other("object-log contention limit"))
