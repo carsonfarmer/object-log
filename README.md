@@ -48,10 +48,10 @@ A backend must provide:
 - create-if-absent writes;
 - version-based conditional updates;
 - conditional reads;
-- consistent read-after-write behavior; and
+- consistent read-after-write behavior;
 - stable immutable bytes until `object-log` garbage collection removes them;
-- deletion for capability-probe cleanup; and
-- prefix listing and repeatable deletion when collection is enabled.
+- prefix listing; and
+- repeatable deletion of immutable objects.
 
 `ValidatedBackend::new` probes those capabilities once, including prefix listing
 and two deletions of the same probe object, and rejects unsupported stores.
@@ -64,10 +64,12 @@ writes, reads, conditionally updates, lists, and repeatedly deletes one object
 under an isolated probe log. Normal publication needs reads and conditional writes. Collection
 also lists the log prefix and deletes immutable objects. A single deployment
 credential therefore needs read, write, list, and delete access under its root
-prefix; deployments that separate publication from maintenance can scope those
-phases independently, while the process constructing `ValidatedBackend` still
-needs permission to delete its probe object. Prevent external lifecycle rules
-from expiring protocol objects.
+prefix, even when a process performs only publication or only maintenance.
+Application authorization can keep maintenance unavailable to publishers, but
+the backend credential still covers the complete storage protocol. A backend
+that cannot delete may leave the private probe object behind while validation
+reports the missing capability. Prevent external lifecycle rules from expiring
+protocol objects.
 
 Only `<prefix>/v1/logs/<log-id>/index.cbor` is mutable. A conditional update to
 that object is the publication point. Everything else has a create-only key

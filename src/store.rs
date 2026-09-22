@@ -549,8 +549,9 @@ impl ScopedStore {
         Ok(())
     }
 
-    /// Probes backend behavior below a fresh private prefix and cleans up its
-    /// own object before returning.
+    /// Probes backend behavior below a fresh private prefix and attempts to
+    /// clean up its object before returning. A backend without deletion may
+    /// retain that object while the missing capability is reported.
     ///
     /// A missing capability is reported in the returned set. An unexpected
     /// backend failure is returned as an error.

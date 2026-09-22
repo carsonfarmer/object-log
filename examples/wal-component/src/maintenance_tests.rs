@@ -82,7 +82,6 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
     // This reports only the cached view; observing another operation's fence
     // requires refreshing, without a hidden storage read from this method.
     assert!(!GuestSession::has_active_collection(&s));
-    assert!(!GuestSession::has_active_collection(&s));
     assert!(matches!(
         maintenance::collect(&s, 4).await.unwrap().state,
         MaintenanceState::Conflict

@@ -226,6 +226,7 @@ func TestRepositoryRootAdmission(t *testing.T) {
 				"head":            {Validated: true, Format: format, Head: "refs/tags/main", Refs: valid.Refs, Buckets: valid.Buckets},
 				"reference":       {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"HEAD": id}, Buckets: valid.Buckets},
 				"hash":            {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.ToUpper(id)}, Buckets: valid.Buckets},
+				"zero hash":       {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.Repeat("0", format.HexSize())}, Buckets: valid.Buckets},
 				"ref collision":   {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": id, "refs/heads/main/nested": id}, Buckets: valid.Buckets},
 				"bucket order":    {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"ab", "0a"}},
 				"bucket encoding": {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"AZ"}},
@@ -298,11 +299,15 @@ func TestCatalogMetadataAdmission(t *testing.T) {
 				t.Fatal("rejected valid object metadata")
 			}
 			for name, mutate := range map[string]func(*objectMeta){
-				"path":     func(m *objectMeta) { m.ID = "ac" + m.ID[2:] },
-				"hash":     func(m *objectMeta) { m.ID = strings.ToUpper(m.ID) },
-				"kind":     func(m *objectMeta) { m.Kind = plumbing.REFDeltaObject },
-				"size":     func(m *objectMeta) { m.Size = -1 },
-				"encoding": func(m *objectMeta) { m.Encoding = "" },
+				"path":      func(m *objectMeta) { m.ID = "ac" + m.ID[2:] },
+				"hash":      func(m *objectMeta) { m.ID = strings.ToUpper(m.ID) },
+				"zero hash": func(m *objectMeta) { m.ID = strings.Repeat("0", format.HexSize()) },
+				"kind":      func(m *objectMeta) { m.Kind = plumbing.REFDeltaObject },
+				"size":      func(m *objectMeta) { m.Size = -1 },
+				"encoding":  func(m *objectMeta) { m.Encoding = "" },
+				"delta base": func(m *objectMeta) {
+					m.Delta = &deltaMeta{Base: strings.Repeat("0", format.HexSize()), Size: 2, Data: []byte{1}}
+				},
 			} {
 				t.Run(name, func(t *testing.T) {
 					invalid := item

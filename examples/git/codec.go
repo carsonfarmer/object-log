@@ -70,7 +70,7 @@ func validateRefs(format config.ObjectFormat, refs map[string]string) error {
 			}
 			parent = parent[:i]
 			if _, exists := refs[parent]; exists {
-				return fmt.Errorf("reference prefix collision")
+				return fmt.Errorf("ref prefix collision")
 			}
 		}
 	}
@@ -78,7 +78,8 @@ func validateRefs(format config.ObjectFormat, refs map[string]string) error {
 }
 
 func validID(format config.ObjectFormat, id string) bool {
-	return len(id) == format.HexSize() && id == strings.ToLower(id) && plumbing.IsHash(id)
+	hash, ok := plumbing.FromHex(id)
+	return len(id) == format.HexSize() && id == strings.ToLower(id) && ok && !hash.IsZero()
 }
 
 func validPrefix(value string, width int, parent string) bool {
@@ -97,7 +98,9 @@ func validObjectMeta(item objectMeta, format config.ObjectFormat, prefix string)
 	validKind := item.Kind == plumbing.BlobObject || item.Kind == plumbing.TreeObject ||
 		item.Kind == plumbing.CommitObject || item.Kind == plumbing.TagObject
 	validStorage := item.validInline() || len(item.Inline) == 0 && item.Encoding == "zlib" && item.StoredSize > 0
-	return validID(format, item.ID) && strings.HasPrefix(item.ID, prefix) && validKind && item.Size >= 0 && validStorage
+	validDelta := item.Delta == nil || item.Delta.valid() && validID(format, item.Delta.Base) &&
+		item.Delta.Base != item.ID && len(item.Inline) == 0
+	return validID(format, item.ID) && strings.HasPrefix(item.ID, prefix) && validKind && item.Size >= 0 && validStorage && validDelta
 }
 
 // Keep full catalog leaves below the WAL node limit, including base64 encoding.

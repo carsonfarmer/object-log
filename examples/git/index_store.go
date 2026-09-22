@@ -53,9 +53,6 @@ func (s *store) loadBucket(prefix string, value *wal.Object) (radixNode[indexed,
 			if !validObjectMeta(item, s.meta.Format, prefix) || i > 0 && meta.Items[i-1].ID >= item.ID {
 				return node, fmt.Errorf("invalid indexed object")
 			}
-			if item.Delta != nil && (!item.Delta.valid() || !validID(s.meta.Format, item.Delta.Base) || item.Delta.Base == item.ID || len(item.Inline) != 0) {
-				return node, fmt.Errorf("invalid indexed delta")
-			}
 			value := indexed{objectMeta: item}
 			if len(item.Inline) == 0 {
 				if next == len(entry.Objects) {
@@ -83,8 +80,8 @@ func validateBucket(node radixNode[indexed, *wal.Object], format config.ObjectFo
 			return fmt.Errorf("invalid index child")
 		}
 	}
-	for id, item := range node.Items {
-		if id != item.ID || !strings.HasPrefix(id, prefix) {
+	for _, item := range node.Items {
+		if !strings.HasPrefix(item.ID, prefix) {
 			return fmt.Errorf("invalid indexed object")
 		}
 	}
