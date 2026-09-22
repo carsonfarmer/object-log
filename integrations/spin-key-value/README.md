@@ -147,7 +147,7 @@ Optional `[key_value_store.<label>.limits]` fields and defaults:
 | `batch_entries` | 128 | Commands or requested keys |
 | `batch_bytes` | 1,048,576 | Input key/value bytes |
 | `page_entries` | 128 | Internal scan page |
-| `response_bytes` | 1,048,576 | Returned bytes plus String/Vec element storage |
+| `response_bytes` | 1,048,576 | Returned bytes plus collection headers and element storage |
 | `tree_bytes` | 33,554,432 | KV traversal/staging work per call or scan page |
 | `list_keys` | 4,096 | Complete key listing; overflow is an error |
 | `concurrent_operations` | 16 | Per manager, shared across its open handles |
@@ -157,6 +157,8 @@ Optional `[key_value_store.<label>.limits]` fields and defaults:
 | `collection_candidates` | 1,024 | One collection plan |
 
 `get_keys` returns a complete bounded listing, never silent truncation.
+Collection response accounting includes the outer `Vec` header, even for an
+empty result, as well as each element's headers and payload bytes.
 The async interface buffers the same bounded result. Internal KV scans also
 read values: their transient page allowance is the larger of `response_bytes`
 and `key_bytes + value_bytes`. Existence checks read a value without copying it
@@ -176,9 +178,23 @@ unreadable if reduced below its required bounds.
 ## Maintenance and diagnostics
 
 Writes checkpoint automatically before the configured tail threshold. Physical
-collection is explicit host work through `Manager::maintain(label)`. Retain the
-concrete manager when constructing/registering it programmatically if your host
-needs this method; the standard Spin `Store` trait intentionally has no admin API.
+collection is explicit host work through `Manager::maintain(label)`. The standard
+resolver exposes a concrete manager through `StoreManager::metadata`:
+
+```rust
+use anyhow::Context;
+use object_log_spin_key_value::Manager;
+
+let manager = key_value_config.get_store_manager("default")
+    .context("no default store")?;
+let host = manager.metadata().downcast_ref::<Manager>()
+    .context("default store is not an object-log provider")?.clone();
+let outcome = host.maintain("default").await?;
+```
+
+The cloned host handle shares the same backend validation and admission limit
+as the configured manager. It can be retained by the host for later maintenance.
+The standard Spin `Store` trait intentionally has no admin API.
 
 One call checkpoints and processes at most one bounded deletion plan. It resumes
 an existing plan before materializing a tree. `More` means call again within a
@@ -230,8 +246,8 @@ and collection. These are correctness tests, not remote-S3 performance claims.
 The native integration is not a WASIp2 target; the unchanged portable cores are
 checked separately for WASIp2 by `make spin-kv-check`.
 
-Source size: **840 production Rust lines**, **27 registration-example lines**,
-and **794 test lines** (physical lines including comments/blank lines; generated
+Source size: **863 production Rust lines**, **27 registration-example lines**,
+and **888 test lines** (physical lines including comments/blank lines; generated
 code, lockfiles, and upstream sources excluded). Reproduce with:
 
 ```sh

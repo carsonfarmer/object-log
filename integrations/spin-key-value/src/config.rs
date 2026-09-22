@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{any::Any, sync::Arc, time::Duration};
 
 use anyhow::{Context, ensure};
 use object_log::{Log, LogId, Options, ValidatedBackend};
@@ -54,7 +54,7 @@ pub struct HostLimits {
     pub batch_bytes: usize,
     /// Maximum entries in an internal scan page.
     pub page_entries: usize,
-    /// Maximum returned bytes plus collection element storage.
+    /// Maximum returned bytes plus collection headers and element storage.
     pub response_bytes: usize,
     /// KV tree work allowance per call or scan page.
     pub tree_bytes: usize,
@@ -192,10 +192,13 @@ impl MakeKeyValueStore for ObjectLogKeyValueStore {
 
 /// Manager for a host-configured namespace. Names map to distinct WAL identities.
 /// Spin's delegating manager and component manifest enforce label permissions.
+/// Clones share backend validation and admission. `StoreManager::metadata`
+/// exposes a clone so hosts using the standard resolver can run maintenance.
+#[derive(Clone)]
 pub struct Manager {
     store: Arc<dyn ObjectStore>,
     prefix: Path,
-    backend: OnceCell<ValidatedBackend>,
+    backend: Arc<OnceCell<ValidatedBackend>>,
     wal: Options,
     limits: HostLimits,
     admission: Arc<Semaphore>,
@@ -219,7 +222,7 @@ impl Manager {
         Ok(Self {
             store,
             prefix: prefix_path,
-            backend: OnceCell::new(),
+            backend: Arc::new(OnceCell::new()),
             wal,
             limits,
             admission: Arc::new(Semaphore::new(limits.concurrent_operations)),
@@ -272,5 +275,8 @@ impl StoreManager for Manager {
     }
     fn summary(&self, _name: &str) -> Option<String> {
         Some("object-log (native host storage)".into())
+    }
+    fn metadata(&self) -> Arc<dyn Any> {
+        Arc::new(self.clone())
     }
 }

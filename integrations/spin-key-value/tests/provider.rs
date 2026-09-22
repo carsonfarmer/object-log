@@ -77,6 +77,44 @@ async fn registration_and_strict_config() -> Result {
 }
 
 #[tokio::test]
+async fn resolver_metadata_exposes_host_maintenance() -> Result {
+    let mut resolver = RuntimeConfigResolver::new();
+    resolver.register_store_type(ObjectLogKeyValueStore)?;
+    let table = toml::toml! {
+        [key_value_store.default]
+        type = "object-log"
+        prefix = "maintenance-from-resolver"
+        memory = true
+        [key_value_store.default.limits]
+        checkpoint_entries = 4
+        collection_candidates = 5
+    };
+    let runtime = resolver.resolve(Some(&table))?;
+    let manager = runtime.get_store_manager("default").unwrap();
+    // Obtain a host handle before lazy backend validation has run.
+    let host = manager
+        .metadata()
+        .downcast_ref::<Manager>()
+        .unwrap()
+        .clone();
+    let store = manager.get("default").await?;
+    for value in 0..12 {
+        store.set("key", &[value]).await?;
+    }
+    assert_eq!(host.maintain("default").await?, Maintenance::More);
+    let mut complete = false;
+    for _ in 0..50 {
+        if host.maintain("default").await? == Maintenance::Complete {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete);
+    assert_eq!(store.get("key", usize::MAX).await?, Some(vec![11]));
+    Ok(())
+}
+
+#[tokio::test]
 async fn filesystem_rejects_missing_conditional_updates() -> Result {
     let dir = tempfile::tempdir()?;
     let manager = manager(
@@ -252,7 +290,14 @@ async fn limits_reject_whole_batches_and_lists() -> Result {
     assert!(store.set("a", &[0; 9]).await.is_err());
     assert!(
         store
-            .set_many(vec![("ok".into(), vec![1]), ("bad".into(), vec![0; 9])])
+            .set_many(vec![("ok".into(), vec![1]), ("".into(), vec![0; 9])])
+            .await
+            .is_err()
+    );
+    assert_eq!(store.get("ok", usize::MAX).await?, None);
+    assert!(
+        store
+            .set_many(vec![("ok".into(), vec![1]), ("longer".into(), vec![2])])
             .await
             .is_err()
     );
@@ -270,6 +315,13 @@ async fn limits_reject_whole_batches_and_lists() -> Result {
             .is_err()
     );
     store.set("a", b"v").await?;
+    assert!(
+        store
+            .delete_many(vec!["a".into(), "longer".into()])
+            .await
+            .is_err()
+    );
+    assert_eq!(store.get("a", usize::MAX).await?, Some(b"v".to_vec()));
     assert!(store.get("a", 1).await.is_err());
     assert!(store.get_many(vec!["a".into()], 1).await.is_err());
     assert!(
@@ -340,7 +392,7 @@ async fn collection_preserves_roots_and_respects_retentions() -> Result {
 #[tokio::test]
 async fn boolean_and_key_queries_do_not_charge_value_response_bytes() -> Result {
     let limits = HostLimits {
-        response_bytes: 32,
+        response_bytes: std::mem::size_of::<Vec<String>>() + std::mem::size_of::<String>() + 3,
         ..HostLimits::default()
     };
     let host = manager(Arc::new(InMemory::new()), "small-response", limits)?;
@@ -349,5 +401,47 @@ async fn boolean_and_key_queries_do_not_charge_value_response_bytes() -> Result 
     assert!(store.get("key", usize::MAX).await.is_err());
     assert!(store.exists("key").await?);
     assert_eq!(store.get_keys(usize::MAX).await?, vec!["key"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_response_limits_include_outer_headers() -> Result {
+    for populated in [false, true] {
+        let keys = if populated {
+            vec!["key".to_owned(), "missing".to_owned()]
+        } else {
+            vec![]
+        };
+        let key_bytes = std::mem::size_of::<Vec<String>>()
+            + usize::from(populated) * (std::mem::size_of::<String>() + 3);
+        let many_bytes = std::mem::size_of::<Vec<(String, Option<Vec<u8>>)>>()
+            + usize::from(populated) * (2 * std::mem::size_of::<(String, Option<Vec<u8>>)>() + 15);
+        for (many, required) in [(false, key_bytes), (true, many_bytes)] {
+            for host_limit in [false, true] {
+                for allowed in [required - 1, required] {
+                    let limits = HostLimits {
+                        response_bytes: if host_limit { allowed } else { usize::MAX },
+                        ..HostLimits::default()
+                    };
+                    let host = manager(Arc::new(InMemory::new()), "response-boundary", limits)?;
+                    let store = host.get("default").await?;
+                    if populated {
+                        store.set("key", b"value").await?;
+                    }
+                    let guest_limit = if host_limit { usize::MAX } else { allowed };
+                    let accepted = if many {
+                        store.get_many(keys.clone(), guest_limit).await.is_ok()
+                    } else {
+                        store.get_keys(guest_limit).await.is_ok()
+                    };
+                    assert_eq!(
+                        accepted,
+                        allowed == required,
+                        "many={many} populated={populated} host_limit={host_limit} allowed={allowed}"
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }

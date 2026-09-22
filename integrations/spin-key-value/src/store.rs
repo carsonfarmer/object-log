@@ -94,10 +94,15 @@ impl BackendStore {
     }
 
     fn key(&self, key: &str) -> Result<Bytes, Error> {
+        self.check_key(key)?;
+        Ok(Bytes::copy_from_slice(key.as_bytes()))
+    }
+
+    fn check_key(&self, key: &str) -> Result<(), Error> {
         if key.len() > self.limits.key_bytes {
             return Err(other("object-log key limit"));
         }
-        Ok(Bytes::copy_from_slice(key.as_bytes()))
+        Ok(())
     }
 
     fn batch(&self, count: usize, bytes: usize) -> Result<(), Error> {
@@ -108,10 +113,15 @@ impl BackendStore {
     }
 
     fn value(&self, value: &[u8]) -> Result<Bytes, Error> {
+        self.check_value(value)?;
+        Ok(Bytes::copy_from_slice(value))
+    }
+
+    fn check_value(&self, value: &[u8]) -> Result<(), Error> {
         if value.len() > self.limits.value_bytes {
             return Err(other("object-log value limit"));
         }
-        Ok(Bytes::copy_from_slice(value))
+        Ok(())
     }
 
     async fn snapshot(&self) -> Result<KvSnapshot, Error> {
@@ -302,6 +312,11 @@ impl Store for BackendStore {
     }
 
     async fn get_keys(&self, max_result_bytes: usize) -> Result<Vec<String>, Error> {
+        let limit = max_result_bytes.min(self.limits.response_bytes);
+        let header_bytes = std::mem::size_of::<Vec<String>>();
+        if header_bytes > limit {
+            return Err(other("object-log key listing limit"));
+        }
         self.run(move |store| async move {
             // KV scans read value-bearing pages. Keep their transient allowance
             // large enough for one admitted record even when the key-only output
@@ -314,7 +329,7 @@ impl Store for BackendStore {
             let snapshot = kv.snapshot().await.map_err(public_error)?;
             let mut after = None;
             let mut keys = Vec::new();
-            let mut bytes = 0usize;
+            let mut bytes = header_bytes;
             loop {
                 let page = snapshot
                     .scan(b"", None, after.as_deref(), store.limits.page_entries)
@@ -322,9 +337,7 @@ impl Store for BackendStore {
                     .map_err(public_error)?;
                 for (key, _) in page.entries {
                     bytes = bytes.saturating_add(key.len() + std::mem::size_of::<String>());
-                    if keys.len() >= store.limits.list_keys
-                        || bytes > max_result_bytes.min(store.limits.response_bytes)
-                    {
+                    if keys.len() >= store.limits.list_keys || bytes > limit {
                         return Err(other("object-log key listing limit"));
                     }
                     keys.push(String::from_utf8(key.to_vec()).map_err(public_error)?);
@@ -380,7 +393,8 @@ impl Store for BackendStore {
                 .get_many(&encoded)
                 .await
                 .map_err(public_error)?;
-            let bytes = keys.iter().zip(&values).fold(0usize, |n, (k, v)| {
+            let header_bytes = std::mem::size_of::<Vec<(String, Option<Vec<u8>>)>>();
+            let bytes = keys.iter().zip(&values).fold(header_bytes, |n, (k, v)| {
                 n.saturating_add(
                     std::mem::size_of::<(String, Option<Vec<u8>>)>()
                         + k.len()
@@ -404,11 +418,13 @@ impl Store for BackendStore {
             values.iter().map(|(k, v)| k.len() + v.len()).sum(),
         )?;
         let commands = values
-            .iter()
+            .into_iter()
             .map(|(key, value)| {
+                self.check_key(&key)?;
+                self.check_value(&value)?;
                 Ok(KvCommand::Set {
-                    key: self.key(key)?,
-                    value: self.value(value)?,
+                    key: Bytes::from(key),
+                    value: Bytes::from(value),
                 })
             })
             .collect::<Result<_, Error>>()?;
@@ -418,10 +434,11 @@ impl Store for BackendStore {
     async fn delete_many(&self, keys: Vec<String>) -> Result<(), Error> {
         self.batch(keys.len(), keys.iter().map(String::len).sum())?;
         let commands = keys
-            .iter()
+            .into_iter()
             .map(|key| {
+                self.check_key(&key)?;
                 Ok(KvCommand::Delete {
-                    key: self.key(key)?,
+                    key: Bytes::from(key),
                 })
             })
             .collect::<Result<_, Error>>()?;
