@@ -29,6 +29,16 @@ pins through go-pkg's public `Unpin` function after the bindings return Go
 values. Source revisions are pinned in `examples/git/Makefile` and `go.mod`;
 their upstream licenses apply.
 
+## Native Spin provider
+
+The isolated [Spin key-value provider](integrations/spin-key-value/README.md)
+uses unmodified Spin 4.1.0 at revision
+[`c0b3726`](https://github.com/spinframework/spin/commit/c0b3726aa4857961e20cf8616a0df5f0741af73d).
+Spin is Apache-2.0 WITH LLVM-exception. The opt-in guest test fetches and compiles
+that revision's unmodified key-value test component and helper; it does not
+vendor them into this repository. The provider is Apache-2.0 and unpublished.
+Its separate Cargo.lock records its native and development dependencies.
+
 ## Design acknowledgements
 
 The protocol is informed by Cursor's

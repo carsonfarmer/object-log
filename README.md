@@ -194,6 +194,11 @@ for the durable format and recovery invariants. The schema is defined in
 
 ## Examples
 
+The [native Spin key-value provider](integrations/spin-key-value/README.md) lets
+custom Spin runtimes register object-log as a host-side store at compile time.
+Guests keep the standard key-value API; S3 credentials and transport stay in the
+host. Spin dependencies remain outside the core and KV workspaces.
+
 - [`object-log-kv`](https://github.com/carsonfarmer/object-log/tree/main/crates/object-log-kv)
   is a byte-key/value store with sparse reads and writes, atomic batches,
   immutable snapshots, ordered scans, and checkpoint recovery. Its guide defines

@@ -51,3 +51,16 @@ git-spin-config-test: git-build
 git-provider-test:
 	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to an isolated Git test service"; exit 1)
 	cd $(GIT_EXAMPLE_DIR) && go test ./tests -count=1 -v -timeout 15m
+
+# Native Spin provider is intentionally outside the portable core workspace.
+SPIN_KV = integrations/spin-key-value/Cargo.toml
+.PHONY: spin-kv-check spin-kv-guest-test
+spin-kv-check:
+	cargo fmt --manifest-path $(SPIN_KV) --check
+	cargo clippy --locked --manifest-path $(SPIN_KV) --all-targets -- -D warnings
+	cargo test --locked --manifest-path $(SPIN_KV)
+	cargo clippy --locked -p object-log --lib --target wasm32-wasip2 -- -D warnings
+	cargo clippy --locked -p object-log-kv --lib --target wasm32-wasip2 -- -D warnings
+
+spin-kv-guest-test:
+	./integrations/spin-key-value/test-guest.sh

@@ -30,6 +30,10 @@ Git changes should follow the build and provider-test instructions in
 [`examples/git/README.md`](examples/git/README.md). Network-backed tests are
 opt-in and must use isolated disposable storage.
 
+For the isolated native Spin key-value provider, run `make spin-kv-check` and
+`make spin-kv-guest-test`. Its [guide](integrations/spin-key-value/README.md)
+describes opt-in local MinIO tests and consumer registration.
+
 ## Performance measurements
 
 Run optimized benchmarks and the finite operation measurements separately:

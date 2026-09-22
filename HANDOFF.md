@@ -17,6 +17,10 @@ Read `AGENTS.md`, `PLAN.md`, and `GIT_PLAN.md` before changing behavior.
   defines its local qualification and caller-owned recovery/maintenance duties.
   Its qualified profile documents KV-owned per-call buffers separately from
   caller, WAL, provider, runtime, allocator, and concurrency costs.
+- `integrations/spin-key-value/`: native provider for Spin 4.1's existing KV
+  factor. Consumers link and register it in their own runtime; no CLI or Spin
+  fork is shipped. Issue #52 covers registration, unchanged-guest execution,
+  host limits, pending results, recovery, and local MinIO qualification.
 - `examples/git/`: go-git smart-HTTP service and provider tests.
 - `examples/wal-component/`: reusable WASIp2 object-log component with S3,
   static or IMDSv2 credentials, bounded transport, and exact recovery.
