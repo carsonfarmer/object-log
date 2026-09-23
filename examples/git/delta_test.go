@@ -79,7 +79,7 @@ func TestRetainedDeltaRoundtrip(t *testing.T) {
 						t.Fatal(err)
 					}
 					s.deltas = map[plumbing.Hash]*deltaMeta{}
-					err = offsets.deltas(source, int64(len(packed)), func(id plumbing.Hash, delta *deltaMeta) { s.deltas[id] = delta })
+					err = offsets.deltas(source, int64(len(packed)), func(id plumbing.Hash, delta *deltaMeta) error { s.deltas[id] = delta; return nil })
 					if err != nil || len(s.deltas) != 1 {
 						t.Fatalf("retained %d deltas: %v", len(s.deltas), err)
 					}
@@ -166,7 +166,7 @@ func TestDeltaCatalogBound(t *testing.T) {
 
 func TestLargeDeltaRemainsAFullObject(t *testing.T) {
 	f := format.SHA256
-	target := make([]byte, 70<<10)
+	target := make([]byte, retainedDeltaLimit+1)
 	_, _ = rand.New(rand.NewSource(42)).Read(target)
 	delta := append([]byte{0}, packutil.EncodeLEB128(uint(len(target)))...)
 	for pos := 0; pos < len(target); {
@@ -179,10 +179,10 @@ func TestLargeDeltaRemainsAFullObject(t *testing.T) {
 	source := bytes.NewReader(packed)
 	s := newImportStorage(f)
 	offsets := packOffsets{}
-	if err := importPack(context.Background(), source, s, f, testPackLimits(1<<20), offsets); err != nil {
+	if err := importPack(context.Background(), source, s, f, testPackLimits(16<<20), offsets); err != nil {
 		t.Fatal(err)
 	}
-	if err := offsets.deltas(source, int64(len(packed)), func(plumbing.Hash, *deltaMeta) { t.Fatal("retained oversized representation") }); err != nil {
+	if err := offsets.deltas(source, int64(len(packed)), func(plumbing.Hash, *deltaMeta) error { t.Fatal("retained oversized representation"); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	object, err := s.EncodedObject(plumbing.BlobObject, blobID(f, target))

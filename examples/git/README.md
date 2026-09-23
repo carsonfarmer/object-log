@@ -278,11 +278,12 @@ Never clear retentions while a reader may still be active.
 - Incoming delta reconstruction uses go-git's normal in-memory buffers. Large
   objects and long delta chains can use substantially more memory than the
   compressed upload size. Plain object data and WAL reads remain streamed.
-- Fetch reuses compact deltas supplied by Git clients; it does not calculate
-  new deltas. Each optional representation is limited to 64 KiB compressed,
-  shares the catalog leaf's 512 KiB inline allowance, and uses an optional
-  per-push allowance equal to `git_max_catalog_bytes`. Full objects remain available
-  when a representation does not fit or its base is absent from the fetch.
+- Fetch reuses compressed deltas supplied by Git clients; it does not calculate
+  new deltas. Representations up to 64 KiB stay inline; larger ones up to 8 MiB
+  live in separate WAL byte objects so unrelated catalog reads stay small.
+  Optional retention per push is bounded by `git_max_catalog_bytes`. Full
+  objects remain available when a representation does not fit or its base is
+  absent from the fetch.
   Such fetches can use more bandwidth. Have-aware negotiation still omits
   objects the client already owns. Retained deltas also add catalog-read bytes.
 - Partial-clone filters and packfile URIs are not implemented.

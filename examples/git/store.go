@@ -154,7 +154,12 @@ func (s *store) DeltaObject(kind plumbing.ObjectType, id plumbing.Hash) (plumbin
 		return nil, err
 	}
 	if delta := object.(*storedObject).item.Delta; delta != nil {
-		return storedDelta{EncodedObject: object, delta: delta}, nil
+		item := object.(*storedObject).item
+		result := storedDelta{EncodedObject: object, delta: delta, failure: &s.failure}
+		if delta.StoredSize > 0 {
+			result.open = func() (io.ReadCloser, error) { return s.openDelta(item) }
+		}
+		return result, nil
 	}
 	return object, nil
 }
@@ -340,7 +345,11 @@ func (o *storedObject) Reader() (reader io.ReadCloser, err error) {
 	if len(o.item.Inline) > 0 {
 		return o.item.readInline(o.s.meta.Format)
 	}
-	source, err := o.s.openBytes(o.item.root)
+	root, _, err := o.s.objectRoots(o.item.root, o.item.Delta != nil && o.item.Delta.StoredSize > 0)
+	if err != nil {
+		return nil, err
+	}
+	source, err := o.s.openBytes(root)
 	if err != nil {
 		return nil, err
 	}
@@ -350,6 +359,36 @@ func (o *storedObject) Reader() (reader io.ReadCloser, err error) {
 		return nil, fmt.Errorf("object size differs from index")
 	}
 	return readLoose(source, o.s.meta.Format, o.item.Kind, o.item.Size, o.Hash())
+}
+
+func (s *store) objectRoots(root *wal.Object, external bool) (*wal.Object, *wal.Object, error) {
+	if !external {
+		return root, nil, nil
+	}
+	entry, err := s.readNode(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(entry.Data) != 0 || len(entry.Objects) != 2 {
+		return nil, nil, fmt.Errorf("invalid delta object")
+	}
+	return entry.Objects[0], entry.Objects[1], nil
+}
+
+func (s *store) openDelta(item indexed) (io.ReadCloser, error) {
+	_, root, err := s.objectRoots(item.root, true)
+	if err != nil {
+		return nil, err
+	}
+	source, err := s.openBytes(root)
+	if err != nil {
+		return nil, err
+	}
+	if source.size != item.Delta.StoredSize {
+		_ = source.Close()
+		return nil, fmt.Errorf("delta size differs from index")
+	}
+	return source, nil
 }
 
 func (s *store) publish(refs map[string]string) error {

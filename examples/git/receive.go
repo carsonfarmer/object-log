@@ -4,6 +4,7 @@ import (
 	"io"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	wal "object-log-git-proof/bindings/object_log_storage_wal"
 )
 
 // Incoming packs are staged as seekable WAL bytes before import.
@@ -61,19 +62,45 @@ func (p *incomingPack) Close() (err error) {
 		return err
 	}
 	remaining := p.s.limits.catalogBytes
-	if err := offsets.deltas(reader, reader.size, func(id plumbing.Hash, delta *deltaMeta) {
+	if err := offsets.deltas(reader, reader.size, func(id plumbing.Hash, delta *deltaMeta) error {
 		key := id.String()
 		item := p.s.pending[key]
-		if len(item.Inline) != 0 || int64(len(delta.Data)) >= item.StoredSize {
-			return
+		if len(item.Inline) != 0 || item.Delta != nil || int64(len(delta.Data)) >= item.StoredSize {
+			return nil
 		}
 		cost := int64(len(delta.Data) + len(delta.Base) + 64)
 		if cost > remaining {
-			return
+			return nil
 		}
 		remaining -= cost
+		if len(delta.Data) > inlineDeltaLimit {
+			writer, err := p.s.newByteWriter()
+			if err != nil {
+				return err
+			}
+			for data := delta.Data; len(data) > 0; {
+				part := data[:min(len(data), 1<<20)]
+				if _, err := writer.Write(part); err != nil {
+					return err
+				}
+				data = data[len(part):]
+			}
+			deltaRoot, err := writer.finish()
+			if err != nil {
+				return err
+			}
+			root, err := p.s.putNode(nil, []*wal.Object{item.root, deltaRoot})
+			deltaRoot.Drop()
+			if err != nil {
+				return err
+			}
+			item.root = root
+			delta.StoredSize = int64(len(delta.Data))
+			delta.Data = nil
+		}
 		item.Delta = delta
 		p.s.pending[key] = item
+		return nil
 	}); err != nil {
 		return err
 	}

@@ -25,7 +25,7 @@ func TestRetainedDeltas(t *testing.T) {
 			data := make([]byte, 16<<20)
 			_, _ = rand.New(rand.NewSource(42)).Read(data)
 			for version := range 4 {
-				data[version*1024]++
+				_, _ = rand.New(rand.NewSource(int64(version) + 43)).Read(data[version*(1<<20) : (version+1)*(1<<20)])
 				write(t, filepath.Join(source, "content"), data)
 				git(t, nil, "-C", source, "add", ".")
 				git(t, nil, "-C", source, "commit", "-m", fmt.Sprint(version))
@@ -53,7 +53,7 @@ func TestRetainedDeltas(t *testing.T) {
 				if info.Size() >= int64(len(data))*2 {
 					t.Fatalf("four related revisions used %d pack bytes", info.Size())
 				}
-				t.Logf("maintenance=%t four16MiB revisions clone=%d bytes", pass == 1, info.Size())
+				t.Logf("maintenance=%t four16MiB revisions with 1MiB edits clone=%d bytes", pass == 1, info.Size())
 			}
 		})
 	}
