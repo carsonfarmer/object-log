@@ -2,8 +2,6 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/ProtonMail/go-crypto v1.4.1 h1:9RfcZHqEQUvP8RzecWEUafnZVtEvrBVL9BiF67IQOfM=
 github.com/ProtonMail/go-crypto v1.4.1/go.mod h1:e1OaTyu5SYVrO9gKOEhTc+5UcXtTUa+P3uLudwcgPqo=
-github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260924052535-61b16b5071dd h1:bM6elWcME6db8anXejwgv6YBUgdbYyjjYNAy4+lRoes=
-github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260924052535-61b16b5071dd/go.mod h1:GHHrtMAGbK8lrpypt8yoC0hVcCYIfBTbyEq4xVLM6HA=
 github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
 github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
@@ -16,6 +14,8 @@ github.com/go-git/go-billy/v6 v6.0.0-alpha.2 h1:1Sv5WemXL8CxKrAx1gioJ+uHNb2bZJhi
 github.com/go-git/go-billy/v6 v6.0.0-alpha.2/go.mod h1:r/bsv9i/iDyyEU8/Z6mjC+YraOVwie1ddfUqBCElKXQ=
 github.com/go-git/go-git-fixtures/v6 v6.0.0-alpha.1 h1:gmqi2jvsreu0s8JMLylYDFq4sbjHwwlhktMw0DUg3mA=
 github.com/go-git/go-git-fixtures/v6 v6.0.0-alpha.1/go.mod h1:ECf1MqJlBdYpKggBrOXjo/0EnvRZx6D++I86UYjPgAQ=
+github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260917090420-0f3a0a2c2551 h1:OsE/ebR/Pm+fF1UntXmxQz68c3LN3yuuru+tzt0I4P0=
+github.com/go-git/go-git/v6 v6.0.0-alpha.5.0.20260917090420-0f3a0a2c2551/go.mod h1:GHHrtMAGbK8lrpypt8yoC0hVcCYIfBTbyEq4xVLM6HA=
 github.com/go-jose/go-jose/v4 v4.1.5 h1:RjgjO2LOtWOJKUC5wpwY9LR3B3vwVAz6JS2YHfYU6eA=
 github.com/go-jose/go-jose/v4 v4.1.5/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/kevinburke/ssh_config v1.6.0 h1:J1FBfmuVosPHf5GRdltRLhPJtJpTlMdKTBjRgTaQBFY=

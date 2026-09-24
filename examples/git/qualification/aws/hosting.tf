@@ -39,7 +39,7 @@ variable "host_instance_type" {
 }
 
 variable "host_git_max_object_bytes" {
-  description = "Largest decoded Git object and incoming delta instruction stream, in bytes."
+  description = "Largest decoded Git object stored or served, in bytes."
   type        = number
   default     = 67108864
   validation {

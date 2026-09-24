@@ -141,7 +141,7 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `git_read_only` | `false` | Reject push and maintenance when true |
 | `git_max_push_bytes` | `2147483648` | Incoming push body limit |
 | `git_max_negotiation_bytes` | `8388608` | Protocol command and negotiation limit |
-| `git_max_object_bytes` | `67108864` | Maximum decoded Git object and incoming delta instruction stream |
+| `git_max_object_bytes` | `67108864` | Maximum decoded Git object stored or served |
 | `git_max_metadata_bytes` | `16777216` | Maximum commit, tree, or tag |
 | `git_max_pack_objects` | `1000000` | Maximum entries declared by one incoming pack |
 | `git_max_catalog_bytes` | `67108864` | Catalog data decoded during one request |
@@ -149,9 +149,8 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 
 Invalid, zero, or inconsistent limits fail closed. These defaults are
 configurable service policy, not requirements of the WAL or Spin. They bound
-accepted requests and stored objects, not peak memory. The parser rejects
-oversized pack entries before inflation and oversized delta results before
-loading their bases. Allowed deltas still buffer their bases and results. In a local
+accepted requests and stored objects, not peak memory. go-git reconstructs
+incoming deltas before the service checks decoded object size. In a local
 Spin/MinIO run, simultaneous 64 MiB delta pushes to one, two, and four separate
 repositories peaked at about 578 MiB, 928 MiB, and 1.59 GiB of process memory.
 Deployment capacity must account for concurrent requests and headroom.
@@ -281,9 +280,8 @@ Never clear retentions while a reader may still be active.
   bases needed by the pack, which can increase upload size. No client
   configuration is required.
 - Incoming delta reconstruction uses go-git's normal in-memory buffers. The
-  parser checks its configured size limit before loading a delta base; the
-  limit also applies to the inflated delta instruction stream. Allowed objects
-  and long delta chains can still use substantially more memory than the
+  service checks decoded object size after reconstruction. Large objects and
+  long delta chains can use substantially more memory than the
   compressed upload size. Plain object data and WAL reads remain streamed.
 - Fetch reuses compressed deltas supplied by Git clients; it does not calculate
   new deltas. Representations up to 64 KiB stay inline; larger ones up to 8 MiB
@@ -297,8 +295,8 @@ Never clear retentions while a reader may still be active.
 - TLS termination, process supervision, and host-wide connection and memory
   policies belong to the deployment host. Cognito settings must match the
   deployed user pool and clients.
-- Spin, MinIO, and componentize-go are unmodified. The go-git pin adds only an
-  opt-in early size check; the Go SDK pins the proposed fix in go-pkg PR #13.
+- go-git, Spin, MinIO, and componentize-go are unmodified. The Go SDK pins the
+  proposed fix in go-pkg PR #13.
   See [dependency provenance](../../THIRD_PARTY.md).
 - Durable development formats are not migrated. Start with a fresh prefix after
   an incompatible revision change.

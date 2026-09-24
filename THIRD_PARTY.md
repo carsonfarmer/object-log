@@ -12,12 +12,9 @@ The adapter's Apache-2.0 WITH LLVM-exception license is reproduced in
 [`licenses/wasmtime.txt`](licenses/wasmtime.txt) and must accompany redistributed
 adapter binaries.
 
-The Git example pins [our go-git revision `61b16b5`](https://github.com/carsonfarmer/go-git/commit/61b16b5071dd9ab0597d9cf31c870590f1a69df5),
-based on upstream [`0f3a0a2`](https://github.com/go-git/go-git/commit/0f3a0a2c25513f2666ac9b88a6745f7b2382f572).
-Its only production change is an opt-in pack-parser size check before inflating
-an entry or loading a delta base. Incoming deltas otherwise retain go-git's
-normal buffering. The Git example uses the public pack parser, object storage,
-stored-delta, and receive-hook interfaces. Receive-pack
+The Git example uses unmodified upstream [go-git at revision `0f3a0a2`](https://github.com/go-git/go-git/commit/0f3a0a2c25513f2666ac9b88a6745f7b2382f572).
+It uses the public pack parser, object storage, stored-delta, and receive-hook
+interfaces. Incoming deltas use go-git's normal buffering. Receive-pack
 advertises `no-thin`, so ordinary Git clients include the bases their packs need.
 
 The Go SDK pins [go-pkg PR #13](https://github.com/bytecodealliance/go-pkg/pull/13)

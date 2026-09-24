@@ -194,16 +194,16 @@ outside request traffic also covers idle repositories and uploads that never
 published. Active reader retentions can delay collection; registrations lost by
 a stopped process require an explicit drain-and-recover procedure.
 
-There are costs I do not want to hide. The service uses go-git's normal
-buffering of incoming delta bases and results, with a small early size check
-on our pinned branch. Large updates can still need substantially more memory
-than their compressed size. Pushes advertise Git's `no-thin` capability, so
-clients include delta bases in the upload. This can cost bandwidth, but uses
-Git's existing negotiation without changing clients.
+There are costs I do not want to hide. The service uses unmodified go-git,
+including its normal buffering of incoming delta bases and results. Large
+updates can therefore need substantially more memory than their compressed
+size. The service's object-size limit applies when decoded objects reach
+storage, after delta reconstruction. Pushes advertise Git's `no-thin`
+capability, so clients include delta bases in the upload. This can cost
+bandwidth, but uses Git's existing negotiation without changing clients.
 
-The Go component uses unmodified Spin, MinIO, and componentize-go. It pins a
-small go-git parser size check and the unchanged contributor revision from an
-unmerged go-pkg pull request so
+The Go component uses unmodified go-git, Spin, MinIO, and componentize-go. It
+pins the unchanged contributor revision from an unmerged go-pkg pull request so
 garbage collection does not run during a restricted component allocation step.
 [THIRD_PARTY.md](../../THIRD_PARTY.md) records the exact revision and license.
 
