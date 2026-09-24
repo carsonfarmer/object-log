@@ -153,7 +153,7 @@ accepted requests and stored objects, not peak memory. The parser rejects
 oversized pack entries before inflation and oversized delta results before
 loading their bases. Allowed deltas still buffer their bases and results. In a local
 Spin/MinIO run, simultaneous 64 MiB delta pushes to one, two, and four separate
-repositories peaked at about 606 MiB, 973 MiB, and 1.71 GiB of process memory.
+repositories peaked at about 578 MiB, 928 MiB, and 1.59 GiB of process memory.
 Deployment capacity must account for concurrent requests and headroom.
 When upgrading an existing repository containing larger objects, retain a
 configured limit high enough to read them; lowering it blocks those objects.
