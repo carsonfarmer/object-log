@@ -18,6 +18,7 @@ object_prefix = "object-log-qualification/replace-with-run-id"
 # host_artifact_path   = "/absolute/private/path/git.tar.gz"
 # host_subnet_id       = "subnet-PUBLIC" # Empty selects a default-VPC default subnet.
 # host_instance_type   = "t3.xlarge"    # 16 GiB for concurrent large fixtures; qualify remotely.
+# host_git_max_object_bytes = 67108864 # Raise only with measured host capacity.
 # host_groups          = ["readers", "writers", "admins"]
 # host_repositories = {
 #   "team/project.git" = {

@@ -31,7 +31,7 @@ func TestObjectAndMetadataLimits(t *testing.T) {
 
 func TestRequestLimits(t *testing.T) {
 	defaults, err := loadLimits(func(string) string { return "" })
-	if err != nil || defaults.pushBytes != 2<<30 || defaults.objectBytes != 1<<30 || defaults.metadataBytes != 16<<20 || defaults.packObjects != 1_000_000 || defaults.catalogBytes != 64<<20 || defaults.collectionObjects != 100_000 {
+	if err != nil || defaults.pushBytes != 2<<30 || defaults.objectBytes != 64<<20 || defaults.metadataBytes != 16<<20 || defaults.packObjects != 1_000_000 || defaults.catalogBytes != 64<<20 || defaults.collectionObjects != 100_000 {
 		t.Fatalf("defaults: %+v %v", defaults, err)
 	}
 	for _, key := range []string{"GIT_MAX_PUSH_BYTES", "GIT_MAX_NEGOTIATION_BYTES", "GIT_MAX_OBJECT_BYTES", "GIT_MAX_METADATA_BYTES", "GIT_MAX_CATALOG_BYTES", "GIT_MAX_PACK_OBJECTS", "WAL_MAX_COLLECTION_OBJECTS", "WAL_COLLECTION_CANDIDATES", "GIT_REQUEST_TIMEOUT"} {

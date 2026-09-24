@@ -27,7 +27,7 @@ git_boot_id = { default = "local-boot" }
 git_read_only = { default = "false" }
 git_max_push_bytes = { default = "2147483648" }
 git_max_negotiation_bytes = { default = "8388608" }
-git_max_object_bytes = { default = "1073741824" }
+git_max_object_bytes = { default = "67108864" }
 git_max_metadata_bytes = { default = "16777216" }
 git_max_pack_objects = { default = "1000000" }
 git_max_catalog_bytes = { default = "67108864" }

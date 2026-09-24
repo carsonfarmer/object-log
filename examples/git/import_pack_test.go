@@ -379,6 +379,43 @@ func testPackLimits(size int64) requestLimits {
 	return requestLimits{objectBytes: size, metadataBytes: size, packObjects: 1_000_000}
 }
 
+func TestImportPackRejectsOversizedDeltaBeforeStorage(t *testing.T) {
+	for _, objectFormat := range []format.ObjectFormat{format.SHA1, format.SHA256} {
+		t.Run(string(objectFormat), func(t *testing.T) {
+			delta := []byte{4, 8, 0x90, 4, 0x90, 4}
+			packed := fixturePack(t, objectFormat, []packFixtureEntry{
+				{kind: plumbing.BlobObject, data: []byte("abcd")},
+				{kind: plumbing.OFSDeltaObject, ofs: 0, data: delta},
+			})
+			for _, tc := range []struct {
+				limit   int64
+				allowed bool
+			}{
+				{6, false},
+				{8, true},
+			} {
+				s := newImportStorage(objectFormat)
+				err := importPack(t.Context(), bytes.NewReader(packed), s, objectFormat, testPackLimits(tc.limit))
+				if tc.allowed {
+					if err != nil || s.writes != 2 {
+						t.Fatalf("limit %d: %v; writes=%d", tc.limit, err, s.writes)
+					}
+				} else if !errors.Is(err, errObjectLimit) || s.writes != 1 {
+					t.Fatalf("limit %d: %v; writes=%d", tc.limit, err, s.writes)
+				}
+			}
+			// A delta referencing an external base must be rejected on its
+			// declared result size before the parser tries to find the base.
+			thin := fixturePack(t, objectFormat, []packFixtureEntry{
+				{kind: plumbing.REFDeltaObject, ref: blobID(objectFormat, []byte("abcd")), data: delta},
+			})
+			if err := importPack(t.Context(), bytes.NewReader(thin), newImportStorage(objectFormat), objectFormat, testPackLimits(6)); !errors.Is(err, errObjectLimit) {
+				t.Fatalf("external base: %v", err)
+			}
+		})
+	}
+}
+
 func TestPackEntryBounds(t *testing.T) {
 	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
 		t.Run(f.String(), func(t *testing.T) {

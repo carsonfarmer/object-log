@@ -23,6 +23,9 @@ The configurable default is `t3.xlarge` (16 GiB) for the concurrent large-object
 qualification fixtures. Two concurrent 513 MiB push/clone/update/fetch lifecycles
 passed on this host size with a 5.30 GiB service cgroup peak. This is a tested
 workload, not an application memory limit or an arbitrary-concurrency guarantee.
+The service now defaults to 64 MiB objects. Set
+`host_git_max_object_bytes = 537919488` for the 513 MiB qualification fixture;
+use that larger limit only on a host with measured headroom.
 
 `host_repositories` provisions canonical names, unique stable WAL IDs, SHA-1 or
 SHA-256 formats, default branches, and independent read/write/admin groups.

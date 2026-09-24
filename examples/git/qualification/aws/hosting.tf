@@ -38,6 +38,16 @@ variable "host_instance_type" {
   default     = "t3.xlarge"
 }
 
+variable "host_git_max_object_bytes" {
+  description = "Largest decoded Git object and incoming delta instruction stream, in bytes."
+  type        = number
+  default     = 67108864
+  validation {
+    condition     = var.host_git_max_object_bytes >= 1 && floor(var.host_git_max_object_bytes) == var.host_git_max_object_bytes
+    error_message = "host_git_max_object_bytes must be a positive integer."
+  }
+}
+
 variable "host_repositories" {
   description = "Explicit repository provisioning and independent group permissions."
   type = map(object({
@@ -150,6 +160,7 @@ locals {
     wal_prefix                     = local.host_wal_prefix
     wal_credential_mode            = "instance-role"
     git_repositories               = jsonencode(var.host_repositories)
+    git_max_object_bytes           = tostring(var.host_git_max_object_bytes)
     git_auth_mode                  = "cognito"
     git_cognito_issuer             = "https://${aws_cognito_user_pool.git[0].endpoint}"
     git_cognito_host               = "https://cognito-idp.${var.aws_region}.amazonaws.com"

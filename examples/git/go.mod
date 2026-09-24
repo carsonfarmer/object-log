@@ -23,3 +23,5 @@ require (
 )
 
 replace go.bytecodealliance.org/pkg => github.com/ricochet/go-pkg v0.0.0-20260912220218-af8c737ad573
+
+replace github.com/go-git/go-git/v6 => github.com/carsonfarmer/go-git/v6 v6.0.0-alpha.5.0.20260924052535-61b16b5071dd

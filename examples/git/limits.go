@@ -26,7 +26,7 @@ type requestLimits struct {
 }
 
 func loadLimits(getenv func(string) string) (requestLimits, error) {
-	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 1 << 30, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, collectionObjects: 100_000, collectionCandidates: 1000, catalogRead: new(int64), timeout: 5 * time.Minute}
+	limits := requestLimits{pushBytes: 2 << 30, negotiationBytes: 8 << 20, objectBytes: 64 << 20, packObjects: 1_000_000, metadataBytes: 16 << 20, catalogBytes: 64 << 20, collectionObjects: 100_000, collectionCandidates: 1000, catalogRead: new(int64), timeout: 5 * time.Minute}
 	for _, setting := range []struct {
 		name  string
 		value *int64

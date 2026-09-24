@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -56,9 +57,13 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage storer.Encode
 	}
 	parser := packfile.NewParser(input,
 		packfile.WithStorage(storage), packfile.WithObjectFormat(objectFormat),
+		packfile.WithObjectSizeLimit(limits.objectBytes),
 		packfile.WithScannerObservers(observers...))
 	parsed, err := parser.Parse()
 	if err != nil {
+		if errors.Is(err, packfile.ErrObjectSizeLimit) {
+			return fmt.Errorf("%w: GIT_MAX_OBJECT_BYTES", errObjectLimit)
+		}
 		return err
 	}
 	if parsed.Compare(checksum.Sum(nil)) != 0 {
