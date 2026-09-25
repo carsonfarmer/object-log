@@ -18,7 +18,7 @@ fn handle(request: Request) -> Response {
 }
 
 fn exercise(path: &str) -> Result<(), wal::Failure> {
-    let settings = wal::Config {
+    let mut settings = wal::Config {
         endpoint: "http://127.0.0.1:19092".into(),
         bucket: "fixture".into(),
         region: "us-west-2".into(),
@@ -63,11 +63,23 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             let session = wal::open_existing(&settings)?;
             assert!(!session.has_active_collection());
         }
-        "/missing" => assert!(matches!(
-            wal::open_existing(&settings),
-            Err(wal::Failure::Missing)
-        )),
-        "/unavailable" | "/renewal-unavailable" | "/slow-metadata" => {
+        "/missing" => {
+            assert!(matches!(
+                wal::open_existing(&settings),
+                Err(wal::Failure::Missing)
+            ));
+            settings.log_id = "missing-after-error".into();
+            assert!(matches!(
+                wal::open_existing(&settings),
+                Err(wal::Failure::Missing)
+            ));
+        }
+        "/slow-metadata" => {
+            for _ in 0..2 {
+                assert!(matches!(wal::open(&settings), Err(wal::Failure::Other(_))));
+            }
+        }
+        "/unavailable" | "/renewal-unavailable" => {
             assert!(matches!(wal::open(&settings), Err(wal::Failure::Other(_))));
         }
         _ => panic!("unknown fixture scenario"),

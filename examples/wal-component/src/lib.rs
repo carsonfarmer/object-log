@@ -8,6 +8,7 @@ use object_log::{
 };
 use std::cell::{Ref, RefCell};
 use std::sync::Arc;
+mod executor;
 mod maintenance;
 mod transport;
 wit_bindgen::generate!({ path: "wit", world: "storage" });
@@ -146,7 +147,7 @@ impl GuestByteWriter for WriterState {
         let writer = writer
             .as_mut()
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
-        spin_executor::run(writer.write(&data)).map_err(failure)
+        executor::run(writer.write(&data)).map_err(failure)
     }
     fn finish(&self) -> Result<Object, Failure> {
         let writer = self
@@ -154,7 +155,7 @@ impl GuestByteWriter for WriterState {
             .borrow_mut()
             .take()
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
-        spin_executor::run(writer.finish())
+        executor::run(writer.finish())
             .map(Object::new)
             .map_err(failure)
     }
@@ -164,7 +165,7 @@ impl GuestByteReader for ReaderState {
         self.0.borrow().len()
     }
     fn read_at(&self, offset: u64, max_len: u32) -> Result<Vec<u8>, Failure> {
-        spin_executor::run(self.0.borrow_mut().read_at(offset, max_len as usize))
+        executor::run(self.0.borrow_mut().read_at(offset, max_len as usize))
             .map(|bytes| bytes.to_vec())
             .map_err(failure)
     }
@@ -176,33 +177,32 @@ impl GuestSession for SessionState {
     }
     fn retain(&self, id: Vec<u8>) -> Result<RetentionState, Failure> {
         let view = self.current_view();
-        let status =
-            spin_executor::run(self.log.retain(&view, retention_id(id)?)).map_err(failure)?;
+        let status = executor::run(self.log.retain(&view, retention_id(id)?)).map_err(failure)?;
         Ok(self.accept_retention(status))
     }
     fn release_retention(&self, id: Vec<u8>) -> Result<RetentionState, Failure> {
         let view = self.current_view();
-        let status = spin_executor::run(self.log.release_retention(&view, retention_id(id)?))
-            .map_err(failure)?;
+        let status =
+            executor::run(self.log.release_retention(&view, retention_id(id)?)).map_err(failure)?;
         Ok(self.accept_retention(status))
     }
     fn clear_retentions_after_drain(&self) -> Result<RetentionState, Failure> {
         let view = self.current_view();
         let status =
-            spin_executor::run(self.log.clear_retentions_after_drain(&view)).map_err(failure)?;
+            executor::run(self.log.clear_retentions_after_drain(&view)).map_err(failure)?;
         Ok(self.accept_retention(status))
     }
     fn collect(&self, max_candidates: u64) -> Result<CollectionResult, Failure> {
         let max_candidates = usize::try_from(max_candidates)
             .map_err(|_| Failure::Limit("collection candidate objects".into()))?;
-        spin_executor::run(maintenance::collect(self, max_candidates))
+        executor::run(maintenance::collect(self, max_candidates))
     }
     fn usage(&self) -> Usage {
         let (calls, bytes) = self.transport.usage();
         Usage { calls, bytes }
     }
     fn refresh(&self) -> Result<Session, Failure> {
-        let view = spin_executor::run(self.log.load()).map_err(failure)?;
+        let view = executor::run(self.log.load()).map_err(failure)?;
         Ok(Session::new(Self {
             log: self.log.clone(),
             view: RefCell::new(view),
@@ -223,7 +223,7 @@ impl GuestSession for SessionState {
     }
 
     fn resume(&self, token: Vec<u8>) -> Result<Resolution, Failure> {
-        match spin_executor::run(self.log.resume(&token)).map_err(failure)? {
+        match executor::run(self.log.resume(&token)).map_err(failure)? {
             LogResolution::Committed(view) => {
                 self.view.replace(view);
                 Ok(Resolution::Committed)
@@ -255,7 +255,7 @@ impl RecoveryState {
 }
 impl GuestRecovery for RecoveryState {
     fn next(&self) -> Result<Option<HistoryItem>, Failure> {
-        let item = spin_executor::run(self.cursor.borrow_mut().next()).map_err(failure)?;
+        let item = executor::run(self.cursor.borrow_mut().next()).map_err(failure)?;
         Ok(item.map(|item| match item {
             LogHistoryItem::Checkpoint(authenticated) => {
                 let (record, objects) = authenticated.into_parts();
@@ -293,7 +293,7 @@ impl GuestRecovery for RecoveryState {
     fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
         let value = value.get::<StagedObject>();
         let cursor = self.require_complete()?;
-        spin_executor::run(self.log.open_bytes(cursor.view(), value.reference()))
+        executor::run(self.log.open_bytes(cursor.view(), value.reference()))
             .map(|reader| ByteReader::new(ReaderState(RefCell::new(reader))))
             .map_err(failure)
     }
@@ -301,7 +301,7 @@ impl GuestRecovery for RecoveryState {
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<StagedObject>();
         let cursor = self.require_complete()?;
-        spin_executor::run(self.log.read_staged_node(cursor.view(), value))
+        executor::run(self.log.read_staged_node(cursor.view(), value))
             .map(|(data, objects)| Entry {
                 data: data.into(),
                 objects: objects.into_iter().map(Object::new).collect(),
@@ -310,7 +310,7 @@ impl GuestRecovery for RecoveryState {
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {
         let cursor = self.require_complete()?;
-        spin_executor::run(
+        executor::run(
             self.log
                 .put_node(cursor.view(), Bytes::from(data), proofs(&children)),
         )
@@ -350,7 +350,7 @@ impl GuestRecovery for RecoveryState {
         roots: Vec<ObjectBorrow<'_>>,
     ) -> Result<CheckpointOutcome, Failure> {
         let cursor = self.require_complete()?;
-        match spin_executor::run(maintenance::checkpoint(
+        match executor::run(maintenance::checkpoint(
             &self.log,
             cursor.view(),
             data,
@@ -375,7 +375,7 @@ impl GuestPendingCheckpoint for PendingCheckpointState {
             .as_ref()
             .ok_or_else(|| Failure::Other("resolved checkpoint".into()))?
             .clone();
-        match spin_executor::run(self.log.resolve_checkpoint(pending)).map_err(failure)? {
+        match executor::run(self.log.resolve_checkpoint(pending)).map_err(failure)? {
             LogCheckpointResolution::Published(_) => {
                 self.pending.borrow_mut().take();
                 Ok(CheckpointResolution::Published)
@@ -413,7 +413,7 @@ impl GuestCandidate for CandidateState {
             .as_ref()
             .ok_or_else(|| Failure::Other("published candidate".into()))?
             .clone();
-        let status = spin_executor::run(self.log.commit(prepared)).map_err(failure)?;
+        let status = executor::run(self.log.commit(prepared)).map_err(failure)?;
         self.prepared.borrow_mut().take();
         match status {
             CommitStatus::Committed(_) => Ok(Outcome::Committed),
@@ -441,7 +441,7 @@ impl Guest for Component {
 }
 
 fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
-    spin_executor::run(async {
+    executor::run(async {
         let transport = transport::Transport::new(
             settings.transport_limits.max_calls,
             settings.transport_limits.max_bytes,

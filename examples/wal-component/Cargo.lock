@@ -746,7 +746,6 @@ dependencies = [
  "object-log",
  "object_store",
  "sha2",
- "spin-executor",
  "spin-sdk",
  "tokio",
  "uuid",

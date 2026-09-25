@@ -30,6 +30,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     issued = 0
     metadata = []
     signatures = []
+    storage_paths = []
     errors = []
 
     def log_message(self, *_):
@@ -82,6 +83,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         generation = int(match.group(1))
         assert self.headers["X-amz-security-token"] == f"session-{generation}"
         Fixture.signatures.append(generation)
+        Fixture.storage_paths.append(self.path)
         if self.command == "GET" and request.path == "/fixture":
             query = urllib.parse.parse_qs(request.query)
             assert query.get("list-type") == ["2"]
@@ -191,6 +193,7 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                     for scenario in ("obtain", "existing", "missing", "unavailable", "renewal-unavailable", "slow-metadata"):
                         Fixture.mode, Fixture.issued = scenario, 0
                         Fixture.metadata, Fixture.signatures = [], []
+                        Fixture.storage_paths = []
                         started = time.monotonic()
                         try:
                             with urllib.request.urlopen(f"http://127.0.0.1:{spin_port}/{scenario}", timeout=10) as response:
@@ -200,10 +203,14 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                         assert not Fixture.errors, Fixture.errors
                         if scenario in ("unavailable", "slow-metadata"):
                             assert Fixture.metadata and not Fixture.signatures
+                            if scenario == "slow-metadata":
+                                assert len(Fixture.metadata) >= 4, "second timed-out request did not reach metadata"
                             assert all(method == "PUT" for method, _ in Fixture.metadata), "IMDSv1 fallback"
                             assert time.monotonic() - started < 6, "metadata deadline was not enforced"
                         elif scenario == "renewal-unavailable":
                             assert Fixture.issued == 1 and Fixture.signatures == [1]
+                        elif scenario == "missing":
+                            assert any("/missing-after-error/" in path for path in Fixture.storage_paths)
                         else:
                             assert Fixture.issued == 2, f"expiry renewal not observed: {Fixture.issued}"
                             assert Fixture.signatures[0] == 1 and set(Fixture.signatures[1:]) == {2}

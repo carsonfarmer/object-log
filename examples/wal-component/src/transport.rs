@@ -1,3 +1,4 @@
+use crate::executor;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -10,8 +11,6 @@ use object_store::client::{
     HttpResponseBody, HttpService, Signer, SigningAlgorithm,
 };
 use sha2::{Digest, Sha256};
-use spin_executor::CancelOnDropToken;
-use spin_sdk::http::conversions::TryIntoOutgoingRequest;
 use std::{
     sync::{
         Arc,
@@ -19,6 +18,10 @@ use std::{
     },
     task::Poll,
 };
+use wasi::http::types::{
+    self, IncomingBody, IncomingResponse, Method, OutgoingBody, OutgoingRequest, Scheme,
+};
+use wasi::io::streams::{InputStream, StreamError};
 
 const QUOTA_EXCEEDED: &str = "object storage transport limit exceeded";
 
@@ -91,6 +94,87 @@ fn http_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Htt
     HttpError::new_boxed(HttpErrorKind::Unknown, error.into())
 }
 
+fn outgoing_request(parts: &http::request::Parts) -> Result<OutgoingRequest, HttpError> {
+    let headers = parts
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+        .collect::<Vec<_>>();
+    let request = OutgoingRequest::new(types::Fields::from_list(&headers).map_err(http_error)?);
+    let method = match parts.method.as_str() {
+        "GET" => Method::Get,
+        "HEAD" => Method::Head,
+        "POST" => Method::Post,
+        "PUT" => Method::Put,
+        "DELETE" => Method::Delete,
+        "CONNECT" => Method::Connect,
+        "OPTIONS" => Method::Options,
+        "TRACE" => Method::Trace,
+        "PATCH" => Method::Patch,
+        other => Method::Other(other.to_owned()),
+    };
+    let invalid = || http_error(std::io::Error::other("invalid outgoing HTTP request"));
+    request.set_method(&method).map_err(|()| invalid())?;
+    request
+        .set_path_with_query(parts.uri.path_and_query().map(|path| path.as_str()))
+        .map_err(|()| invalid())?;
+    let scheme = parts.uri.scheme().map(|scheme| match scheme.as_str() {
+        "http" => Scheme::Http,
+        "https" => Scheme::Https,
+        other => Scheme::Other(other.to_owned()),
+    });
+    request
+        .set_scheme(scheme.as_ref())
+        .map_err(|()| invalid())?;
+    request
+        .set_authority(parts.uri.authority().map(|authority| authority.as_str()))
+        .map_err(|()| invalid())?;
+    Ok(request)
+}
+
+fn incoming_body(
+    response: &IncomingResponse,
+) -> Result<impl futures::Stream<Item = Result<Vec<u8>, HttpError>> + use<>, HttpError> {
+    struct Body {
+        stream: Option<InputStream>,
+        body: Option<IncomingBody>,
+        token: Option<executor::Subscription>,
+    }
+    impl Drop for Body {
+        fn drop(&mut self) {
+            self.token.take();
+            self.stream.take();
+            if let Some(body) = self.body.take() {
+                IncomingBody::finish(body);
+            }
+        }
+    }
+    let body = response
+        .consume()
+        .map_err(|()| http_error(std::io::Error::other("response body unavailable")))?;
+    let stream = body
+        .stream()
+        .map_err(|()| http_error(std::io::Error::other("response stream unavailable")))?;
+    let mut body = Body {
+        stream: Some(stream),
+        body: Some(body),
+        token: None,
+    };
+    Ok(futures::stream::poll_fn(move |cx| {
+        body.token.take();
+        let stream = body.stream.as_ref().expect("response stream is live");
+        match stream.read(64 << 10) {
+            Ok(chunk) if chunk.is_empty() => {
+                body.token = Some(executor::subscribe(stream.subscribe(), cx.waker().clone()));
+                Poll::Pending
+            }
+            Ok(chunk) => Poll::Ready(Some(Ok(chunk))),
+            Err(StreamError::Closed) => Poll::Ready(None),
+            Err(error) => Poll::Ready(Some(Err(http_error(error)))),
+        }
+    }))
+}
+
 async fn finish_exchange<U, R, T, E, F>(upload: U, response: R, is_success: F) -> Result<T, E>
 where
     U: std::future::Future<Output = Result<(), E>>,
@@ -129,14 +213,14 @@ impl HttpService for Service {
             |request| self.call_once(request),
             |error| {
                 std::error::Error::source(error)
-                    .and_then(|source| source.downcast_ref::<spin_sdk::http::ErrorCode>())
+                    .and_then(|source| source.downcast_ref::<types::ErrorCode>())
                     .is_some_and(|code| {
                         matches!(
                             code,
-                            spin_sdk::http::ErrorCode::ConnectionTerminated
-                                | spin_sdk::http::ErrorCode::ConnectionReadTimeout
-                                | spin_sdk::http::ErrorCode::HttpResponseIncomplete
-                                | spin_sdk::http::ErrorCode::HttpProtocolError
+                            types::ErrorCode::ConnectionTerminated
+                                | types::ErrorCode::ConnectionReadTimeout
+                                | types::ErrorCode::HttpResponseIncomplete
+                                | types::ErrorCode::HttpProtocolError
                         )
                     })
             },
@@ -180,16 +264,14 @@ impl Service {
         } else {
             self.read
         };
-        let (outgoing, _) = http::Request::from_parts(parts, ())
-            .try_into_outgoing_request()
-            .map_err(http_error)?;
+        let outgoing = outgoing_request(&parts)?;
         let outgoing_body = outgoing
             .body()
             .map_err(|()| http_error(std::io::Error::other("outgoing body unavailable")))?;
         let output = outgoing_body
             .write()
             .map_err(|()| http_error(std::io::Error::other("output stream unavailable")))?;
-        let options = spin_sdk::wit::wasi::http0_2_0::types::RequestOptions::new();
+        let options = types::RequestOptions::new();
         options
             .set_connect_timeout(self.connect)
             .map_err(|()| http_error(std::io::Error::other("unsupported connect timeout")))?;
@@ -200,8 +282,7 @@ impl Service {
             .set_between_bytes_timeout(read_timeout)
             .map_err(|()| http_error(std::io::Error::other("unsupported read timeout")))?;
         let pending =
-            spin_sdk::wit::wasi::http0_2_0::outgoing_handler::handle(outgoing, Some(options))
-                .map_err(http_error)?;
+            wasi::http::outgoing_handler::handle(outgoing, Some(options)).map_err(http_error)?;
         let upload_budget = Arc::clone(&self.budget);
         let upload = async move {
             while let Some(frame) = body.frame().await {
@@ -211,12 +292,12 @@ impl Service {
                 }
             }
             drop(output);
-            spin_sdk::http::OutgoingBody::finish(outgoing_body, None).map_err(http_error)?;
+            OutgoingBody::finish(outgoing_body, None).map_err(http_error)?;
             Ok::<_, HttpError>(())
         };
         let response = async move {
             // Drop the poll subscription before the future-response resource.
-            let mut token: Option<CancelOnDropToken> = None;
+            let mut token = None;
             futures::future::poll_fn(|cx| {
                 drop(token.take());
                 if let Some(result) = pending.get() {
@@ -228,13 +309,7 @@ impl Service {
                             .map_err(http_error),
                     )
                 } else {
-                    token = Some(
-                        spin_executor::push_waker_and_get_token(
-                            pending.subscribe(),
-                            cx.waker().clone(),
-                        )
-                        .into(),
-                    );
+                    token = Some(executor::subscribe(pending.subscribe(), cx.waker().clone()));
                     Poll::Pending
                 }
             })
@@ -252,7 +327,7 @@ impl Service {
         }
         // Keep the response resource alive until its streaming body is dropped.
         let response_budget = Arc::clone(&self.budget);
-        let stream = response.take_body_stream().map(move |chunk| {
+        let stream = incoming_body(&response)?.map(move |chunk| {
             let _keep_response_alive = &response;
             let chunk = chunk.map_err(http_error)?;
             response_budget.transfer(chunk.len())?;
@@ -269,16 +344,13 @@ pub(crate) async fn write_chunk(
     bytes: &[u8],
 ) -> Result<(), HttpError> {
     let mut offset = 0;
-    let mut token: Option<CancelOnDropToken> = None;
+    let mut token = None;
     futures::future::poll_fn(|cx| {
         drop(token.take());
         while offset < bytes.len() {
             let available = output.check_write().map_err(http_error)?;
             if available == 0 {
-                token = Some(
-                    spin_executor::push_waker_and_get_token(output.subscribe(), cx.waker().clone())
-                        .into(),
-                );
+                token = Some(executor::subscribe(output.subscribe(), cx.waker().clone()));
                 return Poll::Pending;
             }
             let count = usize::try_from(available)
@@ -446,7 +518,7 @@ mod tests {
         assert!(
             !std::error::Error::source(&error)
                 .unwrap()
-                .is::<spin_sdk::http::ErrorCode>()
+                .is::<types::ErrorCode>()
         );
         assert!(shared.0.transfer(-1_i32).is_err());
         transport.0.calls.store(2, Ordering::Relaxed);
