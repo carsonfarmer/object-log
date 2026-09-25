@@ -2296,9 +2296,10 @@ impl Log {
 
     async fn mark_live(&self, view: &View) -> Result<HashMap<ImmutableKey, (u64, u64)>, Error> {
         let mut live = HashMap::new();
-        let tail = self.read_tail(view).await?;
         let mut roots = Vec::new();
-        for record in tail {
+        let tail = self.tail_records(view)?;
+        futures::pin_mut!(tail);
+        while let Some(record) = tail.try_next().await? {
             self.insert_live(
                 &mut live,
                 self.commit_immutable_key(&record.reference),
@@ -2310,6 +2311,7 @@ impl Log {
             }
             roots.extend(record.objects);
         }
+        self.remember_tail(view);
         if let Some(reference) = view.checkpoint() {
             self.insert_live(
                 &mut live,
@@ -2341,6 +2343,9 @@ impl Log {
         }
 
         let mut reads = stream::FuturesUnordered::new();
+        // Active reads' declared encoded lengths fit one maximum-sized object.
+        // Decoder state, transport chunks, and visited keys are separate.
+        let mut active_bytes = 0_usize;
         loop {
             while reads.len() < MAX_CONCURRENT_READS {
                 let Some(object) = pending.pop_front() else {
@@ -2348,13 +2353,27 @@ impl Log {
                 };
                 // Blob references carry no edges. GC protects their keys without
                 // auditing payloads; publication still verifies the complete graph.
-                if mode == GraphWalk::VerifyBlobs || object.kind != ObjectKind::Blob {
-                    reads.push(async move { self.read_graph_children(&object).await });
+                if mode == GraphWalk::Reachability && object.kind == ObjectKind::Blob {
+                    continue;
                 }
+                let bytes = usize::try_from(object.len)
+                    .map_err(|_| Error::LimitExceeded("object byte length"))?;
+                if !reads.is_empty()
+                    && bytes > self.options.max_object_bytes.saturating_sub(active_bytes)
+                {
+                    pending.push_front(object);
+                    break;
+                }
+                active_bytes = active_bytes
+                    .checked_add(bytes)
+                    .ok_or(Error::LimitExceeded("graph read bytes"))?;
+                reads.push(async move { (bytes, self.read_graph_children(&object).await) });
             }
-            let Some(children) = reads.try_next().await? else {
+            let Some((bytes, children)) = reads.next().await else {
                 break;
             };
+            active_bytes -= bytes;
+            let children = children?;
             for child in children {
                 self.enqueue_object(&child, visited, blocked, &mut pending)?;
             }
@@ -4139,6 +4158,73 @@ mod tests {
             faults.metrics().operation(Operation::Get).succeeded,
             roots.len() as u64
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn graph_verification_admits_one_large_read_at_a_time()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let max_object_bytes = 128 * 1024;
+        let (log, faults, _) = staged_read_log(
+            "graph-byte-budget",
+            Options {
+                max_object_bytes,
+                ..Options::default()
+            },
+        )
+        .await?;
+        let view = log.load().await?;
+        let mut roots = Vec::new();
+        for byte in 0..3_u8 {
+            let node = log
+                .put_node(
+                    &view,
+                    Bytes::from(vec![byte; max_object_bytes / 2 + 1]),
+                    Vec::new(),
+                )
+                .await?;
+            roots.push(node.reference().clone());
+        }
+        faults.reset();
+        let pause = faults.pause_next_get(FailurePhase::Before);
+        let mut verification = Box::pin(log.verify_object_graph(&roots));
+        for _ in 0..roots.len() {
+            assert!(futures::poll!(&mut verification).is_pending());
+        }
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        assert!(pause.release());
+        verification.await?;
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collection_marks_roots_across_a_long_tail() -> Result<(), Box<dyn std::error::Error>> {
+        let (log, _, _) = staged_read_log("streamed-tail-collection", Options::default()).await?;
+        let mut view = log.load().await?;
+        let mut roots = Vec::new();
+        for byte in 0..=MAX_CONCURRENT_READS {
+            let root = log
+                .put_object(&view, Bytes::from(vec![u8::try_from(byte)?]))
+                .await?;
+            view = publish_root(&log, &view, root.clone()).await?;
+            roots.push(root);
+        }
+        let orphan = log.put_object(&view, Bytes::from_static(b"orphan")).await?;
+        let CollectionStart::Installed(fenced, report) = log.start_collection(&view).await? else {
+            return Err("collection did not install".into());
+        };
+        assert_eq!(report.candidate_count(), 1);
+        let CollectionFinish::Complete(current, _) = log.resume_collection(&fenced).await? else {
+            return Err("collection did not finish".into());
+        };
+        for root in roots {
+            assert!(log.read_object(&current, root.reference()).await.is_ok());
+        }
+        assert!(matches!(
+            log.read_object(&current, orphan.reference()).await,
+            Err(Error::CorruptObject)
+        ));
         Ok(())
     }
 
