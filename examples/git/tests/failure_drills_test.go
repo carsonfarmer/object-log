@@ -300,15 +300,7 @@ func collectDrill(t *testing.T, url string) {
 // collectDrill still requires completion.
 func collectDrillStep(t *testing.T, url, service string) string {
 	t.Helper()
-	response := drillRequest(t, context.Background(), url+"/"+service, nil)
-	var result struct {
-		State string `json:"state"`
-	}
-	err := json.NewDecoder(response.Body).Decode(&result)
-	response.Body.Close()
-	if err != nil || response.StatusCode != 200 {
-		t.Fatalf("maintenance HTTP %d: %v", response.StatusCode, err)
-	}
+	result := requestMaintenanceStep(t, url, service)
 	switch result.State {
 	case "complete", "more", "conflict", "pending", "retained":
 	default:
