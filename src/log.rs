@@ -19,6 +19,15 @@ use crate::{
 const MAX_CONCURRENT_READS: usize = 32;
 const MAX_FRESH_OBJECT_ATTEMPTS: usize = 16;
 
+// Storage refusal or failure cannot settle an uncertain publication.
+fn publication_evidence<T>(result: Result<T, Error>) -> Result<Option<T>, Error> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::Store(_) | Error::RequestDenied) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GraphWalk {
     Reachability,
@@ -605,23 +614,11 @@ impl Log {
             let mut candidate = current.head().clone();
             change.apply(&mut candidate);
             candidate.advance_generation()?;
-            let bytes = format::encode_head(&candidate)?;
-            self.validate_encoded_head(&bytes)?;
-            match self
-                .store
-                .update(StoreKey::Head, bytes, current.storage_version().clone())
-                .await
-            {
-                Ok(Some(version)) => {
-                    return Ok(RetentionStatus::Applied(Self::view(candidate, version)));
-                }
+            match self.update_head(&current, candidate).await {
+                Ok(Some(next)) => return Ok(RetentionStatus::Applied(next)),
                 Ok(None) => {
-                    let next = match self.load().await {
-                        Ok(next) => next,
-                        Err(Error::Store(_) | Error::RequestDenied) => {
-                            return Ok(RetentionStatus::Pending);
-                        }
-                        Err(error) => return Err(error),
+                    let Some(next) = publication_evidence(self.load().await)? else {
+                        return Ok(RetentionStatus::Pending);
                     };
                     if next.head() == current.head()
                         && next.storage_version() == current.storage_version()
@@ -771,17 +768,8 @@ impl Log {
         candidate.advance_generation()?;
         candidate.collection_epoch = epoch;
         candidate.active_plan = Some(plan_ref.clone());
-        let bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&bytes)?;
-        match self
-            .store
-            .update(StoreKey::Head, bytes, view.storage_version().clone())
-            .await
-        {
-            Ok(Some(version)) => Ok(CollectionStart::Installed(
-                Self::view(candidate, version),
-                report,
-            )),
+        match self.update_head(view, candidate).await {
+            Ok(Some(next)) => Ok(CollectionStart::Installed(next, report)),
             Ok(None) => match self.load().await {
                 Ok(current) if current.head().active_plan.as_ref() == Some(&plan_ref) => {
                     Ok(CollectionStart::Installed(current, report))
@@ -874,27 +862,14 @@ impl Log {
             let mut candidate = current.head().clone();
             candidate.active_plan = None;
             candidate.advance_generation()?;
-            let bytes = format::encode_head(&candidate)?;
-            self.validate_encoded_head(&bytes)?;
-            match self
-                .store
-                .update(StoreKey::Head, bytes, current.storage_version().clone())
-                .await
-            {
-                Ok(Some(version)) => {
+            match self.update_head(&current, candidate).await {
+                Ok(Some(next)) => {
                     self.cleanup_collection_plan(plan_key).await?;
-                    return Ok(CollectionFinish::Complete(
-                        Self::view(candidate, version),
-                        report,
-                    ));
+                    return Ok(CollectionFinish::Complete(next, report));
                 }
                 Ok(None) => {
-                    let reloaded = match self.load().await {
-                        Ok(reloaded) => reloaded,
-                        Err(Error::Store(_) | Error::RequestDenied) => {
-                            return Ok(CollectionFinish::Pending(report));
-                        }
-                        Err(error) => return Err(error),
+                    let Some(reloaded) = publication_evidence(self.load().await)? else {
+                        return Ok(CollectionFinish::Pending(report));
                     };
                     if reloaded.head() == current.head()
                         && reloaded.storage_version() == current.storage_version()
@@ -1291,12 +1266,8 @@ impl Log {
         let prepared = pending.prepared.as_ref().ok_or_else(|| {
             Error::InvalidFormat("pending commit has no prepared candidate".into())
         })?;
-        let current = match self.load().await {
-            Ok(view) => view,
-            Err(Error::Store(_) | Error::RequestDenied) => {
-                return Ok(Resolution::StillPending(pending));
-            }
-            Err(error) => return Err(error),
+        let Some(current) = publication_evidence(self.load().await)? else {
+            return Ok(Resolution::StillPending(pending));
         };
 
         let Some(publication_view) = Self::retention_publication_view(&prepared.view, &current)?
@@ -1305,45 +1276,36 @@ impl Log {
             if let Resolution::Committed(view) = &resolution
                 && Self::tail_contains(view, &pending.commit_ref)
                 && !self.proof_matches(&prepared.staging_domain)
+                && publication_evidence(self.verify_published_commit(&pending.commit_ref).await)?
+                    .is_none()
             {
-                match self.verify_published_commit(&pending.commit_ref).await {
-                    Ok(()) => {}
-                    Err(Error::Store(_) | Error::RequestDenied) => {
-                        return Ok(Resolution::StillPending(pending));
-                    }
-                    Err(error) => return Err(error),
-                }
+                return Ok(Resolution::StillPending(pending));
             }
             return Ok(resolution);
         };
 
         let (_, commit_bytes) = self.encode_prepared(prepared)?;
-        match self
-            .verify_publication(
+        if publication_evidence(
+            self.verify_publication(
                 &prepared.view,
                 self.commit_immutable_key(&pending.commit_ref),
                 &prepared.objects,
                 &prepared.staging_domain,
             )
-            .await
+            .await,
+        )?
+        .is_none()
         {
-            Ok(()) => {}
-            Err(Error::Store(_) | Error::RequestDenied) => {
-                return Ok(Resolution::StillPending(pending));
-            }
-            Err(error) => return Err(error),
+            return Ok(Resolution::StillPending(pending));
         }
-        if !self.proof_matches(&prepared.staging_domain) {
-            match self
-                .ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
-                .await
-            {
-                Ok(()) => {}
-                Err(Error::Store(_) | Error::RequestDenied) => {
-                    return Ok(Resolution::StillPending(pending));
-                }
-                Err(error) => return Err(error),
-            }
+        if !self.proof_matches(&prepared.staging_domain)
+            && publication_evidence(
+                self.ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
+                    .await,
+            )?
+            .is_none()
+        {
+            return Ok(Resolution::StillPending(pending));
         }
         pending
             .prepared
@@ -1386,12 +1348,8 @@ impl Log {
             commit_ref: commit_ref.clone(),
             token: Some(Bytes::copy_from_slice(token)),
         };
-        let current = match self.load().await {
-            Ok(view) => view,
-            Err(Error::Store(_) | Error::RequestDenied) => {
-                return Ok(Resolution::StillPending(pending()));
-            }
-            Err(error) => return Err(error),
+        let Some(current) = publication_evidence(self.load().await)? else {
+            return Ok(Resolution::StillPending(pending()));
         };
         let full_digest = Digest::of(&format::encode_head(current.head())?);
         let exact = current.storage_version() == &recovered.version
@@ -1442,14 +1400,9 @@ impl Log {
         let resolution = Self::classify_resolution(&commit_ref, current)?;
         if let Resolution::Committed(view) = &resolution
             && Self::tail_contains(view, &commit_ref)
+            && publication_evidence(self.verify_published_commit(&commit_ref).await)?.is_none()
         {
-            match self.verify_published_commit(&commit_ref).await {
-                Ok(()) => {}
-                Err(Error::Store(_) | Error::RequestDenied) => {
-                    return Ok(Resolution::StillPending(pending()));
-                }
-                Err(error) => return Err(error),
-            }
+            return Ok(Resolution::StillPending(pending()));
         }
         Ok(resolution)
     }
@@ -1734,12 +1687,8 @@ impl Log {
             ));
         }
 
-        let current = match self.load().await {
-            Ok(view) => view,
-            Err(Error::Store(_) | Error::RequestDenied) => {
-                return Ok(CheckpointResolution::StillPending(pending));
-            }
-            Err(error) => return Err(error),
+        let Some(current) = publication_evidence(self.load().await)? else {
+            return Ok(CheckpointResolution::StillPending(pending));
         };
         let Some(publication_view) = Self::checkpoint_publication_view(&pending.view, &current)?
         else {
@@ -1765,19 +1714,10 @@ impl Log {
             }
         };
 
-        match self.verify_tail(&pending.view).await {
-            Ok(()) => {}
-            Err(Error::Store(_) | Error::RequestDenied) => {
-                return Ok(CheckpointResolution::StillPending(pending));
-            }
-            Err(error) => return Err(error),
-        }
-        match self.verify_checkpoint_publication(&pending).await {
-            Ok(()) => {}
-            Err(Error::Store(_) | Error::RequestDenied) => {
-                return Ok(CheckpointResolution::StillPending(pending));
-            }
-            Err(error) => return Err(error),
+        if publication_evidence(self.verify_tail(&pending.view).await)?.is_none()
+            || publication_evidence(self.verify_checkpoint_publication(&pending).await)?.is_none()
+        {
+            return Ok(CheckpointResolution::StillPending(pending));
         }
         pending.staging_domain = Arc::clone(&self.staging_domain);
         match self
@@ -2036,6 +1976,16 @@ impl Log {
         Self::validate_head_size(self.options, bytes)
     }
 
+    async fn update_head(&self, current: &View, candidate: Head) -> Result<Option<View>, Error> {
+        let bytes = format::encode_head(&candidate)?;
+        self.validate_encoded_head(&bytes)?;
+        Ok(self
+            .store
+            .update(StoreKey::Head, bytes, current.storage_version().clone())
+            .await?
+            .map(|version| Self::view(candidate, version)))
+    }
+
     fn validate_head_size(options: Options, bytes: &Bytes) -> Result<(), Error> {
         if bytes.len() > options.max_head_bytes {
             return Err(Error::LimitExceeded("encoded head bytes"));
@@ -2135,23 +2085,11 @@ impl Log {
         let mut view = source.clone();
         for attempt in 0..MAX_HEAD_PUBLICATION_ATTEMPTS {
             let head = candidate(&view)?;
-            let bytes = format::encode_head(&head)?;
-            self.validate_encoded_head(&bytes)?;
-            match self
-                .store
-                .update(StoreKey::Head, bytes, view.storage_version().clone())
-                .await
-            {
-                Ok(Some(version)) => {
-                    return Ok(HeadPublication::Updated(Self::view(head, version)));
-                }
+            match self.update_head(&view, head).await {
+                Ok(Some(next)) => return Ok(HeadPublication::Updated(next)),
                 Ok(None) => {
-                    let current = match self.load().await {
-                        Ok(current) => current,
-                        Err(Error::Store(_) | Error::RequestDenied) => {
-                            return Ok(HeadPublication::Pending);
-                        }
-                        Err(error) => return Err(error),
+                    let Some(current) = publication_evidence(self.load().await)? else {
+                        return Ok(HeadPublication::Pending);
                     };
                     if !compatible(source.head(), current.head()) {
                         return Ok(HeadPublication::Changed {
