@@ -7,7 +7,7 @@ Apache-2.0 and set `publish = false`. Dependencies retain their own licenses.
 ## Git component dependencies
 
 The build uses the preview1 adapter bundled with unmodified
-[componentize-go v0.4.3](https://github.com/bytecodealliance/componentize-go/commit/148dba505f8c6c64ad84db777cfde5e34e25098b).
+[componentize-go v0.4.3](https://github.com/bytecodealliance/componentize-go/releases/tag/v0.4.3).
 The adapter's Apache-2.0 WITH LLVM-exception license is reproduced in
 [`licenses/wasmtime.txt`](licenses/wasmtime.txt) and must accompany redistributed
 adapter binaries.
@@ -16,26 +16,33 @@ The Git example uses unmodified upstream [go-git at revision `0f3a0a2`](https://
 It uses the public pack parser, object storage, stored-delta, and receive-hook
 interfaces. Incoming deltas use go-git's normal buffering. Receive-pack
 advertises `no-thin`, so ordinary Git clients include the bases their packs need.
+The [v6.0.0-alpha.5 release](https://github.com/go-git/go-git/releases/tag/v6.0.0-alpha.5)
+lacks `plumbing.ValidateBranchName`, which `repositories.go` calls. Keep the
+reviewed upstream revision until a v6 release provides that API and passes the
+Git build and provider suites.
 
 The Go SDK pins [go-pkg PR #13](https://github.com/bytecodealliance/go-pkg/pull/13)
 at its contributor's exact [revision `af8c737`](https://github.com/ricochet/go-pkg/commit/af8c737ad573d76dd08cf2927baf2660475c5c01).
 The change postpones garbage collection during canonical allocation, allowing
 the stock adapter to run the Go component. The PR is unmerged; the module
 replacement uses that revision unchanged, with no project-specific SDK patch.
-The binding generator is the version bundled with componentize-go.
+The compatible unmodified SDK revision traps on ordinary pushes when garbage
+collection starts in `cabi_realloc`. Upstream v0.3.0 changes an SDK API used by
+the service but does not include PR #13. Remove the replacement when an
+upstream release provides equivalent behavior and the composed Git provider
+suite passes. The binding generator is the version bundled with componentize-go.
 
 The service serializes allocating component calls and releases imported-buffer
 pins through go-pkg's public `Unpin` function after the bindings return Go
-values. Source revisions are pinned in `examples/git/Makefile` and `go.mod`;
+values. Build inputs are recorded in `examples/git/Makefile` and `go.mod`;
 their upstream licenses apply.
 
 ## Native Spin provider
 
 The isolated [Spin key-value provider](integrations/spin-key-value/README.md)
-uses unmodified Spin 4.1.0 at revision
-[`c0b3726`](https://github.com/spinframework/spin/commit/c0b3726aa4857961e20cf8616a0df5f0741af73d).
+uses unmodified [Spin v4.1.0](https://github.com/spinframework/spin/releases/tag/v4.1.0).
 Spin is Apache-2.0 WITH LLVM-exception. The opt-in guest test fetches and compiles
-that revision's unmodified key-value test component and helper; it does not
+that release's unmodified key-value test component and helper; it does not
 vendor them into this repository. The provider is Apache-2.0 and unpublished.
 Its separate Cargo.lock records its native and development dependencies.
 

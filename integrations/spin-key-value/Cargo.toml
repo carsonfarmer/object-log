@@ -22,29 +22,29 @@ object_store = { version = "0.14", default-features = false, features = ["aws"] 
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
-spin-factor-key-value = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
+spin-factor-key-value = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
 
 [dev-dependencies]
-spin-tls = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
+spin-tls = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 http = "1"
 http-body-util = "0.1"
-spin-app = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-factors = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-factors-executor = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-factor-wasi = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-factor-outbound-networking = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-factor-outbound-http = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-factor-variables = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-loader = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-trigger = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
-spin-trigger-http = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
+spin-app = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-factors = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-factors-executor = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-factor-wasi = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-factor-outbound-networking = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-factor-outbound-http = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-factor-variables = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-loader = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-trigger = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
+spin-trigger-http = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 object-log = { path = "../..", features = ["test-util"] }
 object_store = { version = "0.14", features = ["fs"] }
 tempfile = "3"
-spin-core = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
+spin-core = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
 
 [lints.rust]
 unsafe_code = "forbid"

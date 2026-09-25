@@ -15,17 +15,17 @@ its gateway. The optional Git host demonstrates and tests that boundary in
 [`HOSTING.md`](../../examples/git/qualification/aws/HOSTING.md).
 
 The provider implements upstream `StoreManager`, `Store`, `Cas`, and
-`MakeKeyValueStore`. It pins unmodified Spin **4.1.0**, revision
-`c0b3726aa4857961e20cf8616a0df5f0741af73d`. It is pre-release and unpublished;
-use a reviewed repository revision. Its separate Cargo workspace keeps Spin and
-native S3 dependencies outside the portable object-log and KV cores.
+`MakeKeyValueStore`. It uses unmodified tagged Spin **4.1.0**. The provider is
+pre-release and unpublished; use a reviewed repository revision. Its separate
+Cargo workspace keeps Spin and native S3 dependencies outside the portable
+object-log and KV cores.
 
 ## Register in your runtime
 
 ```toml
 [dependencies]
 object-log-spin-key-value = { git = "https://github.com/carsonfarmer/object-log", rev = "<reviewed-object-log-revision>" }
-spin-factor-key-value = { git = "https://github.com/spinframework/spin", rev = "c0b3726aa4857961e20cf8616a0df5f0741af73d" }
+spin-factor-key-value = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
 ```
 
 Add the provider to the resolver your runtime uses **before** resolving its TOML:
