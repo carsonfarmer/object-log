@@ -428,7 +428,7 @@ func (s *store) publish(refs map[string]string) error {
 	case wal.OutcomeCommitted:
 		return nil
 	case wal.OutcomePending:
-		return &pendingError{token: result.Pending()}
+		return &pendingError{}
 	default:
 		return errPublicationConflict
 	}
@@ -551,7 +551,7 @@ func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
 	return o, e
 }
 
-type pendingError struct{ token []byte }
+type pendingError struct{}
 
 func (*pendingError) Error() string { return "publication pending" }
 

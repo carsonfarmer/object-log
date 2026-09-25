@@ -317,9 +317,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 				return e
 			}
 			e = s.publish(refs)
-			if pending, ok := e.(*pendingError); ok {
-				w.Header().Set("X-Wal-Recovery-Token", fmt.Sprintf("%x", pending.token))
-			}
 			return e
 		}}})
 	}
