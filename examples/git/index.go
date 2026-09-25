@@ -74,16 +74,15 @@ func lookupRadix[V, H any](id, prefix string, root H, load func(string, H) (radi
 			item, ok := node.Items[id]
 			return item, ok, nil
 		}
-		found := false
-		for childPrefix, child := range node.Children {
-			if len(id) >= len(childPrefix) && id[:len(childPrefix)] == childPrefix {
-				prefix, root, found = childPrefix, child, true
-				break
-			}
-		}
-		if !found {
+		if len(id) <= len(prefix) {
 			return zero, false, nil
 		}
+		prefix = id[:len(prefix)+1]
+		child, ok := node.Children[prefix]
+		if !ok {
+			return zero, false, nil
+		}
+		root = child
 	}
 }
 

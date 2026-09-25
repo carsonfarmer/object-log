@@ -78,26 +78,14 @@ func parseRepository(encoded []byte) (repositoryConfig, error) {
 		if bytes.Equal(value, []byte("null")) {
 			return repository, fmt.Errorf("%s must not be null", name)
 		}
-		var target any
 		switch name {
-		case "log_id":
-			target = &repository.LogID
-		case "format":
-			target = &repository.Format
-		case "default_branch":
-			target = &repository.DefaultBranch
-		case "read_groups":
-			target = &repository.ReadGroups
-		case "write_groups":
-			target = &repository.WriteGroups
-		case "admin_groups":
-			target = &repository.AdminGroups
+		case "log_id", "format", "default_branch", "read_groups", "write_groups", "admin_groups":
 		default:
 			return repository, fmt.Errorf("unknown field %q", name)
 		}
-		if err := json.Unmarshal(value, target); err != nil {
-			return repository, fmt.Errorf("%s: %w", name, err)
-		}
+	}
+	if err := json.Unmarshal(encoded, &repository); err != nil {
+		return repository, err
 	}
 	validID := repositoryLogID.MatchString(repository.LogID)
 	if !validID || repository.LogID == "." || repository.LogID == ".." {
