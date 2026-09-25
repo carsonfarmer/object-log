@@ -2,8 +2,6 @@ package tests
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -35,11 +33,6 @@ func TestFetchRetentionSurvivesDestructiveCollection(t *testing.T) {
 			tip := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
 			git(t, nil, "-C", source, "push", "--atomic", url,
 				"HEAD:refs/heads/"+branch, "refs/tags/"+tag+":refs/tags/"+tag)
-			type collectionReport struct {
-				State   string `json:"state"`
-				Objects uint64 `json:"candidate_objects"`
-			}
-
 			body := append(packet("command=fetch\n"), packet("object-format="+format+"\n")...)
 			body = append(body, []byte("0001")...)
 			body = append(body, packet("want "+tip+"\n")...)
@@ -64,12 +57,9 @@ func TestFetchRetentionSurvivesDestructiveCollection(t *testing.T) {
 			// unread pauses the response while its retention remains active.
 			git(t, nil, "-C", source, "push", "--atomic", url,
 				":refs/heads/"+branch, ":refs/tags/"+tag)
-			maintenance := drillRequest(t, context.Background(), url+"/maintenance", nil)
-			var result collectionReport
-			err = json.NewDecoder(maintenance.Body).Decode(&result)
-			maintenance.Body.Close()
-			if err != nil || maintenance.StatusCode != http.StatusOK || result.State != "retained" {
-				t.Fatalf("maintenance during fetch: status=%d state=%q error=%v", maintenance.StatusCode, result.State, err)
+			result := requestGitMaintenance(t, url)
+			if result.State != "retained" {
+				t.Fatalf("maintenance during fetch: %+v", result)
 			}
 
 			packResponse, err := io.ReadAll(response.Body)
@@ -81,12 +71,9 @@ func TestFetchRetentionSurvivesDestructiveCollection(t *testing.T) {
 			git(t, unband(t, packResponse), "-C", target, "index-pack", "--stdin")
 			git(t, nil, "-C", target, "fsck", "--strict")
 
-			maintenance = drillRequest(t, context.Background(), url+"/maintenance", nil)
-			result = collectionReport{}
-			err = json.NewDecoder(maintenance.Body).Decode(&result)
-			maintenance.Body.Close()
-			if err != nil || maintenance.StatusCode != http.StatusOK || result.Objects == 0 {
-				t.Fatalf("maintenance after fetch: status=%d state=%q objects=%d error=%v", maintenance.StatusCode, result.State, result.Objects, err)
+			result = requestGitMaintenance(t, url)
+			if result.Objects == 0 {
+				t.Fatalf("maintenance after fetch found no collection candidates: %+v", result)
 			}
 			collectDrill(t, url)
 		})
