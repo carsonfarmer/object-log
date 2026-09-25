@@ -345,22 +345,20 @@ impl ScopedStore {
     }
 
     // Callers admit normal requests first; capability probes use the raw client.
-    async fn put_mode(
-        &self,
-        location: &Path,
+    fn put_mode<'a>(
+        &'a self,
+        location: &'a Path,
         bytes: Bytes,
         mode: PutMode,
-    ) -> Result<object_store::PutResult, object_store::Error> {
-        self.store
-            .put_opts(
-                location,
-                bytes.into(),
-                PutOptions {
-                    mode,
-                    ..PutOptions::default()
-                },
-            )
-            .await
+    ) -> impl Future<Output = Result<object_store::PutResult, object_store::Error>> + 'a {
+        self.store.put_opts(
+            location,
+            bytes.into(),
+            PutOptions {
+                mode,
+                ..PutOptions::default()
+            },
+        )
     }
 
     async fn retry_safe_read<T, F, Fut>(&self, max_bytes: usize, mut read: F) -> Result<T, Error>
