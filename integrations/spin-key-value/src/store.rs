@@ -933,41 +933,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_sets_are_actually_grouped() -> Result<(), Box<dyn std::error::Error>> {
-        let (faults, kv) = group_fixture().await?;
-        let owner = Owner::spawn(
-            kv.clone(),
-            HostLimits {
-                owner_wait_ms: 60_000,
-                ..HostLimits::default()
-            },
-        );
-        let total = Arc::new(AtomicUsize::new(6));
-        let mut paused = faults.pause_next_put(FailurePhase::Before);
-        let (first, first_result) = set_job(b"a", b"1", &total);
-        owner.sender.try_send(first).map_err(|_| "owner closed")?;
-        assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
-        let (second, second_result) = set_job(b"b", b"2", &total);
-        let (third, third_result) = set_job(b"c", b"3", &total);
-        owner.sender.try_send(second).map_err(|_| "owner closed")?;
-        owner.sender.try_send(third).map_err(|_| "owner closed")?;
-        assert!(paused.release());
-        for result in [first_result, second_result, third_result] {
-            result.await??;
-        }
-        let snapshot = kv.snapshot().await?;
-        assert_eq!(snapshot.view().tail().len(), 2);
-        for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3")] {
-            assert_eq!(
-                snapshot.get(key).await?,
-                Some(Bytes::copy_from_slice(value))
+    async fn queued_sets_group_or_fall_back_on_result_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (result_bytes, commits) in [(4 * 1024, 2), (5, 3)] {
+            let (faults, kv) = group_fixture_with_options(Options {
+                max_inline_result_bytes: result_bytes,
+                ..Options::default()
+            })
+            .await?;
+            let owner = Owner::spawn(
+                kv.clone(),
+                HostLimits {
+                    owner_wait_ms: 60_000,
+                    ..HostLimits::default()
+                },
             );
+            let total = Arc::new(AtomicUsize::new(6));
+            let mut paused = faults.pause_next_put(FailurePhase::Before);
+            let (first, first_result) = set_job(b"a", b"1", &total);
+            owner.sender.try_send(first).map_err(|_| "owner closed")?;
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?
+            );
+            let (second, second_result) = set_job(b"b", b"2", &total);
+            let (third, third_result) = set_job(b"c", b"3", &total);
+            owner.sender.try_send(second).map_err(|_| "owner closed")?;
+            owner.sender.try_send(third).map_err(|_| "owner closed")?;
+            assert!(paused.release());
+            for result in [first_result, second_result, third_result] {
+                result.await??;
+            }
+            let snapshot = kv.snapshot().await?;
+            assert_eq!(snapshot.view().tail().len(), commits);
+            for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3")] {
+                assert_eq!(
+                    snapshot.get(key).await?,
+                    Some(Bytes::copy_from_slice(value))
+                );
+            }
+            assert_eq!(total.load(Ordering::Relaxed), 0);
         }
-        assert_eq!(total.load(Ordering::Relaxed), 0);
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn grouped_pending_resolves_or_broadcasts_unknown_without_replay()
     -> Result<(), Box<dyn std::error::Error>> {
         let head_put = grouped_head_put().await?;
@@ -995,8 +1004,12 @@ mod tests {
                     phase: FailurePhase::Before,
                 });
             }
+            let started = tokio::time::Instant::now();
             assert!(paused.release());
             writer.await?;
+            if blocked_reads == 100 {
+                assert!(started.elapsed() >= Duration::from_millis(200));
+            }
             for result in results {
                 let result = result.await?;
                 if blocked_reads == 1 {

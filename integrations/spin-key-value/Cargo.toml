@@ -25,6 +25,7 @@ tracing = "0.1"
 spin-factor-key-value = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
 
 [dev-dependencies]
+tokio = { version = "1.47", features = ["test-util"] }
 spin-tls = { git = "https://github.com/spinframework/spin", tag = "v4.1.0" }
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }

@@ -77,6 +77,32 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             assert_eq!(commit.recorded_result, b"result");
             assert!(recovery.next()?.is_none());
         }
+        "/recovery-gates" => {
+            let session = wal::open_existing(&settings)?;
+            let complete = session.recover()?;
+            while complete.next()?.is_some() {}
+            let writer = complete.write_bytes()?;
+            writer.write(b"bytes")?;
+            let bytes = writer.finish()?;
+            let node = complete.put_node(b"node", &[])?;
+
+            let incomplete = session.recover()?;
+            let requires_history = |result: Result<(), wal::Failure>| {
+                assert!(
+                    matches!(result, Err(wal::Failure::Other(message)) if message.contains("history must be consumed"))
+                );
+            };
+            requires_history(incomplete.write_bytes().map(|_| ()));
+            requires_history(incomplete.open_bytes(&bytes).map(|_| ()));
+            requires_history(incomplete.read_node(&node).map(|_| ()));
+            requires_history(incomplete.put_node(b"other", &[]).map(|_| ()));
+            requires_history(
+                incomplete
+                    .prepare(&[9; 16], b"op", b"result", &[])
+                    .map(|_| ()),
+            );
+            requires_history(incomplete.checkpoint(b"snapshot", &[]).map(|_| ()));
+        }
         "/refresh" => {
             let session = wal::open_existing(&settings)?;
             let before = session.usage();

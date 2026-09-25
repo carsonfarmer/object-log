@@ -208,7 +208,7 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             time.sleep(0.1)
                     else:
                         raise RuntimeError("Spin did not listen")
-                    for scenario in ("validate", "obtain", "existing", "refresh", "missing", "mismatched-options", "unavailable", "renewal-unavailable", "slow-metadata", "lost-head"):
+                    for scenario in ("validate", "obtain", "existing", "recovery-gates", "refresh", "missing", "mismatched-options", "unavailable", "renewal-unavailable", "slow-metadata", "lost-head"):
                         Fixture.mode, Fixture.issued = scenario, 0
                         Fixture.metadata, Fixture.metadata_starts, Fixture.signatures = [], [], []
                         Fixture.storage_paths = []
