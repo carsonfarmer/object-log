@@ -734,6 +734,33 @@ async fn sparse_calls_stay_small_as_database_outgrows_tree_budget() -> TestResul
             bounded.log().commit(prepared).await?,
             CommitStatus::Committed(_)
         ));
+        faults.reset();
+        let tailed = bounded.snapshot().await?;
+        assert_eq!(tailed.view().tail().len(), 1);
+        assert!(faults.metrics().operation(Operation::Get).requests <= 3);
+        faults.reset();
+        assert_eq!(
+            tailed.get(&(count / 2).to_be_bytes()).await?,
+            Some(Bytes::from_static(b"changed"))
+        );
+        let tailed_read = faults.metrics();
+        assert!(tailed_read.operation(Operation::Get).requests <= 3);
+        assert!(tailed_read.downloaded_bytes() < 32 * 1024);
+        faults.reset();
+        let next = tailed
+            .prepare(
+                TransactionId::new(),
+                &[set(&(count / 2).to_be_bytes(), b"changed again")],
+            )
+            .await?;
+        let tailed_write = faults.metrics();
+        assert!(tailed_write.operation(Operation::Get).requests <= 3);
+        assert!(tailed_write.operation(Operation::Put).requests <= 3);
+        assert!(tailed_write.downloaded_bytes() + tailed_write.uploaded_bytes() < 96 * 1024);
+        assert!(matches!(
+            bounded.log().commit(next).await?,
+            CommitStatus::Committed(_)
+        ));
         eprintln!(
             "keys={count} value_bytes=64 get_calls={} get_bytes={} prepare_gets={} prepare_puts={} prepare_bytes={}",
             read.operation(Operation::Get).requests,
