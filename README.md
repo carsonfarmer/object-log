@@ -157,12 +157,11 @@ the candidate committed, so the application must not replay it.
 
 Large values can be written through `ByteWriter` and read with authenticated,
 bounded `read_at` calls. Reference nodes form application-defined trees without
-exposing storage paths. `materialize` can rebuild typed state from a checkpoint
-and the active tail while preserving process-local publication proofs.
-`history` returns a bounded cursor over the same authenticated checkpoint and
+exposing storage paths. `history` returns a bounded cursor over an authenticated checkpoint and
 ordered commits, including transaction IDs and recorded results, for bindings
-or consumers that apply their state transitions outside Rust. It returns one
-record at a time and remains bound to the exact view being reconstructed.
+or consumers that rebuild application state. Each item includes process-local
+publication proofs for its object references. The cursor returns one record at
+a time and remains bound to the exact view being reconstructed.
 
 ## Checkpoints and collection
 

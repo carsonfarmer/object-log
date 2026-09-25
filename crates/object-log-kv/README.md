@@ -4,7 +4,7 @@ A small byte-key/value library on object-log. Each atomic batch publishes one
 immutable compressed radix-tree root through the WAL's conditional head. Reads
 load only the requested paths. An atomic batch evaluates commands in order,
 keeps changed paths transient, then stages each final changed node once while
-reusing unchanged subtrees. Reopening materializes root proofs from the checkpoint
+reusing unchanged subtrees. Reopening recovers root proofs from the checkpoint
 and bounded WAL tail, without reading the database. There is no local database
 or second head.
 

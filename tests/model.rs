@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation, RequestOutcome};
 use object_log::{
-    CheckpointStatus, CollectionStart, CommitStatus, Log, LogId, Materializer, Options,
-    PendingCommit, Resolution, StagedObject, TransactionId, ValidatedBackend, View, materialize,
+    CheckpointStatus, CollectionStart, CommitStatus, HistoryItem, Log, LogId, Options,
+    PendingCommit, Resolution, StagedObject, TransactionId, ValidatedBackend, View, history,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -32,33 +32,19 @@ fn fail_next_safe_read(store: &FaultStore) {
     );
 }
 
-struct ProofMachine;
-
-impl Materializer for ProofMachine {
-    type State = Vec<StagedObject>;
-    type Error = std::convert::Infallible;
-
-    fn empty(&self) -> Self::State {
-        Vec::new()
+async fn proof_history(
+    log: &Log,
+    view: View,
+) -> Result<(View, Vec<StagedObject>), object_log::Error> {
+    let mut cursor = history(log, view)?;
+    let mut proofs = Vec::new();
+    while let Some(item) = cursor.next().await? {
+        match item {
+            HistoryItem::Checkpoint(item) => proofs.extend_from_slice(item.proofs()),
+            HistoryItem::Commit(item) => proofs.extend_from_slice(item.proofs()),
+        }
     }
-
-    fn restore(
-        &self,
-        _checkpoint: &[u8],
-        objects: &[StagedObject],
-    ) -> Result<Self::State, Self::Error> {
-        Ok(objects.to_vec())
-    }
-
-    fn apply(
-        &self,
-        state: &mut Self::State,
-        _operation: &[u8],
-        objects: &[StagedObject],
-    ) -> Result<(), Self::Error> {
-        state.extend_from_slice(objects);
-        Ok(())
-    }
+    Ok((cursor.view().clone(), proofs))
 }
 
 #[tokio::test]
@@ -630,7 +616,7 @@ async fn batched_existing_staging_deduplicates_the_object_graph() -> TestResult 
 }
 
 #[tokio::test]
-async fn materialize_uses_the_supplied_view_after_head_advances() -> TestResult {
+async fn history_uses_the_supplied_view_after_head_advances() -> TestResult {
     let (_, log, _) = open_model_log(127).await?;
     let initial = log.load().await?;
     let first = log
@@ -659,18 +645,18 @@ async fn materialize_uses_the_supplied_view_after_head_advances() -> TestResult 
         return Err(test_error("second materialization commit did not publish").into());
     };
 
-    let materialized = materialize(&log, observed, &ProofMachine).await?;
-    assert_eq!(materialized.view().generation(), 1);
-    assert_eq!(materialized.view().tail().len(), 1);
-    assert_eq!(materialized.state().len(), 1);
-    assert_eq!(materialized.state()[0].reference(), &first_reference);
+    let (view, proofs) = proof_history(&log, observed).await?;
+    assert_eq!(view.generation(), 1);
+    assert_eq!(view.tail().len(), 1);
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].reference(), &first_reference);
     assert_eq!(current.generation(), 2);
     assert_eq!(current.tail().len(), 2);
     Ok(())
 }
 
 #[tokio::test]
-async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResult {
+async fn history_roots_are_authenticated_epoch_scoped_proofs() -> TestResult {
     let (store, log, _) = open_model_log(126).await?;
     let initial = log.load().await?;
     let child = log
@@ -691,15 +677,15 @@ async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResul
     };
 
     store.reset();
-    let tail = materialize(&log, committed, &ProofMachine).await?;
-    assert_eq!(tail.state().len(), 1);
+    let (tail_view, tail_proofs) = proof_history(&log, committed).await?;
+    assert_eq!(tail_proofs.len(), 1);
     assert_eq!(segment_gets(&store, "nodes"), 0);
     assert_eq!(segment_gets(&store, "blobs"), 0);
 
-    let through = tail.view().tail()[0].clone();
+    let through = tail_view.tail()[0].clone();
     store.reset();
     let CheckpointStatus::Published(checkpoint_view) = log
-        .publish_checkpoint(tail.view(), &through, Bytes::new(), tail.state().clone())
+        .publish_checkpoint(&tail_view, &through, Bytes::new(), tail_proofs)
         .await?
     else {
         return Err(test_error("proof checkpoint did not publish").into());
@@ -709,23 +695,23 @@ async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResul
     assert_eq!(segment_gets(&store, "blobs"), 0);
 
     store.reset();
-    let checkpoint = materialize(&log, checkpoint_view, &ProofMachine).await?;
-    assert_eq!(checkpoint.state().len(), 1);
+    let (checkpoint_view, checkpoint_proofs) = proof_history(&log, checkpoint_view).await?;
+    assert_eq!(checkpoint_proofs.len(), 1);
     assert_eq!(segment_gets(&store, "nodes"), 0);
     assert_eq!(segment_gets(&store, "blobs"), 0);
 
     store.reset();
     log.stage_objects(
-        checkpoint.view(),
-        vec![checkpoint.state()[0].reference().clone()],
+        &checkpoint_view,
+        vec![checkpoint_proofs[0].reference().clone()],
     )
     .await?;
     assert_eq!(segment_gets(&store, "nodes"), 1);
     assert_eq!(segment_gets(&store, "blobs"), 1);
 
-    log.put_object(checkpoint.view(), Bytes::from_static(b"orphan"))
+    log.put_object(&checkpoint_view, Bytes::from_static(b"orphan"))
         .await?;
-    let CollectionStart::Installed(fenced, _) = log.start_collection(checkpoint.view()).await?
+    let CollectionStart::Installed(fenced, _) = log.start_collection(&checkpoint_view).await?
     else {
         return Err(test_error("proof collection did not install").into());
     };
@@ -735,7 +721,7 @@ async fn materialized_roots_are_authenticated_epoch_scoped_proofs() -> TestResul
             transaction_id(126, 2),
             Bytes::new(),
             Bytes::new(),
-            checkpoint.state().clone(),
+            checkpoint_proofs,
         ),
         Err(object_log::Error::InvalidStagedObject)
     ));

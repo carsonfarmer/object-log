@@ -6,8 +6,8 @@ mod tree;
 use bytes::Bytes;
 use minicbor::{CborLen, Decode, Encode, encode::Write};
 use object_log::{
-    CheckpointStatus, Log, MaterializeError, Materializer, PreparedCommit, StagedObject,
-    TransactionId, View, materialize, tail_record,
+    CheckpointStatus, HistoryItem, Log, PreparedCommit, StagedObject, TransactionId, View, history,
+    tail_record,
 };
 
 const FORMAT: &[u8] = b"object-log-kv/radix/1";
@@ -172,16 +172,20 @@ impl KvStore {
         let view = self.log.load().await?;
         let root = if let Some(index) = view.tail().len().checked_sub(1) {
             let latest = tail_record(&self.log, &view, index).await?;
-            Root.restore(latest.record().operation(), latest.proofs())?
+            restore_root(latest.record().operation(), latest.proofs())?
         } else {
-            materialize(&self.log, view.clone(), &Root)
-                .await
-                .map_err(|error| match error {
-                    MaterializeError::Log(error) => KvError::Log(error),
-                    MaterializeError::State(error) => error,
-                })?
-                .into_parts()
-                .1
+            let mut cursor = history(&self.log, view.clone())?;
+            let root = match cursor.next().await? {
+                Some(HistoryItem::Checkpoint(checkpoint)) => {
+                    restore_root(checkpoint.record().snapshot(), checkpoint.proofs())?
+                }
+                None => None,
+                Some(HistoryItem::Commit(_)) => return Err(KvError::InvalidEncoding),
+            };
+            if cursor.next().await?.is_some() {
+                return Err(KvError::InvalidEncoding);
+            }
+            root
         };
         Ok(KvSnapshot {
             store: self.clone(),
@@ -472,33 +476,16 @@ pub enum KvError {
     IntegerOverflow,
 }
 
-struct Root;
-impl Materializer for Root {
-    type State = Option<StagedObject>;
-    type Error = KvError;
-    fn empty(&self) -> Self::State {
-        None
+fn restore_root(bytes: &[u8], objects: &[StagedObject]) -> Result<Option<StagedObject>, KvError> {
+    if bytes != FORMAT
+        || objects.len() > 1
+        || objects
+            .first()
+            .is_some_and(|object| object.reference().kind() != object_log::ObjectKind::Node)
+    {
+        return Err(KvError::InvalidEncoding);
     }
-    fn restore(&self, bytes: &[u8], objects: &[StagedObject]) -> Result<Self::State, KvError> {
-        if bytes != FORMAT
-            || objects.len() > 1
-            || objects
-                .first()
-                .is_some_and(|object| object.reference().kind() != object_log::ObjectKind::Node)
-        {
-            return Err(KvError::InvalidEncoding);
-        }
-        Ok(objects.first().cloned())
-    }
-    fn apply(
-        &self,
-        state: &mut Self::State,
-        bytes: &[u8],
-        objects: &[StagedObject],
-    ) -> Result<(), KvError> {
-        *state = self.restore(bytes, objects)?;
-        Ok(())
-    }
+    Ok(objects.first().cloned())
 }
 
 struct Budget(usize);

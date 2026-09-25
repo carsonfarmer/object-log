@@ -125,8 +125,8 @@ head-write permission even when Git pushes are disabled.
 `load` reads and validates only the index. `read_checkpoint` reads its base.
 `read_tail` fetches active WAL entries concurrently because the index contains
 their complete ordered references. It does not fetch referenced payloads or
-nodes. An adapter reads only the objects that it needs. The materializer uses
-these operations to restore the complete state.
+nodes. An adapter reads only the objects that it needs. The `history` cursor
+returns the authenticated checkpoint and commits in order for state recovery.
 
 `refresh` uses a conditional read. An unchanged index returns `None`. A changed
 index returns `Some(View)`. The caller then reads the base and active tail that
@@ -139,7 +139,7 @@ the view names.
 clone and for its collection epoch. It lets publication rely on the completed
 create-only write without reading the object graph back. It is not serialized.
 
-`materialize` accepts one loaded `View` and creates the same type of proof for
+`history` accepts one loaded `View` and creates the same type of proof for
 each ordered object reference in its authenticated checkpoint and tail records.
 An adapter can retain these proofs and publish them with that exact view
 without reading the object graph. A changed collection epoch rejects the proof.
@@ -239,7 +239,7 @@ revisions. Other later head movement can make the outcome `Expired`.
 
 The core treats snapshot and node payload bytes as opaque. The adapter must put
 every durable dependency in the checkpoint roots or a reference-node edge.
-Opaque bytes must not hide another durable reachability graph. The materializer
+Opaque bytes must not hide another durable reachability graph. The adapter
 must also prove that the snapshot is the correct state for the covered prefix.
 These are the checkpoint trust boundaries.
 
@@ -326,14 +326,11 @@ compacted commit bodies without losing commit resolution. The active tail,
 current checkpoint, and their transitive object graph remain live. A valid
 content-addressed cycle cannot be formed without breaking digest verification.
 
-## Materializer
+## History recovery
 
-The optional helper restores typed state. It receives publication proofs for
-the ordered object references in each authenticated snapshot or operation. It
-can retain those proofs for lazy reads and a checkpoint against the returned
-view. Each domain encodes and publishes its own checkpoints because only the
-domain knows which objects the snapshot retains. See the `Materializer` trait
-in the generated API documentation for the current interface.
-
-The core log can be used without this trait. Domain transactions and query APIs
-do not belong in the core.
+The `history` cursor returns one authenticated checkpoint or commit at a time,
+with publication proofs for its ordered object references. An adapter can
+retain those proofs for lazy reads and checkpoint publication against the
+cursor's exact view. Each domain encodes and publishes its own checkpoints
+because only the domain knows which objects the snapshot retains. Domain
+transactions and query APIs do not belong in the core.

@@ -4,22 +4,19 @@
 
 mod byte_stream;
 mod format;
+mod history;
 mod log;
-mod materialize;
 mod store;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod sim;
 
 pub use byte_stream::{ByteReader, ByteWriter};
+pub use history::{Authenticated, HistoryCursor, HistoryItem, history, tail_record};
 pub use log::{
     CheckpointRecord, CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionReport,
     CollectionStart, CommitRecord, CommitStatus, Log, Options, ReferenceNode, Resolution,
     RetentionStatus,
-};
-pub use materialize::{
-    Authenticated, HistoryCursor, HistoryItem, MaterializeError, Materialized, Materializer,
-    history, materialize, tail_record,
 };
 pub use store::{
     BackendCapabilities, BackendCapability, Request, RequestDenied, RequestGuard, ValidatedBackend,
@@ -348,7 +345,7 @@ pub(crate) struct StagingDomain;
 /// Proof that one immutable object graph is ready for publication.
 ///
 /// A staged object is valid only for its source [`Log`] handle and collection
-/// epoch. Clones of that handle share the proof. [`Materializer`] receives new
+/// epoch. Clones of that handle share the proof. [`HistoryCursor`] yields new
 /// proofs for references in the authenticated checkpoint and commit records of
 /// its exact view. Use [`Log::stage_objects`] for arbitrary durable references.
 /// Recovery tokens and separately opened handles do not share the proof. Their

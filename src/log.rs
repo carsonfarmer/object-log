@@ -1088,7 +1088,7 @@ impl Log {
     /// The returned payload and ordered children come from that verified node.
     ///
     /// Separately opened handles must obtain a fresh parent proof through
-    /// materialization or [`Self::stage_objects`]. This operation does not
+    /// [`crate::history`] or [`Self::stage_objects`]. This operation does not
     /// refresh the view or grant a retention lease.
     ///
     /// # Errors
@@ -1364,43 +1364,6 @@ impl Log {
             commit_ref,
         })
         .await
-    }
-
-    /// Bounds encoded history bytes buffered by materialization or checkpoint validation.
-    ///
-    /// This is the larger of the checkpoint length and the largest concurrently
-    /// buffered tail window, including one record held by the consumer. It uses
-    /// authenticated view lengths and performs no I/O. Successful evaluation
-    /// uses a fixed stack buffer without heap allocation.
-    ///
-    /// This is not a heap bound: callers must separately budget decoder
-    /// allocations, application state, publication proofs, and other work. It
-    /// does not bound [`Self::read_tail`] or [`Self::resolve_checkpoint`], which
-    /// may retain the complete tail, or missing-read head classification.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a foreign view or unrepresentable lengths or sums.
-    pub fn materialization_read_bound(&self, view: &View) -> Result<usize, Error> {
-        self.validate_view(view)?;
-        let checkpoint = usize::try_from(view.checkpoint().map_or(0, |value| value.object().len()))
-            .map_err(|_| Error::LimitExceeded("materialization encoded bytes"))?;
-        let mut largest = [0_usize; MAX_CONCURRENT_READS + 1];
-        for record in view.tail() {
-            let mut length = usize::try_from(record.len())
-                .map_err(|_| Error::LimitExceeded("materialization encoded bytes"))?;
-            for retained in &mut largest {
-                if length > *retained {
-                    std::mem::swap(retained, &mut length);
-                }
-            }
-        }
-        let tail = largest.into_iter().try_fold(0_usize, |total, length| {
-            total
-                .checked_add(length)
-                .ok_or(Error::LimitExceeded("materialization encoded bytes"))
-        })?;
-        Ok(checkpoint.max(tail))
     }
 
     /// Reads and verifies every commit in the active tail.
@@ -4026,7 +3989,7 @@ mod tests {
             Err(Error::InvalidStagedObject)
         ));
         assert_eq!(faults.metrics().total_requests(), 0);
-        let state = crate::materialize(&log, fenced, &FoldProbe::default()).await?;
+        let state = fold_history(&log, fenced, &FoldProbe::default()).await?;
         faults.reset();
         let (_, children) = log
             .read_staged_node(state.view(), &state.state().objects[0])
@@ -4095,7 +4058,7 @@ mod tests {
             cold.resume(&token).await?,
             Resolution::Committed(_)
         ));
-        let state = crate::materialize(&cold, cold.load().await?, &FoldProbe::default()).await?;
+        let state = fold_history(&cold, cold.load().await?, &FoldProbe::default()).await?;
         let current_root = state
             .state()
             .objects
@@ -4122,7 +4085,7 @@ mod tests {
             return Err("collection did not finish".into());
         };
         assert!(report.delete_attempts >= 3);
-        let state = crate::materialize(&cold, view, &FoldProbe::default()).await?;
+        let state = fold_history(&cold, view, &FoldProbe::default()).await?;
         let (_, children) = cold
             .read_staged_node(state.view(), &state.state().objects[0])
             .await?;
@@ -4164,10 +4127,7 @@ mod tests {
         }
     }
 
-    impl crate::Materializer for FoldProbe {
-        type State = FoldState;
-        type Error = std::io::Error;
-
+    impl FoldProbe {
         fn empty(&self) -> FoldState {
             FoldState {
                 total: 0,
@@ -4176,15 +4136,11 @@ mod tests {
             }
         }
 
-        fn restore(
-            &self,
-            snapshot: &[u8],
-            objects: &[StagedObject],
-        ) -> Result<FoldState, Self::Error> {
+        fn restore(&self, snapshot: &[u8], objects: &[StagedObject]) -> FoldState {
             let mut state = self.empty();
             state.total = usize::from(snapshot[0]);
             state.objects = objects.to_vec();
-            Ok(state)
+            state
         }
 
         fn apply(
@@ -4192,7 +4148,7 @@ mod tests {
             state: &mut FoldState,
             operation: &[u8],
             objects: &[StagedObject],
-        ) -> Result<(), Self::Error> {
+        ) -> Result<(), std::io::Error> {
             if let Some(reads) = &self.reads {
                 let completed = usize::try_from(reads.metrics().operation(Operation::Get).requests)
                     .map_err(std::io::Error::other)?;
@@ -4207,6 +4163,50 @@ mod tests {
             self.applied.set(self.applied.get() + 1);
             Ok(())
         }
+    }
+
+    struct Folded {
+        view: View,
+        state: FoldState,
+    }
+
+    impl Folded {
+        fn view(&self) -> &View {
+            &self.view
+        }
+
+        fn state(&self) -> &FoldState {
+            &self.state
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum FoldError {
+        #[error(transparent)]
+        Log(#[from] Error),
+        #[error(transparent)]
+        State(std::io::Error),
+    }
+
+    async fn fold_history(log: &Log, view: View, probe: &FoldProbe) -> Result<Folded, FoldError> {
+        let mut cursor = crate::history(log, view)?;
+        let mut state = probe.empty();
+        while let Some(item) = cursor.next().await? {
+            match item {
+                crate::HistoryItem::Checkpoint(checkpoint) => {
+                    state = probe.restore(checkpoint.record().snapshot(), checkpoint.proofs());
+                }
+                crate::HistoryItem::Commit(commit) => {
+                    probe
+                        .apply(&mut state, commit.record().operation(), commit.proofs())
+                        .map_err(FoldError::State)?;
+                }
+            }
+        }
+        Ok(Folded {
+            view: cursor.view().clone(),
+            state,
+        })
     }
 
     #[tokio::test]
@@ -4349,87 +4349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialization_read_bound_tracks_largest_lengths_and_checkpoint()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let (log, faults, _) = staged_read_log("history-bound", Options::default()).await?;
-        let mut view = log.load().await?;
-        assert_eq!(log.materialization_read_bound(&view)?, 0);
-        let window = MAX_CONCURRENT_READS + 1;
-        for size in 1..=2 * window {
-            view = fold_append(&log, &view, Bytes::from(vec![1; size * 100])).await?;
-        }
-        assert!(
-            view.tail()
-                .windows(2)
-                .all(|pair| pair[0].len() < pair[1].len())
-        );
-        let expected: u64 = view.tail()[window..].iter().map(CommitRef::len).sum();
-        faults.reset();
-        assert_eq!(
-            log.materialization_read_bound(&view)?,
-            usize::try_from(expected)?
-        );
-        assert_eq!(faults.metrics().total_requests(), 0);
-        let through = view.tail()[window - 1].clone();
-        let CheckpointStatus::Published(view) = log
-            .publish_checkpoint(
-                &view,
-                &through,
-                Bytes::from(vec![1; 256 * 1024]),
-                Vec::new(),
-            )
-            .await?
-        else {
-            return Err("checkpoint did not publish".into());
-        };
-        let checkpoint = view
-            .checkpoint()
-            .ok_or("checkpoint is missing")?
-            .object()
-            .len();
-        assert!(checkpoint > expected);
-        faults.reset();
-        assert_eq!(
-            log.materialization_read_bound(&view)?,
-            usize::try_from(checkpoint)?
-        );
-        assert_eq!(faults.metrics().total_requests(), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn materialization_read_bound_rejects_foreign_views_and_overflow_without_io()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let (log, faults, backend) = staged_read_log("bound-errors", Options::default()).await?;
-        let mut view = log.load().await?;
-        for _ in 0..2 {
-            view = fold_append(&log, &view, Bytes::from_static(&[1])).await?;
-        }
-        let foreign = Log::open(&backend, &LogId::new("foreign")?, Options::default())
-            .await?
-            .load()
-            .await?;
-        let mut head = view.head().clone();
-        // Synthetic authenticated-length extremes exercise checked arithmetic
-        // without creating or allocating impossible-sized storage objects.
-        head.tail[0].len = u64::MAX;
-        head.tail[1].len = 1;
-        let overflow = Log::view(head, view.storage_version().clone());
-        faults.reset();
-        assert!(matches!(
-            log.materialization_read_bound(&foreign),
-            Err(Error::InvalidFormat(_))
-        ));
-        assert!(matches!(
-            log.materialization_read_bound(&overflow),
-            Err(Error::LimitExceeded("materialization encoded bytes"))
-        ));
-        assert_eq!(faults.metrics().total_requests(), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn materialization_bounds_completed_records_ahead_of_application()
+    async fn history_cursor_reads_one_record_before_application()
     -> Result<(), Box<dyn std::error::Error>> {
         let faults = FaultStore::new(InMemory::new());
         let backend =
@@ -4440,34 +4360,16 @@ mod tests {
         for _ in 0..count {
             view = fold_append(&log, &view, Bytes::from(vec![1; 32 * 1024])).await?;
         }
-        let encoded_bound = log.materialization_read_bound(&view)?;
-        let maximum_record = view
-            .tail()
-            .iter()
-            .map(CommitRef::len)
-            .max()
-            .ok_or("tail is empty")?;
-        let total_encoded: u64 = view.tail().iter().map(CommitRef::len).sum();
-        assert!(u64::try_from(encoded_bound)? < total_encoded);
         faults.reset();
         let probe = FoldProbe {
             reads: Some(faults.clone()),
             ..FoldProbe::default()
         };
-        let state = crate::materialize(&log, view, &probe).await?;
+        let state = fold_history(&log, view, &probe).await?;
         assert_eq!(state.state().total, count);
         assert_eq!(probe.applied.get(), count);
-        assert!(
-            u64::try_from(encoded_bound)?
-                >= u64::try_from(probe.maximum_ahead.get())? * maximum_record
-        );
-        // The store completes each GET before its record can be decoded. The
-        // completed-but-unapplied count therefore bounds retained records.
-        assert!(
-            probe.maximum_ahead.get() <= MAX_CONCURRENT_READS,
-            "{} records completed ahead of application",
-            probe.maximum_ahead.get(),
-        );
+        // The cursor returns each authenticated record before reading the next.
+        assert_eq!(probe.maximum_ahead.get(), 1);
         assert_eq!(
             faults.metrics().operation(Operation::Get).requests,
             u64::try_from(count)?
@@ -4502,11 +4404,8 @@ mod tests {
             )
             .await?;
         store.delay_heads.store(true, Ordering::Relaxed);
-        let result = crate::materialize(&log, view, &FoldProbe::default()).await;
-        assert!(matches!(
-            result,
-            Err(crate::MaterializeError::Log(Error::CorruptObject))
-        ));
+        let result = fold_history(&log, view, &FoldProbe::default()).await;
+        assert!(matches!(result, Err(FoldError::Log(Error::CorruptObject))));
         assert_eq!(store.head_reads.load(Ordering::Relaxed), 1);
         Ok(())
     }
@@ -4570,23 +4469,20 @@ mod tests {
                 view = log.load().await?;
             }
             let probe = FoldProbe::default();
-            let result = crate::materialize(&log, view.clone(), &probe).await;
+            let result = fold_history(&log, view.clone(), &probe).await;
             match failure {
-                "body" => assert!(matches!(
-                    result,
-                    Err(crate::MaterializeError::Log(Error::CorruptObject))
-                )),
+                "body" => assert!(matches!(result, Err(FoldError::Log(Error::CorruptObject)))),
                 "parent" => {
                     assert!(matches!(
                         result,
-                        Err(crate::MaterializeError::Log(Error::InvalidFormat(_)))
+                        Err(FoldError::Log(Error::InvalidFormat(_)))
                     ));
                     assert!(matches!(
                         log.read_tail(&view).await,
                         Err(Error::InvalidFormat(_))
                     ));
                 }
-                _ => assert!(matches!(result, Err(crate::MaterializeError::State(_)))),
+                _ => assert!(matches!(result, Err(FoldError::State(_)))),
             }
             assert_eq!(probe.applied.get(), 2);
             assert!(probe.dropped.get(), "partial state escaped after {failure}");
@@ -4644,7 +4540,7 @@ mod tests {
             return Err("tail did not publish".into());
         };
         let probe = FoldProbe::default();
-        let state = crate::materialize(&log, view.clone(), &probe).await?;
+        let state = fold_history(&log, view.clone(), &probe).await?;
         assert_eq!(state.state().total, 3);
         assert_eq!(probe.applied.get(), 1);
         assert_eq!(state.state().objects.len(), 2);
@@ -4681,8 +4577,8 @@ mod tests {
         ));
         let probe = FoldProbe::default();
         assert!(matches!(
-            crate::materialize(&log, old.clone(), &probe).await,
-            Err(crate::MaterializeError::Log(Error::ViewExpired))
+            fold_history(&log, old.clone(), &probe).await,
+            Err(FoldError::Log(Error::ViewExpired))
         ));
         assert!(matches!(
             crate::tail_record(&log, &old, 0).await,
