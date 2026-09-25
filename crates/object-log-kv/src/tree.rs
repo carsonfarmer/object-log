@@ -25,6 +25,16 @@ pub(super) struct Node {
 }
 
 impl Node {
+    fn leaf(prefix: &[u8], value: Option<Bytes>) -> Self {
+        Self {
+            prefix: Bytes::copy_from_slice(prefix),
+            value,
+            edges: Vec::new(),
+            children: Vec::new(),
+            source: None,
+        }
+    }
+
     fn into_link(mut self) -> Link {
         self.source
             .take()
@@ -280,15 +290,7 @@ impl Tree<'_> {
         value: Option<Bytes>,
     ) -> Result<Option<Link>, KvError> {
         let Some(mut node) = node else {
-            return self
-                .dirty(Node {
-                    prefix: Bytes::copy_from_slice(key),
-                    value,
-                    edges: Vec::new(),
-                    children: Vec::new(),
-                    source: None,
-                })
-                .await;
+            return self.dirty(Node::leaf(key, value)).await;
         };
         if common < node.prefix.len() {
             // Only insertion reaches a divergent prefix; absent no-ops return above.
@@ -302,36 +304,13 @@ impl Tree<'_> {
             node.prefix = Bytes::copy_from_slice(&node.prefix[common + 1..]);
             let old = self.dirty(node).await?.ok_or(KvError::InvalidEncoding)?;
             parent.children.push(old);
-            if common == key.len() {
-                parent.value = value;
-            } else {
-                let leaf = self
-                    .dirty(Node {
-                        prefix: Bytes::copy_from_slice(&key[common + 1..]),
-                        value,
-                        edges: Vec::new(),
-                        children: Vec::new(),
-                        source: None,
-                    })
-                    .await?
-                    .ok_or(KvError::InvalidEncoding)?;
-                let at = usize::from(parent.edges[0] < key[common]);
-                parent.edges.insert(at, key[common]);
-                parent.children.insert(at, leaf);
-            }
-            return self.dirty(parent).await;
+            node = parent;
         }
         if common == key.len() {
             node.value = value;
         } else {
             let leaf = self
-                .dirty(Node {
-                    prefix: Bytes::copy_from_slice(&key[common + 1..]),
-                    value,
-                    edges: Vec::new(),
-                    children: Vec::new(),
-                    source: None,
-                })
+                .dirty(Node::leaf(&key[common + 1..], value))
                 .await?
                 .ok_or(KvError::InvalidEncoding)?;
             let index = node.edges.partition_point(|edge| *edge < key[common]);
