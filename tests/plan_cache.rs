@@ -1,5 +1,8 @@
 #![cfg(feature = "test-util")]
 
+#[path = "support/pause.rs"]
+mod pause;
+
 use std::{error::Error as StdError, sync::Arc};
 
 use bytes::Bytes;
@@ -55,13 +58,7 @@ async fn byte_writer_and_commit_read_one_plan_for_their_view() -> Result<(), Box
         let view = next.clone();
         tokio::spawn(async move { log.put_object(&view, Bytes::from_static(b"first")).await })
     };
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     let second = {
         let log = log.clone();
         tokio::spawn(async move { log.put_object(&next, Bytes::from_static(b"second")).await })

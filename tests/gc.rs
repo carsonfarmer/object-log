@@ -1,5 +1,8 @@
 #![cfg(feature = "test-util")]
 
+#[path = "support/pause.rs"]
+mod pause;
+
 use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 
@@ -564,13 +567,7 @@ async fn collection_fence_finds_a_planned_descendant_of_a_new_node() -> TestResu
         let source = source.clone();
         async move { log.start_collection(&source).await }
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
 
     let node = fixture
         .log
@@ -1191,13 +1188,7 @@ async fn append_during_resume_does_not_prevent_fence_clear() -> TestResult {
         let fenced = fenced.clone();
         async move { log.resume_collection(&fenced).await }
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     let appended = append(&fixture.log, &fenced, b"append").await?;
     assert!(pause.release());
     let CollectionFinish::Complete(current, report) = collector.await?? else {
@@ -1239,10 +1230,7 @@ async fn collection_finishes_after_repeated_commits_during_deletion() -> TestRes
     let mut clear_pause = None;
     for next_delete in [Some(8), Some(16), Some(24), None] {
         let mut stop = pause.take().ok_or("delete pause was not scheduled")?;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), stop.wait_until_entered())
-                .await?
-        );
+        pause::entered(stop.wait_until_entered()).await?;
         appended = append(&fixture.log, &appended, b"concurrent append").await?;
         if next_delete.is_none() {
             let next_put = fixture.store.metrics().operation(Operation::Put).requests + 1;
@@ -1259,10 +1247,7 @@ async fn collection_finishes_after_repeated_commits_during_deletion() -> TestRes
     // Keep writing across two rejected clear attempts, then let the retry win.
     for retry in 0..2 {
         let mut stop = clear_pause.take().ok_or("clear pause was not scheduled")?;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), stop.wait_until_entered())
-                .await?
-        );
+        pause::entered(stop.wait_until_entered()).await?;
         appended = append(&fixture.log, &appended, b"concurrent append").await?;
         if retry == 0 {
             let next_put = fixture.store.metrics().operation(Operation::Put).requests + 1;
@@ -1331,13 +1316,7 @@ async fn cancellation_before_and_after_fence_installation_is_restart_safe() -> T
         let source = source.clone();
         async move { log.start_collection(&source).await }
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     task.abort();
     assert!(task.await.is_err());
     assert!(!pause.release());
@@ -1356,13 +1335,7 @@ async fn cancellation_before_and_after_fence_installation_is_restart_safe() -> T
         let source = source.clone();
         async move { log.start_collection(&source).await }
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            head_pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(head_pause.wait_until_entered()).await?;
     task.abort();
     assert!(task.await.is_err());
     assert!(!head_pause.release());
@@ -1395,13 +1368,7 @@ async fn cancelled_deletes_repeat_safely_before_and_after_visibility() -> TestRe
             let fenced = fenced.clone();
             async move { log.resume_collection(&fenced).await }
         });
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                pause.wait_until_entered()
-            )
-            .await?
-        );
+        pause::entered(pause.wait_until_entered()).await?;
         task.abort();
         assert!(task.await.is_err());
         assert!(!pause.release());
@@ -1431,13 +1398,7 @@ async fn two_collectors_clear_only_the_exact_plan_and_delayed_delete_is_isolated
         let fenced = fenced.clone();
         async move { log.resume_collection(&fenced).await }
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
 
     let CollectionFinish::Complete(cleared, _) = fixture.log.resume_collection(&fenced).await?
     else {
@@ -1474,13 +1435,7 @@ async fn delayed_clear_does_not_clear_a_different_plan() -> TestResult {
         let first = first.clone();
         async move { log.resume_collection(&first).await }
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
 
     let CollectionFinish::Complete(cleared, _) = fixture.log.resume_collection(&first).await?
     else {

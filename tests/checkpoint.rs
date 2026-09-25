@@ -1,3 +1,7 @@
+#[cfg(feature = "test-util")]
+#[path = "support/pause.rs"]
+mod pause;
+
 use std::error::Error as StdError;
 use std::sync::Arc;
 
@@ -175,13 +179,7 @@ async fn checkpoint_cas_racing_appends_keeps_the_new_suffix() -> TestResult {
             .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
             .await
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     let appended = append(&append_writer, &append_writer.load().await?, b"two").await?;
     let appended = append(&append_writer, &appended, b"three").await?;
     assert!(pause.release());
@@ -282,13 +280,7 @@ async fn checkpoint_cas_does_not_cross_a_collection_epoch() -> TestResult {
             .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
             .await
     });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     let current = collector.load().await?;
     let CollectionStart::Installed(fenced, _) = collector.start_collection(&current).await? else {
         return Err("collection fence was not installed".into());

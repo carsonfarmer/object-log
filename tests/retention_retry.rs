@@ -1,5 +1,8 @@
 #![cfg(feature = "test-util")]
 
+#[path = "support/pause.rs"]
+mod pause;
+
 use std::error::Error as StdError;
 use std::sync::Arc;
 
@@ -66,10 +69,7 @@ async fn acquisition_retries_commits_and_protects_original_view() -> TestResult 
     let mut current = source.clone();
     for race in 0..2 {
         let mut stop = pause.take().ok_or("acquisition pause was not scheduled")?;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), stop.wait_until_entered())
-                .await?
-        );
+        pause::entered(stop.wait_until_entered()).await?;
         current = append(&log, &current).await?;
         pause = (race == 0).then(|| store.pause_next_put(FailurePhase::Before));
         assert!(stop.release());
@@ -113,13 +113,7 @@ async fn acquisition_does_not_cross_a_collection_fence() -> TestResult {
         async move { log.retain(&source, id).await }
     });
 
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     let CollectionStart::Installed(fenced, _) = log.start_collection(&source).await? else {
         return Err("collection plan was not installed".into());
     };
@@ -158,13 +152,7 @@ async fn acquisition_rejects_an_installed_and_cleared_collection_epoch() -> Test
         async move { log.retain(&source, RetentionId::new()).await }
     });
 
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     let CollectionStart::Installed(fenced, _) = log.start_collection(&source).await? else {
         return Err("collection plan was not installed".into());
     };
@@ -196,10 +184,7 @@ async fn acquisition_contended_through_retry_limit_returns_conflict() -> TestRes
     let mut current = source;
     for race in 0..16 {
         let mut stop = pause.take().ok_or("acquisition pause was not scheduled")?;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), stop.wait_until_entered())
-                .await?
-        );
+        pause::entered(stop.wait_until_entered()).await?;
         current = append(&log, &current).await?;
         pause = (race < 15).then(|| store.pause_next_put(FailurePhase::Before));
         assert!(stop.release());
@@ -227,13 +212,7 @@ async fn hidden_success_after_a_retry_remains_pending_until_resolved() -> TestRe
         async move { log.retain(&source, id).await }
     });
 
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pause.wait_until_entered()
-        )
-        .await?
-    );
+    pause::entered(pause.wait_until_entered()).await?;
     let appended = append(&log, &source).await?;
     store.fail_next(Operation::Put, FailurePhase::After);
     assert!(pause.release());
