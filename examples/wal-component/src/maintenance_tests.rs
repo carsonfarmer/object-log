@@ -315,6 +315,129 @@ async fn candidate_token_precedes_single_use_publication_and_resumes() {
 }
 
 #[tokio::test]
+async fn recovery_requires_the_end_of_history_before_writing() {
+    let mut s = session().await;
+    append(&mut s, vec![]).await;
+    let recovery = RecoveryState {
+        log: s.log.clone(),
+        cursor: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
+    };
+    let transaction = uuid::Uuid::from_u128(42).as_bytes().to_vec();
+    assert!(matches!(
+        GuestRecovery::prepare(&recovery, transaction, vec![], vec![], vec![]),
+        Err(Failure::Other(message)) if message.contains("history must be consumed")
+    ));
+    assert!(matches!(
+        GuestRecovery::checkpoint(&recovery, vec![], vec![]),
+        Err(Failure::Other(message)) if message.contains("history must be consumed")
+    ));
+    while GuestRecovery::next(&recovery).unwrap().is_some() {}
+    assert!(recovery.require_complete().is_ok());
+}
+
+#[tokio::test]
+async fn resume_reports_losing_and_unresolved_tokens_without_discarding_them() {
+    let faults = FaultStore::new(InMemory::new());
+    let s = session_on(Arc::new(faults.clone())).await;
+    let mut winner = session_on(Arc::new(faults.clone())).await;
+    let losing = s
+        .log
+        .prepare(
+            &s.current_view(),
+            TransactionId::new(),
+            Bytes::from_static(b"loser"),
+            Bytes::new(),
+            vec![],
+        )
+        .unwrap();
+    let losing_token = losing.recovery_token().unwrap();
+    append(&mut winner, vec![]).await;
+    assert_ne!(
+        s.current_view().generation(),
+        winner.current_view().generation()
+    );
+    assert!(matches!(
+        GuestSession::resume(&s, losing_token.to_vec()).unwrap(),
+        Resolution::NotCommitted
+    ));
+    assert_eq!(
+        s.current_view().generation(),
+        winner.current_view().generation()
+    );
+
+    let candidate = s
+        .log
+        .prepare(
+            &s.current_view(),
+            TransactionId::new(),
+            Bytes::from_static(b"retry"),
+            Bytes::new(),
+            vec![],
+        )
+        .unwrap();
+    let token = candidate.recovery_token().unwrap().to_vec();
+    let previous_generation = s.current_view().generation();
+    faults.reset();
+    for occurrence in 1..=3 {
+        faults.schedule(StoreFailure {
+            operation: Operation::Get,
+            occurrence,
+            phase: FailurePhase::Before,
+        });
+    }
+    let Resolution::StillPending(returned) = GuestSession::resume(&s, token.clone()).unwrap()
+    else {
+        panic!("a failed evidence read must preserve the token")
+    };
+    assert_eq!(returned, token);
+    assert_eq!(s.current_view().generation(), previous_generation);
+    faults.reset();
+    assert!(matches!(
+        GuestSession::resume(&s, returned).unwrap(),
+        Resolution::Committed
+    ));
+    assert!(s.current_view().generation() > previous_generation);
+}
+
+#[tokio::test]
+async fn pending_checkpoint_reports_a_definite_loser_once() {
+    let faults = FaultStore::new(InMemory::new());
+    let mut s = session_on(Arc::new(faults.clone())).await;
+    append(&mut s, vec![]).await;
+    let view = s.current_view();
+    faults.reset();
+    faults.schedule(StoreFailure {
+        operation: Operation::Put,
+        occurrence: 2,
+        phase: FailurePhase::Before,
+    });
+    let CheckpointStatus::Pending(pending) =
+        maintenance::checkpoint(&s.log, &view, b"loser".to_vec(), vec![])
+            .await
+            .unwrap()
+    else {
+        panic!("lost checkpoint response did not remain pending")
+    };
+    faults.reset();
+    assert!(matches!(
+        maintenance::checkpoint(&s.log, &view, b"winner".to_vec(), vec![])
+            .await
+            .unwrap(),
+        CheckpointStatus::Published(_)
+    ));
+    let pending = PendingCheckpointState {
+        log: s.log.clone(),
+        pending: RefCell::new(Some(pending)),
+    };
+    assert_eq!(
+        GuestPendingCheckpoint::resolve(&pending).unwrap(),
+        CheckpointResolution::NotPublished
+    );
+    assert!(pending.pending.borrow().is_none());
+    assert!(GuestPendingCheckpoint::resolve(&pending).is_err());
+}
+
+#[tokio::test]
 async fn recovery_does_not_skip_corrupt_older_commit_or_checkpoint() {
     for checkpoint in [false, true] {
         let store = Arc::new(InMemory::new());
