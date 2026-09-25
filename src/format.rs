@@ -71,6 +71,23 @@ impl Head {
             && self.active_plan == other.active_plan
     }
 
+    pub(crate) fn has_checkpoint_append_base(&self, other: &Self) -> bool {
+        let Some(appended) = other.tail.strip_prefix(self.tail.as_slice()) else {
+            return false;
+        };
+        self.log_id == other.log_id
+            && self.incarnation == other.incarnation
+            && self.options == other.options
+            && self.checkpoint == other.checkpoint
+            && self.recent_outcomes == other.recent_outcomes
+            && self.collection_epoch == other.collection_epoch
+            && self.active_plan == other.active_plan
+            && u64::try_from(appended.len())
+                .ok()
+                .and_then(|count| self.next_sequence.checked_add(count))
+                == Some(other.next_sequence)
+    }
+
     pub(crate) fn advance_generation(&mut self) -> Result<(), Error> {
         self.generation = self
             .generation

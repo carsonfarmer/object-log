@@ -1478,11 +1478,12 @@ impl Log {
 
     /// Publishes an opaque base that covers one exact prefix of `view`.
     ///
-    /// The base object becomes durable before the index update. Retention-only
-    /// head updates are reconciled without changing the checkpoint evidence. A
-    /// conflicting log or collection update returns
+    /// The base object becomes durable before the index update. Retention
+    /// updates and commits appended after the covered prefix are reconciled
+    /// without changing the checkpoint evidence. A conflicting log or
+    /// collection update returns
     /// [`CheckpointStatus::Conflict`] and preserves the current durable history.
-    /// Exhausting the bounded retention retry also returns conflict.
+    /// Exhausting bounded publication retries also returns conflict.
     /// Same-process staged proofs avoid immutable dependency reads. Reopened
     /// pending evidence verifies its complete dependency graph.
     ///
@@ -1551,13 +1552,18 @@ impl Log {
         };
 
         match self
-            .publish_head(view, |publication_view| {
+            .publish_checkpoint_head(view, |publication_view| {
                 Self::checkpoint_head(publication_view, through, pending.checkpoint.object.clone())
             })
             .await?
         {
             HeadPublication::Updated(next) => {
-                self.remember_tail(&next);
+                // The supplied tail was verified above. A reconciled head may
+                // also contain commits appended by another handle, so it does
+                // not inherit that proof.
+                if next.head().next_sequence == view.head().next_sequence {
+                    self.remember_tail(&next);
+                }
                 Ok(CheckpointStatus::Published(next))
             }
             HeadPublication::Changed(current) => {
@@ -1577,8 +1583,8 @@ impl Log {
     /// Resolves or safely retries one uncertain checkpoint publication.
     ///
     /// It preserves the original checkpoint evidence. It can retry against a
-    /// newer storage version only when the logical log and collection state are
-    /// unchanged and only retention bookkeeping moved.
+    /// newer storage version when the covered prefix and collection state are
+    /// unchanged; retention bookkeeping and an appended tail suffix may move.
     ///
     /// # Errors
     ///
@@ -1608,7 +1614,7 @@ impl Log {
             Err(error) => return Err(error),
         };
         let publication_view =
-            if let Some(current) = Self::retention_publication_view(&pending.view, &current)? {
+            if let Some(current) = Self::checkpoint_publication_view(&pending.view, &current)? {
                 current
             } else {
                 match Self::classify_checkpoint(&pending, current)? {
@@ -1650,7 +1656,7 @@ impl Log {
         }
         pending.staging_domain = Arc::clone(&self.staging_domain);
         match self
-            .publish_head(&publication_view, |view| {
+            .publish_checkpoint_head(&publication_view, |view| {
                 Self::checkpoint_head(view, &pending.through, pending.checkpoint.object.clone())
             })
             .await
@@ -1984,6 +1990,25 @@ impl Log {
         source: &View,
         candidate: impl Fn(&View) -> Result<Head, Error>,
     ) -> Result<HeadPublication, Error> {
+        self.publish_head_compatible(source, candidate, Head::has_same_publication_base)
+            .await
+    }
+
+    async fn publish_checkpoint_head(
+        &self,
+        source: &View,
+        candidate: impl Fn(&View) -> Result<Head, Error>,
+    ) -> Result<HeadPublication, Error> {
+        self.publish_head_compatible(source, candidate, Head::has_checkpoint_append_base)
+            .await
+    }
+
+    async fn publish_head_compatible(
+        &self,
+        source: &View,
+        candidate: impl Fn(&View) -> Result<Head, Error>,
+        compatible: fn(&Head, &Head) -> bool,
+    ) -> Result<HeadPublication, Error> {
         let mut view = source.clone();
         for attempt in 0..MAX_HEAD_PUBLICATION_ATTEMPTS {
             let head = candidate(&view)?;
@@ -2005,7 +2030,7 @@ impl Log {
                         }
                         Err(error) => return Err(error),
                     };
-                    if !source.head().has_same_publication_base(current.head()) {
+                    if !compatible(source.head(), current.head()) {
                         return Ok(HeadPublication::Changed(current));
                     }
                     if current.head() == view.head()
@@ -2031,11 +2056,23 @@ impl Log {
     }
 
     fn retention_publication_view(source: &View, current: &View) -> Result<Option<View>, Error> {
+        Self::compatible_publication_view(source, current, Head::has_same_publication_base)
+    }
+
+    fn checkpoint_publication_view(source: &View, current: &View) -> Result<Option<View>, Error> {
+        Self::compatible_publication_view(source, current, Head::has_checkpoint_append_base)
+    }
+
+    fn compatible_publication_view(
+        source: &View,
+        current: &View,
+        compatible: fn(&Head, &Head) -> bool,
+    ) -> Result<Option<View>, Error> {
         if current.head() == source.head() && current.storage_version() == source.storage_version()
         {
             return Ok(Some(current.clone()));
         }
-        if !source.head().has_same_publication_base(current.head()) {
+        if !compatible(source.head(), current.head()) {
             return Ok(None);
         }
         if current.generation() <= source.generation() {

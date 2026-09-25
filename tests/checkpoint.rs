@@ -4,6 +4,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::TryStreamExt;
 #[cfg(feature = "test-util")]
+use object_log::CollectionStart;
+#[cfg(feature = "test-util")]
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 #[cfg(feature = "test-util")]
 use object_log::{CheckpointResolution, PendingCommit};
@@ -88,14 +90,157 @@ async fn append_before_checkpoint_preserves_both_entries() -> TestResult {
     let CommitStatus::Committed(appended) = second.commit(append_candidate).await? else {
         return Err("append did not publish".into());
     };
-    let CheckpointStatus::Conflict(current) = first
+    let CheckpointStatus::Published(current) = first
         .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
         .await?
     else {
-        return Err("stale checkpoint did not conflict".into());
+        return Err("checkpoint did not reconcile the appended entry".into());
     };
-    assert_eq!(current.tail(), appended.tail());
-    assert_eq!(first.read_tail(&current).await?.len(), 2);
+    assert_eq!(
+        current
+            .checkpoint()
+            .map(object_log::CheckpointRef::through_commit),
+        Some(through.digest())
+    );
+    assert_eq!(current.tail(), &appended.tail()[1..]);
+    assert_eq!(first.read_tail(&current).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconciled_suffix_needs_verification_before_another_checkpoint() -> TestResult {
+    for (id, corrupt) in [
+        ("reconciled-missing-commit", false),
+        ("reconciled-corrupt-commit", true),
+    ] {
+        let raw = Arc::new(InMemory::new());
+        let backend: Arc<dyn ObjectStore> = raw.clone();
+        let first = open(Arc::clone(&backend), id, Options::default()).await?;
+        let second = open(backend, id, Options::default()).await?;
+        let one = append(&first, &first.load().await?, b"one").await?;
+        let through = one.tail()[0].clone();
+        let appended = append(&second, &one, b"two").await?;
+        let CheckpointStatus::Published(reconciled) = first
+            .publish_checkpoint(&one, &through, Bytes::from_static(b"state one"), Vec::new())
+            .await?
+        else {
+            return Err("first checkpoint did not reconcile the append".into());
+        };
+
+        let commit_path =
+            immutable_location(&raw, id, "commits", appended.tail()[1].digest()).await?;
+        if corrupt {
+            raw.put(&commit_path, Bytes::from_static(b"corrupt").into())
+                .await?;
+        } else {
+            raw.delete(&commit_path).await?;
+        }
+
+        assert!(matches!(
+            first
+                .publish_checkpoint(
+                    &reconciled,
+                    &reconciled.tail()[0],
+                    Bytes::from_static(b"state two"),
+                    Vec::new(),
+                )
+                .await,
+            Err(object_log::Error::CorruptObject)
+        ));
+        let current = first.load().await?;
+        assert_eq!(current.generation(), reconciled.generation());
+        assert_eq!(current.checkpoint(), reconciled.checkpoint());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "test-util")]
+async fn checkpoint_cas_racing_appends_keeps_the_new_suffix() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let backend: Arc<dyn ObjectStore> = Arc::new(faults.clone());
+    let options = Options {
+        max_tail_entries: 3,
+        ..Options::default()
+    };
+    let checkpoint_writer = open(Arc::clone(&backend), "checkpoint-append-race", options).await?;
+    let append_writer = open(backend, "checkpoint-append-race", options).await?;
+    let one = append(&checkpoint_writer, &checkpoint_writer.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+
+    faults.reset();
+    let mut pause = faults.pause_put_at(2, FailurePhase::Before);
+    let checkpoint = tokio::spawn(async move {
+        checkpoint_writer
+            .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
+            .await
+    });
+    assert!(pause.wait_until_entered().await);
+    let appended = append(&append_writer, &append_writer.load().await?, b"two").await?;
+    let appended = append(&append_writer, &appended, b"three").await?;
+    assert!(pause.release());
+
+    let CheckpointStatus::Published(published) = checkpoint.await?? else {
+        return Err("checkpoint lost to an appended suffix".into());
+    };
+    assert_eq!(published.tail(), &appended.tail()[1..]);
+    assert_eq!(
+        published
+            .checkpoint()
+            .map(object_log::CheckpointRef::through_commit),
+        Some(appended.tail()[0].digest())
+    );
+    let recovered = append_writer.load().await?;
+    assert_eq!(recovered.generation(), published.generation());
+    assert_eq!(recovered.checkpoint(), published.checkpoint());
+    assert_eq!(recovered.tail(), published.tail());
+    let records = append_writer.read_tail(&recovered).await?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].operation(), &Bytes::from_static(b"two"));
+    assert_eq!(records[1].operation(), &Bytes::from_static(b"three"));
+    let fourth = append(&append_writer, &recovered, b"four").await?;
+    assert_eq!(fourth.tail().len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "test-util")]
+async fn checkpoint_cas_does_not_cross_a_collection_epoch() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let backend: Arc<dyn ObjectStore> = Arc::new(faults.clone());
+    let checkpoint_writer = open(
+        Arc::clone(&backend),
+        "checkpoint-collection-race",
+        Options::default(),
+    )
+    .await?;
+    let collector = open(backend, "checkpoint-collection-race", Options::default()).await?;
+    let one = append(&checkpoint_writer, &checkpoint_writer.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    checkpoint_writer
+        .put_object(&one, Bytes::from_static(b"garbage"))
+        .await?;
+
+    faults.reset();
+    let mut pause = faults.pause_put_at(2, FailurePhase::Before);
+    let checkpoint = tokio::spawn(async move {
+        checkpoint_writer
+            .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
+            .await
+    });
+    assert!(pause.wait_until_entered().await);
+    let current = collector.load().await?;
+    let CollectionStart::Installed(fenced, _) = collector.start_collection(&current).await? else {
+        return Err("collection fence was not installed".into());
+    };
+    assert!(pause.release());
+
+    let CheckpointStatus::Conflict(current) = checkpoint.await?? else {
+        return Err("checkpoint crossed a collection epoch".into());
+    };
+    assert_eq!(current.collection_epoch(), fenced.collection_epoch());
+    assert_eq!(current.tail(), fenced.tail());
+    assert!(current.checkpoint().is_none());
     Ok(())
 }
 
@@ -448,10 +593,13 @@ async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
             return Err("lost checkpoint response did not remain pending".into());
         }
     };
-    assert!(matches!(
-        log.resolve_checkpoint(pending).await?,
-        CheckpointResolution::Published(_)
-    ));
+    let checkpointed = log.load().await?;
+    let appended = append(&log, &checkpointed, b"two").await?;
+    let CheckpointResolution::Published(published) = log.resolve_checkpoint(pending).await? else {
+        return Err("published checkpoint was not resolved after an append".into());
+    };
+    assert_eq!(published.checkpoint(), checkpointed.checkpoint());
+    assert_eq!(published.tail(), appended.tail());
     Ok(())
 }
 
@@ -529,7 +677,7 @@ async fn reopened_checkpoint_resolution_rejects_invalid_descendants() -> TestRes
 
 #[tokio::test]
 #[cfg(feature = "test-util")]
-async fn failed_checkpoint_update_retries_the_exact_prefix() -> TestResult {
+async fn reopened_pending_checkpoint_retries_after_an_append() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let log = open(
         Arc::new(faults.clone()),
@@ -555,10 +703,25 @@ async fn failed_checkpoint_update_retries_the_exact_prefix() -> TestResult {
             return Err("failed checkpoint update did not remain pending".into());
         }
     };
-    assert!(matches!(
-        log.resolve_checkpoint(pending).await?,
-        CheckpointResolution::Published(_)
-    ));
+    let appended = append(&log, &log.load().await?, b"two").await?;
+    drop(log);
+    let reopened = open(
+        Arc::new(faults.clone()),
+        "checkpoint-pending-before",
+        Options::default(),
+    )
+    .await?;
+    let CheckpointResolution::Published(published) = reopened.resolve_checkpoint(pending).await?
+    else {
+        return Err("pending checkpoint did not retry after an append".into());
+    };
+    assert_eq!(
+        published
+            .checkpoint()
+            .map(object_log::CheckpointRef::through_commit),
+        Some(through.digest())
+    );
+    assert_eq!(published.tail(), &appended.tail()[1..]);
     Ok(())
 }
 
