@@ -167,7 +167,7 @@ async fn pending_collection_continues_with_the_cached_fence() {
 }
 
 #[tokio::test]
-async fn recovered_view_does_not_checkpoint_a_concurrent_append() {
+async fn recovered_view_checkpoints_prefix_and_preserves_concurrent_append() {
     let mut s = session().await;
     append(&mut s, vec![]).await;
     let stale = s.current_view();
@@ -175,15 +175,22 @@ async fn recovered_view_does_not_checkpoint_a_concurrent_append() {
     while recovery.next().await.unwrap().is_some() {}
     append(&mut s, vec![]).await;
     let current = s.current_view();
-    assert!(matches!(
+    let CheckpointStatus::Published(checkpointed) =
         maintenance::checkpoint(&s.log, recovery.view(), vec![], vec![])
             .await
-            .unwrap(),
-        CheckpointStatus::Conflict(_)
-    ));
+            .unwrap()
+    else {
+        panic!("checkpoint did not preserve the appended suffix");
+    };
+    assert_eq!(checkpointed.tail(), &current.tail()[1..]);
+    assert_eq!(
+        checkpointed.checkpoint().unwrap().through_commit(),
+        current.tail()[0].digest()
+    );
+    assert_eq!(s.log.read_tail(&checkpointed).await.unwrap().len(), 1);
     assert_eq!(
         s.log.load().await.unwrap().generation(),
-        current.generation()
+        checkpointed.generation()
     );
 }
 
