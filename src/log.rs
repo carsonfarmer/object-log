@@ -2875,7 +2875,17 @@ mod tests {
     async fn cold_resume_never_retries_from_unmatched_source_fingerprints()
     -> Result<(), Box<dyn std::error::Error>> {
         let log = test_log("unmatched-token-source", Options::default()).await?;
-        let view = log.load().await?;
+        let initial = log.load().await?;
+        let first = log.prepare(
+            &initial,
+            TransactionId::new(),
+            Bytes::from_static(b"first"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(view) = log.commit(first).await? else {
+            return Err("first commit did not publish".into());
+        };
         let prepared = log.prepare(
             &view,
             TransactionId::new(),
@@ -2895,11 +2905,12 @@ mod tests {
         recovered.tip = Some(Digest::of(b"false tip"));
         assert!(matches!(
             log.resume(&recovered.encode()?).await,
-            Err(Error::InvalidFormat(_))
+            Err(Error::InvalidFormat(message))
+                if message == "recovery token source fields disagree"
         ));
         let current = log.load().await?;
         assert_eq!(current.generation(), view.generation());
-        assert!(current.tail().is_empty());
+        assert_eq!(current.tail(), view.tail());
         Ok(())
     }
 

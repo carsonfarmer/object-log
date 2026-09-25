@@ -66,7 +66,10 @@ async fn acquisition_retries_commits_and_protects_original_view() -> TestResult 
     let mut current = source.clone();
     for race in 0..2 {
         let mut stop = pause.take().ok_or("acquisition pause was not scheduled")?;
-        assert!(stop.wait_until_entered().await);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), stop.wait_until_entered())
+                .await?
+        );
         current = append(&log, &current).await?;
         pause = (race == 0).then(|| store.pause_next_put(FailurePhase::Before));
         assert!(stop.release());
@@ -110,7 +113,13 @@ async fn acquisition_does_not_cross_a_collection_fence() -> TestResult {
         async move { log.retain(&source, id).await }
     });
 
-    assert!(pause.wait_until_entered().await);
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pause.wait_until_entered()
+        )
+        .await?
+    );
     let CollectionStart::Installed(fenced, _) = log.start_collection(&source).await? else {
         return Err("collection plan was not installed".into());
     };
@@ -136,6 +145,43 @@ async fn acquisition_does_not_cross_a_collection_fence() -> TestResult {
 }
 
 #[tokio::test]
+async fn acquisition_rejects_an_installed_and_cleared_collection_epoch() -> TestResult {
+    let (store, log) = open("cleared-collection-race").await?;
+    let source = log.load().await?;
+    log.put_object(&source, Bytes::from_static(b"orphan"))
+        .await?;
+    store.reset();
+    let mut pause = store.pause_next_put(FailurePhase::Before);
+    let acquiring = tokio::spawn({
+        let log = log.clone();
+        let source = source.clone();
+        async move { log.retain(&source, RetentionId::new()).await }
+    });
+
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pause.wait_until_entered()
+        )
+        .await?
+    );
+    let CollectionStart::Installed(fenced, _) = log.start_collection(&source).await? else {
+        return Err("collection plan was not installed".into());
+    };
+    let CollectionFinish::Complete(cleared, _) = log.resume_collection(&fenced).await? else {
+        return Err("collection did not finish".into());
+    };
+    assert!(pause.release());
+    assert!(matches!(
+        acquiring.await??,
+        RetentionStatus::Conflict(current)
+            if current.collection_epoch() == cleared.collection_epoch()
+    ));
+    assert!(cleared.collection_epoch() > source.collection_epoch());
+    Ok(())
+}
+
+#[tokio::test]
 async fn acquisition_contended_through_retry_limit_returns_conflict() -> TestResult {
     let (store, log) = open("bounded-contention").await?;
     let source = log.load().await?;
@@ -150,7 +196,10 @@ async fn acquisition_contended_through_retry_limit_returns_conflict() -> TestRes
     let mut current = source;
     for race in 0..16 {
         let mut stop = pause.take().ok_or("acquisition pause was not scheduled")?;
-        assert!(stop.wait_until_entered().await);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), stop.wait_until_entered())
+                .await?
+        );
         current = append(&log, &current).await?;
         pause = (race < 15).then(|| store.pause_next_put(FailurePhase::Before));
         assert!(stop.release());
@@ -178,7 +227,13 @@ async fn hidden_success_after_a_retry_remains_pending_until_resolved() -> TestRe
         async move { log.retain(&source, id).await }
     });
 
-    assert!(pause.wait_until_entered().await);
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pause.wait_until_entered()
+        )
+        .await?
+    );
     let appended = append(&log, &source).await?;
     store.fail_next(Operation::Put, FailurePhase::After);
     assert!(pause.release());

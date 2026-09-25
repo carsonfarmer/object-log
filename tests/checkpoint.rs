@@ -175,7 +175,13 @@ async fn checkpoint_cas_racing_appends_keeps_the_new_suffix() -> TestResult {
             .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
             .await
     });
-    assert!(pause.wait_until_entered().await);
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pause.wait_until_entered()
+        )
+        .await?
+    );
     let appended = append(&append_writer, &append_writer.load().await?, b"two").await?;
     let appended = append(&append_writer, &appended, b"three").await?;
     assert!(pause.release());
@@ -276,7 +282,13 @@ async fn checkpoint_cas_does_not_cross_a_collection_epoch() -> TestResult {
             .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
             .await
     });
-    assert!(pause.wait_until_entered().await);
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pause.wait_until_entered()
+        )
+        .await?
+    );
     let current = collector.load().await?;
     let CollectionStart::Installed(fenced, _) = collector.start_collection(&current).await? else {
         return Err("collection fence was not installed".into());
@@ -912,6 +924,106 @@ async fn checkpoint_retains_a_pending_commit_outcome() -> TestResult {
         log.resolve(pending).await?,
         Resolution::Committed(_)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "test-util")]
+async fn checkpointed_winner_keeps_a_loser_definite() -> TestResult {
+    for cold in [false, true] {
+        let faults = FaultStore::new(InMemory::new());
+        let log = open(
+            Arc::new(faults.clone()),
+            if cold { "cold-loser" } else { "warm-loser" },
+            Options::default(),
+        )
+        .await?;
+        let source = log.load().await?;
+        let loser = log.prepare(
+            &source,
+            TransactionId::new(),
+            Bytes::from_static(b"loser"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let token = loser.recovery_token()?;
+        faults.reset();
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase: FailurePhase::Before,
+        });
+        let CommitStatus::Pending(pending) = log.commit(loser).await? else {
+            return Err("failed publication did not leave pending evidence".into());
+        };
+
+        let winner = append(&log, &source, b"winner").await?;
+        let through = winner.tail()[0].clone();
+        let CheckpointStatus::Published(compacted) = log
+            .publish_checkpoint(&winner, &through, Bytes::new(), Vec::new())
+            .await?
+        else {
+            return Err("winner checkpoint did not publish".into());
+        };
+        assert!(compacted.tail().is_empty());
+        let outcome = if cold {
+            let reopened = open(Arc::new(faults), "cold-loser", Options::default()).await?;
+            reopened.resume(&token).await?
+        } else {
+            log.resolve(pending).await?
+        };
+        assert!(matches!(outcome, Resolution::NotCommitted(_)));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_resume_from_a_full_history_head() -> TestResult {
+    const LIMIT: usize = 64;
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let options = Options {
+        max_tail_entries: LIMIT,
+        resolution_window: LIMIT,
+        ..Options::default()
+    };
+    let id = "mature-resume";
+    let log = open(Arc::clone(&store), id, options).await?;
+    let mut view = log.load().await?;
+    for _ in 0..LIMIT {
+        view = append(&log, &view, b"history").await?;
+    }
+    let through = view.tail()[LIMIT - 1].clone();
+    let CheckpointStatus::Published(mut view) = log
+        .publish_checkpoint(&view, &through, Bytes::new(), Vec::new())
+        .await?
+    else {
+        return Err("history checkpoint did not publish".into());
+    };
+    for _ in 0..LIMIT - 1 {
+        view = append(&log, &view, b"tail").await?;
+    }
+    assert_eq!(view.tail().len(), LIMIT - 1);
+    let prepared = log.prepare(
+        &view,
+        TransactionId::new(),
+        Bytes::from_static(b"resumed"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    let token = prepared.recovery_token()?;
+    assert!(token.len() < 512);
+    drop(prepared);
+    drop(log);
+
+    let reopened = open(store, id, options).await?;
+    let Resolution::Committed(committed) = reopened.resume(&token).await? else {
+        return Err("mature head did not resume".into());
+    };
+    assert_eq!(committed.tail().len(), LIMIT);
+    assert_eq!(
+        reopened.read_tail(&committed).await?[LIMIT - 1].operation(),
+        b"resumed".as_slice()
+    );
     Ok(())
 }
 
