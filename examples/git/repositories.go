@@ -195,7 +195,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	for _, service := range []string{
 		"info/refs", transport.UploadPackService, transport.ReceivePackService,
-		"maintenance", "collect", "recover-retentions-after-drain",
+		"maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain",
 	} {
 		suffix := "/" + service
 		if strings.HasSuffix(r.URL.Path, suffix) {

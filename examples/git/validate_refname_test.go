@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os/exec"
@@ -65,6 +66,61 @@ func TestReceiveRefNamesBeforePublication(t *testing.T) {
 						t.Fatalf("valid ref did not pass receive and publication: err=%v reply=%q publishes=%d", err, reply, published)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestPruneLegacyRefNames(t *testing.T) {
+	legacy := "refs/heads/\u200c./review-probe"
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		t.Run(format.String(), func(t *testing.T) {
+			id := strings.Repeat("1", format.HexSize())
+			original := rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{
+				legacy: id, "refs/heads/main": id, "refs/tags/release": id,
+			}}
+			encoded, err := json.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := decodeRoot(encoded, format, 0)
+			if err != nil {
+				t.Fatalf("old catalog must remain readable: %v", err)
+			}
+			clean, removed, err := withoutInvalidRefs(loaded, "")
+			if err != nil || len(removed) != 1 || removed[0] != legacy || len(clean.Refs) != 2 || len(loaded.Refs) != 3 {
+				t.Fatalf("cleanup removed wrong refs: clean=%v removed=%v", clean, removed)
+			}
+			if clean.Refs["refs/heads/main"] != id || clean.Refs["refs/tags/release"] != id {
+				t.Fatalf("valid refs changed: %v", clean)
+			}
+			clean, removed, err = withoutInvalidRefs(clean, "")
+			if err != nil || len(removed) != 0 || len(clean.Refs) != 2 {
+				t.Fatalf("repeated cleanup changed valid refs: %v %v", clean, removed)
+			}
+			loaded.Head = legacy
+			encoded, err = json.Marshal(loaded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err = decodeRoot(encoded, format, 0)
+			if err != nil {
+				t.Fatalf("old default HEAD must remain readable: %v", err)
+			}
+			if _, _, err := withoutInvalidRefs(loaded, ""); err == nil {
+				t.Fatal("invalid default HEAD was removed without replacement")
+			}
+			if _, _, err := withoutInvalidRefs(loaded, "refs/tags/release"); err == nil {
+				t.Fatal("replacement HEAD accepted a tag")
+			}
+			clean, removed, err = withoutInvalidRefs(loaded, "refs/heads/main")
+			if err != nil || clean.Head != "refs/heads/main" || len(removed) != 1 || len(loaded.Refs) != 3 {
+				t.Fatalf("explicit HEAD replacement failed: clean=%v removed=%v error=%v", clean, removed, err)
+			}
+			delete(loaded.Refs, legacy)
+			clean, removed, err = withoutInvalidRefs(loaded, "refs/heads/main")
+			if err != nil || clean.Head != "refs/heads/main" || len(removed) != 0 {
+				t.Fatalf("unborn invalid HEAD was not replaced: clean=%v removed=%v error=%v", clean, removed, err)
 			}
 		})
 	}

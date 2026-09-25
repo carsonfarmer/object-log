@@ -59,7 +59,7 @@ class Backend(http.server.BaseHTTPRequestHandler):
     def handle_request(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         Backend.calls.append((self.command, self.path))
-        admin = self.path.endswith(("/maintenance", "/collect"))
+        admin = self.path.endswith(("/maintenance", "/collect", "/prune-invalid-refs"))
         status = 401 if admin and self.headers.get("Authorization") != "Bearer fixture" else 200
         data = b"git"
         if self.path == "/_validate_backend":
@@ -110,7 +110,7 @@ class AdmissionTest(unittest.TestCase):
         # This local HTTP fixture omits the public-IP certificate configuration.
         snippet = re.sub(r"%\{ if public_ip_https ~\}.*?%\{ endif ~\}\n", "", snippet, flags=re.S)
         paths = [f"/{name}/{operation}" for name in ("alpha/project.git", "star*project.git")
-                 for operation in ("maintenance", "collect", "recover-retentions-after-drain")]
+                 for operation in ("maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain")]
         snippet = snippet.replace("${hostname}", "http://:8080")
         snippet = snippet.replace("http://127.0.0.1:8081", "http://:8081")
         snippet = snippet.replace("${admin_paths}", json.dumps(paths)).replace("${retry_after}", "2")
@@ -200,7 +200,8 @@ class AdmissionTest(unittest.TestCase):
                              ("POST", "/unknown.git/maintenance"),
                              ("POST", "/starXproject.git/maintenance")]:
             self.assertEqual(self.request(method, path)[0], 503, path)
-        for path in ("/alpha/project.git/maintenance", "/alpha/project.git/collect", "/star*project.git/maintenance"):
+        for path in ("/alpha/project.git/maintenance", "/alpha/project.git/collect",
+                     "/alpha/project.git/prune-invalid-refs", "/star*project.git/maintenance"):
             self.assertEqual(self.request("POST", path)[0], 401, path)
             self.assertEqual(self.request("POST", path, {"Authorization": "Bearer fixture"})[0], 200, path)
         Backend.release.set()

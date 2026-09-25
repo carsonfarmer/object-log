@@ -303,6 +303,20 @@ without reading opaque leaf payloads. Ordinary reads and publication still
 verify those bytes. Continuous readers can delay cleanup; scheduling alone
 does not remove that constraint.
 
+Repositories published before the current ref-name rule may contain refs that
+Git can advertise but no longer accepts for updates or deletion. An operator
+can explicitly remove only those invalid names with `POST
+/<repository>/prune-invalid-refs` using administrator credentials. The response
+lists removed names after the new ref map is committed through the WAL head.
+An empty list with no `default_head` means no change. If the stored default
+HEAD is invalid, ensure another valid branch exists, then supply
+its full name in `X-Git-Replacement-Head` on this call; the new HEAD and any
+removed refs publish together. Without that header, the call refuses to
+change an invalid default HEAD.
+On a publication conflict, retry; on an uncertain result, inspect the refs
+and repeat the request. This action does not run on the maintenance timer. Run
+ordinary maintenance afterward to reclaim objects no longer reachable from a ref.
+
 Every fetch acquires WAL retention before opening catalog data and releases it
 after the last response byte. If a stopped instance loses a retention ID, stop
 new traffic and drain all readers. Start one authenticated instance with

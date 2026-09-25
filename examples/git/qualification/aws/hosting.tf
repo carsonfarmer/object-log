@@ -191,7 +191,7 @@ locals {
     run_timeout = length(var.host_repositories) * var.host_maintenance_budget_seconds + 65
     retry_after = max(1, length(var.host_repositories) * var.host_maintenance_pause_seconds)
     admin_paths = jsonencode(flatten([for name in sort(keys(var.host_repositories)) : [
-      for operation in ["maintenance", "collect", "recover-retentions-after-drain"] : "/${name}/${operation}"
+      for operation in ["maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain"] : "/${name}/${operation}"
     ]]))
   }) : ""
 }
