@@ -7,7 +7,7 @@ use object_log::{
 };
 use object_log_spin_key_value::{HostLimits, Maintenance, Manager};
 use object_store::{ObjectStore, memory::InMemory};
-use spin_factor_key_value::{Store, StoreManager};
+use spin_factor_key_value::{Store, StoreManager, SwapError};
 
 type Result<T = ()> = anyhow::Result<T>;
 
@@ -127,6 +127,52 @@ async fn unresolved_publication_reports_unknown_and_never_replays() -> Result {
         .filter(|e| e.operation == Operation::Put && e.path.ends_with("index.cbor"))
         .count();
     assert_eq!(count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cas_reports_unknown_after_a_lost_publication_response() -> Result {
+    let occurrence = set_head_put().await?;
+    let (fault, _, store) = fixture(HostLimits {
+        attempts: 2,
+        ..HostLimits::default()
+    })
+    .await?;
+    let cas = store.new_compare_and_swap(0, "key").await?;
+    assert_eq!(cas.current(usize::MAX).await?, None);
+    fault.reset();
+    let mut paused = fault.pause_put_at(occurrence, FailurePhase::After);
+    fault.schedule(Failure {
+        operation: Operation::Put,
+        occurrence,
+        phase: FailurePhase::After,
+    });
+    let writer = tokio::spawn(async move { cas.swap(b"value".to_vec()).await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    let next_get = fault.metrics().operation(Operation::Get).requests + 1;
+    for occurrence in next_get..next_get + 100 {
+        fault.schedule(Failure {
+            operation: Operation::Get,
+            occurrence,
+            phase: FailurePhase::Before,
+        });
+    }
+    assert!(paused.release());
+    assert!(matches!(
+        writer.await?.unwrap_err(),
+        SwapError::Other(message) if message.contains("outcome unknown")
+    ));
+    fault.clear_failures();
+    assert_eq!(store.get("key", usize::MAX).await?, Some(b"value".to_vec()));
+    assert_eq!(
+        fault
+            .metrics()
+            .events
+            .iter()
+            .filter(|event| event.operation == Operation::Put && event.path.ends_with("index.cbor"))
+            .count(),
+        1
+    );
     Ok(())
 }
 

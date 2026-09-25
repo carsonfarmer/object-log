@@ -863,45 +863,225 @@ mod tests {
     };
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
-    #[tokio::test]
-    async fn group_storage_failure_does_not_fan_out() -> Result<(), Box<dyn std::error::Error>> {
+    async fn group_fixture_with_options(
+        options: Options,
+    ) -> Result<(Arc<FaultStore>, KvStore), Box<dyn std::error::Error>> {
         let faults = Arc::new(FaultStore::new(InMemory::new()));
         let backend = ValidatedBackend::new(
             faults.clone() as Arc<dyn ObjectStore>,
             Path::from("group-fault"),
         )
         .await?;
-        let log = Log::open(&backend, &LogId::new("store")?, Options::default()).await?;
-        let kv = KvStore::new(log, HostLimits::default().kv());
+        let log = Log::open(&backend, &LogId::new("store")?, options).await?;
         faults.reset();
+        Ok((faults, KvStore::new(log, HostLimits::default().kv())))
+    }
+
+    async fn group_fixture() -> Result<(Arc<FaultStore>, KvStore), Box<dyn std::error::Error>> {
+        group_fixture_with_options(Options::default()).await
+    }
+
+    type JobResult = oneshot::Receiver<Result<(), Error>>;
+
+    fn set_job(key: &[u8], value: &[u8], total: &Arc<AtomicUsize>) -> (WriteJob, JobResult) {
+        let (done, result) = oneshot::channel();
+        (
+            WriteJob {
+                commands: vec![KvCommand::Set {
+                    key: Bytes::copy_from_slice(key),
+                    value: Bytes::copy_from_slice(value),
+                }],
+                input: InputCharge {
+                    bytes: key.len() + value.len(),
+                    total: total.clone(),
+                },
+                admitted: Instant::now(),
+                done,
+            },
+            result,
+        )
+    }
+
+    fn group_jobs() -> (Vec<WriteJob>, Vec<JobResult>, Arc<AtomicUsize>) {
+        let total = Arc::new(AtomicUsize::new(4));
+        let mut jobs = Vec::new();
+        let mut results = Vec::new();
+        for (key, value) in [(b"a", b"1"), (b"b", b"2")] {
+            let (job, result) = set_job(key, value, &total);
+            jobs.push(job);
+            results.push(result);
+        }
+        (jobs, results, total)
+    }
+
+    async fn grouped_head_put() -> Result<u64, Box<dyn std::error::Error>> {
+        let (faults, kv) = group_fixture().await?;
+        let (jobs, results, total) = group_jobs();
+        Owner::publish_group(&kv, HostLimits::default(), jobs).await;
+        for result in results {
+            result.await??;
+        }
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        let head_put = faults
+            .metrics()
+            .events
+            .iter()
+            .find(|event| event.operation == Operation::Put && event.path.ends_with("index.cbor"))
+            .ok_or("missing grouped head publication")?
+            .occurrence;
+        Ok(head_put)
+    }
+
+    #[tokio::test]
+    async fn queued_sets_are_actually_grouped() -> Result<(), Box<dyn std::error::Error>> {
+        let (faults, kv) = group_fixture().await?;
+        let owner = Owner::spawn(
+            kv.clone(),
+            HostLimits {
+                owner_wait_ms: 60_000,
+                ..HostLimits::default()
+            },
+        );
+        let total = Arc::new(AtomicUsize::new(6));
+        let mut paused = faults.pause_next_put(FailurePhase::Before);
+        let (first, first_result) = set_job(b"a", b"1", &total);
+        owner.sender.try_send(first).map_err(|_| "owner closed")?;
+        assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+        let (second, second_result) = set_job(b"b", b"2", &total);
+        let (third, third_result) = set_job(b"c", b"3", &total);
+        owner.sender.try_send(second).map_err(|_| "owner closed")?;
+        owner.sender.try_send(third).map_err(|_| "owner closed")?;
+        assert!(paused.release());
+        for result in [first_result, second_result, third_result] {
+            result.await??;
+        }
+        let snapshot = kv.snapshot().await?;
+        assert_eq!(snapshot.view().tail().len(), 2);
+        for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3")] {
+            assert_eq!(
+                snapshot.get(key).await?,
+                Some(Bytes::copy_from_slice(value))
+            );
+        }
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grouped_pending_resolves_or_broadcasts_unknown_without_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let head_put = grouped_head_put().await?;
+        for blocked_reads in [1, 100] {
+            let (faults, kv) = group_fixture().await?;
+            let mut paused = faults.pause_put_at(head_put, FailurePhase::After);
+            faults.schedule(Failure {
+                operation: Operation::Put,
+                occurrence: head_put,
+                phase: FailurePhase::After,
+            });
+            let (jobs, results, total) = group_jobs();
+            let writer = tokio::spawn({
+                let kv = kv.clone();
+                async move { Owner::publish_group(&kv, HostLimits::default(), jobs).await }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?
+            );
+            let next_get = faults.metrics().operation(Operation::Get).requests + 1;
+            for occurrence in next_get..next_get + blocked_reads {
+                faults.schedule(Failure {
+                    operation: Operation::Get,
+                    occurrence,
+                    phase: FailurePhase::Before,
+                });
+            }
+            assert!(paused.release());
+            writer.await?;
+            for result in results {
+                let result = result.await?;
+                if blocked_reads == 1 {
+                    result?;
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::Other(message)) if message.contains("outcome unknown")
+                    ));
+                }
+            }
+            assert_eq!(total.load(Ordering::Relaxed), 0);
+            faults.clear_failures();
+            let snapshot = kv.snapshot().await?;
+            assert_eq!(snapshot.view().tail().len(), 1);
+            assert_eq!(snapshot.get(b"a").await?, Some(Bytes::from_static(b"1")));
+            assert_eq!(snapshot.get(b"b").await?, Some(Bytes::from_static(b"2")));
+            assert_eq!(
+                faults
+                    .metrics()
+                    .events
+                    .iter()
+                    .filter(|event| event.operation == Operation::Put
+                        && event.path.ends_with("index.cbor"))
+                    .count(),
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grouped_pending_expires_after_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
+        let head_put = grouped_head_put().await?;
+        let (faults, kv) = group_fixture_with_options(Options {
+            resolution_window: 0,
+            ..Options::default()
+        })
+        .await?;
+        let mut paused = faults.pause_put_at(head_put, FailurePhase::After);
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: head_put,
+            phase: FailurePhase::After,
+        });
+        let (jobs, results, total) = group_jobs();
+        let writer = tokio::spawn({
+            let kv = kv.clone();
+            async move { Owner::publish_group(&kv, HostLimits::default(), jobs).await }
+        });
+        assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+        let snapshot = kv.snapshot().await?;
+        assert!(matches!(
+            snapshot.checkpoint().await?,
+            Some(CheckpointStatus::Published(_))
+        ));
+        assert!(paused.release());
+        writer.await?;
+        for result in results {
+            assert!(matches!(
+                result.await?,
+                Err(Error::Other(message)) if message.contains("outcome unknown")
+            ));
+        }
+        assert_eq!(total.load(Ordering::Relaxed), 0);
+        let snapshot = kv.snapshot().await?;
+        assert!(snapshot.view().tail().is_empty());
+        assert_eq!(snapshot.get(b"a").await?, Some(Bytes::from_static(b"1")));
+        assert_eq!(snapshot.get(b"b").await?, Some(Bytes::from_static(b"2")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn group_storage_failure_does_not_fan_out() -> Result<(), Box<dyn std::error::Error>> {
+        let (faults, kv) = group_fixture().await?;
         faults.schedule(Failure {
             operation: Operation::Put,
             occurrence: 1,
             phase: FailurePhase::Before,
         });
-        let total = Arc::new(AtomicUsize::new(4));
-        let (first_done, first) = oneshot::channel();
-        let (second_done, second) = oneshot::channel();
-        let job = |key: &'static [u8], value: &'static [u8], done| WriteJob {
-            commands: vec![KvCommand::Set {
-                key: Bytes::from_static(key),
-                value: Bytes::from_static(value),
-            }],
-            input: InputCharge {
-                bytes: 2,
-                total: total.clone(),
-            },
-            admitted: Instant::now(),
-            done,
-        };
-        Owner::publish_group(
-            &kv,
-            HostLimits::default(),
-            vec![job(b"a", b"1", first_done), job(b"b", b"2", second_done)],
-        )
-        .await;
-        assert!(first.await?.is_err());
-        assert!(second.await?.is_err());
+        let (jobs, results, total) = group_jobs();
+        Owner::publish_group(&kv, HostLimits::default(), jobs).await;
+        for result in results {
+            assert!(result.await?.is_err());
+        }
         assert_eq!(kv.snapshot().await?.get(b"a").await?, None);
         assert_eq!(kv.snapshot().await?.get(b"b").await?, None);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);

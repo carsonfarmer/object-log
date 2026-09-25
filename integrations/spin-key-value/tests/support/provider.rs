@@ -37,6 +37,20 @@ pub async fn qualify(config: Config) -> anyhow::Result<()> {
     for task in tasks {
         task.await??;
     }
+    let gate = Arc::new(tokio::sync::Barrier::new(9));
+    let mut sets = Vec::new();
+    for index in 0..8 {
+        let store = Arc::clone(&store);
+        let gate = Arc::clone(&gate);
+        sets.push(tokio::spawn(async move {
+            gate.wait().await;
+            store.set(&format!("set-{index}"), &[index as u8]).await
+        }));
+    }
+    gate.wait().await;
+    for set in sets {
+        set.await??;
+    }
     drop(store);
     drop(host);
     drop(other_host);
@@ -51,6 +65,12 @@ pub async fn qualify(config: Config) -> anyhow::Result<()> {
         Some(16i64.to_le_bytes().to_vec())
     );
     assert_eq!(store.get("boundary", usize::MAX).await?, Some(boundary));
+    for index in 0..8 {
+        assert_eq!(
+            store.get(&format!("set-{index}"), usize::MAX).await?,
+            Some(vec![index as u8])
+        );
+    }
     assert!(store.set("oversize", &[0; 65537]).await.is_err());
     let mut complete = false;
     for _ in 0..20 {
