@@ -112,6 +112,82 @@ async fn commit(
     ));
     Ok(results)
 }
+
+#[tokio::test]
+async fn optional_no_op_preparation_preserves_recorded_results() -> TestResult {
+    let (_, store, faults) = fixture(Options::default()).await?;
+    commit(&store, &[set(b"a", b"value"), set(b"b", b"other")]).await?;
+    faults.reset();
+    let snapshot = store.snapshot().await?;
+    let unchanged = [
+        set(b"a", b"value"),
+        KvCommand::Delete {
+            key: Bytes::from_static(b"missing"),
+        },
+    ];
+    assert!(
+        snapshot
+            .prepare_if_changed(TransactionId::new(), &unchanged)
+            .await?
+            .is_none()
+    );
+    let prepared = snapshot.prepare(TransactionId::new(), &unchanged).await?;
+    assert_eq!(
+        decode_results(prepared.result())?,
+        vec![KvResult::Changed(false), KvResult::Changed(false)]
+    );
+    assert!(matches!(
+        store.log().commit(prepared).await?,
+        CommitStatus::Committed(_)
+    ));
+    assert!(
+        store
+            .snapshot()
+            .await?
+            .prepare_if_changed(TransactionId::new(), &[set(b"a", b"new")])
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        faults
+            .metrics()
+            .events
+            .iter()
+            .filter(|event| {
+                event.operation == Operation::Put && event.path.ends_with("index.cbor")
+            })
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn optional_no_op_preparation_does_not_need_a_tail_slot() -> TestResult {
+    let (_, store, _) = fixture(Options {
+        max_tail_entries: 1,
+        ..Options::default()
+    })
+    .await?;
+    commit(&store, &[set(b"key", b"value")]).await?;
+    let snapshot = store.snapshot().await?;
+    assert_eq!(snapshot.view().tail().len(), 1);
+    assert!(
+        snapshot
+            .prepare_if_changed(TransactionId::new(), &[set(b"key", b"value")])
+            .await?
+            .is_none()
+    );
+    assert!(matches!(
+        snapshot
+            .prepare(TransactionId::new(), &[set(b"key", b"value")])
+            .await,
+        Err(KvError::Log(object_log::Error::LimitExceeded(
+            "active tail entries"
+        )))
+    ));
+    Ok(())
+}
 async fn checkpoint(store: &KvStore) -> TestResult {
     assert!(matches!(
         store.snapshot().await?.checkpoint().await?,

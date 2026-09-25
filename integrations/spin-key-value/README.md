@@ -135,6 +135,8 @@ only S3 and the same configuration.
 - Get distinguishes absence from an empty value. Deleting an absent key succeeds.
 - Multi-get preserves input order, duplicates, and missing-value positions.
   Set/delete batches are atomic; repeated keys observe earlier commands.
+  A batch in which no command changes a value succeeds without a WAL commit or
+  tail slot. At the checkpoint threshold it may still publish a checkpoint.
 - Counters use little-endian signed 64-bit bytes, matching Spin's default backend.
   Incrementing an absent key by zero creates it. Invalid encodings and overflow
   return `Error::Other` rather than trapping.
@@ -205,9 +207,10 @@ lifting, caller inputs, WAL decoding, native clients, allocator overhead, and
 concurrency add memory. The embedding also owns guest memory, instance count,
 and Spin resource-table limits. `owner_count` bounds distinct live store names,
 but does not cap handles to one name or CAS handles. The request guard applies
-to a whole grouped publication, including conflict retries. It excludes backend
-probing/opening and provider-internal retries, listing pagination, and delete
-batching.
+to a whole grouped publication, including conflict retries. If group preparation
+hits a limit, each original write is retried with its own guard; storage errors
+do not trigger that fallback. The guard excludes backend probing/opening and
+retries internal to object_store, listing pagination, and delete batching.
 
 Optional `[key_value_store.<label>.wal]` fields are the twelve public
 `object_log::Options` fields, with the core defaults. They are durable: all

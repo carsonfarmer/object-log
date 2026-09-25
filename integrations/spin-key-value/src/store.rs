@@ -57,7 +57,7 @@ struct Writer {
 }
 
 enum GroupFailure {
-    BeforePublication,
+    Limit,
     Other(Error),
 }
 
@@ -135,7 +135,7 @@ impl Owner {
                     let _ = job.done.send(Ok(()));
                 }
             }
-            Err(GroupFailure::BeforePublication) => {
+            Err(GroupFailure::Limit) => {
                 for job in jobs {
                     let writer = Writer::new(kv.clone(), limits);
                     let result = writer.write(&job.commands).await;
@@ -203,6 +203,21 @@ impl Writer {
         self.commit(candidate).await
     }
 
+    async fn publish_unobserved(
+        &self,
+        snapshot: &KvSnapshot,
+        commands: &[KvCommand],
+    ) -> Result<bool, Error> {
+        let Some(candidate) = snapshot
+            .prepare_if_changed(TransactionId::new(), commands)
+            .await
+            .map_err(public_kv_error)?
+        else {
+            return Ok(true);
+        };
+        self.commit(candidate).await
+    }
+
     async fn commit(&self, candidate: PreparedCommit) -> Result<bool, Error> {
         match self
             .kv
@@ -214,14 +229,19 @@ impl Writer {
             CommitStatus::Committed(_) => Ok(true),
             CommitStatus::Conflict(_) => Ok(false),
             CommitStatus::Pending(mut pending) => {
-                for _ in 0..self.limits.attempts {
+                for attempt in 0..self.limits.attempts {
                     match self.kv.log().resolve(pending).await.map_err(|error| {
                         tracing::warn!(error = %error, "object-log pending resolution failed");
                         unknown()
                     })? {
                         Resolution::Committed(_) => return Ok(true),
                         Resolution::NotCommitted(_) => return Ok(false),
-                        Resolution::StillPending(next) => pending = next,
+                        Resolution::StillPending(next) => {
+                            pending = next;
+                            if attempt + 1 < self.limits.attempts {
+                                back_off(attempt).await;
+                            }
+                        }
                         Resolution::Expired(_) => return Err(unknown()),
                     }
                 }
@@ -233,7 +253,7 @@ impl Writer {
     async fn write(&self, commands: &[KvCommand]) -> Result<(), Error> {
         for attempt in 0..self.limits.attempts {
             let snapshot = self.write_snapshot().await?;
-            if self.publish(&snapshot, commands).await? {
+            if self.publish_unobserved(&snapshot, commands).await? {
                 return Ok(());
             }
             if attempt + 1 < self.limits.attempts {
@@ -246,12 +266,19 @@ impl Writer {
     async fn write_group(&self, commands: &[KvCommand]) -> Result<(), GroupFailure> {
         for attempt in 0..self.limits.attempts {
             let snapshot = self.write_snapshot().await.map_err(GroupFailure::Other)?;
-            let candidate = match snapshot.prepare(TransactionId::new(), commands).await {
-                Ok(candidate) => candidate,
-                Err(error) => {
+            let candidate = match snapshot
+                .prepare_if_changed(TransactionId::new(), commands)
+                .await
+            {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) => return Ok(()),
+                Err(
+                    error @ (KvError::Limit(_) | KvError::Log(object_log::Error::LimitExceeded(_))),
+                ) => {
                     tracing::warn!(error = %error, "group preparation failed");
-                    return Err(GroupFailure::BeforePublication);
+                    return Err(GroupFailure::Limit);
                 }
+                Err(error) => return Err(GroupFailure::Other(public_kv_error(error))),
             };
             if self.commit(candidate).await.map_err(GroupFailure::Other)? {
                 return Ok(());
@@ -837,8 +864,7 @@ mod tests {
     use object_store::{ObjectStore, memory::InMemory, path::Path};
 
     #[tokio::test]
-    async fn prepublication_failure_isolated_to_original_call()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn group_storage_failure_does_not_fan_out() -> Result<(), Box<dyn std::error::Error>> {
         let faults = Arc::new(FaultStore::new(InMemory::new()));
         let backend = ValidatedBackend::new(
             faults.clone() as Arc<dyn ObjectStore>,
@@ -848,15 +874,11 @@ mod tests {
         let log = Log::open(&backend, &LogId::new("store")?, Options::default()).await?;
         let kv = KvStore::new(log, HostLimits::default().kv());
         faults.reset();
-        // The group fails before publication; its first original call then
-        // fails independently, leaving the second original call free to commit.
-        for occurrence in [1, 2] {
-            faults.schedule(Failure {
-                operation: Operation::Put,
-                occurrence,
-                phase: FailurePhase::Before,
-            });
-        }
+        faults.schedule(Failure {
+            operation: Operation::Put,
+            occurrence: 1,
+            phase: FailurePhase::Before,
+        });
         let total = Arc::new(AtomicUsize::new(4));
         let (first_done, first) = oneshot::channel();
         let (second_done, second) = oneshot::channel();
@@ -879,12 +901,10 @@ mod tests {
         )
         .await;
         assert!(first.await?.is_err());
-        assert!(second.await?.is_ok());
+        assert!(second.await?.is_err());
         assert_eq!(kv.snapshot().await?.get(b"a").await?, None);
-        assert_eq!(
-            kv.snapshot().await?.get(b"b").await?,
-            Some(Bytes::from_static(b"2"))
-        );
+        assert_eq!(kv.snapshot().await?.get(b"b").await?, None);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);
         assert_eq!(total.load(Ordering::Relaxed), 0);
         Ok(())
     }

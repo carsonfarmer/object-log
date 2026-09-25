@@ -222,7 +222,7 @@ impl Tree<'_> {
         &mut self,
         mut root: Option<Link>,
         command: &KvCommand,
-    ) -> Result<(Option<Link>, KvResult), KvError> {
+    ) -> Result<(Option<Link>, KvResult, bool), KvError> {
         let mut key = command.key().as_ref();
         let mut parents = Vec::new();
         // Keep the decoded path through evaluation so a mutation reads it once.
@@ -269,7 +269,7 @@ impl Tree<'_> {
                 Some(node.into_link())
             };
         }
-        Ok((replacement, result))
+        Ok((replacement, result, changed))
     }
 
     async fn replace(

@@ -46,15 +46,37 @@ async fn set_head_put() -> Result<u64> {
 }
 
 #[tokio::test]
-async fn lost_publication_response_is_resolved_once() -> Result {
+async fn lost_publication_response_is_resolved_after_retry() -> Result {
     let occurrence = head_put().await?;
-    let (fault, _, store) = fixture(HostLimits::default()).await?;
+    let (fault, _, store) = fixture(HostLimits {
+        attempts: 2,
+        ..HostLimits::default()
+    })
+    .await?;
+    let mut paused = fault.pause_put_at(occurrence, FailurePhase::After);
     fault.schedule(Failure {
         operation: Operation::Put,
         occurrence,
         phase: FailurePhase::After,
     });
-    assert_eq!(store.increment("counter".into(), 1).await?, 1);
+    let writer = store.clone();
+    let task = tokio::spawn(async move { writer.increment("counter".into(), 1).await });
+    assert!(tokio::time::timeout(Duration::from_secs(5), paused.wait_until_entered()).await?);
+    let failed_get = fault.metrics().operation(Operation::Get).requests + 1;
+    fault.fail_next(Operation::Get, FailurePhase::Before);
+    assert!(paused.release());
+    assert_eq!(task.await??, 1);
+    let events = fault.metrics().events;
+    assert!(events.iter().any(|event| {
+        event.operation == Operation::Get
+            && event.occurrence == failed_get
+            && event.outcome == RequestOutcome::InjectedBefore
+    }));
+    assert!(events.iter().any(|event| {
+        event.operation == Operation::Get
+            && event.occurrence > failed_get
+            && event.outcome == RequestOutcome::Succeeded
+    }));
     assert_eq!(
         store.get("counter", usize::MAX).await?,
         Some(1i64.to_le_bytes().to_vec())
@@ -328,6 +350,63 @@ async fn logical_request_budget_stops_work() -> Result {
     .await?;
     assert!(store.set("key", b"value").await.is_err());
     assert_eq!(fault.metrics().total_requests(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unchanged_writes_do_not_commit() -> Result {
+    let (fault, _, store) = fixture(HostLimits::default()).await?;
+    store.set("present", b"value").await?;
+    fault.reset();
+    store.set("present", b"value").await?;
+    store.delete("absent").await?;
+    store
+        .set_many(vec![("present".into(), b"value".to_vec())])
+        .await?;
+    store
+        .delete_many(vec!["absent".into(), "missing".into()])
+        .await?;
+    assert_eq!(
+        store.get("present", usize::MAX).await?,
+        Some(b"value".to_vec())
+    );
+    assert!(
+        fault.metrics().events.iter().all(|event| {
+            event.operation != Operation::Put || !event.path.ends_with("index.cbor")
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unchanged_writes_at_checkpoint_threshold_use_no_tail_slot() -> Result {
+    let (fault, _, store) = fixture(HostLimits {
+        checkpoint_entries: 1,
+        ..HostLimits::default()
+    })
+    .await?;
+    store.set("present", b"value").await?;
+    fault.reset();
+    store.set("present", b"value").await?;
+    store.delete("absent").await?;
+    let head_puts = |fault: &FaultStore| {
+        fault
+            .metrics()
+            .events
+            .iter()
+            .filter(|event| event.operation == Operation::Put && event.path.ends_with("index.cbor"))
+            .count()
+    };
+    assert_eq!(head_puts(&fault), 1); // checkpoint only
+
+    store.set("present", b"new").await?;
+    fault.reset();
+    store.delete("absent").await?;
+    assert_eq!(head_puts(&fault), 1); // checkpoint only
+    assert_eq!(
+        store.get("present", usize::MAX).await?,
+        Some(b"new".to_vec())
+    );
     Ok(())
 }
 

@@ -297,12 +297,60 @@ impl KvSnapshot {
         transaction: TransactionId,
         commands: &[KvCommand],
     ) -> Result<PreparedCommit, KvError> {
+        let (result, root, _) = self.prepare_parts(transaction, commands, true).await?;
+        self.prepare_root(transaction, result, root)
+    }
+
+    /// Prepare a batch only when at least one command changes a value.
+    /// Use this when the caller does not need the recorded command results.
+    /// `None` means every command left its value unchanged in this snapshot;
+    /// it does not check for later writers. Input and result limits still apply;
+    /// a batch with no changes needs no WAL tail slot.
+    /// A batch whose changes cancel may still publish.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::prepare`] for a changed batch.
+    pub async fn prepare_if_changed(
+        &self,
+        transaction: TransactionId,
+        commands: &[KvCommand],
+    ) -> Result<Option<PreparedCommit>, KvError> {
+        let (result, root, changed) = self.prepare_parts(transaction, commands, false).await?;
+        if !changed {
+            return Ok(None);
+        }
+        Ok(Some(self.prepare_root(transaction, result, root)?))
+    }
+
+    fn prepare_root(
+        &self,
+        transaction: TransactionId,
+        result: Bytes,
+        root: Option<StagedObject>,
+    ) -> Result<PreparedCommit, KvError> {
+        Ok(self.store.log.prepare(
+            &self.view,
+            transaction,
+            Bytes::from_static(FORMAT),
+            result,
+            root.into_iter().collect(),
+        )?)
+    }
+
+    async fn prepare_parts(
+        &self,
+        transaction: TransactionId,
+        commands: &[KvCommand],
+        preflight_early: bool,
+    ) -> Result<(Bytes, Option<StagedObject>, bool), KvError> {
         let limits = self.store.limits;
         ensure(
             !commands.is_empty() && commands.len() <= limits.batch_entries,
             "batch entries",
         )?;
-        self.store.log.preflight(&self.view, transaction)?;
+        if preflight_early {
+            self.store.log.preflight(&self.view, transaction)?;
+        }
         let mut input = Budget(limits.batch_bytes);
         for command in commands {
             self.check_key(command.key())?;
@@ -322,24 +370,23 @@ impl KvSnapshot {
         let mut tree = self.tree();
         let mut root = self.root.clone().map(tree::Link::Stored);
         let mut results = Vec::with_capacity(commands.len());
+        let mut changed = false;
         for command in commands {
-            let (next, result) = tree.apply(root, command).await?;
+            let (next, result, command_changed) = tree.apply(root, command).await?;
             root = next;
             results.push(result);
+            changed |= command_changed;
         }
         let result_len = minicbor::len(&results);
         if result_len > self.store.log.options().max_inline_result_bytes {
             return Err(object_log::Error::LimitExceeded("inline result bytes").into());
         }
+        if !preflight_early && changed {
+            self.store.log.preflight(&self.view, transaction)?;
+        }
         let root = tree.finish(root).await?;
         let result = encode_len(&results, result_len)?;
-        Ok(self.store.log.prepare(
-            &self.view,
-            transaction,
-            Bytes::from_static(FORMAT),
-            result,
-            root.into_iter().collect(),
-        )?)
+        Ok((result, root, changed))
     }
 
     /// Checkpoint this complete tree root without copying any tree nodes.
