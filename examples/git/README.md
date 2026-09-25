@@ -282,6 +282,10 @@ Never clear retentions while a reader may still be active.
 - Push advertises Git's `no-thin` capability. Ordinary clients include any delta
   bases needed by the pack, which can increase upload size. No client
   configuration is required.
+- With `push.negotiate=true`, Git warns that the server does not support
+  `wait-for-done` and proceeds with the push. The push succeeds, but without
+  this optional negotiation it may send more objects. The pinned go-git
+  upload-pack does not implement `wait-for-done`.
 - Incoming delta reconstruction uses go-git's normal in-memory buffers. The
   service checks decoded object size after reconstruction. Large objects and
   long delta chains can use substantially more memory than the
