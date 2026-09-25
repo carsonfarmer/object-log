@@ -3213,6 +3213,33 @@ mod tests {
             .as_ref(),
             fixture_plan
         );
+        let prepared = crate::PreparedCommit {
+            view: crate::View {
+                observed: Arc::new(crate::ObservedState {
+                    verified_tail: std::sync::OnceLock::new(),
+                    collection_candidates: std::sync::OnceLock::new(),
+                    collection_candidates_load: futures::lock::Mutex::new(()),
+                    head: head.clone(),
+                    version: object_store::UpdateVersion {
+                        e_tag: Some("etag".to_owned()),
+                        version: Some("version".to_owned()),
+                    },
+                }),
+            },
+            staging_domain: Arc::new(crate::StagingDomain),
+            transaction_id: crate::TransactionId::from_uuid(uuid::Uuid::from_u128(4)),
+            storage_id: crate::StorageId::from_uuid(uuid::Uuid::from_u128(5)),
+            operation: Bytes::from_static(b"op"),
+            result: Bytes::from_static(b"ok"),
+            objects: vec![object_ref(ObjectKind::Blob, 4)],
+        };
+        let fixture_hex = include_str!("../tests/fixtures/token-nonempty-v1.hex").trim();
+        assert_eq!(hex::encode(encode_recovery_token(&prepared)?), fixture_hex);
+        let fixture_token = hex::decode(fixture_hex)?;
+        let recovered = decode_recovery_token(&fixture_token)?;
+        assert_eq!(recovered.tip, head.tip());
+        assert_eq!(recovered.next_sequence, head.next_sequence);
+        assert_eq!(recovered.encode()?.as_ref(), fixture_token);
         Ok(())
     }
 

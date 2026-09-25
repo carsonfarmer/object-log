@@ -67,16 +67,27 @@ reference-node = {
 }
 
 ; Caller-owned recovery token. Persist before attempting publication.
+; The source digest is BLAKE3 of the canonical enveloped source index.
+; The publication-base digest is BLAKE3 of that index's canonical envelope
+; after setting generation to max(next sequence, collection epoch) and clearing
+; retention IDs. The options digest is BLAKE3 of the bare canonical options CBOR.
 recovery-token = {
   1: 1,                            ; format version
-  2: bstr,                         ; canonical enveloped source index
+  2: digest,                       ; source index digest
   ? 3: tstr,                       ; source ETag
   ? 4: tstr,                       ; source storage version
   5: transaction-id,
   6: bstr,                         ; opaque operation
   7: bstr,                         ; opaque recorded result
   8: [* object-ref<data-kind>],
-  9: storage-id                    ; exact entry physical identity
+  9: storage-id,                   ; exact entry physical identity
+  10: digest,                      ; publication-base digest
+  11: uint,                        ; source generation
+  12: uint,                        ; source next sequence
+  ? 13: digest,                    ; source tip
+  14: log-id,
+  15: incarnation-id,
+  16: digest                       ; options digest
 }
 
 entry-pointer = {
