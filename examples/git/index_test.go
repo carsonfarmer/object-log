@@ -239,3 +239,24 @@ func BenchmarkPruneCatalog(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkLookupCatalog(b *testing.B) {
+	db := testIndex{nodes: map[int]radixNode[int, int]{}}
+	items := map[string]int{}
+	for i := 0; i < 16384; i++ {
+		items[fmt.Sprintf("aa%04x%034x", i, i)] = i
+	}
+	root, err := updateRadix("aa", radixNode[int, int]{}, items, db.load, db.save)
+	if err != nil {
+		b.Fatal(err)
+	}
+	load := func(_ string, id int) (radixNode[int, int], error) { return db.nodes[id], nil }
+	key := fmt.Sprintf("aa%04x%034x", 16383, 16383)
+	b.ReportAllocs()
+	for b.Loop() {
+		item, ok, err := lookupRadix(key, "aa", root, load)
+		if err != nil || !ok || item != 16383 {
+			b.Fatal("lookup", err)
+		}
+	}
+}
