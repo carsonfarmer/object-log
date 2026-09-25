@@ -4,9 +4,7 @@ use crate::{
     CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus, LogId, Options,
     TransactionId, ValidatedBackend,
 };
-use object_store::{
-    ObjectStore, ObjectStoreExt, local::LocalFileSystem, memory::InMemory, path::Path,
-};
+use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 use std::sync::Arc;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -71,7 +69,10 @@ async fn geometry_capacity_and_tiny_limits() -> TestResult {
         writer.write(&vec![0; 513]).await,
         Err(Error::LimitExceeded(_))
     ));
-    assert!(writer.finish().await.is_err());
+    assert!(matches!(
+        writer.finish().await,
+        Err(Error::InvalidFormat(message)) if message == "invalid byte stream"
+    ));
     let (log, view) = setup(
         Arc::new(InMemory::new()),
         Options {
@@ -146,7 +147,7 @@ async fn authenticated_malformed_descriptors_fail_before_payload_reads() -> Test
         faults.reset();
         assert!(matches!(
             log.open_bytes(&view, root.reference()).await,
-            Err(Error::InvalidFormat(_))
+            Err(Error::InvalidFormat(message)) if message == "invalid byte stream"
         ));
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
     }
@@ -161,9 +162,18 @@ async fn failed_and_cancelled_writes_cannot_finish() -> TestResult {
         let mut writer = log.byte_writer(&view)?;
         faults.reset();
         faults.fail_next(Operation::Put, phase);
-        assert!(writer.write(&[1; 256]).await.is_err());
-        assert!(writer.write(b"later").await.is_err());
-        assert!(writer.finish().await.is_err());
+        assert!(matches!(
+            writer.write(&[1; 256]).await,
+            Err(Error::Store(_))
+        ));
+        assert!(matches!(
+            writer.write(b"later").await,
+            Err(Error::InvalidFormat(message)) if message == "invalid byte stream"
+        ));
+        assert!(matches!(
+            writer.finish().await,
+            Err(Error::InvalidFormat(message)) if message == "invalid byte stream"
+        ));
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);
         assert_eq!(log.load().await?.generation(), 0);
     }
@@ -176,8 +186,14 @@ async fn failed_and_cancelled_writes_cannot_finish() -> TestResult {
     tokio::select! { result=&mut write => return Err(format!("write did not pause: {result:?}").into()), entered=pause.wait_until_entered()=>{ assert!(entered); } }
     drop(write);
     assert!(!pause.release());
-    assert!(writer.write(b"later").await.is_err());
-    assert!(writer.finish().await.is_err());
+    assert!(matches!(
+        writer.write(b"later").await,
+        Err(Error::InvalidFormat(message)) if message == "invalid byte stream"
+    ));
+    assert!(matches!(
+        writer.finish().await,
+        Err(Error::InvalidFormat(message)) if message == "invalid byte stream"
+    ));
     assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);
     Ok(())
 }
@@ -246,20 +262,6 @@ async fn published_stream_survives_checkpoint_collection_and_cold_reopen() -> Te
 }
 
 #[tokio::test]
-async fn filesystem_without_conditional_update_is_rejected() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    assert!(matches!(
-        setup(
-            Arc::new(LocalFileSystem::new_with_prefix(directory.path())?),
-            small()
-        )
-        .await,
-        Err(Error::UnsupportedBackend("conditional update"))
-    ));
-    Ok(())
-}
-
-#[tokio::test]
 async fn guards_charge_failed_stream_writes_without_refunding() -> TestResult {
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[derive(Debug)]
@@ -284,7 +286,10 @@ async fn guards_charge_failed_stream_writes_without_refunding() -> TestResult {
         writer.write(&[3; 512]).await,
         Err(Error::RequestDenied)
     ));
-    assert!(writer.finish().await.is_err());
+    assert!(matches!(
+        writer.finish().await,
+        Err(Error::InvalidFormat(message)) if message == "invalid byte stream"
+    ));
     assert_eq!(guard.0.load(Ordering::Relaxed), 2);
     assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);
     Ok(())

@@ -355,7 +355,8 @@ async fn staging_rejects_missing_and_corrupt_existing_objects() -> TestResult {
     assert!(matches!(
         log.stage_objects(&view, vec![missing.reference().clone()])
             .await,
-        Err(object_log::Error::InvalidFormat(_))
+        Err(object_log::Error::InvalidFormat(message))
+            if message == "a referenced object is missing"
     ));
 
     let corrupt = log
@@ -382,68 +383,7 @@ async fn staging_rejects_missing_and_corrupt_existing_objects() -> TestResult {
 }
 
 #[tokio::test]
-async fn checkpoint_staging_rejects_missing_declared_object() -> TestResult {
-    let backend = Arc::new(InMemory::new());
-    let store: Arc<dyn ObjectStore> = backend.clone();
-    let log = open(store, "checkpoint-missing-object", Options::default()).await?;
-    let initial = log.load().await?;
-    let object = log
-        .put_object(&initial, Bytes::from_static(b"page"))
-        .await?;
-    backend
-        .delete(
-            &immutable_location(
-                &backend,
-                "checkpoint-missing-object",
-                "blobs",
-                object.reference().digest(),
-            )
-            .await?,
-        )
-        .await?;
-
-    assert!(matches!(
-        log.stage_objects(&initial, vec![object.reference().clone()])
-            .await,
-        Err(object_log::Error::InvalidFormat(_))
-    ));
-    assert!(log.load().await?.checkpoint().is_none());
-    Ok(())
-}
-
-#[tokio::test]
-async fn checkpoint_staging_rejects_corrupt_declared_object() -> TestResult {
-    let backend = Arc::new(InMemory::new());
-    let store: Arc<dyn ObjectStore> = backend.clone();
-    let log = open(store, "checkpoint-corrupt-object", Options::default()).await?;
-    let initial = log.load().await?;
-    let object = log
-        .put_object(&initial, Bytes::from_static(b"page"))
-        .await?;
-    backend
-        .put(
-            &immutable_location(
-                &backend,
-                "checkpoint-corrupt-object",
-                "blobs",
-                object.reference().digest(),
-            )
-            .await?,
-            Bytes::from_static(b"bad!").into(),
-        )
-        .await?;
-
-    assert!(matches!(
-        log.stage_objects(&initial, vec![object.reference().clone()])
-            .await,
-        Err(object_log::Error::CorruptObject)
-    ));
-    assert!(log.load().await?.checkpoint().is_none());
-    Ok(())
-}
-
-#[tokio::test]
-async fn checkpoint_read_rejects_missing_and_corrupt_roots() -> TestResult {
+async fn checkpoint_read_rejects_missing_and_corrupt_checkpoint_object() -> TestResult {
     let backend = Arc::new(InMemory::new());
     let store: Arc<dyn ObjectStore> = backend.clone();
     let log = open(store, "missing-checkpoint", Options::default()).await?;
@@ -574,8 +514,9 @@ async fn reopened_checkpoint_resolution_rejects_invalid_descendants() -> TestRes
 
         faults.reset();
         match (corrupt, reopened.resolve_checkpoint(pending).await) {
-            (false, Err(object_log::Error::InvalidFormat(_)))
-            | (true, Err(object_log::Error::CorruptObject)) => {}
+            (false, Err(object_log::Error::InvalidFormat(message)))
+                if message == "a referenced object is missing" => {}
+            (true, Err(object_log::Error::CorruptObject)) => {}
             _ => return Err("invalid checkpoint descendant did not fail closed".into()),
         }
         assert_eq!(segment_gets(&faults, "checkpoints"), 1);

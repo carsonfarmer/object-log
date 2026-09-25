@@ -2694,10 +2694,6 @@ mod tests {
             Bytes::from_static(b"result"),
             Vec::new(),
         )?;
-        let (reference, bytes) = log.encode_prepared(&prepared)?;
-        let encoded_len = u64::try_from(bytes.len())?;
-        assert_eq!(reference.len(), encoded_len);
-
         let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
             return Err("commit lost its uncontended publication".into());
         };
@@ -2705,6 +2701,12 @@ mod tests {
             .tail()
             .last()
             .ok_or("committed view has no tail")?;
+        let stored = log
+            .store
+            .read(log.commit_key(published), log.options.max_commit_bytes)
+            .await?
+            .ok_or("published commit object is missing")?;
+        let encoded_len = u64::try_from(stored.bytes.len())?;
         assert_eq!(published.len(), encoded_len);
         assert_eq!(
             log.read_commit(published).await?.reference().len(),
@@ -3430,10 +3432,12 @@ mod tests {
         let source = log.load().await?;
         let bytes = Bytes::from_static(b"same content");
         let current = log.put_object(&source, bytes.clone()).await?;
+        let old_incarnation = uuid::Uuid::from_u128(61);
+        assert_ne!(old_incarnation, log.incarnation);
         let old_key = ImmutableKey {
-            incarnation: uuid::Uuid::from_u128(61),
+            incarnation: old_incarnation,
             kind: ImmutableKind::Blob,
-            storage_id: StorageId::from_uuid(uuid::Uuid::from_u128(62)),
+            storage_id: current.reference().storage_id,
             digest: Digest::of(&bytes),
         };
         log.store

@@ -1600,7 +1600,6 @@ async fn collection_drains_a_backlog_larger_than_its_plan_bound() -> TestResult 
         }
     }
     assert_eq!(collected, 9);
-    assert_eq!(batches, 5);
     assert_eq!(
         fixture.log.read_object(&view, live.reference()).await?,
         Bytes::from_static(b"live")

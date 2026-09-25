@@ -70,7 +70,6 @@ backend_cases! {
     repeated_first_attempt_resolves_as_committed,
     view_is_bound_to_one_durable_log_incarnation,
     open_rejects_options_that_differ_from_the_durable_contract,
-    log_exposes_its_durable_options,
     provider_shaped_stale_view_conflict_is_definite,
     referenced_objects_are_durable_before_head_publication,
     tail_replay_leaves_referenced_objects_lazy,
@@ -484,7 +483,8 @@ async fn view_is_bound_to_one_durable_log_incarnation(
             Bytes::new(),
             Vec::new(),
         ),
-        Err(object_log::Error::InvalidFormat(_))
+        Err(object_log::Error::InvalidFormat(message))
+            if message == "the view belongs to another log incarnation"
     ));
     Ok(())
 }
@@ -493,12 +493,17 @@ async fn open_rejects_options_that_differ_from_the_durable_contract(
     new_store: &StoreFactory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn ObjectStore> = new_store()?;
-    let first = open(Arc::clone(&backend), "durable-options").await?;
     let log_id = LogId::new("durable-options")?;
     let backend = ValidatedBackend::new(backend, Path::from("protocol-tests")).await?;
+    let options = Options {
+        max_object_bytes: 8 * 1024 * 1024,
+        ..Options::default()
+    };
+    let first = Log::open(&backend, &log_id, options).await?;
+    assert_eq!(first.options(), options);
     let changed = Options {
         resolution_window: 0,
-        ..Options::default()
+        ..options
     };
 
     assert!(matches!(
@@ -506,20 +511,6 @@ async fn open_rejects_options_that_differ_from_the_durable_contract(
         Err(object_log::Error::ConfigurationMismatch("options"))
     ));
     assert!(first.load().await?.tail().is_empty());
-    Ok(())
-}
-
-async fn log_exposes_its_durable_options(
-    new_store: &StoreFactory,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let options = Options {
-        max_object_bytes: 8 * 1024 * 1024,
-        ..Options::default()
-    };
-    let backend = ValidatedBackend::new(new_store()?, Path::from("protocol-tests")).await?;
-    let log = Log::open(&backend, &LogId::new("options-getter")?, options).await?;
-
-    assert_eq!(log.options(), options);
     Ok(())
 }
 
@@ -586,7 +577,7 @@ async fn referenced_objects_are_durable_before_head_publication(
     let CommitStatus::Committed(after) = log.commit(prepared).await? else {
         return Err("the object-referencing candidate did not commit".into());
     };
-    assert!(observed.object_existed_before_update());
+    assert!(observed.referenced_objects_existed_before_update());
     let tail = log.read_tail(&after).await?;
     assert_eq!(tail[0].objects(), std::slice::from_ref(object.reference()));
     Ok(())
@@ -893,8 +884,9 @@ struct InstrumentedStore {
     inner: Arc<dyn ObjectStore>,
     failure: AtomicU8,
     order_check_armed: AtomicBool,
-    object_created: AtomicBool,
-    object_before_update: AtomicBool,
+    blob_created: AtomicBool,
+    commit_created: AtomicBool,
+    referenced_objects_before_update: AtomicBool,
     lie_conditional_read: AtomicBool,
     fail_head_gets: AtomicU8,
     pause_after_update: AtomicBool,
@@ -910,8 +902,9 @@ impl InstrumentedStore {
             inner,
             failure: AtomicU8::new(FAIL_NONE),
             order_check_armed: AtomicBool::new(false),
-            object_created: AtomicBool::new(false),
-            object_before_update: AtomicBool::new(false),
+            blob_created: AtomicBool::new(false),
+            commit_created: AtomicBool::new(false),
+            referenced_objects_before_update: AtomicBool::new(false),
             lie_conditional_read: AtomicBool::new(false),
             fail_head_gets: AtomicU8::new(0),
             pause_after_update: AtomicBool::new(false),
@@ -923,13 +916,15 @@ impl InstrumentedStore {
     }
 
     fn arm_order_check(&self) {
-        self.object_created.store(false, Ordering::SeqCst);
-        self.object_before_update.store(false, Ordering::SeqCst);
+        self.blob_created.store(false, Ordering::SeqCst);
+        self.commit_created.store(false, Ordering::SeqCst);
+        self.referenced_objects_before_update
+            .store(false, Ordering::SeqCst);
         self.order_check_armed.store(true, Ordering::SeqCst);
     }
 
-    fn object_existed_before_update(&self) -> bool {
-        self.object_before_update.load(Ordering::SeqCst)
+    fn referenced_objects_existed_before_update(&self) -> bool {
+        self.referenced_objects_before_update.load(Ordering::SeqCst)
     }
 
     fn fail_next_update_before_mutation(&self) {
@@ -989,10 +984,14 @@ impl ObjectStore for InstrumentedStore {
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
         let is_update = matches!(&options.mode, object_store::PutMode::Update(_));
-        let is_object = location.to_string().contains("/blobs/");
+        let is_blob = location.to_string().contains("/blobs/");
+        let is_commit = location.to_string().contains("/commits/");
         if is_update && self.order_check_armed.load(Ordering::SeqCst) {
-            self.object_before_update
-                .store(self.object_created.load(Ordering::SeqCst), Ordering::SeqCst);
+            self.referenced_objects_before_update.store(
+                self.blob_created.load(Ordering::SeqCst)
+                    && self.commit_created.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
         }
         if is_update
             && self
@@ -1026,8 +1025,13 @@ impl ObjectStore for InstrumentedStore {
             }
             result => result,
         };
-        if result.is_ok() && is_object && self.order_check_armed.load(Ordering::SeqCst) {
-            self.object_created.store(true, Ordering::SeqCst);
+        if result.is_ok() && self.order_check_armed.load(Ordering::SeqCst) {
+            if is_blob {
+                self.blob_created.store(true, Ordering::SeqCst);
+            }
+            if is_commit {
+                self.commit_created.store(true, Ordering::SeqCst);
+            }
         }
         if is_update
             && result.is_ok()
