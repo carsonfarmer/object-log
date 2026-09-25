@@ -97,9 +97,10 @@ MINIO_ROOT_USER=objectlog MINIO_ROOT_PASSWORD=local-test-secret \
   minio server "$minio_data" --address 127.0.0.1:19090
 ```
 
-In a second terminal, create a bucket and the service configuration. These
-credentials are disposable local examples. The temporary `mc` configuration
-keeps them separate from any existing MinIO setup.
+In a second terminal, start from the repository root and create a bucket and
+the service configuration. These credentials are disposable local examples.
+The temporary `mc` configuration keeps them separate from any existing MinIO
+setup.
 
 ```sh
 local_config="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-config.XXXXXX")"
@@ -123,7 +124,14 @@ spin up --listen 127.0.0.1:19100 \
   --variable "@$local_config/variables.toml"
 ```
 
-Run that block from the repository root. The default configuration exposes
+With Spin running, validate the storage settings from another terminal before
+sending Git traffic:
+
+```sh
+curl --fail-with-body -X POST http://127.0.0.1:19100/_validate_backend
+```
+
+The default configuration exposes
 `http://127.0.0.1:19100/sha1.git` and
 `http://127.0.0.1:19100/sha256.git`.
 

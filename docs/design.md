@@ -209,12 +209,14 @@ evidence incomplete. `Expired` is indeterminate. It does not prove that the
 operation failed. An application must not submit a non-idempotent operation as
 new work after this result.
 
-`PreparedCommit::recovery_token` encodes the exact source view, operation,
-result, object references, and transaction ID. It excludes the process-local
-staging proof. The caller must persist this token before publication if
-process-loss recovery is required. `Log::resume` fully verifies the referenced
-graph, can stage the missing WAL object, and retries only the original
-conditional head update.
+`PreparedCommit::recovery_token` records digests of the source head and
+publication base, the source storage version and position, and the candidate's
+operation, result, object references, and transaction ID. It excludes the
+complete head and process-local staging proof. The caller must persist this
+token before publication if process-loss recovery is required. `Log::resume`
+uses that evidence to classify the current head, fully verifies the referenced
+graph, and can stage the missing WAL object. It retries only the exact candidate,
+allowing newer storage versions only for reader-retention bookkeeping.
 
 ## Checkpoint
 
