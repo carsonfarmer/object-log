@@ -150,7 +150,8 @@ pub enum RetentionStatus {
     Applied(View),
     /// An active collection fence blocks a new retention.
     ActiveCollection(View),
-    /// Another head update rejected the requested change.
+    /// Another head update rejected the requested change, or acquisition
+    /// remained contested through the bounded retry window.
     Conflict(View),
     /// The requested head update is unresolved; refresh or retry it.
     Pending,
@@ -510,7 +511,9 @@ impl Log {
     /// Adds one stable retention to the supplied head view.
     ///
     /// A retention protects the complete log namespace. It has no expiry. The
-    /// caller must keep `id` until release is confirmed.
+    /// caller must keep `id` until release is confirmed. Acquisition follows
+    /// concurrent head updates while the supplied view's collection epoch is
+    /// unchanged and no collection plan is active.
     ///
     /// # Errors
     ///
@@ -571,46 +574,77 @@ impl Log {
         if source != RetentionHeadState::Conflict {
             return match self.refresh(view).await? {
                 None => Ok(Self::retention_status(source, view.clone())),
+                Some(current)
+                    if matches!(change, RetentionChange::Acquire(_))
+                        && current.collection_epoch() != view.collection_epoch() =>
+                {
+                    Ok(RetentionStatus::Conflict(current))
+                }
                 Some(current) => Ok(Self::retention_status(
                     change.classify(current.head()),
                     current,
                 )),
             };
         }
-        if matches!(change, RetentionChange::Acquire(_))
-            && view.head().retention_ids.len() >= self.options.max_retention_ids
-        {
-            return Err(Error::LimitExceeded("retention IDs"));
-        }
+        let mut current = view.clone();
+        for attempt in 0..MAX_HEAD_PUBLICATION_ATTEMPTS {
+            if matches!(change, RetentionChange::Acquire(_))
+                && current.head().retention_ids.len() >= self.options.max_retention_ids
+            {
+                return Err(Error::LimitExceeded("retention IDs"));
+            }
 
-        let mut candidate = view.head().clone();
-        change.apply(&mut candidate);
-        candidate.advance_generation()?;
-        let bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&bytes)?;
-        match self
-            .store
-            .update(StoreKey::Head, bytes, view.storage_version().clone())
-            .await
-        {
-            Ok(Some(version)) => Ok(RetentionStatus::Applied(Self::view(candidate, version))),
-            Ok(None) => match self.load().await {
-                Ok(current)
-                    if current.head() == view.head()
-                        && current.storage_version() == view.storage_version() =>
-                {
-                    Ok(RetentionStatus::Pending)
+            let mut candidate = current.head().clone();
+            change.apply(&mut candidate);
+            candidate.advance_generation()?;
+            let bytes = format::encode_head(&candidate)?;
+            self.validate_encoded_head(&bytes)?;
+            match self
+                .store
+                .update(StoreKey::Head, bytes, current.storage_version().clone())
+                .await
+            {
+                Ok(Some(version)) => {
+                    return Ok(RetentionStatus::Applied(Self::view(candidate, version)));
                 }
-                Ok(current) => Ok(Self::retention_status(
-                    change.classify(current.head()),
-                    current,
-                )),
-                Err(Error::Store(_) | Error::RequestDenied) => Ok(RetentionStatus::Pending),
-                Err(error) => Err(error),
-            },
-            Err(Error::Store(_)) => Ok(RetentionStatus::Pending),
-            Err(error) => Err(error),
+                Ok(None) => {
+                    let next = match self.load().await {
+                        Ok(next) => next,
+                        Err(Error::Store(_) | Error::RequestDenied) => {
+                            return Ok(RetentionStatus::Pending);
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if next.head() == current.head()
+                        && next.storage_version() == current.storage_version()
+                    {
+                        return Ok(RetentionStatus::Pending);
+                    }
+                    if matches!(change, RetentionChange::Acquire(_))
+                        && next.collection_epoch() != view.collection_epoch()
+                    {
+                        return Ok(RetentionStatus::Conflict(next));
+                    }
+                    let state = change.classify(next.head());
+                    if matches!(change, RetentionChange::Acquire(_))
+                        && state == RetentionHeadState::Conflict
+                        && attempt + 1 < MAX_HEAD_PUBLICATION_ATTEMPTS
+                    {
+                        if next.generation() <= current.generation() {
+                            return Err(Error::InvalidFormat(
+                                "head version changed without a monotonic head change".to_owned(),
+                            ));
+                        }
+                        current = next;
+                        continue;
+                    }
+                    return Ok(Self::retention_status(state, next));
+                }
+                Err(Error::Store(_)) => return Ok(RetentionStatus::Pending),
+                Err(error) => return Err(error),
+            }
         }
+        unreachable!("retention attempts are positive")
     }
 
     fn retention_status(state: RetentionHeadState, view: View) -> RetentionStatus {

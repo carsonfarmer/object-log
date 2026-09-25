@@ -102,8 +102,10 @@ Call `snapshot.checkpoint()` before the WAL tail fills. It publishes the current
 root and copies no tree data. Handle its conflict/pending statuses through the
 WAL. Retain `snapshot.view()` with `Log::retain` before long scans or concurrent
 collection; confirm retention before use and keep its ID until release is
-confirmed, including on cancellation or errors. If acquisition conflicts, load
-a fresh snapshot before retrying; do not resume an old pagination cursor on it.
+confirmed, including on cancellation or errors. Acquisition retries a bounded
+number of head updates while no collection plan is active and the epoch is
+unchanged. If it still conflicts, load a fresh snapshot before retrying; do
+not resume an old pagination cursor on it.
 Retentions have no expiry and block collection for the namespace. Recover a lost
 retention only after preventing new readers and draining all existing readers.
 Unretained reads can return `ViewExpired` and never silently switch to a newer
