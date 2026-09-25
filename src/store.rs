@@ -344,6 +344,25 @@ impl ScopedStore {
         })
     }
 
+    // Callers admit normal requests first; capability probes use the raw client.
+    async fn put_mode(
+        &self,
+        location: &Path,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<object_store::PutResult, object_store::Error> {
+        self.store
+            .put_opts(
+                location,
+                bytes.into(),
+                PutOptions {
+                    mode,
+                    ..PutOptions::default()
+                },
+            )
+            .await
+    }
+
     async fn retry_safe_read<T, F, Fut>(&self, max_bytes: usize, mut read: F) -> Result<T, Error>
     where
         F: FnMut() -> Fut,
@@ -461,15 +480,7 @@ impl ScopedStore {
     pub(crate) async fn create(&self, key: StoreKey, bytes: Bytes) -> Result<bool, Error> {
         self.admit(Request::Write { bytes: bytes.len() })?;
         match self
-            .store
-            .put_opts(
-                &self.location(key),
-                bytes.into(),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..PutOptions::default()
-                },
-            )
+            .put_mode(&self.location(key), bytes, PutMode::Create)
             .await
         {
             Ok(_) => Ok(true),
@@ -492,15 +503,7 @@ impl ScopedStore {
     ) -> Result<Option<UpdateVersion>, Error> {
         self.admit(Request::Write { bytes: bytes.len() })?;
         match self
-            .store
-            .put_opts(
-                &self.location(key),
-                bytes.into(),
-                PutOptions {
-                    mode: PutMode::Update(observed),
-                    ..PutOptions::default()
-                },
-            )
+            .put_mode(&self.location(key), bytes, PutMode::Update(observed))
             .await
         {
             Ok(result) => Ok(Some(result.into())),
@@ -643,15 +646,7 @@ impl ScopedStore {
         let second_bytes = Bytes::from_static(b"object-log capability probe: second");
 
         let first_result = self
-            .store
-            .put_opts(
-                location,
-                first_bytes.clone().into(),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..PutOptions::default()
-                },
-            )
+            .put_mode(location, first_bytes.clone(), PutMode::Create)
             .await;
         let first_version = match first_result {
             Ok(result) => UpdateVersion::from(result),
@@ -662,15 +657,7 @@ impl ScopedStore {
         };
 
         match self
-            .store
-            .put_opts(
-                location,
-                first_bytes.clone().into(),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..PutOptions::default()
-                },
-            )
+            .put_mode(location, first_bytes.clone(), PutMode::Create)
             .await
         {
             Err(object_store::Error::AlreadyExists { .. }) => {
@@ -746,14 +733,10 @@ impl ScopedStore {
         second_bytes: Bytes,
     ) -> Result<Option<UpdateVersion>, Error> {
         let update = self
-            .store
-            .put_opts(
+            .put_mode(
                 location,
-                second_bytes.clone().into(),
-                PutOptions {
-                    mode: PutMode::Update(first_version.clone()),
-                    ..PutOptions::default()
-                },
+                second_bytes.clone(),
+                PutMode::Update(first_version.clone()),
             )
             .await;
         let update_version = match update {
@@ -764,15 +747,7 @@ impl ScopedStore {
         };
 
         match self
-            .store
-            .put_opts(
-                location,
-                first_bytes.into(),
-                PutOptions {
-                    mode: PutMode::Update(first_version),
-                    ..PutOptions::default()
-                },
-            )
+            .put_mode(location, first_bytes, PutMode::Update(first_version))
             .await
         {
             Err(object_store::Error::Precondition { .. }) => {
