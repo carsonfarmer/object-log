@@ -53,11 +53,13 @@ func racePush(t *testing.T, source, url, format, branch, old string) {
 	}
 	close(start)
 	winner := -1
+	var responses [2][]byte
 	for range tips {
 		r := <-replies
 		if r.err != nil {
 			t.Fatal(r.err)
 		}
+		responses[r.index] = r.body
 		if bytes.Contains(r.body, []byte("ok refs/heads/"+branch+"\n")) {
 			if winner != -1 {
 				t.Fatal("both conflicting pushes succeeded")
@@ -67,6 +69,12 @@ func racePush(t *testing.T, source, url, format, branch, old string) {
 	}
 	if winner == -1 {
 		t.Fatal("neither conflicting push succeeded")
+	}
+	loser := 1 - winner
+	for _, ref := range []string{"refs/heads/" + branch, fmt.Sprintf("refs/heads/racer-%d", loser)} {
+		if !bytes.Contains(responses[loser], []byte("ng "+ref+" ")) {
+			t.Fatalf("losing push did not report rejected %s: %q", ref, responses[loser])
+		}
 	}
 	refs := string(git(t, nil, "ls-remote", url))
 	if !strings.Contains(refs, tips[winner]+"\trefs/heads/"+branch) || !strings.Contains(refs, fmt.Sprintf("refs/heads/racer-%d", winner)) || strings.Contains(refs, fmt.Sprintf("refs/heads/racer-%d", 1-winner)) {
