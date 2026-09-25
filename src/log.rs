@@ -414,9 +414,9 @@ impl Log {
 
     /// Opens an existing writable log without creating or updating its head.
     ///
-    /// This method only reads the durable head. Constructing the supplied
-    /// [`ValidatedBackend`] separately still performs capability probes,
-    /// including temporary writes in an isolated probe namespace.
+    /// This method only reads the durable head. [`ValidatedBackend::new`]
+    /// probes separately; [`ValidatedBackend::assume_validated`] uses a prior
+    /// validation without another probe.
     ///
     /// # Errors
     ///

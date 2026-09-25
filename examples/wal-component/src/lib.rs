@@ -438,24 +438,41 @@ impl Guest for Component {
     fn open_existing(settings: Config) -> Result<Session, Failure> {
         open_session(settings, false)
     }
+    fn validate_backend(settings: Config) -> Result<(), Failure> {
+        executor::run(async {
+            let (store, _) = connect_store(&settings)?;
+            object_log::ValidatedBackend::new(
+                store,
+                object_store::path::Path::from(settings.prefix),
+            )
+            .await
+            .map_err(failure)?;
+            Ok(())
+        })
+    }
+}
+
+fn connect_store(
+    settings: &Config,
+) -> Result<(Arc<dyn object_store::ObjectStore>, transport::Transport), Failure> {
+    let transport = transport::Transport::new(
+        settings.transport_limits.max_calls,
+        settings.transport_limits.max_bytes,
+    )
+    .map_err(|error| Failure::Other(error.into()))?;
+    let store = s3_builder(settings, transport.clone())?
+        .build()
+        .map_err(|error| Failure::Other(error.to_string()))?;
+    Ok((Arc::new(store), transport))
 }
 
 fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
     executor::run(async {
-        let transport = transport::Transport::new(
-            settings.transport_limits.max_calls,
-            settings.transport_limits.max_bytes,
-        )
-        .map_err(|error| Failure::Other(error.into()))?;
-        let store = s3_builder(&settings, transport.clone())?
-            .build()
-            .map_err(|error| Failure::Other(error.to_string()))?;
-        let backend = object_log::ValidatedBackend::new(
-            Arc::new(store),
+        let (store, transport) = connect_store(&settings)?;
+        let backend = object_log::ValidatedBackend::assume_validated(
+            store,
             object_store::path::Path::from(settings.prefix),
-        )
-        .await
-        .map_err(failure)?;
+        );
         let log_id = object_log::LogId::new(settings.log_id).map_err(failure)?;
         let options = log_options(settings.log_limits)?;
         let log = if create {

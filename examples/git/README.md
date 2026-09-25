@@ -84,6 +84,13 @@ spin up --listen 127.0.0.1:19100 \
   --variable "@$local_config/variables.toml" 2>&1 | tee /tmp/object-log-git-spin.log
 ```
 
+Before sending Git traffic, validate the same MinIO settings from another
+terminal. A failed probe returns HTTP 503; fix the backend before serving:
+
+```sh
+curl --fail-with-body -X POST http://127.0.0.1:19100/_validate_backend
+```
+
 The repositories are available at:
 
 ```text
@@ -204,8 +211,10 @@ through IMDSv2. Restrict the instance role to the application's bucket prefix.
 `git_read_only` and read-only repository groups restrict Git operations, not the
 S3 role. A clone, fetch, or ref advertisement registers and releases a reader
 in the WAL head so concurrent collection cannot remove its objects. Those reads
-need conditional-write permission on the head. The current per-session backend
-probe also needs write, list, and delete permission under the configured prefix.
+need conditional-write permission on the head. The backend capability probe
+runs once at hosted service startup and after each restart; it needs write,
+list, and delete permission under the configured prefix. Hosted Caddy never
+forwards the internal validation route and returns 503 until that probe succeeds.
 Do not give this service an S3 read-only credential.
 
 ## Test

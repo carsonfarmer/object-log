@@ -47,7 +47,11 @@ Wants=network-online.target
 User=object-log-git
 Group=object-log-git
 WorkingDirectory=/opt/object-log-git
+RuntimeDirectory=object-log-git
+ExecStartPre=/usr/bin/rm -f /run/object-log-git/validated
 ExecStart=/usr/local/bin/spin up --from /opt/object-log-git/spin.toml --listen 127.0.0.1:3000 --variable @/etc/object-log-git/variables.json --state-dir /var/lib/object-log-git --truncate-logs
+ExecStartPost=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused --max-time 5 -X POST http://127.0.0.1:3000/_validate_backend
+ExecStartPost=/usr/bin/touch /run/object-log-git/validated
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -83,7 +87,13 @@ ${hostname} {
         try_files pause
     }
     @invalid_baggage expression `{header.Baggage}.size() > 8192 || header_regexp('Baggage', '^([^,]*,){64}')`
+    @backend_unready not file {
+        root /run/object-log-git
+        try_files /validated
+    }
     route {
+        respond /_validate_backend 404
+        respond @backend_unready "Storage validation pending" 503
         respond @invalid_baggage "Baggage header exceeds propagation limits" 431
         reverse_proxy @admin 127.0.0.1:3000
         handle @paused {

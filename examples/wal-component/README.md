@@ -13,6 +13,12 @@ HTTP call and body-byte counters remain cumulative when a session is refreshed.
 ## Interface
 
 `open` creates a configured log when absent. `open-existing` never creates one.
+Each uses a backend validated by its host before traffic; neither repeats the
+capability probe. `validate-backend` probes conditional writes and reads, listing,
+and deletion for the same endpoint, bucket, prefix, credential mode, and
+effective permissions. Hosts must run it before serving and after changing
+that configuration or storage policy. The Git host gates
+public traffic on a successful startup probe, including after a service restart.
 Both take:
 
 - the S3 endpoint, bucket, region, credentials, prefix, and log identity;

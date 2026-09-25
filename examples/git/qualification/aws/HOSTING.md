@@ -41,8 +41,11 @@ or OAuth secret enters Spin variables or EC2 user data. The SSM core policy's
 broad Parameter Store reads are denied outside the worker's secret parameter.
 The role needs conditional writes even if Git pushes are disabled: clone and
 fetch register and release readers in the WAL head to prevent concurrent
-collection from deleting objects they use. The component also validates the
-backend on each session open, which currently requires list and delete access.
+collection from deleting objects they use. On each Spin start, a loopback probe
+validates the same backend configuration before Caddy forwards public traffic.
+The probe and later collection require list and delete access. A local runtime
+readiness file is cleared before every start and written only after validation;
+it is never a durable WAL authority. Caddy blocks the internal probe route.
 The maintenance secret still exists in **Terraform state and saved plans**;
 protect those local files as credentials and never commit them.
 

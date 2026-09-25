@@ -93,13 +93,13 @@ pub enum BackendCapability {
     RepeatableDelete,
 }
 
-/// Behaviors observed by an isolated backend capability probe.
+/// Backend behaviors observed by a probe or asserted by a prevalidated caller.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendCapabilities {
     supported: BTreeSet<BackendCapability>,
 }
 
-/// One object-store root whose observable protocol capabilities were verified.
+/// One object-store root whose protocol capabilities were probed or asserted.
 ///
 /// The probe cannot prove long-term object retention. The operator must prevent
 /// lifecycle expiry, overwrite, and deletion of protocol objects outside
@@ -134,7 +134,32 @@ impl ValidatedBackend {
         })
     }
 
-    /// Returns the observed backend capabilities.
+    /// Uses a backend and root validated before this process began serving work.
+    ///
+    /// This performs **no probe**. The caller must first run [`Self::new`] with
+    /// the same endpoint, bucket, root, credential mode, and effective permissions,
+    /// and repeat validation whenever that configuration or policy changes.
+    /// Rotating credentials with equivalent permissions does not require another
+    /// probe. In particular, a per-request WASI
+    /// instance can use this only when its host fails closed until validation
+    /// succeeds. The returned capabilities are asserted, not observed here.
+    /// Incorrectly asserting conditional writes can violate the log contract.
+    #[must_use]
+    pub fn assume_validated(store: Arc<dyn ObjectStore>, root: Path) -> Self {
+        Self {
+            store,
+            root,
+            capabilities: BackendCapabilities {
+                supported: BackendCapabilities::REQUIRED
+                    .into_iter()
+                    .map(|(capability, _)| capability)
+                    .collect(),
+            },
+        }
+    }
+
+    /// Returns capabilities observed by [`Self::new`] or asserted by
+    /// [`Self::assume_validated`].
     #[must_use]
     pub const fn capabilities(&self) -> &BackendCapabilities {
         &self.capabilities
@@ -146,26 +171,26 @@ impl ValidatedBackend {
 }
 
 impl BackendCapabilities {
-    /// Reports whether the probe observed `capability`.
+    const REQUIRED: [(BackendCapability, &'static str); 6] = [
+        (BackendCapability::ConditionalCreate, "conditional create"),
+        (BackendCapability::ConditionalUpdate, "conditional update"),
+        (BackendCapability::ConditionalRead, "conditional read"),
+        (
+            BackendCapability::ConsistentReadAfterWrite,
+            "consistent read after write",
+        ),
+        (BackendCapability::PrefixList, "prefix listing"),
+        (BackendCapability::RepeatableDelete, "repeatable delete"),
+    ];
+
+    /// Reports whether the probe observed or the caller asserted `capability`.
     #[must_use]
     pub fn supports(&self, capability: BackendCapability) -> bool {
         self.supported.contains(&capability)
     }
 
     fn require_protocol(&self) -> Result<(), Error> {
-        const REQUIRED: [(BackendCapability, &str); 6] = [
-            (BackendCapability::ConditionalCreate, "conditional create"),
-            (BackendCapability::ConditionalUpdate, "conditional update"),
-            (BackendCapability::ConditionalRead, "conditional read"),
-            (
-                BackendCapability::ConsistentReadAfterWrite,
-                "consistent read after write",
-            ),
-            (BackendCapability::PrefixList, "prefix listing"),
-            (BackendCapability::RepeatableDelete, "repeatable delete"),
-        ];
-
-        for (capability, name) in REQUIRED {
+        for (capability, name) in Self::REQUIRED {
             if !self.supports(capability) {
                 return Err(Error::UnsupportedBackend(name));
             }

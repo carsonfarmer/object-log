@@ -16,6 +16,8 @@ wal_endpoint = "http://127.0.0.1:1"
 wal_bucket = "config-test"
 wal_region = "us-test-1"
 wal_prefix = "spin/config-test"
+wal_access_key = "config-test-key"
+wal_secret_key = "config-test-secret"
 git_auth_mode = "password"
 git_password = "config-test-password"
 git_boot_id = "config-test-boot"
@@ -35,5 +37,7 @@ done
 [ "$status" = 401 ] || fail
 grep -q '^x-git-boot-id: config-test-boot' "$tmp/headers" || fail
 grep -q '^x-git-target-id: 0248b42a112bbb45f86b59b157ba54d51ad4415c26efdbcc57c5a2daaacfa6c4' "$tmp/headers" || fail
+status=$(curl --max-time 5 -sS -X POST -o /dev/null -w '%{http_code}' 'http://127.0.0.1:19101/_validate_backend')
+[ "$status" = 503 ] || fail
 status=$(curl --max-time 5 -sS -u git:config-test-password -o /dev/null -w '%{http_code}' "$url")
 [ "$status" != 401 ] || fail

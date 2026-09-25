@@ -106,5 +106,7 @@ interface wal {
     open: func(settings: config) -> result<own<session>, failure>;
     // Returns missing without creating the requested log.
     open-existing: func(settings: config) -> result<own<session>, failure>;
+    // Probe the configured store and root before admitting service traffic.
+    validate-backend: func(settings: config) -> result<_, failure>;
 }
 world storage { export wal; }

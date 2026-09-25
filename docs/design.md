@@ -109,15 +109,18 @@ Object-store ETags are concurrency tokens and are not content-integrity hashes.
 ## Open and refresh
 
 `ValidatedBackend::new` probes one backend and root when the handle is created.
-Reuse that handle across logs and opens; the current `WASIp2` component creates
-one per session and therefore probes on each request. `Log::open` reads the
+Reuse that handle across logs and opens. Short-lived hosts may call
+`ValidatedBackend::assume_validated` only after validating the same storage
+configuration before admitting traffic; it does not probe. The WASIp2 Git host
+does this at startup and after each service restart. `Log::open` reads the
 derived log's index and conditionally creates it only when absent.
 `Log::open_existing` reads the index without creating it. Neither open loads
 the complete log history.
 
-The capability probe writes and deletes one private object when the backend
-handle is created. Provisioning and collection credentials need delete
-permission because only these two operations delete objects.
+The capability probe writes and deletes private objects during validation.
+Validation and collection credentials need delete permission. Ordinary Git
+reads also conditionally update the head for reader retention, so they require
+head-write permission even when Git pushes are disabled.
 
 `load` reads and validates only the index. `read_checkpoint` reads its base.
 `read_tail` fetches active WAL entries concurrently because the index contains

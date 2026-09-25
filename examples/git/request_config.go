@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 
 	cm "go.bytecodealliance.org/pkg/wit/types"
@@ -34,6 +35,23 @@ func sessionToken(getenv func(string) string) cm.Option[string] {
 		return cm.Some(token)
 	}
 	return cm.None[string]()
+}
+
+func walSettings(getenv func(string) string, logID string, limits requestLimits) (wal.Config, error) {
+	mode := wal.CredentialModeStaticCredentials
+	switch getenv("WAL_CREDENTIAL_MODE") {
+	case "static":
+	case "instance-role":
+		mode = wal.CredentialModeInstanceRole
+	default:
+		return wal.Config{}, fmt.Errorf("WAL_CREDENTIAL_MODE must be static or instance-role")
+	}
+	return wal.Config{
+		Endpoint: getenv("WAL_ENDPOINT"), Bucket: getenv("WAL_BUCKET"), Region: getenv("WAL_REGION"),
+		CredentialMode: mode, AccessKey: getenv("WAL_ACCESS_KEY"), SecretKey: getenv("WAL_SECRET_KEY"),
+		SessionToken: sessionToken(getenv), Prefix: getenv("WAL_PREFIX"), LogId: logID,
+		LogLimits: walLogLimits(uint64(limits.collectionObjects)), TransportLimits: walTransportLimits(),
+	}, nil
 }
 
 func targetID(getenv func(string) string) string {

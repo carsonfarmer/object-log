@@ -80,6 +80,27 @@ async fn validated_backend_opens_tenants_without_more_probes() -> TestResult {
 }
 
 #[tokio::test]
+async fn prevalidated_backend_skips_probe_on_each_open() -> TestResult {
+    let store = FaultStore::new(InMemory::new());
+    let root = Path::from("prevalidated-tests");
+    let log_id = LogId::new("existing")?;
+    let validated = ValidatedBackend::new(Arc::new(store.clone()), root.clone()).await?;
+    Log::open(&validated, &log_id, Options::default()).await?;
+    store.reset();
+
+    let backend = ValidatedBackend::assume_validated(Arc::new(store.clone()), root);
+    assert_eq!(store.metrics().total_requests(), 0);
+    Log::open_existing(&backend, &log_id, Options::default()).await?;
+
+    let metrics = store.metrics();
+    assert_eq!(metrics.operation(Operation::Get).requests, 1);
+    assert_eq!(metrics.operation(Operation::Put).requests, 0);
+    assert_eq!(metrics.operation(Operation::List).requests, 0);
+    assert_eq!(metrics.operation(Operation::Delete).requests, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn preflight_has_no_store_requests_and_reserves_nothing() -> TestResult {
     let store = FaultStore::new(InMemory::new());
     let backend =

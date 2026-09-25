@@ -79,6 +79,28 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
 	}
+	if r.URL.Path == "/_validate_backend" {
+		if r.Method != http.MethodPost {
+			response.Header().Set("Allow", http.MethodPost)
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		limits, err := loadLimits(getConfig)
+		if err != nil {
+			http.Error(response, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		settings, err := walSettings(getConfig, "backend-validation", limits)
+		if err == nil {
+			_, err = unwrap(func() wt.Result[wt.Unit, wal.Failure] { return wal.ValidateBackend(settings) })
+		}
+		if err != nil {
+			http.Error(response, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+		return
+	}
 	route, e := resolveRepository(repositories, r)
 	if errors.Is(e, errRepositoryMethod) {
 		response.Header().Set("Allow", route.Method)
@@ -127,20 +149,10 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
-	mode := wal.CredentialModeStaticCredentials
-	switch getConfig("WAL_CREDENTIAL_MODE") {
-	case "static":
-	case "instance-role":
-		mode = wal.CredentialModeInstanceRole
-	default:
-		http.Error(response, "WAL_CREDENTIAL_MODE must be static or instance-role", http.StatusInternalServerError)
+	settings, e := walSettings(getConfig, route.Repository.LogID, limits)
+	if e != nil {
+		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
-	}
-	settings := wal.Config{
-		Endpoint: getConfig("WAL_ENDPOINT"), Bucket: getConfig("WAL_BUCKET"), Region: getConfig("WAL_REGION"),
-		CredentialMode: mode, AccessKey: getConfig("WAL_ACCESS_KEY"), SecretKey: getConfig("WAL_SECRET_KEY"),
-		SessionToken: sessionToken(getConfig), Prefix: getConfig("WAL_PREFIX"), LogId: route.Repository.LogID,
-		LogLimits: walLogLimits(uint64(limits.collectionObjects)), TransportLimits: walTransportLimits(),
 	}
 	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
 		// First-push discovery requires an empty repository advertisement. Only

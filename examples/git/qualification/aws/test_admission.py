@@ -92,6 +92,10 @@ class AdmissionTest(unittest.TestCase):
         cls.marker_dir = cls.directory / "run"
         cls.marker_dir.mkdir()
         cls.marker = cls.marker_dir / "pause"
+        cls.ready_dir = cls.directory / "ready"
+        cls.ready_dir.mkdir()
+        cls.ready = cls.ready_dir / "validated"
+        cls.ready.touch()
         backend = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Backend)
         cls.cleanup.callback(backend.server_close)
         cls.cleanup.callback(backend.shutdown)
@@ -110,7 +114,8 @@ class AdmissionTest(unittest.TestCase):
         name = "object-log-caddy-test-" + uuid.uuid4().hex[:8]
         command("docker", "run", "--detach", "--name", name, "--add-host", "host.docker.internal:host-gateway",
                 "--publish", "127.0.0.1::8080", "--volume", f"{cls.directory / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
-                "--volume", f"{cls.marker_dir}:/run/object-log-maintenance:ro", "caddy:2.10.2-alpine")
+                "--volume", f"{cls.marker_dir}:/run/object-log-maintenance:ro",
+                "--volume", f"{cls.ready_dir}:/run/object-log-git:ro", "caddy:2.10.2-alpine")
         cls.cleanup.callback(command, "docker", "rm", "--force", name)
         cls.port = int(command("docker", "port", name, "8080").rsplit(":", 1)[1])
 
@@ -131,11 +136,21 @@ class AdmissionTest(unittest.TestCase):
 
     def setUp(self):
         self.marker.unlink(missing_ok=True)
+        self.ready.touch()
+        wait_for(lambda: self.request("GET", "/ready")[0] == 200)
         Backend.calls = []
         Backend.retained = False
         Backend.release.clear()
         self.addCleanup(Backend.release.set)
         self.addCleanup(self.marker.unlink, missing_ok=True)
+        self.addCleanup(self.ready.touch)
+
+    def test_backend_validation_gates_public_traffic(self):
+        self.assertEqual(self.request("POST", "/_validate_backend")[0], 404)
+        self.ready.unlink()
+        self.assertEqual(self.request("GET", "/alpha/project.git/info/refs?service=git-upload-pack")[0], 503)
+        self.ready.touch()
+        wait_for(lambda: self.request("GET", "/alpha/project.git/info/refs?service=git-upload-pack")[0] == 200)
 
     @classmethod
     def request(cls, method, path, headers=None):
