@@ -384,17 +384,24 @@ impl Log {
         options: Options,
     ) -> Result<Self, Error> {
         let store = backend.scope(log_id);
-        let initial = Head::empty(store.log_id().clone(), uuid::Uuid::new_v4(), options);
-        let initial_bytes = format::encode_head(&initial)?;
-        Self::validate_head_size(options, &initial_bytes)?;
-
-        let incarnation = match store.create(StoreKey::Head, initial_bytes).await {
-            Ok(true) => initial.incarnation,
-            Ok(false) => Self::load_incarnation(&store, options).await?,
-            Err(create_error) => match store.read(StoreKey::Head, options.max_head_bytes).await? {
-                Some(stored) => Self::incarnation_from_stored(&store, options, &stored)?,
-                None => return Err(create_error),
-            },
+        let incarnation = if let Some(stored) =
+            store.read(StoreKey::Head, options.max_head_bytes).await?
+        {
+            Self::incarnation_from_stored(&store, options, &stored)?
+        } else {
+            let initial = Head::empty(store.log_id().clone(), uuid::Uuid::new_v4(), options);
+            let initial_bytes = format::encode_head(&initial)?;
+            Self::validate_head_size(options, &initial_bytes)?;
+            match store.create(StoreKey::Head, initial_bytes).await {
+                Ok(true) => initial.incarnation,
+                Ok(false) => Self::load_incarnation(&store, options).await?,
+                Err(create_error) => {
+                    match store.read(StoreKey::Head, options.max_head_bytes).await? {
+                        Some(stored) => Self::incarnation_from_stored(&store, options, &stored)?,
+                        None => return Err(create_error),
+                    }
+                }
+            }
         };
         let staging_domain = Arc::new(StagingDomain);
         Ok(Self {
@@ -3511,6 +3518,71 @@ mod tests {
         assert_eq!(faults.metrics().operation(Operation::List).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Delete).requests, 0);
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_existing_log_reads_without_putting_head() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("read-first-open")).await?;
+        let id = LogId::new("existing")?;
+        let first = Log::open(&backend, &id, Options::default()).await?;
+
+        faults.reset();
+        let reopened = Log::open(&backend, &id, Options::default()).await?;
+        assert_eq!(reopened.incarnation, first.incarnation);
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_recovers_when_another_writer_creates_after_missing_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("racing-open")).await?;
+        let id = LogId::new("new")?;
+        faults.reset();
+        let mut pause = faults.pause_next_put(FailurePhase::Before);
+        let first_backend = backend.clone();
+        let first_id = id.clone();
+        let first =
+            tokio::spawn(
+                async move { Log::open(&first_backend, &first_id, Options::default()).await },
+            );
+        assert!(pause.wait_until_entered().await);
+
+        let winner = Log::open(&backend, &id, Options::default()).await?;
+        assert!(pause.release());
+        let loser = first.await??;
+        assert_eq!(winner.incarnation, loser.incarnation);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 2);
+        assert_eq!(
+            faults.metrics().operation(Operation::Put).visible_mutations,
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_recovers_when_create_acknowledgement_is_lost()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend = ValidatedBackend::new(
+            Arc::new(faults.clone()),
+            Path::from("uncertain-create-open"),
+        )
+        .await?;
+        let id = LogId::new("new")?;
+        faults.reset();
+        faults.fail_next(Operation::Put, FailurePhase::After);
+
+        let log = Log::open(&backend, &id, Options::default()).await?;
+        assert_eq!(log.load().await?.generation(), 0);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);
         Ok(())
     }
 

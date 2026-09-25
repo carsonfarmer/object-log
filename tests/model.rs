@@ -74,7 +74,7 @@ async fn validated_backend_opens_tenants_without_more_probes() -> TestResult {
 
     let metrics = store.metrics();
     assert_eq!(metrics.operation(Operation::Put).requests, 2);
-    assert_eq!(metrics.operation(Operation::Get).requests, 0);
+    assert_eq!(metrics.operation(Operation::Get).requests, 2);
     assert_eq!(metrics.operation(Operation::Delete).requests, 0);
     Ok(())
 }
