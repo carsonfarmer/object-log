@@ -29,6 +29,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     mode = "obtain"
     issued = 0
     metadata = []
+    metadata_starts = []
     signatures = []
     storage_paths = []
     errors = []
@@ -50,12 +51,13 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path.startswith("/latest/"):
             Fixture.metadata.append((self.command, self.path))
+            Fixture.metadata_starts.append(time.monotonic())
             assert "Authorization" not in self.headers
             if self.command == "PUT":
                 assert self.path == "/latest/api/token"
                 assert self.headers["X-aws-ec2-metadata-token-ttl-seconds"] == "600"
                 if Fixture.mode == "slow-metadata":
-                    time.sleep(2)
+                    time.sleep(3)
                     return self.reply(200, b"fixture-token")
                 if Fixture.mode == "unavailable" or (Fixture.mode == "renewal-unavailable" and Fixture.issued):
                     return self.reply(403, b"metadata unavailable")
@@ -192,9 +194,8 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                         raise RuntimeError("Spin did not listen")
                     for scenario in ("obtain", "existing", "missing", "unavailable", "renewal-unavailable", "slow-metadata"):
                         Fixture.mode, Fixture.issued = scenario, 0
-                        Fixture.metadata, Fixture.signatures = [], []
+                        Fixture.metadata, Fixture.metadata_starts, Fixture.signatures = [], [], []
                         Fixture.storage_paths = []
-                        started = time.monotonic()
                         try:
                             with urllib.request.urlopen(f"http://127.0.0.1:{spin_port}/{scenario}", timeout=10) as response:
                                 assert response.read() == b"ok"
@@ -205,8 +206,13 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             assert Fixture.metadata and not Fixture.signatures
                             if scenario == "slow-metadata":
                                 assert len(Fixture.metadata) >= 4, "second timed-out request did not reach metadata"
+                                # Each attempt is sequential; the next arrival (or final return)
+                                # must precede the fixture's three-second response.
+                                points = Fixture.metadata_starts + [time.monotonic()]
+                                assert all(0 <= later - earlier < 2 for earlier, later in zip(points, points[1:])), (
+                                    f"metadata request outlasted deadline: {points}"
+                                )
                             assert all(method == "PUT" for method, _ in Fixture.metadata), "IMDSv1 fallback"
-                            assert time.monotonic() - started < 6, "metadata deadline was not enforced"
                         elif scenario == "renewal-unavailable":
                             assert Fixture.issued == 1 and Fixture.signatures == [1]
                         elif scenario == "missing":
