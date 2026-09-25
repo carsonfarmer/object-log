@@ -73,6 +73,45 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             assert_eq!(commit.recorded_result, b"result");
             assert!(recovery.next()?.is_none());
         }
+        "/refresh" => {
+            let session = wal::open_existing(&settings)?;
+            let before = session.usage();
+            let unchanged = session.refresh()?;
+            assert_eq!(unchanged.usage().calls, before.calls + 1);
+            assert_eq!(unchanged.usage().bytes, before.bytes);
+            assert_eq!(session.usage().calls, unchanged.usage().calls);
+
+            let recovery = session.recover()?;
+            assert!(matches!(
+                recovery.next()?,
+                Some(wal::HistoryItem::Commit(_))
+            ));
+            assert!(recovery.next()?.is_none());
+            let candidate = recovery.prepare(&[8; 16], b"next", b"result", &[])?;
+            assert!(matches!(candidate.publish()?, wal::Outcome::Committed));
+
+            let stale = unchanged.recover()?;
+            assert!(matches!(stale.next()?, Some(wal::HistoryItem::Commit(_))));
+            assert!(stale.next()?.is_none());
+            let before = unchanged.usage();
+            let changed = unchanged.refresh()?;
+            assert_eq!(changed.usage().calls, before.calls + 1);
+            assert!(changed.usage().bytes > before.bytes);
+            assert_eq!(session.usage().calls, changed.usage().calls);
+
+            let recovery = changed.recover()?;
+            for transaction_id in [vec![7; 16], vec![8; 16]] {
+                let Some(wal::HistoryItem::Commit(commit)) = recovery.next()? else {
+                    panic!("refreshed session missed a commit")
+                };
+                assert_eq!(commit.transaction_id, transaction_id);
+            }
+            assert!(recovery.next()?.is_none());
+            let before = changed.usage();
+            let stable = changed.refresh()?;
+            assert_eq!(stable.usage().calls, before.calls + 1);
+            assert_eq!(stable.usage().bytes, before.bytes);
+        }
         "/missing" => {
             assert!(matches!(
                 wal::open_existing(&settings),

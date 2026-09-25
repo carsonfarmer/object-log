@@ -202,7 +202,10 @@ impl GuestSession for SessionState {
         Usage { calls, bytes }
     }
     fn refresh(&self) -> Result<Session, Failure> {
-        let view = executor::run(self.log.load()).map_err(failure)?;
+        let current = self.current_view();
+        let view = executor::run(self.log.refresh(&current))
+            .map_err(failure)?
+            .unwrap_or(current);
         Ok(Session::new(Self {
             log: self.log.clone(),
             view: RefCell::new(view),

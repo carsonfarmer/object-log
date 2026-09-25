@@ -33,6 +33,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     signatures = []
     storage_paths = []
     lost_head_puts = []
+    refresh_head_gets = []
     errors = []
 
     def log_message(self, *_):
@@ -136,6 +137,8 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             Fixture.objects.pop(self.path, None)
             return self.reply(204)
         assert self.command == "GET"
+        if Fixture.mode == "refresh" and self.path.endswith("/existing/index.cbor"):
+            Fixture.refresh_head_gets.append((self.headers.get("If-None-Match"), etag))
         if previous is None:
             return self.reply(404)
         if self.headers.get("If-None-Match") == etag:
@@ -203,11 +206,12 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             time.sleep(0.1)
                     else:
                         raise RuntimeError("Spin did not listen")
-                    for scenario in ("obtain", "existing", "missing", "mismatched-options", "unavailable", "renewal-unavailable", "slow-metadata", "lost-head"):
+                    for scenario in ("obtain", "existing", "refresh", "missing", "mismatched-options", "unavailable", "renewal-unavailable", "slow-metadata", "lost-head"):
                         Fixture.mode, Fixture.issued = scenario, 0
                         Fixture.metadata, Fixture.metadata_starts, Fixture.signatures = [], [], []
                         Fixture.storage_paths = []
                         Fixture.lost_head_puts = []
+                        Fixture.refresh_head_gets = []
                         try:
                             with urllib.request.urlopen(f"http://127.0.0.1:{spin_port}/{scenario}", timeout=10) as response:
                                 assert response.read() == b"ok"
@@ -239,6 +243,14 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             assert Fixture.lost_head_puts[0] == Fixture.lost_head_puts[1]
                             assert Fixture.lost_head_puts[0][1] == "*"
                             assert any(path.endswith("/lost-head/index.cbor") for path in Fixture.objects), Fixture.objects.keys()
+                        if scenario == "refresh":
+                            conditional = [
+                                (condition, etag) for condition, etag in Fixture.refresh_head_gets if condition
+                            ]
+                            assert len(conditional) == 3, Fixture.refresh_head_gets
+                            assert conditional[0][0] == conditional[0][1] == conditional[1][0]
+                            assert conditional[1][0] != conditional[1][1]
+                            assert conditional[2][0] == conditional[2][1] == conditional[1][1]
                         assert not any(path.endswith("/missing/index.cbor") for path in Fixture.objects)
                         print(f"PASS {scenario}: metadata={len(Fixture.metadata)} signed-storage={len(Fixture.signatures)} credential-generations={Fixture.issued}")
                 except Exception:
