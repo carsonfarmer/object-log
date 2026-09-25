@@ -34,6 +34,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     storage_paths = []
     lost_head_puts = []
     refresh_head_gets = []
+    probe_deletes = []
     errors = []
 
     def log_message(self, *_):
@@ -111,6 +112,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             result = ET.Element("DeleteResult")
             for key in ET.fromstring(body).findall(".//{*}Key"):
                 assert key.text.startswith("credentials/")
+                Fixture.probe_deletes.append(key.text)
                 Fixture.objects.pop("/fixture/" + key.text, None)
                 ET.SubElement(ET.SubElement(result, "Deleted"), "Key").text = key.text
             return self.reply(200, ET.tostring(result))
@@ -206,12 +208,13 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             time.sleep(0.1)
                     else:
                         raise RuntimeError("Spin did not listen")
-                    for scenario in ("obtain", "existing", "refresh", "missing", "mismatched-options", "unavailable", "renewal-unavailable", "slow-metadata", "lost-head"):
+                    for scenario in ("validate", "obtain", "existing", "refresh", "missing", "mismatched-options", "unavailable", "renewal-unavailable", "slow-metadata", "lost-head"):
                         Fixture.mode, Fixture.issued = scenario, 0
                         Fixture.metadata, Fixture.metadata_starts, Fixture.signatures = [], [], []
                         Fixture.storage_paths = []
                         Fixture.lost_head_puts = []
                         Fixture.refresh_head_gets = []
+                        Fixture.probe_deletes = []
                         try:
                             with urllib.request.urlopen(f"http://127.0.0.1:{spin_port}/{scenario}", timeout=10) as response:
                                 assert response.read() == b"ok"
@@ -243,6 +246,12 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             assert Fixture.lost_head_puts[0] == Fixture.lost_head_puts[1]
                             assert Fixture.lost_head_puts[0][1] == "*"
                             assert any(path.endswith("/lost-head/index.cbor") for path in Fixture.objects), Fixture.objects.keys()
+                        if scenario == "validate":
+                            assert any("list-type=2" in path and "credentials%2Fvalidate%2F" in path
+                                       for path in Fixture.storage_paths), Fixture.storage_paths
+                            assert Fixture.probe_deletes and all(key.startswith("credentials/validate/v1/logs/probe-")
+                                                                 for key in Fixture.probe_deletes)
+                            assert not any(path.startswith("/fixture/credentials/validate/") for path in Fixture.objects)
                         if scenario == "refresh":
                             conditional = [
                                 (condition, etag) for condition, etag in Fixture.refresh_head_gets if condition

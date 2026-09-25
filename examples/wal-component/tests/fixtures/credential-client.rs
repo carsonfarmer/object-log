@@ -53,6 +53,10 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
         },
     };
     match path {
+        "/validate" => {
+            settings.prefix = "credentials/validate".into();
+            wal::validate_backend(&settings)?;
+        }
         "/obtain" => {
             let session = wal::open(&settings)?;
             assert!(!session.has_active_collection());

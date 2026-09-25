@@ -111,8 +111,9 @@ Object-store ETags are concurrency tokens and are not content-integrity hashes.
 `ValidatedBackend::new` probes one backend and root when the handle is created.
 Reuse that handle across logs and opens. Short-lived hosts may call
 `ValidatedBackend::assume_validated` only after validating the same storage
-configuration before admitting traffic; it does not probe. The WASIp2 Git host
-does this at startup and after each service restart. `Log::open` reads the
+configuration before admitting traffic; it does not probe. The AWS Git hosting
+template does this at startup and after each service restart; other hosts must
+enforce the same precondition. `Log::open` reads the
 derived log's index and conditionally creates it only when absent.
 `Log::open_existing` reads the index without creating it. Neither open loads
 the complete log history.

@@ -50,8 +50,9 @@ WorkingDirectory=/opt/object-log-git
 RuntimeDirectory=object-log-git
 ExecStartPre=/usr/bin/rm -f /run/object-log-git/validated
 ExecStart=/usr/local/bin/spin up --from /opt/object-log-git/spin.toml --listen 127.0.0.1:3000 --variable @/etc/object-log-git/variables.json --state-dir /var/lib/object-log-git --truncate-logs
-ExecStartPost=/usr/bin/curl --fail --silent --show-error --retry 30 --retry-delay 1 --retry-connrefused --max-time 5 -X POST http://127.0.0.1:3000/_validate_backend
+ExecStartPost=/usr/local/bin/object-log-maintenance /etc/object-log-git/maintenance.json --validate
 ExecStartPost=/usr/bin/touch /run/object-log-git/validated
+TimeoutStartSec=180
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -70,14 +71,7 @@ cat > /etc/caddy/Caddyfile <<'CADDY'
     default_sni ${hostname}
 }
 %{ endif ~}
-${hostname} {
-%{ if public_ip_https ~}
-    tls {
-        issuer acme https://acme-v02.api.letsencrypt.org/directory {
-            profile shortlived
-        }
-    }
-%{ endif ~}
+(git_routes) {
     @admin {
         method POST
         expression `{http.request.uri.path} in ${admin_paths}`
@@ -103,11 +97,25 @@ ${hostname} {
         reverse_proxy 127.0.0.1:3000
     }
 }
+${hostname} {
+%{ if public_ip_https ~}
+    tls {
+        issuer acme https://acme-v02.api.letsencrypt.org/directory {
+            profile shortlived
+        }
+    }
+%{ endif ~}
+    import git_routes
+}
+http://127.0.0.1:8081 {
+    import git_routes
+}
 CADDY
 
 cat > /etc/systemd/system/object-log-maintenance.service <<'UNIT'
 [Unit]
 Description=Periodic Git pruning and bounded WAL collection
+Requires=object-log-git.service caddy.service
 After=object-log-git.service caddy.service network-online.target
 
 [Service]

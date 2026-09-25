@@ -74,20 +74,28 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	response.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
 	response.Header().Set("X-Git-Target-ID", targetID(getConfig))
-	repositories, e := loadRepositories(getConfig)
-	if e != nil {
-		http.Error(response, e.Error(), http.StatusInternalServerError)
-		return
-	}
 	if r.URL.Path == "/_validate_backend" {
 		if r.Method != http.MethodPost {
 			response.Header().Set("Allow", http.MethodPost)
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if status, err := authorizeRequest(r, repositoryRoute{Action: gitAdmin}, getConfig, keyTransport{}); err != nil {
+			if status == http.StatusUnauthorized {
+				response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
+			}
+			http.Error(response, err.Error(), status)
+			return
+		}
+		if _, err := loadRepositories(getConfig); err != nil {
+			log.Printf("backend validation failed id=%s: %v", requestID, err)
+			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
+			return
+		}
 		limits, err := loadLimits(getConfig)
 		if err != nil {
-			http.Error(response, err.Error(), http.StatusInternalServerError)
+			log.Printf("backend validation failed id=%s: %v", requestID, err)
+			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
 			return
 		}
 		settings, err := walSettings(getConfig, "backend-validation", limits)
@@ -95,10 +103,16 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			_, err = unwrap(func() wt.Result[wt.Unit, wal.Failure] { return wal.ValidateBackend(settings) })
 		}
 		if err != nil {
-			http.Error(response, err.Error(), http.StatusServiceUnavailable)
+			log.Printf("backend validation failed id=%s: %v", requestID, err)
+			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
 			return
 		}
 		response.WriteHeader(http.StatusNoContent)
+		return
+	}
+	repositories, e := loadRepositories(getConfig)
+	if e != nil {
+		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
 	}
 	route, e := resolveRepository(repositories, r)

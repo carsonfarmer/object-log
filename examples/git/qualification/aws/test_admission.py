@@ -18,8 +18,10 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 import uuid
+from unittest.mock import patch
 
 
 SOURCE = Path(os.getenv("GIT_HOST_SOURCE", Path(__file__).parent))
@@ -60,6 +62,9 @@ class Backend(http.server.BaseHTTPRequestHandler):
         admin = self.path.endswith(("/maintenance", "/collect"))
         status = 401 if admin and self.headers.get("Authorization") != "Bearer fixture" else 200
         data = b"git"
+        if self.path == "/_validate_backend":
+            status = 204 if self.headers.get("Authorization") == "Bearer fixture" else 401
+            data = b""
         if admin:
             state = "complete"
             if Backend.retained:
@@ -99,6 +104,7 @@ class AdmissionTest(unittest.TestCase):
         backend = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Backend)
         cls.cleanup.callback(backend.server_close)
         cls.cleanup.callback(backend.shutdown)
+        cls.backend_port = backend.server_port
         threading.Thread(target=backend.serve_forever, daemon=True).start()
         snippet = template_section("<<'CADDY'\n", "\nCADDY")
         # This local HTTP fixture omits the public-IP certificate configuration.
@@ -106,6 +112,7 @@ class AdmissionTest(unittest.TestCase):
         paths = [f"/{name}/{operation}" for name in ("alpha/project.git", "star*project.git")
                  for operation in ("maintenance", "collect", "recover-retentions-after-drain")]
         snippet = snippet.replace("${hostname}", "http://:8080")
+        snippet = snippet.replace("http://127.0.0.1:8081", "http://:8081")
         snippet = snippet.replace("${admin_paths}", json.dumps(paths)).replace("${retry_after}", "2")
         snippet = snippet.replace("127.0.0.1:3000", f"host.docker.internal:{backend.server_port}")
         if "${" in snippet:
@@ -113,11 +120,13 @@ class AdmissionTest(unittest.TestCase):
         (cls.directory / "Caddyfile").write_text(snippet)
         name = "object-log-caddy-test-" + uuid.uuid4().hex[:8]
         command("docker", "run", "--detach", "--name", name, "--add-host", "host.docker.internal:host-gateway",
-                "--publish", "127.0.0.1::8080", "--volume", f"{cls.directory / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
+                "--publish", "127.0.0.1::8080", "--publish", "127.0.0.1::8081",
+                "--volume", f"{cls.directory / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
                 "--volume", f"{cls.marker_dir}:/run/object-log-maintenance:ro",
                 "--volume", f"{cls.ready_dir}:/run/object-log-git:ro", "caddy:2.10.2-alpine")
         cls.cleanup.callback(command, "docker", "rm", "--force", name)
         cls.port = int(command("docker", "port", name, "8080").rsplit(":", 1)[1])
+        cls.local_port = int(command("docker", "port", name, "8081").rsplit(":", 1)[1])
 
         def ready():
             try:
@@ -147,14 +156,20 @@ class AdmissionTest(unittest.TestCase):
 
     def test_backend_validation_gates_public_traffic(self):
         self.assertEqual(self.request("POST", "/_validate_backend")[0], 404)
+        self.assertEqual(self.request("POST", "/_validate_backend", local=True)[0], 404)
         self.ready.unlink()
         self.assertEqual(self.request("GET", "/alpha/project.git/info/refs?service=git-upload-pack")[0], 503)
+        self.assertEqual(self.request("POST", "/alpha/project.git/maintenance",
+                                      {"Authorization": "Bearer fixture"}, local=True)[0], 503)
+        self.assertEqual(Backend.calls, [])
         self.ready.touch()
         wait_for(lambda: self.request("GET", "/alpha/project.git/info/refs?service=git-upload-pack")[0] == 200)
+        self.assertEqual(self.request("POST", "/alpha/project.git/maintenance",
+                                      {"Authorization": "Bearer fixture"}, local=True)[0], 200)
 
     @classmethod
-    def request(cls, method, path, headers=None):
-        connection = http.client.HTTPConnection("127.0.0.1", cls.port, timeout=5)
+    def request(cls, method, path, headers=None, local=False):
+        connection = http.client.HTTPConnection("127.0.0.1", cls.local_port if local else cls.port, timeout=5)
         try:
             connection.request(method, path, headers=headers or {})
             response = connection.getresponse()
@@ -216,7 +231,7 @@ class AdmissionTest(unittest.TestCase):
 
         def post(repository, operation, deadline):
             self.assertTrue(self.marker.exists())
-            request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{repository}/{operation}",
+            request = urllib.request.Request(f"http://127.0.0.1:{self.local_port}/{repository}/{operation}",
                                              data=b"", headers={"Authorization": "Bearer fixture"})
             return self.worker.request_json(request, deadline)["state"]
 
@@ -227,6 +242,44 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(Backend.calls, [("POST", "/alpha/project.git/maintenance"),
                                          ("POST", "/alpha/project.git/collect")])
         self.assertEqual(self.request("GET", "/alpha/project.git/info/refs?service=git-upload-pack")[0], 200)
+
+    def test_worker_stops_when_readiness_is_removed_between_requests(self):
+        Backend.retained = True
+
+        def post(repository, operation, deadline):
+            request = urllib.request.Request(f"http://127.0.0.1:{self.local_port}/{repository}/{operation}",
+                                             data=b"", headers={"Authorization": "Bearer fixture"})
+            state = self.worker.request_json(request, deadline)["state"]
+            self.ready.unlink()
+            return state
+
+        self.assertEqual(self.worker.maintain(["alpha/project.git"], post, 2), 1)
+        self.assertEqual(Backend.calls, [("POST", "/alpha/project.git/maintenance")])
+
+    def test_startup_validation_waits_for_listener_and_uses_operator_token(self):
+        client = self.worker.Client({"client_id": "fixture",
+                                     "validation_url": f"http://127.0.0.1:{self.backend_port}/_validate_backend"}, "")
+        client.token, client.expires = "fixture", time.monotonic() + 60
+        original = urllib.request.OpenerDirector.open
+        attempts = []
+
+        def refused_once(opener, *args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise urllib.error.URLError(ConnectionRefusedError())
+            return original(opener, *args, **kwargs)
+
+        with patch.object(urllib.request.OpenerDirector, "open", refused_once):
+            client.validate(time.monotonic() + 10)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(Backend.calls, [("POST", "/_validate_backend")])
+
+        unavailable = urllib.error.HTTPError(client.config["validation_url"], 503, "unavailable", {}, None)
+        with patch.object(urllib.request.OpenerDirector, "open", side_effect=unavailable) as open_request:
+            with self.assertRaises(urllib.error.HTTPError):
+                client.validate(time.monotonic() + 10)
+            self.assertEqual(open_request.call_count, 1)
+        unavailable.close()
 
     def test_unexpected_worker_failure_removes_marker(self):
         def broken(*_):

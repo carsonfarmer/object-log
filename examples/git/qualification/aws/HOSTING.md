@@ -41,11 +41,13 @@ or OAuth secret enters Spin variables or EC2 user data. The SSM core policy's
 broad Parameter Store reads are denied outside the worker's secret parameter.
 The role needs conditional writes even if Git pushes are disabled: clone and
 fetch register and release readers in the WAL head to prevent concurrent
-collection from deleting objects they use. On each Spin start, a loopback probe
-validates the same backend configuration before Caddy forwards public traffic.
+collection from deleting objects they use. On each Spin start, the maintenance
+identity authenticates one loopback probe against the same backend configuration
+before Caddy forwards traffic.
 The probe and later collection require list and delete access. A local runtime
 readiness file is cleared before every start and written only after validation;
-it is never a durable WAL authority. Caddy blocks the internal probe route.
+it is never a durable WAL authority. Caddy blocks the internal probe route, and
+its loopback listener gates every maintenance request during Spin restarts.
 The maintenance secret still exists in **Terraform state and saved plans**;
 protect those local files as credentials and never commit them.
 
@@ -70,7 +72,7 @@ sudo systemctl list-timers object-log-maintenance.timer
 ```
 
 Spin binds to `127.0.0.1:3000`; Caddy serves public HTTPS. The local maintenance
-worker calls that loopback listener with its Cognito token, so cleanup does not
+worker calls Caddy's `127.0.0.1:8081` listener with its Cognito token, so cleanup does not
 depend on the Git service's public DNS or certificate renewal. The systemd timer runs
 after boot, then `host_maintenance_interval` seconds after each completed run,
 without overlap. A run starts with `/maintenance` per repository, then uses

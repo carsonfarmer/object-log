@@ -39,7 +39,7 @@ class Client:
         self.token = ""
         self.expires = 0
 
-    def post(self, repository, operation, deadline):
+    def access_token(self, deadline):
         if time.monotonic() >= self.expires:
             result = request_json(urllib.request.Request(
                 self.config["token_url"],
@@ -49,17 +49,42 @@ class Client:
             ), deadline)
             self.token = result["access_token"]
             self.expires = time.monotonic() + int(result["expires_in"]) - 60
+        return self.token
+
+    def validate(self, deadline):
+        request = urllib.request.Request(
+            self.config["validation_url"], data=b"",
+            headers={"Authorization": f"Bearer {self.access_token(deadline)}"},
+        )
+        opener = urllib.request.build_opener(NoRedirect)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("backend validation budget exhausted")
+            try:
+                with opener.open(request, timeout=remaining) as response:
+                    if response.status != 204:
+                        raise ValueError("backend validation did not return 204")
+                return
+            except urllib.error.URLError as error:
+                if not isinstance(error.reason, ConnectionRefusedError):
+                    raise
+                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+    def post(self, repository, operation, deadline):
         # Canonical repository paths can contain URL-safe punctuation. Encoding
         # those characters would create aliases rejected by the service router.
         name = urllib.parse.quote(repository, safe="/:@!$&'()*+,;=-._~")
         url = f'{self.config["service_url"]}/{name}/{operation}'
+        token = self.access_token(deadline)
         try:
             return request_json(urllib.request.Request(
-                url, data=b"", headers={"Authorization": f"Bearer {self.token}"},
+                url, data=b"", headers={"Authorization": f"Bearer {token}"},
             ), deadline)["state"]
         except urllib.error.HTTPError as error:
             # Configured repositories are materialized by their first writer.
             if error.code == 404:
+                error.close()
                 return "not materialized"
             raise
 
@@ -109,6 +134,7 @@ def maintain(repositories, post, budget_seconds=300, pause_seconds=0,
                     break
             print(f"{repository}: {state}", flush=True)
         except urllib.error.HTTPError as error:
+            error.close()
             print(f"{repository}: HTTP {error.code}", file=sys.stderr, flush=True)
             failed = True
         except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
@@ -122,6 +148,9 @@ def maintain(repositories, post, budget_seconds=300, pause_seconds=0,
 
 
 def main():
+    validate = len(sys.argv) == 3 and sys.argv[2] == "--validate"
+    if len(sys.argv) != (3 if validate else 2):
+        raise ValueError("expected a configuration file and optional --validate")
     with open(sys.argv[1], encoding="utf-8") as source:
         config = json.load(source)
     secret = subprocess.check_output([
@@ -129,7 +158,18 @@ def main():
         "--name", config["secret_parameter"], "--with-decryption",
         "--query", "Parameter.Value", "--output", "text",
     ], text=True, timeout=60).strip()
-    return maintain(config["repositories"], Client(config, secret).post,
+    client = Client(config, secret)
+    if validate:
+        try:
+            with time_budget(90):
+                client.validate(time.monotonic() + 90)
+        except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+            print(f"backend validation failed: {type(error).__name__}", file=sys.stderr)
+            return 1
+        return 0
+    return maintain(config["repositories"], client.post,
                     config["budget_seconds"], config["pause_seconds"])
 
 

@@ -103,6 +103,8 @@ interface wal {
         recover: func() -> result<own<recovery>, failure>;
         resume: func(token: list<u8>) -> result<resolution, failure>;
     }
+    // The host must validate the same backend configuration before either open.
+    // These calls assert capabilities; they do not run the probe themselves.
     open: func(settings: config) -> result<own<session>, failure>;
     // Returns missing without creating the requested log.
     open-existing: func(settings: config) -> result<own<session>, failure>;

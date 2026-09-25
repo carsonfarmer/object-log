@@ -89,7 +89,8 @@ Before sending Git traffic, validate the same MinIO settings from another
 terminal. A failed probe returns HTTP 503; fix the backend before serving:
 
 ```sh
-curl --fail-with-body -X POST http://127.0.0.1:19100/_validate_backend
+curl --fail-with-body -u git:local-git-password \
+  -X POST http://127.0.0.1:19100/_validate_backend
 ```
 
 The repositories are available at:
@@ -214,8 +215,12 @@ S3 role. A clone, fetch, or ref advertisement registers and releases a reader
 in the WAL head so concurrent collection cannot remove its objects. Those reads
 need conditional-write permission on the head. The backend capability probe
 runs once at hosted service startup and after each restart; it needs write,
-list, and delete permission under the configured prefix. Hosted Caddy never
-forwards the internal validation route and returns 503 until that probe succeeds.
+list, and delete permission under the configured prefix. It requires operator
+authentication even in Git read-only mode, because WAL reader retention still
+writes the head. Hosted Caddy never forwards the internal validation route and
+returns 503 to public and loopback maintenance traffic until the probe succeeds.
+A direct local Spin run needs an explicit authenticated validation call before
+admitting traffic.
 Do not give this service an S3 read-only credential.
 
 ## Test
