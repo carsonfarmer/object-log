@@ -54,7 +54,7 @@ func importPack(ctx context.Context, source io.ReadSeeker, storage storer.Encode
 	// Buffer once for zlib's byte reads. The limit keeps the footer out of
 	// both the scan and the checksum.
 	data := &io.LimitedReader{R: input, N: size - int64(len(header)+objectFormat.Size())}
-	reader := bufio.NewReader(io.TeeReader(data, checksum))
+	reader := bufio.NewReaderSize(io.TeeReader(data, checksum), 32<<10)
 	for range binary.BigEndian.Uint32(header[8:]) {
 		if err := checkPackEntry(reader, objectFormat, limits); err != nil {
 			return err
