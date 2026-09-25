@@ -16,7 +16,7 @@ mod support;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
-async fn immutable_create_faults_never_publish_and_tokens_recover_exactly_once() -> TestResult {
+async fn immutable_create_faults_reconcile_or_resume_exactly_once() -> TestResult {
     immutable_create_faults(Arc::new(InMemory::new())).await
 }
 
@@ -64,21 +64,32 @@ async fn immutable_create_faults(store: Arc<dyn ObjectStore>) -> TestResult {
 
         faults.reset();
         faults.fail_next(Operation::Put, phase);
-        assert!(matches!(log.commit(prepared).await, Err(Error::Store(_))));
+        let result = log.commit(prepared).await;
         let metrics = faults.metrics();
-        assert_eq!(metrics.operation(Operation::Put).requests, 1);
+        assert_eq!(
+            metrics.operation(Operation::Put).requests,
+            if phase == FailurePhase::After { 2 } else { 1 }
+        );
         assert_eq!(
             metrics.operation(Operation::Put).visible_mutations,
-            u64::from(phase == FailurePhase::After)
-        );
-        assert!(
-            metrics
-                .events
-                .iter()
-                .all(|event| !event.path.ends_with("index.cbor"))
+            if phase == FailurePhase::After { 2 } else { 0 }
         );
         assert!(faults.pending_failures().is_empty());
-        assert_eq!(log.load().await?.generation(), 0);
+        if phase == FailurePhase::Before {
+            assert!(matches!(result, Err(Error::Store(_))));
+            assert!(
+                metrics
+                    .events
+                    .iter()
+                    .all(|event| !event.path.ends_with("index.cbor"))
+            );
+            assert_eq!(log.load().await?.generation(), 0);
+        } else {
+            let CommitStatus::Committed(view) = result? else {
+                return Err("applied immutable commit was not published".into());
+            };
+            assert_eq!(view.generation(), 1);
+        }
         drop(log);
 
         let cold = Log::open_existing(&backend, &id, Options::default()).await?;

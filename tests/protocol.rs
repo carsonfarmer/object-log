@@ -67,7 +67,7 @@ backend_cases! {
     retention_updates_do_not_reject_an_in_flight_commit,
     retention_reconciliation_preserves_recovery_evidence,
     retention_updates_do_not_reject_an_in_flight_checkpoint,
-    repeated_first_attempt_requires_the_recovery_path,
+    repeated_first_attempt_resolves_as_committed,
     view_is_bound_to_one_durable_log_incarnation,
     open_rejects_options_that_differ_from_the_durable_contract,
     log_exposes_its_durable_options,
@@ -441,7 +441,7 @@ async fn retention_updates_do_not_reject_an_in_flight_checkpoint(
     Ok(())
 }
 
-async fn repeated_first_attempt_requires_the_recovery_path(
+async fn repeated_first_attempt_resolves_as_committed(
     new_store: &StoreFactory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn ObjectStore> = new_store()?;
@@ -460,8 +460,8 @@ async fn repeated_first_attempt_requires_the_recovery_path(
         CommitStatus::Committed(_)
     ));
     assert!(matches!(
-        log.commit(prepared).await,
-        Err(object_log::Error::PhysicalIdentityCollision)
+        log.commit(prepared).await?,
+        CommitStatus::Committed(_)
     ));
     assert_eq!(log.read_tail(&log.load().await?).await?.len(), 1);
     Ok(())

@@ -54,6 +54,27 @@ async fn commit_recognizes_applied_then_rejected_head_update() -> TestResult {
 }
 
 #[tokio::test]
+async fn commit_recognizes_applied_then_already_existing_immutable() -> TestResult {
+    let (store, log) = open("commit-immutable-already-exists").await?;
+    let source = log.load().await?;
+    let prepared = log.prepare(
+        &source,
+        TransactionId::new(),
+        Bytes::from_static(b"operation"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    store.reset();
+    store.reject_put_after(1, PutRejection::AlreadyExists);
+    let CommitStatus::Committed(committed) = log.commit(prepared).await? else {
+        return Err("commit lost its applied immutable object".into());
+    };
+    assert_eq!(committed.tail(), log.load().await?.tail());
+    assert_eq!(store.metrics().operation(Operation::Put).injected_after, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn checkpoint_recognizes_applied_then_rejected_head_update() -> TestResult {
     for rejection in rejections() {
         let (store, log) = open(&format!("checkpoint-{rejection:?}")).await?;

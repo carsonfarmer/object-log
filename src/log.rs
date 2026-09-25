@@ -1143,7 +1143,7 @@ impl Log {
             &prepared.staging_domain,
         )
         .await?;
-        self.create_new_commit(self.commit_key(&commit_ref), commit_bytes)
+        self.ensure_immutable(self.commit_key(&commit_ref), commit_bytes)
             .await?;
         prepared.staging_domain = Arc::clone(&self.staging_domain);
         match self
@@ -2484,14 +2484,6 @@ impl Log {
         Ok(())
     }
 
-    async fn create_new_commit(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
-        if self.store.create(key, bytes).await? {
-            Ok(())
-        } else {
-            Err(Error::PhysicalIdentityCollision)
-        }
-    }
-
     async fn ensure_immutable(&self, key: StoreKey, bytes: Bytes) -> Result<(), Error> {
         let create_error = match self.store.create(key, bytes.clone()).await {
             Ok(true) => return Ok(()),
@@ -3090,7 +3082,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_commit_rejects_a_collision_but_exact_recovery_can_reuse_it()
+    async fn commit_rejects_different_bytes_at_its_immutable_key()
     -> Result<(), Box<dyn std::error::Error>> {
         let log = test_log("commit-storage-id-collision", Options::default()).await?;
         let view = log.load().await?;
@@ -3104,16 +3096,23 @@ mod tests {
         prepared.storage_id = StorageId::from_uuid(uuid::Uuid::from_u128(7));
         let token = prepared.recovery_token()?;
         let (reference, bytes) = log.encode_prepared(&prepared)?;
-        log.store.create(log.commit_key(&reference), bytes).await?;
+        let mut altered = bytes.to_vec();
+        altered[0] ^= 1;
+        log.store
+            .create(log.commit_key(&reference), Bytes::from(altered))
+            .await?;
 
         assert!(matches!(
             log.commit(prepared).await,
-            Err(Error::PhysicalIdentityCollision)
+            Err(Error::CorruptObject)
         ));
         assert!(matches!(
-            log.resume(&token).await?,
-            Resolution::Committed(_)
+            log.resume(&token).await,
+            Err(Error::CorruptObject)
         ));
+        let current = log.load().await?;
+        assert_eq!(current.generation(), view.generation());
+        assert!(current.tail().is_empty());
         Ok(())
     }
 
