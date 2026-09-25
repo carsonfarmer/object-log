@@ -1140,7 +1140,16 @@ impl Scenario {
             CommitStatus::Pending(_) => "pending",
         };
         assert_eq!(actual, expected, "seed {:#x}: {:#?}", self.seed, self.trace);
-        assert!(self.store.pending_failures().is_empty());
+        let pending_faults = self.store.pending_failures();
+        if fault == Some(FailurePhase::After) && !published {
+            assert_eq!(pending_faults.len(), 1);
+            assert_eq!(pending_faults[0].phase, FailurePhase::After);
+            // An After fault cannot fire after the backend has already rejected
+            // the stale head update. Its exact occurrence has passed.
+            self.store.clear_failures();
+        } else {
+            assert!(pending_faults.is_empty());
+        }
         match status {
             CommitStatus::Committed(view) => {
                 self.writers[writer].view = Some(view);

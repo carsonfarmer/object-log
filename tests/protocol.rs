@@ -89,9 +89,15 @@ const REPORT_CONFLICT_AS_ALREADY_EXISTS: u8 = 3;
 #[test]
 fn log_ids_reject_unsafe_namespace_forms() {
     for invalid in ["", ".", "..", "a/b", "a\\b", "white space", "🦀"] {
-        assert!(LogId::new(invalid).is_err(), "accepted {invalid:?}");
+        assert!(
+            matches!(LogId::new(invalid), Err(object_log::Error::InvalidLogId)),
+            "accepted {invalid:?}"
+        );
     }
-    assert!(LogId::new("a".repeat(129)).is_err());
+    assert!(matches!(
+        LogId::new("a".repeat(129)),
+        Err(object_log::Error::InvalidLogId)
+    ));
     assert!(LogId::new("tenant.A_1-2").is_ok());
 }
 

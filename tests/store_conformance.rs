@@ -13,6 +13,29 @@ use tempfile::TempDir;
 #[cfg(feature = "aws")]
 mod support;
 
+#[cfg(feature = "aws")]
+#[test]
+fn remote_builder_preserves_region_and_temporary_credentials() {
+    use object_store::aws::AmazonS3ConfigKey;
+
+    let builder = support::minio::configured_builder(
+        "https://s3.us-west-2.amazonaws.com",
+        "temporary-access-key",
+        "temporary-secret-key",
+        Some("temporary-session-token"),
+        "qualification",
+        "us-west-2",
+    );
+    assert_eq!(
+        builder.get_config_value(&AmazonS3ConfigKey::Region),
+        Some("us-west-2".into())
+    );
+    assert_eq!(
+        builder.get_config_value(&AmazonS3ConfigKey::Token),
+        Some("temporary-session-token".into())
+    );
+}
+
 #[tokio::test]
 async fn memory_backend_conforms() -> Result<(), Box<dyn StdError>> {
     backend_conforms(Arc::new(InMemory::new())).await

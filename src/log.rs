@@ -4158,11 +4158,11 @@ mod tests {
                 phase: FailurePhase::Before,
             });
         }
-        assert!(
+        assert!(matches!(
             log.verify_object_graph(&[first.reference().clone(), second.reference().clone()])
-                .await
-                .is_err()
-        );
+                .await,
+            Err(Error::Store(_))
+        ));
         assert!(!pause.release(), "failed traversal left a read alive");
         Ok(())
     }
@@ -4425,16 +4425,19 @@ mod tests {
             assert!(probe.dropped.get(), "partial state escaped after {failure}");
             if failure != "domain" {
                 faults.reset();
-                assert!(
-                    log.publish_checkpoint(
+                let checkpoint = log
+                    .publish_checkpoint(
                         &view,
                         &view.tail()[2],
                         Bytes::from_static(&[3]),
-                        Vec::new()
+                        Vec::new(),
                     )
-                    .await
-                    .is_err()
-                );
+                    .await;
+                match failure {
+                    "body" => assert!(matches!(checkpoint, Err(Error::CorruptObject))),
+                    "parent" => assert!(matches!(checkpoint, Err(Error::InvalidFormat(_)))),
+                    _ => return Err("unexpected materialization failure case".into()),
+                }
                 assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
             }
         }
@@ -4764,7 +4767,7 @@ mod tests {
                 phase: FailurePhase::Before,
             });
         }
-        assert!(log.read_tail(&view).await.is_err());
+        assert!(matches!(log.read_tail(&view).await, Err(Error::Store(_))));
         assert!(!log.tail_is_verified(&view));
 
         let mut pause = faults.pause_next_get(FailurePhase::Before);

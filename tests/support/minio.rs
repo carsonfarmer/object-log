@@ -1,7 +1,7 @@
 use std::env;
 use std::error::Error as StdError;
 
-use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
 use object_store::prefix::PrefixStore;
 
@@ -21,7 +21,7 @@ pub(crate) fn build_minio() -> Result<PrefixStore<object_store::aws::AmazonS3>, 
     ))
 }
 
-fn configured_builder(
+pub(crate) fn configured_builder(
     endpoint: &str,
     access_key: &str,
     secret_key: &str,
@@ -46,24 +46,4 @@ fn configured_builder(
 
 fn required_env(name: &'static str) -> Result<String, Box<dyn StdError>> {
     env::var(name).map_err(|_| format!("{name} is not set").into())
-}
-
-#[test]
-fn remote_builder_preserves_region_and_temporary_credentials() {
-    let builder = configured_builder(
-        "https://s3.us-west-2.amazonaws.com",
-        "temporary-access-key",
-        "temporary-secret-key",
-        Some("temporary-session-token"),
-        "qualification",
-        "us-west-2",
-    );
-    assert_eq!(
-        builder.get_config_value(&AmazonS3ConfigKey::Region),
-        Some("us-west-2".into())
-    );
-    assert_eq!(
-        builder.get_config_value(&AmazonS3ConfigKey::Token),
-        Some("temporary-session-token".into())
-    );
 }

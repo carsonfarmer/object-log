@@ -245,6 +245,8 @@ struct RequestTicket {
 ///
 /// A failure in [`FailurePhase::After`] is ambiguous. The wrapped
 /// mutation succeeded and became visible, but the caller receives an error.
+/// Only one pause may be scheduled at a time; scheduling another before the
+/// first enters panics instead of silently discarding it.
 #[derive(Clone)]
 pub struct FaultStore {
     inner: Arc<dyn ObjectStore>,
@@ -477,6 +479,10 @@ impl FaultStore {
         occurrence: u64,
         phase: FailurePhase,
     ) -> PauseControl {
+        assert!(
+            state.pause.is_none(),
+            "a simulator pause is already scheduled"
+        );
         let (entered, wait_for_entered) = oneshot::channel();
         let (release, wait_for_release) = oneshot::channel();
         state.pause = Some(ScheduledPause {
@@ -535,14 +541,14 @@ impl FaultStore {
             return Err(Self::injected_error(ticket, FailurePhase::Before, path));
         }
 
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
-        let rejected_put = self.take_rejected_put(ticket, FailurePhase::After);
         let result = request().await;
         if result.is_ok() {
             self.enter_pause(ticket, FailurePhase::After).await;
         }
         match result {
             Ok(value) => {
+                let fail_after = self.take_failure(ticket, FailurePhase::After);
+                let rejected_put = self.take_rejected_put(ticket, FailurePhase::After);
                 let downloaded_bytes = downloaded_bytes(&value);
                 let outcome = if fail_after || rejected_put.is_some() {
                     RequestOutcome::InjectedAfter
@@ -779,7 +785,6 @@ impl ObjectStore for FaultStore {
             let error = Self::injected_error(ticket, FailurePhase::Before, &event_path);
             return futures::stream::once(async move { Err(error) }).boxed();
         }
-        let fail_after = self.take_failure(ticket, FailurePhase::After);
         let store = self.clone();
         let inner = self.inner.list(prefix);
         futures::stream::unfold(
@@ -795,7 +800,7 @@ impl ObjectStore for FaultStore {
                     Some((result, (inner, store, ticket, event_path, recorded)))
                 } else if recorded {
                     None
-                } else if fail_after {
+                } else if store.take_failure(ticket, FailurePhase::After) {
                     store.finish(ticket, &event_path, 0, RequestOutcome::InjectedAfter);
                     let error = Self::injected_error(ticket, FailurePhase::After, &event_path);
                     Some((Err(error), (inner, store, ticket, event_path, true)))
@@ -864,11 +869,10 @@ impl MultipartUpload for FaultMultipartUpload {
             let error = FaultStore::injected_error(ticket, FailurePhase::Before, &location);
             return Box::pin(async move { Err(error) });
         }
-        let fail_after = store.take_failure(ticket, FailurePhase::After);
         let future = self.inner.put_part(data);
         Box::pin(async move {
             match future.await {
-                Ok(()) if fail_after => {
+                Ok(()) if store.take_failure(ticket, FailurePhase::After) => {
                     store.finish(ticket, &location, 0, RequestOutcome::InjectedAfter);
                     Err(FaultStore::injected_error(
                         ticket,
@@ -946,9 +950,55 @@ const fn is_mutation(operation: Operation) -> bool {
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
 
     type TestResult = std::result::Result<(), Box<dyn StdError>>;
+
+    #[tokio::test]
+    async fn second_pause_does_not_replace_the_first() -> TestResult {
+        let store = FaultStore::new(InMemory::new());
+        let mut first = store.pause_next_put(FailurePhase::Before);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ = store.pause_next_get(FailurePhase::Before);
+            }))
+            .is_err()
+        );
+
+        let write_store = store.clone();
+        let write = tokio::spawn(async move {
+            write_store
+                .put(
+                    &Path::from("pause/first-survives"),
+                    Bytes::from_static(b"value").into(),
+                )
+                .await
+        });
+        assert!(first.wait_until_entered().await);
+        assert!(first.release());
+        write.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn after_failure_remains_pending_when_backend_returns_error() {
+        let store = FaultStore::new(InMemory::new());
+        let failure = Failure {
+            operation: Operation::Get,
+            occurrence: 1,
+            phase: FailurePhase::After,
+        };
+        store.schedule(failure);
+        assert!(matches!(
+            store.get(&Path::from("missing")).await,
+            Err(Error::NotFound { .. })
+        ));
+        assert_eq!(store.pending_failures(), vec![failure]);
+        let metrics = store.metrics().operation(Operation::Get);
+        assert_eq!(metrics.backend_errors, 1);
+        assert_eq!(metrics.injected_after, 0);
+    }
 
     #[tokio::test]
     async fn put_pause_before_blocks_visibility_and_releases_once() -> TestResult {
