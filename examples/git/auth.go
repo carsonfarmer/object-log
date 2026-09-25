@@ -267,7 +267,7 @@ func (p gitPrincipal) Allows(policy repositoryAccess, action gitAction) bool {
 	if p.operator {
 		return action == gitAdmin
 	}
-	allowed := []string{}
+	var allowed []string
 	switch action {
 	case gitRead:
 		allowed = policy.ReadGroups

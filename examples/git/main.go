@@ -232,7 +232,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			http.Error(w, "drained retention recovery failed: "+e.Error(), operationStatus(e))
 		} else {
 			w.Header().Set("Content-Type", "application/json")
-			e = json.NewEncoder(w).Encode(struct {
+			_ = json.NewEncoder(w).Encode(struct {
 				State string `json:"state"`
 			}{"complete"})
 		}
