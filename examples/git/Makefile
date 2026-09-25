@@ -11,4 +11,4 @@ bindings: $(COMPONENTIZE_GO)
 	$(COMPONENTIZE_GO) -d wit -w client bindings --format -o bindings --pkg-name object-log-git-proof/bindings
 
 $(COMPONENTIZE_GO): Makefile
-	cargo install --locked --force --root .componentize --git https://github.com/bytecodealliance/componentize-go --tag v0.4.3 componentize-go
+	cargo install --locked --force --root .componentize --git https://github.com/bytecodealliance/componentize-go --rev 148dba505f8c6c64ad84db777cfde5e34e25098b componentize-go

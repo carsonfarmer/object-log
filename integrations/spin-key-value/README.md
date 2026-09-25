@@ -18,7 +18,9 @@ The provider implements upstream `StoreManager`, `Store`, `Cas`, and
 `MakeKeyValueStore`. It uses unmodified tagged Spin **4.1.0**. The provider is
 pre-release and unpublished; use a reviewed repository revision. Its separate
 Cargo workspace keeps Spin and native S3 dependencies outside the portable
-object-log and KV cores.
+object-log and KV cores. The annotated Spin tag resolves to commit
+`c0b3726aa4857961e20cf8616a0df5f0741af73d` in this workspace's Cargo.lock;
+build with `--locked` to retain that revision.
 
 ## Register in your runtime
 

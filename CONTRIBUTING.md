@@ -11,7 +11,8 @@ Install the Rust toolchain pinned by `rust-toolchain.toml`, the Go version in
 `componentize-go` tool with Cargo.
 The complete gate uses `jq` for a self-contained test of the AWS
 temporary-credential helper; it does not contact AWS. Building the composed
-component additionally requires `wac`; running it requires Spin. Local
+component additionally requires `wac` v0.11.0; running it requires Spin CLI
+v4.1.0. CI installs those exact releases with SHA-256 checks. Local
 S3-compatible tests use the pinned MinIO container image through Docker, or a
 native binary named by `OBJECT_LOG_MINIO_BINARY` (which also requires `lsof`
 and either `sha256sum` or `shasum`).

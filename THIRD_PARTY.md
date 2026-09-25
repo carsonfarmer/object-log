@@ -7,7 +7,8 @@ Apache-2.0 and set `publish = false`. Dependencies retain their own licenses.
 ## Git component dependencies
 
 The build uses the preview1 adapter bundled with unmodified
-[componentize-go v0.4.3](https://github.com/bytecodealliance/componentize-go/releases/tag/v0.4.3).
+[componentize-go v0.4.3](https://github.com/bytecodealliance/componentize-go/releases/tag/v0.4.3),
+installed from that tag's [revision `148dba5`](https://github.com/bytecodealliance/componentize-go/commit/148dba505f8c6c64ad84db777cfde5e34e25098b).
 The adapter's Apache-2.0 WITH LLVM-exception license is reproduced in
 [`licenses/wasmtime.txt`](licenses/wasmtime.txt) and must accompany redistributed
 adapter binaries.
@@ -20,6 +21,9 @@ The [v6.0.0-alpha.5 release](https://github.com/go-git/go-git/releases/tag/v6.0.
 lacks `plumbing.ValidateBranchName`, which `repositories.go` calls. Keep the
 reviewed upstream revision until a v6 release provides that API and passes the
 Git build and provider suites.
+The selected go-git revision requires the prerelease `go-billy/v6`
+`v6.0.0-alpha.2`; `examples/git/go.mod` and `go.sum` record its exact module
+version and checksums.
 
 The Go SDK pins [go-pkg PR #13](https://github.com/bytecodealliance/go-pkg/pull/13)
 at its contributor's exact [revision `af8c737`](https://github.com/ricochet/go-pkg/commit/af8c737ad573d76dd08cf2927baf2660475c5c01).
@@ -32,6 +36,11 @@ the service but does not include PR #13. Remove the replacement when an
 upstream release provides equivalent behavior and the composed Git provider
 suite passes. The binding generator is the version bundled with componentize-go.
 
+The WASIp2 component uses `object_store` 0.14.2 from its Cargo.lock; its
+manifest accepts compatible 0.14 releases. `spin-sdk` 5.2.0 is used only by
+the credential-test guest, not the reusable WAL component, and is also locked
+by that workspace's Cargo.lock.
+
 The service serializes allocating component calls and releases imported-buffer
 pins through go-pkg's public `Unpin` function after the bindings return Go
 values. Build inputs are recorded in `examples/git/Makefile` and `go.mod`;
@@ -41,6 +50,9 @@ their upstream licenses apply.
 
 The isolated [Spin key-value provider](integrations/spin-key-value/README.md)
 uses unmodified [Spin v4.1.0](https://github.com/spinframework/spin/releases/tag/v4.1.0).
+Its annotated tag resolves to commit
+[`c0b3726`](https://github.com/spinframework/spin/commit/c0b3726aa4857961e20cf8616a0df5f0741af73d),
+which is the revision in the provider's Cargo.lock.
 Spin is Apache-2.0 WITH LLVM-exception. The opt-in guest test fetches and compiles
 that release's unmodified key-value test component and helper; it does not
 vendor them into this repository. The provider is Apache-2.0 and unpublished.

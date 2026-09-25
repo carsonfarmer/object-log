@@ -9,6 +9,6 @@ fi
 [[ "$(git -C "$checkout" rev-parse HEAD)" == "$rev" ]]
 git -C "$checkout" diff --exit-code -- tests/test-components wit
 cargo build --manifest-path "$checkout/tests/test-components/components/Cargo.toml" \
-  --package key-value --release --target wasm32-wasip2
+  --locked --package key-value --release --target wasm32-wasip2
 SPIN_KV_TEST_GUEST="$checkout/tests/test-components/components/target/wasm32-wasip2/release/key_value.wasm" \
   cargo test --locked --test guest -- --ignored --nocapture

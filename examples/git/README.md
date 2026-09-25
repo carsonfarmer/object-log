@@ -25,7 +25,8 @@ when changing incompatible revisions.
 
 ## Build
 
-Install Go 1.27.1, the repository's pinned Rust toolchain, Spin 4, `wac`, MinIO,
+Install Go 1.27.1, the repository's pinned Rust toolchain, Spin CLI v4.1.0,
+`wac` v0.11.0, MinIO,
 and the AWS CLI. For a pinned MinIO container or a native source build, see
 [the contributor setup](../../CONTRIBUTING.md). Then run from the repository root:
 
