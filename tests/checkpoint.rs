@@ -814,6 +814,44 @@ async fn checkpoint_retains_a_pending_commit_outcome() -> TestResult {
 
 #[tokio::test]
 #[cfg(feature = "test-util")]
+async fn checkpoint_resolution_window_keeps_only_the_newest_outcome() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let options = Options {
+        resolution_window: 1,
+        ..Options::default()
+    };
+    let id = "checkpoint-one-outcome";
+    let log = open(Arc::new(faults.clone()), id, options).await?;
+    let old = append_with_lost_response(&log, &faults).await?;
+    let recent = append_with_lost_response(&log, &faults).await?;
+    let committed = log.load().await?;
+    let through = committed.tail()[1].clone();
+    let CheckpointStatus::Published(compacted) = log
+        .publish_checkpoint(
+            &committed,
+            &through,
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
+        .await?
+    else {
+        return Err("checkpoint did not publish".into());
+    };
+    assert!(compacted.tail().is_empty());
+    let reopened = open(Arc::new(faults), id, options).await?;
+    assert!(matches!(
+        reopened.resolve(old).await?,
+        Resolution::Expired(_)
+    ));
+    assert!(matches!(
+        reopened.resolve(recent).await?,
+        Resolution::Committed(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "test-util")]
 async fn checkpoint_reports_expired_when_the_durable_window_is_zero() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let options = Options {

@@ -1,21 +1,36 @@
 #![cfg(feature = "test-util")]
 
 use std::error::Error as StdError;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use futures::TryStreamExt;
 use object_log::sim::{Failure, FailurePhase, FaultStore, Operation};
 use object_log::{
     CheckpointStatus, CollectionFinish, CollectionStart, CommitRef, CommitStatus, Error, Log,
-    LogId, Options, Resolution, RetentionId, RetentionStatus, TransactionId, ValidatedBackend,
-    View,
+    LogId, Options, Request, RequestDenied, RequestGuard, Resolution, RetentionId, RetentionStatus,
+    TransactionId, ValidatedBackend, View,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 
 type TestResult = Result<(), Box<dyn StdError>>;
+
+#[derive(Debug, Default)]
+struct DeleteBatchGuard(Mutex<Vec<usize>>);
+
+impl RequestGuard for DeleteBatchGuard {
+    fn before_request(&self, request: Request) -> Result<(), RequestDenied> {
+        if let Request::Delete { objects } = request {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(objects);
+        }
+        Ok(())
+    }
+}
 
 struct Fixture {
     log: Log,
@@ -109,6 +124,45 @@ fn assert_collection_not_started(fixture: &Fixture) {
 }
 
 #[tokio::test]
+async fn collection_splits_a_plan_across_bounded_delete_requests() -> TestResult {
+    let fixture = Fixture::new(
+        "delete-batch-boundary",
+        Options {
+            max_collection_objects: 2_001,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let source = fixture.log.load().await?;
+    for _ in 0..2_001 {
+        let _ = fixture
+            .log
+            .put_object(&source, Bytes::from_static(b"orphan"))
+            .await?;
+    }
+    let CollectionStart::Installed(fenced, start) = fixture.log.start_collection(&source).await?
+    else {
+        return Err("the full deletion plan was not installed".into());
+    };
+    assert_eq!(start.candidate_count(), 2_001);
+
+    let guard = Arc::new(DeleteBatchGuard::default());
+    let guarded = fixture.log.with_request_guard(guard.clone());
+    let CollectionFinish::Complete(_, finish) = guarded.resume_collection(&fenced).await? else {
+        return Err("the deletion plan did not finish".into());
+    };
+    assert_eq!(finish.delete_attempts(), 2_001);
+    assert_eq!(
+        *guard
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        [1_000, 1_000, 1, 1], // Last request deletes the plan object.
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn collection_deletes_only_unreachable_data_and_classifies_missing_reads() -> TestResult {
     let fixture = Fixture::new("exact", Options::default()).await?;
     let old = fixture.log.load().await?;
@@ -175,18 +229,25 @@ async fn empty_collection_does_not_write_or_advance_the_head() -> TestResult {
 async fn append_and_collection_have_one_cas_winner_and_preserve_the_fence() -> TestResult {
     let first = Fixture::new("append-start-first", Options::default()).await?;
     let source = first.log.load().await?;
-    first
+    let staged = first
         .log
-        .put_object(&source, Bytes::from_static(b"orphan"))
+        .put_object(&source, Bytes::from_static(b"staged but unpublished"))
         .await?;
     let prepared = first.log.prepare(
         &source,
         TransactionId::new(),
         Bytes::from_static(b"append"),
         Bytes::new(),
-        Vec::new(),
+        vec![staged.clone()],
     )?;
     let fenced = install_collection(&first.log, &source).await?;
+    assert!(matches!(
+        first
+            .log
+            .stage_objects(&fenced, vec![staged.reference().clone()])
+            .await,
+        Err(Error::CollectionFence)
+    ));
     assert!(matches!(
         first.log.commit(prepared).await?,
         CommitStatus::Conflict(_)

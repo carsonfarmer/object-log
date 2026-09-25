@@ -2854,7 +2854,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_commit_checkpoint_and_token_goldens() -> Result<(), Error> {
+    fn durable_commit_checkpoint_and_token_goldens() -> Result<(), Box<dyn std::error::Error>> {
         let transaction = crate::TransactionId::from_uuid(uuid::Uuid::from_u128(3));
         let objects = vec![object_ref(ObjectKind::Blob, 4)];
         let commit = Commit {
@@ -2910,6 +2910,22 @@ mod tests {
         ] {
             assert_eq!(hex::encode(bytes), golden.trim());
         }
+        let commit_bytes = hex::decode(include_str!("../tests/fixtures/commit-v1.hex").trim())?;
+        assert_eq!(
+            encode_commit(&decode_commit(&commit_bytes)?)?.as_ref(),
+            commit_bytes
+        );
+        let checkpoint_bytes =
+            hex::decode(include_str!("../tests/fixtures/checkpoint-v1.hex").trim())?;
+        assert_eq!(
+            encode_checkpoint(&decode_checkpoint(&checkpoint_bytes)?)?.as_ref(),
+            checkpoint_bytes
+        );
+        let token_bytes = hex::decode(include_str!("../tests/fixtures/token-v1.hex").trim())?;
+        assert_eq!(
+            encode_recovery_token(&decode_recovery_token(&token_bytes)?)?.as_ref(),
+            token_bytes
+        );
         Ok(())
     }
 
@@ -2921,6 +2937,70 @@ mod tests {
             hex::encode(encoded),
             "a2015872aa0101026f74656e616e742e7265736f75726365030004000680078008500000000000000000000000000000000109ac0119040002190400031a000100000419100005190400061a00100000071a00040000081a01000000091a040000000a1904000b1a000186a00c1a010000000a000c80025820d66b6c9f2f2a86881c5a2254f9691643adbb7edb70ed057d47216fcda63d0067"
         );
+    }
+
+    #[test]
+    fn durable_nonempty_head_node_and_plan_goldens() -> Result<(), Box<dyn std::error::Error>> {
+        let mut head = Head::empty(log_id(), incarnation(), Options::default());
+        head.generation = 1;
+        head.next_sequence = 1;
+        head.tail.push(CommitRef {
+            sequence: 0,
+            transaction_id: crate::TransactionId::from_uuid(uuid::Uuid::from_u128(3)),
+            storage_id: storage_id(),
+            digest: Digest::of(b"commit"),
+            len: 6,
+        });
+        let node = node(
+            Bytes::from_static(b"root"),
+            vec![object_ref(ObjectKind::Blob, 4)],
+        );
+        let plan = CollectionPlan {
+            log_id: log_id(),
+            collection_epoch: 1,
+            candidates: vec![candidate(1, 1)],
+        };
+        let head_bytes = encode_head(&head)?;
+        let node_bytes = encode_node(&node)?;
+        let plan_bytes = encode_collection_plan(&plan, Options::default())?;
+        let fixture_head =
+            hex::decode(include_str!("../tests/fixtures/head-nonempty-v1.hex").trim())?;
+        let fixture_node = hex::decode(include_str!("../tests/fixtures/node-v1.hex").trim())?;
+        let fixture_plan =
+            hex::decode(include_str!("../tests/fixtures/collection-plan-v1.hex").trim())?;
+        assert_eq!(head_bytes.as_ref(), fixture_head);
+        assert_eq!(node_bytes.as_ref(), fixture_node);
+        assert_eq!(plan_bytes.as_ref(), fixture_plan);
+        assert_eq!(decode_head(&fixture_head)?, head);
+        assert_eq!(
+            encode_head(&decode_head(&fixture_head)?)?.as_ref(),
+            fixture_head
+        );
+        assert_eq!(
+            decode_node(&Bytes::from(fixture_node.clone()), Options::default())?,
+            node
+        );
+        assert_eq!(
+            encode_node(&decode_node(
+                &Bytes::from(fixture_node.clone()),
+                Options::default()
+            )?)?
+            .as_ref(),
+            fixture_node
+        );
+        assert_eq!(
+            decode_collection_plan(&fixture_plan, Options::default())?,
+            plan
+        );
+        assert_eq!(
+            encode_collection_plan(
+                &decode_collection_plan(&fixture_plan, Options::default())?,
+                Options::default()
+            )?
+            .as_ref(),
+            fixture_plan
+        );
+        Ok(())
     }
 
     #[test]
@@ -2952,34 +3032,90 @@ mod tests {
     }
 
     #[test]
-    fn unknown_field_is_not_canonical() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut payload = Vec::new();
-        let mut writer = minicbor::Encoder::new(&mut payload);
-        writer
-            .map(7)?
-            .u8(1)?
-            .u32(FORMAT_VERSION)?
-            .u8(2)?
-            .str(log_id().as_str())?
-            .u8(3)?
-            .u64(0)?
-            .u8(4)?
-            .u64(0)?
-            .u8(6)?
-            .array(0)?
-            .u8(7)?
-            .array(0)?
-            .u8(99)?
-            .null()?;
-        let envelope_bytes = minicbor::to_vec(EnvelopeWire {
-            digest: Digest::of(&payload).as_bytes().to_vec(),
-            payload,
-        })?;
+    fn complete_objects_reject_noncanonical_cbor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        fn check(
+            bytes: &[u8],
+            decode: impl Fn(&[u8]) -> Result<(), Error>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let envelope: EnvelopeWire = super::decode_exact(bytes)?;
+            let payload = envelope.payload;
+            let mut decoder = minicbor::Decoder::new(&payload);
+            let count = decoder.map()?.ok_or("expected a definite payload map")?;
+            assert!(count < 23);
+            let first = decoder.position();
+            decoder.skip()?;
+            decoder.skip()?;
+            let second = decoder.position();
+            decoder.skip()?;
+            decoder.skip()?;
+            let third = decoder.position();
+            assert_eq!(payload[0], 0xa0 | u8::try_from(count)?);
+            assert_eq!(payload[first], 1);
 
+            let mut unknown = payload.clone();
+            unknown[0] += 1;
+            unknown.extend_from_slice(&[13, 0xf6]);
+
+            let mut nonminimal = payload.clone();
+            nonminimal.splice(first..=first, [0x18, 1]);
+
+            let mut reordered = Vec::with_capacity(payload.len());
+            reordered.push(payload[0]);
+            reordered.extend_from_slice(&payload[second..third]);
+            reordered.extend_from_slice(&payload[first..second]);
+            reordered.extend_from_slice(&payload[third..]);
+
+            let mut indefinite = payload.clone();
+            indefinite[0] = 0xbf;
+            indefinite.push(0xff);
+
+            for malformed in [unknown, nonminimal, reordered, indefinite] {
+                let wrapped = minicbor::to_vec(EnvelopeWire {
+                    digest: Digest::of(&malformed).as_bytes().to_vec(),
+                    payload: malformed,
+                })?;
+                assert!(matches!(
+                    decode(&wrapped),
+                    Err(Error::InvalidFormat(message))
+                        if message == "encoded object is not canonical format version 1"
+                ));
+            }
+            Ok(())
+        }
+
+        let commit = hex::decode(include_str!("../tests/fixtures/commit-v1.hex").trim())?;
+        let checkpoint = hex::decode(include_str!("../tests/fixtures/checkpoint-v1.hex").trim())?;
+        let token = hex::decode(include_str!("../tests/fixtures/token-v1.hex").trim())?;
+        let head = encode_head(&Head::empty(log_id(), incarnation(), Options::default()))?;
+        let node = encode_node(&node(Bytes::from_static(b"node"), vec![]))?;
+        let plan = encode_collection_plan(
+            &CollectionPlan {
+                log_id: log_id(),
+                collection_epoch: 1,
+                candidates: vec![candidate(1, 1)],
+            },
+            Options::default(),
+        )?;
+
+        check(&head, |bytes| decode_head(bytes).map(|_| ()))?;
+        let mut head_payload: EnvelopeWire = super::decode_exact(&head)?;
+        head_payload.payload[0] += 1;
+        head_payload.payload.extend_from_slice(&[13, 0xf6]);
         assert!(matches!(
-            decode_head(&envelope_bytes),
-            Err(Error::InvalidFormat(_))
+            super::validate_head_shape(&head_payload.payload),
+            Err(Error::InvalidFormat(message))
+                if message == "encoded object is not canonical format version 1"
         ));
+        check(&commit, |bytes| decode_commit(bytes).map(|_| ()))?;
+        check(&checkpoint, |bytes| decode_checkpoint(bytes).map(|_| ()))?;
+        check(&node, |bytes| {
+            decode_node(&Bytes::copy_from_slice(bytes), Options::default()).map(|_| ())
+        })?;
+        check(&token, |bytes| decode_recovery_token(bytes).map(|_| ()))?;
+        check(&plan, |bytes| {
+            decode_collection_plan(bytes, Options::default()).map(|_| ())
+        })?;
         Ok(())
     }
 

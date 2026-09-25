@@ -2,9 +2,10 @@
 
 use std::error::Error as StdError;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
-use object_log::sim::{FaultStore, Operation, PutRejection};
+use object_log::sim::{FailurePhase, FaultStore, Operation, PutRejection};
 use object_log::{
     CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus, Log,
     LogId, Options, Resolution, RetentionId, RetentionStatus, TransactionId, ValidatedBackend,
@@ -138,6 +139,47 @@ async fn rejected_retention_changes_are_pending_and_retriable() -> TestResult {
             RetentionStatus::Applied(_)
         ));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn commit_reports_conflict_after_sixteen_compatible_retention_races() -> TestResult {
+    let (store, log) = open("retention-exhausts-commit-retry").await?;
+    let source = log.load().await?;
+    let prepared = log.prepare(
+        &source,
+        TransactionId::new(),
+        Bytes::from_static(b"candidate"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    store.reset();
+    let mut pause = Some(store.pause_put_at(2, FailurePhase::Before));
+    let writer = tokio::spawn({
+        let log = log.clone();
+        async move { log.commit(prepared).await }
+    });
+    for attempt in 0..16 {
+        let mut stopped = pause.take().ok_or("a writer pause was not scheduled")?;
+        assert!(tokio::time::timeout(Duration::from_secs(5), stopped.wait_until_entered()).await?);
+        let current = log.load().await?;
+        assert!(matches!(
+            log.retain(&current, RetentionId::new()).await?,
+            RetentionStatus::Applied(_)
+        ));
+        let next = (attempt < 15).then(|| {
+            let occurrence = store.metrics().operation(Operation::Put).requests + 1;
+            store.pause_put_at(occurrence, FailurePhase::Before)
+        });
+        assert!(stopped.release());
+        pause = next;
+    }
+    let CommitStatus::Conflict(current) = writer.await?? else {
+        return Err("exhausted compatible retention races did not return conflict".into());
+    };
+    assert_eq!(current.generation(), source.generation() + 16);
+    assert!(current.tail().is_empty());
+    assert_eq!(log.load().await?.generation(), current.generation());
     Ok(())
 }
 

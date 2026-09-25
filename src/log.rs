@@ -3056,6 +3056,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_rejects_a_tail_at_its_exact_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log(
+            "tail-at-limit",
+            Options {
+                max_tail_entries: 1,
+                ..Options::default()
+            },
+        )
+        .await?;
+        let view = log.load().await?;
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(b"first"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(full) = log.commit(prepared).await? else {
+            return Err("first commit did not publish".into());
+        };
+        assert_eq!(full.tail().len(), 1);
+        assert!(matches!(
+            log.prepare(
+                &full,
+                TransactionId::new(),
+                Bytes::from_static(b"second"),
+                Bytes::new(),
+                Vec::new(),
+            ),
+            Err(Error::LimitExceeded("active tail entries"))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn node_size_preflights_without_io_and_matches_stored_nodes()
     -> Result<(), Box<dyn std::error::Error>> {
         let faults = FaultStore::new(InMemory::new());

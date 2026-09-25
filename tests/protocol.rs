@@ -62,6 +62,7 @@ backend_cases! {
     concurrent_open_creates_one_head_and_existing_open_does_not_rewrite_it,
     refresh_distinguishes_current_and_changed_heads,
     capability_probe_rejects_false_not_modified_responses,
+    capability_probe_rejects_ignored_create_and_update_conditions,
     encoded_commit_limit_fails_before_publication,
     two_writers_publish_one_order_and_require_explicit_reprepare,
     retention_updates_do_not_reject_an_in_flight_commit,
@@ -69,6 +70,7 @@ backend_cases! {
     retention_updates_do_not_reject_an_in_flight_checkpoint,
     repeated_first_attempt_resolves_as_committed,
     view_is_bound_to_one_durable_log_incarnation,
+    same_namespace_recreation_rejects_old_evidence,
     open_rejects_options_that_differ_from_the_durable_contract,
     provider_shaped_stale_view_conflict_is_definite,
     referenced_objects_are_durable_before_head_publication,
@@ -79,6 +81,7 @@ backend_cases! {
     tail_order_survives_out_of_order_read_completion,
     pending_candidate_resolves_not_committed_after_another_writer_wins,
     rejected_candidate_remains_pending_when_the_winner_read_fails,
+    rejected_maintenance_stays_pending_when_the_winner_read_fails,
 }
 
 const FAIL_NONE: u8 = 0;
@@ -164,6 +167,25 @@ async fn capability_probe_rejects_false_not_modified_responses(
         ValidatedBackend::new(store, Path::from("protocol-tests")).await,
         Err(object_log::Error::UnsupportedBackend("conditional read"))
     ));
+    Ok(())
+}
+
+async fn capability_probe_rejects_ignored_create_and_update_conditions(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (create, expected) in [(true, "conditional create"), (false, "conditional update")] {
+        let backend = Arc::new(InstrumentedStore::new(new_store()?));
+        if create {
+            backend.ignore_conditional_create();
+        } else {
+            backend.ignore_conditional_update();
+        }
+        let store: Arc<dyn ObjectStore> = backend;
+        assert!(matches!(
+            ValidatedBackend::new(store, Path::from("protocol-tests")).await,
+            Err(object_log::Error::UnsupportedBackend(name)) if name == expected
+        ));
+    }
     Ok(())
 }
 
@@ -489,6 +511,57 @@ async fn view_is_bound_to_one_durable_log_incarnation(
             Bytes::new(),
             Vec::new(),
         ),
+        Err(object_log::Error::InvalidFormat(message))
+            if message == "the view belongs to another log incarnation"
+    ));
+    Ok(())
+}
+
+async fn same_namespace_recreation_rejects_old_evidence(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = new_store()?;
+    let observed = Arc::new(InstrumentedStore::new(Arc::clone(&raw)));
+    let backend: Arc<dyn ObjectStore> = observed.clone();
+    let old = open(Arc::clone(&backend), "recreated").await?;
+    let view = old.load().await?;
+    let prepared = old.prepare(
+        &view,
+        TransactionId::new(),
+        Bytes::from_static(b"old"),
+        Bytes::new(),
+        Vec::new(),
+    )?;
+    let token = prepared.recovery_token()?;
+    observed.fail_next_update_before_mutation();
+    let CommitStatus::Pending(pending) = old.commit(prepared).await? else {
+        return Err("the old candidate did not remain pending".into());
+    };
+
+    let scope = Path::from("protocol-tests/v1/logs/recreated");
+    let keys = raw.list(Some(&scope)).map_ok(|meta| meta.location);
+    raw.delete_stream(Box::pin(keys))
+        .try_collect::<Vec<_>>()
+        .await?;
+    let fresh = open(backend, "recreated").await?;
+    assert!(matches!(
+        fresh.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(b"new"),
+            Bytes::new(),
+            Vec::new(),
+        ),
+        Err(object_log::Error::InvalidFormat(message))
+            if message == "the view belongs to another log incarnation"
+    ));
+    assert!(matches!(
+        fresh.resume(&token).await,
+        Err(object_log::Error::InvalidFormat(message))
+            if message == "the view belongs to another log incarnation"
+    ));
+    assert!(matches!(
+        fresh.resolve(pending).await,
         Err(object_log::Error::InvalidFormat(message))
             if message == "the view belongs to another log incarnation"
     ));
@@ -858,6 +931,74 @@ async fn rejected_candidate_remains_pending_when_the_winner_read_fails(
     Ok(())
 }
 
+async fn rejected_maintenance_stays_pending_when_the_winner_read_fails(
+    new_store: &StoreFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for operation in ["retention", "checkpoint", "collection"] {
+        let observed = Arc::new(InstrumentedStore::new(new_store()?));
+        let backend: Arc<dyn ObjectStore> = observed.clone();
+        let id = format!("maintenance-read-failure-{operation}");
+        let first = open(Arc::clone(&backend), &id).await?;
+        let second = open(backend, &id).await?;
+        let initial = first.load().await?;
+        let source = if operation == "checkpoint" {
+            let prepared = first.prepare(
+                &initial,
+                TransactionId::new(),
+                Bytes::from_static(b"source"),
+                Bytes::new(),
+                Vec::new(),
+            )?;
+            let CommitStatus::Committed(view) = first.commit(prepared).await? else {
+                return Err("checkpoint source did not commit".into());
+            };
+            view
+        } else {
+            initial
+        };
+        if operation == "collection" {
+            first
+                .put_object(&source, Bytes::from_static(b"unreachable"))
+                .await?;
+        }
+        let winner = second.prepare(
+            &source,
+            TransactionId::new(),
+            Bytes::from_static(b"winner"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        assert!(matches!(
+            second.commit(winner).await?,
+            CommitStatus::Committed(_)
+        ));
+        observed.fail_next_head_get();
+        match operation {
+            "retention" => assert!(matches!(
+                first.retain(&source, RetentionId::new()).await?,
+                RetentionStatus::Pending
+            )),
+            "checkpoint" => assert!(matches!(
+                first
+                    .publish_checkpoint(
+                        &source,
+                        &source.tail()[0],
+                        Bytes::from_static(b"snapshot"),
+                        Vec::new(),
+                    )
+                    .await?,
+                CheckpointStatus::Pending(_)
+            )),
+            "collection" => assert!(matches!(
+                first.start_collection(&source).await?,
+                CollectionStart::Pending
+            )),
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
 async fn open(store: Arc<dyn ObjectStore>, id: &str) -> Result<Log, object_log::Error> {
     let log_id = LogId::new(id)?;
     let backend = ValidatedBackend::new(store, Path::from("protocol-tests")).await?;
@@ -894,6 +1035,8 @@ struct InstrumentedStore {
     commit_created: AtomicBool,
     referenced_objects_before_update: AtomicBool,
     lie_conditional_read: AtomicBool,
+    ignore_create: AtomicBool,
+    ignore_update: AtomicBool,
     fail_head_gets: AtomicU8,
     pause_after_update: AtomicBool,
     visible_update: Notify,
@@ -912,6 +1055,8 @@ impl InstrumentedStore {
             commit_created: AtomicBool::new(false),
             referenced_objects_before_update: AtomicBool::new(false),
             lie_conditional_read: AtomicBool::new(false),
+            ignore_create: AtomicBool::new(false),
+            ignore_update: AtomicBool::new(false),
             fail_head_gets: AtomicU8::new(0),
             pause_after_update: AtomicBool::new(false),
             visible_update: Notify::new(),
@@ -952,6 +1097,14 @@ impl InstrumentedStore {
         self.lie_conditional_read.store(true, Ordering::SeqCst);
     }
 
+    fn ignore_conditional_create(&self) {
+        self.ignore_create.store(true, Ordering::SeqCst);
+    }
+
+    fn ignore_conditional_update(&self) {
+        self.ignore_update.store(true, Ordering::SeqCst);
+    }
+
     fn fail_next_head_get(&self) {
         self.fail_head_gets.store(3, Ordering::SeqCst);
     }
@@ -987,9 +1140,15 @@ impl ObjectStore for InstrumentedStore {
         &self,
         location: &Path,
         payload: PutPayload,
-        options: PutOptions,
+        mut options: PutOptions,
     ) -> object_store::Result<PutResult> {
         let is_update = matches!(&options.mode, object_store::PutMode::Update(_));
+        if (matches!(&options.mode, object_store::PutMode::Create)
+            && self.ignore_create.load(Ordering::SeqCst))
+            || (is_update && self.ignore_update.load(Ordering::SeqCst))
+        {
+            options.mode = object_store::PutMode::Overwrite;
+        }
         let is_blob = location.to_string().contains("/blobs/");
         let is_commit = location.to_string().contains("/commits/");
         if is_update && self.order_check_armed.load(Ordering::SeqCst) {
