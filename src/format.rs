@@ -362,33 +362,46 @@ struct HeadWire {
     retention_ids: Vec<ByteVec>,
 }
 
-#[derive(Clone, Debug, Decode, Encode, PartialEq)]
-#[cbor(map)]
-struct OptionsWire {
-    #[n(1)]
-    max_tail_entries: u64,
-    #[n(2)]
-    resolution_window: u64,
-    #[n(3)]
-    max_inline_operation_bytes: u64,
-    #[n(4)]
-    max_inline_result_bytes: u64,
-    #[n(5)]
-    max_object_refs: u64,
-    #[n(6)]
-    max_commit_bytes: u64,
-    #[n(7)]
-    max_head_bytes: u64,
-    #[n(8)]
-    max_checkpoint_bytes: u64,
-    #[n(9)]
-    max_object_bytes: u64,
-    #[n(10)]
-    max_retention_ids: u64,
-    #[n(11)]
-    max_collection_objects: u64,
-    #[n(12)]
-    max_collection_plan_bytes: u64,
+// One list defines both the durable field numbers and the two width conversions.
+macro_rules! options_wire {
+    ($($field:ident: $number:literal),+ $(,)?) => {
+        #[derive(Clone, Debug, Decode, Encode, PartialEq)]
+        #[cbor(map)]
+        struct OptionsWire {
+            $(#[n($number)] $field: u64,)+
+        }
+
+        impl TryFrom<Options> for OptionsWire {
+            type Error = Error;
+
+            fn try_from(value: Options) -> Result<Self, Self::Error> {
+                Ok(Self { $($field: option_to_u64(value.$field)?,)+ })
+            }
+        }
+
+        impl TryFrom<OptionsWire> for Options {
+            type Error = Error;
+
+            fn try_from(value: OptionsWire) -> Result<Self, Self::Error> {
+                Ok(Self { $($field: option_to_usize(value.$field)?,)+ })
+            }
+        }
+    };
+}
+
+options_wire! {
+    max_tail_entries: 1,
+    resolution_window: 2,
+    max_inline_operation_bytes: 3,
+    max_inline_result_bytes: 4,
+    max_object_refs: 5,
+    max_commit_bytes: 6,
+    max_head_bytes: 7,
+    max_checkpoint_bytes: 8,
+    max_object_bytes: 9,
+    max_retention_ids: 10,
+    max_collection_objects: 11,
+    max_collection_plan_bytes: 12,
 }
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
@@ -1542,48 +1555,6 @@ impl From<&CollectionCandidate> for CollectionCandidateWire {
             digest: value.key.digest.as_bytes().to_vec(),
             bytes: value.bytes,
         }
-    }
-}
-
-impl TryFrom<Options> for OptionsWire {
-    type Error = Error;
-
-    fn try_from(value: Options) -> Result<Self, Self::Error> {
-        Ok(Self {
-            max_tail_entries: option_to_u64(value.max_tail_entries)?,
-            resolution_window: option_to_u64(value.resolution_window)?,
-            max_inline_operation_bytes: option_to_u64(value.max_inline_operation_bytes)?,
-            max_inline_result_bytes: option_to_u64(value.max_inline_result_bytes)?,
-            max_object_refs: option_to_u64(value.max_object_refs)?,
-            max_object_bytes: option_to_u64(value.max_object_bytes)?,
-            max_commit_bytes: option_to_u64(value.max_commit_bytes)?,
-            max_head_bytes: option_to_u64(value.max_head_bytes)?,
-            max_checkpoint_bytes: option_to_u64(value.max_checkpoint_bytes)?,
-            max_retention_ids: option_to_u64(value.max_retention_ids)?,
-            max_collection_objects: option_to_u64(value.max_collection_objects)?,
-            max_collection_plan_bytes: option_to_u64(value.max_collection_plan_bytes)?,
-        })
-    }
-}
-
-impl TryFrom<OptionsWire> for Options {
-    type Error = Error;
-
-    fn try_from(value: OptionsWire) -> Result<Self, Self::Error> {
-        Ok(Self {
-            max_tail_entries: option_to_usize(value.max_tail_entries)?,
-            resolution_window: option_to_usize(value.resolution_window)?,
-            max_inline_operation_bytes: option_to_usize(value.max_inline_operation_bytes)?,
-            max_inline_result_bytes: option_to_usize(value.max_inline_result_bytes)?,
-            max_object_refs: option_to_usize(value.max_object_refs)?,
-            max_object_bytes: option_to_usize(value.max_object_bytes)?,
-            max_commit_bytes: option_to_usize(value.max_commit_bytes)?,
-            max_head_bytes: option_to_usize(value.max_head_bytes)?,
-            max_checkpoint_bytes: option_to_usize(value.max_checkpoint_bytes)?,
-            max_retention_ids: option_to_usize(value.max_retention_ids)?,
-            max_collection_objects: option_to_usize(value.max_collection_objects)?,
-            max_collection_plan_bytes: option_to_usize(value.max_collection_plan_bytes)?,
-        })
     }
 }
 

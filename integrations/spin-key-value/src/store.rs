@@ -57,8 +57,17 @@ struct Writer {
 }
 
 enum GroupFailure {
-    Limit,
+    Limit(KvError),
     Other(Error),
+}
+
+impl GroupFailure {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Limit(error) => public_kv_error(error),
+            Self::Other(error) => error,
+        }
+    }
 }
 
 impl Owner {
@@ -118,7 +127,10 @@ impl Owner {
     async fn publish_group(kv: &KvStore, limits: HostLimits, jobs: Vec<WriteJob>) {
         if jobs.len() == 1 {
             let writer = Writer::new(kv.clone(), limits);
-            let result = writer.write(&jobs[0].commands).await;
+            let result = writer
+                .write(&jobs[0].commands)
+                .await
+                .map_err(GroupFailure::into_error);
             if let Some(job) = jobs.into_iter().next() {
                 let _ = job.done.send(result);
             }
@@ -129,16 +141,19 @@ impl Owner {
             .flat_map(|job| job.commands.iter().cloned())
             .collect::<Vec<_>>();
         let writer = Writer::new(kv.clone(), limits);
-        match writer.write_group(&commands).await {
+        match writer.write(&commands).await {
             Ok(()) => {
                 for job in jobs {
                     let _ = job.done.send(Ok(()));
                 }
             }
-            Err(GroupFailure::Limit) => {
+            Err(GroupFailure::Limit(_)) => {
                 for job in jobs {
                     let writer = Writer::new(kv.clone(), limits);
-                    let result = writer.write(&job.commands).await;
+                    let result = writer
+                        .write(&job.commands)
+                        .await
+                        .map_err(GroupFailure::into_error);
                     let _ = job.done.send(result);
                 }
             }
@@ -195,26 +210,12 @@ impl Writer {
         }
     }
 
+    // Only a definite rejection permits re-preparation; resolve uncertain work as-is.
     async fn publish(&self, snapshot: &KvSnapshot, commands: &[KvCommand]) -> Result<bool, Error> {
         let candidate = snapshot
             .prepare(TransactionId::new(), commands)
             .await
             .map_err(public_kv_error)?;
-        self.commit(candidate).await
-    }
-
-    async fn publish_unobserved(
-        &self,
-        snapshot: &KvSnapshot,
-        commands: &[KvCommand],
-    ) -> Result<bool, Error> {
-        let Some(candidate) = snapshot
-            .prepare_if_changed(TransactionId::new(), commands)
-            .await
-            .map_err(public_kv_error)?
-        else {
-            return Ok(true);
-        };
         self.commit(candidate).await
     }
 
@@ -250,20 +251,7 @@ impl Writer {
         }
     }
 
-    async fn write(&self, commands: &[KvCommand]) -> Result<(), Error> {
-        for attempt in 0..self.limits.attempts {
-            let snapshot = self.write_snapshot().await?;
-            if self.publish_unobserved(&snapshot, commands).await? {
-                return Ok(());
-            }
-            if attempt + 1 < self.limits.attempts {
-                back_off(attempt).await;
-            }
-        }
-        Err(other("object-log contention limit"))
-    }
-
-    async fn write_group(&self, commands: &[KvCommand]) -> Result<(), GroupFailure> {
+    async fn write(&self, commands: &[KvCommand]) -> Result<(), GroupFailure> {
         for attempt in 0..self.limits.attempts {
             let snapshot = self.write_snapshot().await.map_err(GroupFailure::Other)?;
             let candidate = match snapshot
@@ -275,8 +263,8 @@ impl Writer {
                 Err(
                     error @ (KvError::Limit(_) | KvError::Log(object_log::Error::LimitExceeded(_))),
                 ) => {
-                    tracing::warn!(error = %error, "group preparation failed");
-                    return Err(GroupFailure::Limit);
+                    tracing::warn!(error = %error, "write preparation failed");
+                    return Err(GroupFailure::Limit(error));
                 }
                 Err(error) => return Err(GroupFailure::Other(public_kv_error(error))),
             };
@@ -444,24 +432,11 @@ impl BackendStore {
         }
     }
 
-    async fn write_snapshot(&self) -> Result<KvSnapshot, Error> {
+    fn writer(&self) -> Writer {
         Writer {
             kv: self.kv.clone(),
             limits: self.limits,
         }
-        .write_snapshot()
-        .await
-    }
-
-    // Only a definite rejection allows revalidation/re-preparation. Pending work
-    // retains its exact candidate and is resolved a bounded number of times.
-    async fn publish(&self, snapshot: &KvSnapshot, commands: &[KvCommand]) -> Result<bool, Error> {
-        Writer {
-            kv: self.kv.clone(),
-            limits: self.limits,
-        }
-        .publish(snapshot, commands)
-        .await
     }
 
     async fn write(&self, commands: Vec<KvCommand>) -> Result<(), Error> {
@@ -731,7 +706,7 @@ impl Store for BackendStore {
         let key = self.key(&key)?;
         self.run(move |store| async move {
             for attempt in 0..store.limits.attempts {
-                let snapshot = store.write_snapshot().await?;
+                let snapshot = store.writer().write_snapshot().await?;
                 let previous = snapshot.get(&key).await.map_err(public_error)?;
                 // Match Spin's default backend's little-endian representation.
                 let current = previous
@@ -751,7 +726,7 @@ impl Store for BackendStore {
                     value: Bytes::copy_from_slice(&next.to_le_bytes()),
                 };
                 // Even delta=0 creates an absent key, as required by WASI atomics.
-                if store.publish(&snapshot, &[command]).await? {
+                if store.writer().publish(&snapshot, &[command]).await? {
                     return Ok(next);
                 }
                 if attempt + 1 < store.limits.attempts {
@@ -769,8 +744,10 @@ impl Store for BackendStore {
         key: &str,
     ) -> Result<Arc<dyn Cas>, Error> {
         let key = self.key(key)?;
-        let generation = self
-            .run(|store| async move { Ok(store.write_snapshot().await?.view().generation()) })
+        let generation =
+            self.run(|store| async move {
+                Ok(store.writer().write_snapshot().await?.view().generation())
+            })
             .await?;
         Ok(Arc::new(CompareSwap {
             store: self.clone(),
@@ -799,7 +776,7 @@ impl Cas for CompareSwap {
         let (generation, value) = self
             .store
             .run(move |store| async move {
-                let snapshot = store.write_snapshot().await?;
+                let snapshot = store.writer().write_snapshot().await?;
                 let value = snapshot.get(&key).await.map_err(public_error)?;
                 if std::mem::size_of::<Option<Vec<u8>>>() + value.as_ref().map_or(0, Bytes::len)
                     > max_result_bytes.min(store.limits.response_bytes)
@@ -835,6 +812,7 @@ impl Cas for CompareSwap {
                     return Ok(false);
                 }
                 store
+                    .writer()
                     .publish(&snapshot, &[KvCommand::Set { key, value }])
                     .await
             })

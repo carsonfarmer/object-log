@@ -142,7 +142,6 @@ func (s *store) EncodedObject(kind plumbing.ObjectType, id plumbing.Hash) (objec
 		return nil, plumbing.ErrObjectNotFound
 	}
 	if err := s.limits.checkObject(item.Kind, item.Size); err != nil {
-		observeRead(&s.failure, err)
 		return nil, err
 	}
 	return &storedObject{s, item}, nil
@@ -153,8 +152,8 @@ func (s *store) DeltaObject(kind plumbing.ObjectType, id plumbing.Hash) (plumbin
 	if err != nil {
 		return nil, err
 	}
-	if delta := object.(*storedObject).item.Delta; delta != nil {
-		item := object.(*storedObject).item
+	item := object.(*storedObject).item
+	if delta := item.Delta; delta != nil {
 		result := storedDelta{EncodedObject: object, delta: delta, failure: &s.failure}
 		if delta.StoredSize > 0 {
 			result.open = func() (io.ReadCloser, error) { return s.openDelta(item) }
@@ -331,12 +330,10 @@ func (o *storedObject) Reader() (reader io.ReadCloser, err error) {
 		}
 	}()
 	if err := o.s.limits.checkObject(o.item.Kind, o.item.Size); err != nil {
-		observeRead(&o.s.failure, err)
 		return nil, err
 	}
 
 	if err := o.s.ctx.Err(); err != nil {
-		observeRead(&o.s.failure, err)
 		return nil, err
 	}
 	if o.item.Encoding != "zlib" {
