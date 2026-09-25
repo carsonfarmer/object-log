@@ -152,7 +152,7 @@ pub enum RetentionStatus {
     ActiveCollection(View),
     /// Another head update rejected the requested change.
     Conflict(View),
-    /// A storage error can hide a successful head update.
+    /// The requested head update is unresolved; refresh or retry it.
     Pending,
 }
 
@@ -206,7 +206,7 @@ pub enum CollectionStart {
     Retained(View),
     /// Another head update rejected fence installation.
     Conflict(View),
-    /// A storage error can hide a successful fence update.
+    /// Fence installation is unresolved; reload the head before retrying.
     Pending,
 }
 
@@ -588,6 +588,12 @@ impl Log {
         {
             Ok(Some(version)) => Ok(RetentionStatus::Applied(Self::view(candidate, version))),
             Ok(None) => match self.load().await {
+                Ok(current)
+                    if current.head() == view.head()
+                        && current.storage_version() == view.storage_version() =>
+                {
+                    Ok(RetentionStatus::Pending)
+                }
                 Ok(current) => Ok(Self::retention_status(
                     change.classify(current.head()),
                     current,
@@ -731,6 +737,12 @@ impl Log {
                 Ok(current) if current.head().active_plan.as_ref() == Some(&plan_ref) => {
                     Ok(CollectionStart::Installed(current, report))
                 }
+                Ok(current)
+                    if current.head() == view.head()
+                        && current.storage_version() == view.storage_version() =>
+                {
+                    Ok(CollectionStart::Pending)
+                }
                 Ok(current) => {
                     self.cleanup_collection_plan(plan_key).await?;
                     Ok(CollectionStart::Conflict(current))
@@ -814,18 +826,22 @@ impl Log {
                 ))
             }
             Ok(None) => {
-                let current = match self.load().await {
-                    Ok(current) => current,
+                let reloaded = match self.load().await {
+                    Ok(reloaded) => reloaded,
                     Err(Error::Store(_) | Error::RequestDenied) => {
                         return Ok(CollectionFinish::Pending(report));
                     }
                     Err(error) => return Err(error),
                 };
-                if current.head().active_plan.is_none() {
+                if reloaded.head() == current.head()
+                    && reloaded.storage_version() == current.storage_version()
+                {
+                    Ok(CollectionFinish::Pending(report))
+                } else if reloaded.head().active_plan.is_none() {
                     self.cleanup_collection_plan(plan_key).await?;
-                    Ok(CollectionFinish::Complete(current, report))
+                    Ok(CollectionFinish::Complete(reloaded, report))
                 } else {
-                    Ok(CollectionFinish::Conflict(current, report))
+                    Ok(CollectionFinish::Conflict(reloaded, report))
                 }
             }
             Err(Error::Store(_) | Error::RequestDenied) => Ok(CollectionFinish::Pending(report)),
@@ -1264,12 +1280,10 @@ impl Log {
             }
             Ok(HeadPublication::Contended(current)) => Ok(Resolution::NotCommitted(current)),
             Err(error) => Err(error),
-            Ok(HeadPublication::Changed(current)) => Self::classify_resolution(&pending, current)?
-                .ok_or_else(|| {
-                    Error::InvalidFormat(
-                        "head version changed without a monotonic head change".to_owned(),
-                    )
-                }),
+            Ok(HeadPublication::Changed(current)) => {
+                Ok(Self::classify_resolution(&pending, current)?
+                    .unwrap_or(Resolution::StillPending(pending)))
+            }
         }
     }
 
@@ -1959,6 +1973,11 @@ impl Log {
                     };
                     if !source.head().has_same_publication_base(current.head()) {
                         return Ok(HeadPublication::Changed(current));
+                    }
+                    if current.head() == view.head()
+                        && current.storage_version() == view.storage_version()
+                    {
+                        return Ok(HeadPublication::Pending);
                     }
                     if current.generation() <= view.generation() {
                         return Err(Error::InvalidFormat(

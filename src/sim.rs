@@ -59,7 +59,7 @@ pub enum FailurePhase {
     After,
 }
 
-/// A rejected response returned after a successful single-part PUT.
+/// A simulated rejected response for a single-part PUT.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PutRejection {
     /// The server reported an unmet condition.
@@ -206,7 +206,7 @@ struct State {
     next_sequence: u64,
     metrics: Metrics,
     failures: Vec<Failure>,
-    rejected_puts: Vec<(u64, PutRejection)>,
+    rejected_puts: Vec<(u64, FailurePhase, PutRejection)>,
     pause: Option<ScheduledPause>,
     record_events: bool,
 }
@@ -275,7 +275,7 @@ impl FaultStore {
         if failure.operation == Operation::Put {
             state
                 .rejected_puts
-                .retain(|(occurrence, _)| *occurrence != failure.occurrence);
+                .retain(|(occurrence, _, _)| *occurrence != failure.occurrence);
         }
         state.failures.retain(|scheduled| {
             scheduled.operation != failure.operation || scheduled.occurrence != failure.occurrence
@@ -294,7 +294,7 @@ impl FaultStore {
         if operation == Operation::Put {
             state
                 .rejected_puts
-                .retain(|(scheduled, _)| *scheduled != occurrence);
+                .retain(|(scheduled, _, _)| *scheduled != occurrence);
         }
         state.failures.retain(|scheduled| {
             scheduled.operation != operation || scheduled.occurrence != occurrence
@@ -306,19 +306,28 @@ impl FaultStore {
         });
     }
 
+    /// Rejects one PUT without changing storage at its one-based occurrence.
+    pub fn reject_put_before(&self, occurrence: u64, rejection: PutRejection) {
+        self.reject_put_at(occurrence, FailurePhase::Before, rejection);
+    }
+
     /// Applies one PUT, then returns a rejected response for its one-based occurrence.
     ///
     /// This models a conditional write that succeeded before a transport retry
     /// returned `Precondition` or `AlreadyExists` to the caller.
     pub fn reject_put_after(&self, occurrence: u64, rejection: PutRejection) {
+        self.reject_put_at(occurrence, FailurePhase::After, rejection);
+    }
+
+    fn reject_put_at(&self, occurrence: u64, phase: FailurePhase, rejection: PutRejection) {
         let mut state = lock(&self.state);
         state.failures.retain(|failure| {
             failure.operation != Operation::Put || failure.occurrence != occurrence
         });
         state
             .rejected_puts
-            .retain(|(scheduled, _)| *scheduled != occurrence);
-        state.rejected_puts.push((occurrence, rejection));
+            .retain(|(scheduled, _, _)| *scheduled != occurrence);
+        state.rejected_puts.push((occurrence, phase, rejection));
     }
 
     /// Pauses the next single-part object write at `phase`.
@@ -430,7 +439,11 @@ impl FaultStore {
         true
     }
 
-    fn take_rejected_put(&self, ticket: RequestTicket) -> Option<PutRejection> {
+    fn take_rejected_put(
+        &self,
+        ticket: RequestTicket,
+        phase: FailurePhase,
+    ) -> Option<PutRejection> {
         if ticket.operation != Operation::Put {
             return None;
         }
@@ -438,8 +451,10 @@ impl FaultStore {
         let index = state
             .rejected_puts
             .iter()
-            .position(|(occurrence, _)| *occurrence == ticket.occurrence)?;
-        Some(state.rejected_puts.remove(index).1)
+            .position(|(occurrence, scheduled_phase, _)| {
+                *occurrence == ticket.occurrence && *scheduled_phase == phase
+            })?;
+        Some(state.rejected_puts.remove(index).2)
     }
 
     fn pause_next(&self, operation: Operation, phase: FailurePhase) -> PauseControl {
@@ -506,13 +521,22 @@ impl FaultStore {
         D: FnOnce(&T) -> u64,
     {
         self.enter_pause(ticket, FailurePhase::Before).await;
+        if let Some(rejection) = self.take_rejected_put(ticket, FailurePhase::Before) {
+            self.finish(ticket, path, 0, RequestOutcome::InjectedBefore);
+            return Err(Self::rejected_error(
+                ticket,
+                path,
+                FailurePhase::Before,
+                rejection,
+            ));
+        }
         if self.take_failure(ticket, FailurePhase::Before) {
             self.finish(ticket, path, 0, RequestOutcome::InjectedBefore);
             return Err(Self::injected_error(ticket, FailurePhase::Before, path));
         }
 
         let fail_after = self.take_failure(ticket, FailurePhase::After);
-        let rejected_put = self.take_rejected_put(ticket);
+        let rejected_put = self.take_rejected_put(ticket, FailurePhase::After);
         let result = request().await;
         if result.is_ok() {
             self.enter_pause(ticket, FailurePhase::After).await;
@@ -527,7 +551,12 @@ impl FaultStore {
                 };
                 self.finish(ticket, path, downloaded_bytes, outcome);
                 if let Some(rejection) = rejected_put {
-                    Err(Self::rejected_error(ticket, path, rejection))
+                    Err(Self::rejected_error(
+                        ticket,
+                        path,
+                        FailurePhase::After,
+                        rejection,
+                    ))
                 } else if fail_after {
                     Err(Self::injected_error(ticket, FailurePhase::After, path))
                 } else {
@@ -606,11 +635,16 @@ impl FaultStore {
         }
     }
 
-    fn rejected_error(ticket: RequestTicket, path: &Path, rejection: PutRejection) -> Error {
+    fn rejected_error(
+        ticket: RequestTicket,
+        path: &Path,
+        phase: FailurePhase,
+        rejection: PutRejection,
+    ) -> Error {
         let source: Box<dyn StdError + Send + Sync> = Box::new(InjectedFailure {
             operation: ticket.operation,
             occurrence: ticket.occurrence,
-            phase: FailurePhase::After,
+            phase,
             path: path.to_string(),
         });
         match rejection {
