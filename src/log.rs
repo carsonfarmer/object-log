@@ -233,7 +233,10 @@ const MAX_HEAD_PUBLICATION_ATTEMPTS: usize = 16;
 
 enum HeadPublication {
     Updated(View),
-    Changed(View),
+    Changed {
+        current: View,
+        attempted_generation: u64,
+    },
     Contended(View),
     Pending,
 }
@@ -1245,7 +1248,7 @@ impl Log {
                 token: None,
             })),
             HeadPublication::Contended(current) => Ok(CommitStatus::Conflict(current)),
-            HeadPublication::Changed(current) => {
+            HeadPublication::Changed { current, .. } => {
                 let pending = PendingCommit {
                     prepared: Some(Box::new(prepared)),
                     commit_ref,
@@ -1353,7 +1356,7 @@ impl Log {
             }
             Ok(HeadPublication::Contended(current)) => Ok(Resolution::NotCommitted(current)),
             Err(error) => Err(error),
-            Ok(HeadPublication::Changed(current)) => {
+            Ok(HeadPublication::Changed { current, .. }) => {
                 Self::classify_resolution(&pending.commit_ref, current)
             }
         }
@@ -1674,13 +1677,14 @@ impl Log {
                 }
                 Ok(CheckpointStatus::Published(next))
             }
-            HeadPublication::Changed(current) => {
-                match Self::classify_checkpoint(&pending, current)? {
-                    CheckpointEvidence::Published(view) => Ok(CheckpointStatus::Published(view)),
-                    CheckpointEvidence::NotPublished(view) => Ok(CheckpointStatus::Conflict(view)),
-                    CheckpointEvidence::Expired(_) => Ok(CheckpointStatus::Pending(pending)),
-                }
-            }
+            HeadPublication::Changed {
+                current,
+                attempted_generation,
+            } => match Self::classify_checkpoint(&pending, current, attempted_generation)? {
+                CheckpointEvidence::Published(view) => Ok(CheckpointStatus::Published(view)),
+                CheckpointEvidence::NotPublished(view) => Ok(CheckpointStatus::Conflict(view)),
+                CheckpointEvidence::Expired(_) => Ok(CheckpointStatus::Pending(pending)),
+            },
             HeadPublication::Contended(current) => Ok(CheckpointStatus::Conflict(current)),
             HeadPublication::Pending => Ok(CheckpointStatus::Pending(pending)),
         }
@@ -1721,7 +1725,7 @@ impl Log {
         };
         let Some(publication_view) = Self::checkpoint_publication_view(&pending.view, &current)?
         else {
-            match Self::classify_checkpoint(&pending, current)? {
+            match Self::classify_checkpoint(&pending, current, pending.view.generation())? {
                 CheckpointEvidence::Published(view) => {
                     if self.proof_matches(&pending.staging_domain) {
                         return Ok(CheckpointResolution::Published(view));
@@ -1772,17 +1776,16 @@ impl Log {
                 Ok(CheckpointResolution::NotPublished(current))
             }
             Err(error) => Err(error),
-            Ok(HeadPublication::Changed(current)) => {
-                match Self::classify_checkpoint(&pending, current)? {
-                    CheckpointEvidence::Published(view) => {
-                        Ok(CheckpointResolution::Published(view))
-                    }
-                    CheckpointEvidence::NotPublished(view) => {
-                        Ok(CheckpointResolution::NotPublished(view))
-                    }
-                    CheckpointEvidence::Expired(view) => Ok(CheckpointResolution::Expired(view)),
+            Ok(HeadPublication::Changed {
+                current,
+                attempted_generation,
+            }) => match Self::classify_checkpoint(&pending, current, attempted_generation)? {
+                CheckpointEvidence::Published(view) => Ok(CheckpointResolution::Published(view)),
+                CheckpointEvidence::NotPublished(view) => {
+                    Ok(CheckpointResolution::NotPublished(view))
                 }
-            }
+                CheckpointEvidence::Expired(view) => Ok(CheckpointResolution::Expired(view)),
+            },
         }
     }
 
@@ -2133,7 +2136,10 @@ impl Log {
                         Err(error) => return Err(error),
                     };
                     if !compatible(source.head(), current.head()) {
-                        return Ok(HeadPublication::Changed(current));
+                        return Ok(HeadPublication::Changed {
+                            current,
+                            attempted_generation: view.generation(),
+                        });
                     }
                     if current.head() == view.head()
                         && current.storage_version() == view.storage_version()
@@ -2262,14 +2268,12 @@ impl Log {
     fn classify_checkpoint(
         pending: &PendingCheckpoint,
         current: View,
+        attempted_generation: u64,
     ) -> Result<CheckpointEvidence, Error> {
         if current.checkpoint() == Some(&pending.checkpoint) {
             return Ok(CheckpointEvidence::Published(current));
         }
-        let next_generation = pending
-            .view
-            .head()
-            .generation
+        let next_generation = attempted_generation
             .checked_add(1)
             .ok_or(Error::LimitExceeded("head generation"))?;
         match current.generation().cmp(&next_generation) {

@@ -205,6 +205,54 @@ async fn checkpoint_cas_racing_appends_keeps_the_new_suffix() -> TestResult {
 
 #[tokio::test]
 #[cfg(feature = "test-util")]
+async fn checkpoint_retry_losing_to_another_checkpoint_reports_conflict() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let backend: Arc<dyn ObjectStore> = Arc::new(faults.clone());
+    let first = open(
+        Arc::clone(&backend),
+        "checkpoint-retry-race",
+        Options::default(),
+    )
+    .await?;
+    let second = open(backend, "checkpoint-retry-race", Options::default()).await?;
+    let one = append(&first, &first.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    let two = append(&second, &one, b"two").await?;
+
+    faults.reset();
+    // Immutable checkpoint, rejected head update against `one`, retry against `two`.
+    let mut pause = faults.pause_put_at(3, FailurePhase::Before);
+    let checkpoint = tokio::spawn(async move {
+        first
+            .publish_checkpoint(&one, &through, Bytes::from_static(b"first"), Vec::new())
+            .await
+    });
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            pause.wait_until_entered()
+        )
+        .await?
+    );
+    let through = two.tail()[0].clone();
+    let CheckpointStatus::Published(winner) = second
+        .publish_checkpoint(&two, &through, Bytes::from_static(b"second"), Vec::new())
+        .await?
+    else {
+        return Err("competing checkpoint did not publish".into());
+    };
+    assert!(pause.release());
+
+    let CheckpointStatus::Conflict(current) = checkpoint.await?? else {
+        return Err("definitely rejected checkpoint was reported as pending".into());
+    };
+    assert_eq!(current.checkpoint(), winner.checkpoint());
+    assert_eq!(current.generation(), winner.generation());
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "test-util")]
 async fn checkpoint_cas_does_not_cross_a_collection_epoch() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let backend: Arc<dyn ObjectStore> = Arc::new(faults.clone());
@@ -722,6 +770,61 @@ async fn reopened_pending_checkpoint_retries_after_an_append() -> TestResult {
         Some(through.digest())
     );
     assert_eq!(published.tail(), &appended.tail()[1..]);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "test-util")]
+async fn pending_checkpoint_retry_losing_to_checkpoint_is_not_published() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let backend: Arc<dyn ObjectStore> = Arc::new(faults.clone());
+    let first = open(
+        Arc::clone(&backend),
+        "pending-checkpoint-retry-race",
+        Options::default(),
+    )
+    .await?;
+    let second = open(backend, "pending-checkpoint-retry-race", Options::default()).await?;
+    let one = append(&first, &first.load().await?, b"one").await?;
+    let through = one.tail()[0].clone();
+    faults.reset();
+    faults.schedule(Failure {
+        operation: Operation::Put,
+        occurrence: 2,
+        phase: FailurePhase::Before,
+    });
+    let CheckpointStatus::Pending(pending) = first
+        .publish_checkpoint(&one, &through, Bytes::from_static(b"first"), Vec::new())
+        .await?
+    else {
+        return Err("failed checkpoint update was not pending".into());
+    };
+    let two = append(&second, &one, b"two").await?;
+
+    faults.reset();
+    let mut pause = faults.pause_put_at(1, FailurePhase::Before);
+    let resolution = tokio::spawn(async move { first.resolve_checkpoint(pending).await });
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            pause.wait_until_entered()
+        )
+        .await?
+    );
+    let through = two.tail()[0].clone();
+    let CheckpointStatus::Published(winner) = second
+        .publish_checkpoint(&two, &through, Bytes::from_static(b"second"), Vec::new())
+        .await?
+    else {
+        return Err("competing checkpoint did not publish".into());
+    };
+    assert!(pause.release());
+
+    let CheckpointResolution::NotPublished(current) = resolution.await?? else {
+        return Err("definitely rejected retry was reported as expired".into());
+    };
+    assert_eq!(current.checkpoint(), winner.checkpoint());
+    assert_eq!(current.generation(), winner.generation());
     Ok(())
 }
 
