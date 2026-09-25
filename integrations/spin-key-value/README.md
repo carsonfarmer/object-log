@@ -149,13 +149,16 @@ only S3 and the same configuration.
 - A confirmed conflict waits for a small randomized, bounded delay, then
   revalidates against a fresh snapshot within the attempt budget. This keeps
   equal-latency writers from repeatedly colliding in lockstep. An uncertain
-  publication resolves the exact candidate. It is never
-  replayed with a new transaction identity. Unresolved or expired mutation
-  outcomes become `Error::Other` with an explicit **outcome unknown** message.
+  publication resolves the exact candidate with bounded backoff between
+  pending checks. It is never replayed with a new transaction identity.
+  Unresolved or expired mutation outcomes become `Error::Other` with an
+  explicit **outcome unknown** message.
 - Spin's guest interface has no pending token or request identity. Consequently
   this adapter cannot promise exactly-once retries after an unknown result,
   process loss, or lost response. Guests must reconcile their application state
-  instead of blindly repeating an increment. Durable KV data still recovers.
+  instead of blindly repeating an increment. A later no-op set observes current
+  state; it does not resolve an earlier uncertain mutation. Durable KV data
+  still recovers.
 - Admitted work runs in a Tokio task and keeps its permit after guest cancellation.
   Set/delete calls enter a bounded per-namespace queue. The manager admission
   or input allowance rejects overload immediately; work that has waited too long fails before it
@@ -226,9 +229,10 @@ to use. Reads retain their independent path.
 
 ## Maintenance and diagnostics
 
-Writes checkpoint automatically before the configured tail threshold. Physical
-collection is explicit host work through `Manager::maintain(label)`. The standard
-resolver exposes a concrete manager through `StoreManager::metadata`:
+Before a write, the provider checkpoints if the existing tail has reached the
+configured threshold. Physical collection is explicit host work through
+`Manager::maintain(label)`. The standard resolver exposes a concrete manager
+through `StoreManager::metadata`:
 
 ```rust
 use anyhow::Context;
@@ -313,14 +317,3 @@ writers, cold recovery, maintenance, and an explicitly configured value-size
 profile through 8 MiB. The second runs upstream's unchanged Spin guest against
 the same native S3 provider when those variables are present. Neither command
 runs without the explicit ignored-test or remote configuration opt-in.
-
-Commit `a1d4568` was qualified on 2026-09-22 from a same-region `t3.xlarge`
-Amazon Linux 2023 runner in `us-west-2`. The default and explicit 8 MiB native
-profiles passed. The large profile admitted two simultaneous 8 MiB writes to
-independent logical stores and immediately rejected a third through the shared
-manager limit. The original 8 MiB point profile survived a cold reopen and
-collection. The two native test cases ran in parallel and the combined process
-peaked at 155 MiB RSS. The pinned, unmodified Spin guest also passed through the
-S3-backed provider and peaked at 155 MiB in its separately timed process. These
-are qualification figures for this host and test mix, not a runtime-wide memory
-limit.

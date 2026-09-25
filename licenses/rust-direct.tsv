@@ -19,7 +19,6 @@ serde	1.0.229	Apache-2.0 OR MIT
 sha2	0.10.9	Apache-2.0 OR MIT
 spin-app	4.1.0	Apache-2.0 WITH LLVM-exception
 spin-core	4.1.0	Apache-2.0 WITH LLVM-exception
-spin-executor	5.2.0	Apache-2.0 WITH LLVM-exception
 spin-factor-key-value	4.1.0	Apache-2.0 WITH LLVM-exception
 spin-factor-outbound-http	4.1.0	Apache-2.0 WITH LLVM-exception
 spin-factor-outbound-networking	4.1.0	Apache-2.0 WITH LLVM-exception

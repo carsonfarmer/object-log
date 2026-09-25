@@ -167,7 +167,8 @@ impl KvStore {
     /// Load one exact snapshot without reading its tree.
     ///
     /// # Errors
-    /// Returns WAL errors or an incompatible KV operation/checkpoint format.
+    /// Returns WAL errors or an incompatible KV format. With a nonempty tail,
+    /// only its latest operation is decoded; otherwise the checkpoint is decoded.
     pub async fn snapshot(&self) -> Result<KvSnapshot, KvError> {
         let view = self.log.load().await?;
         let root = if let Some(index) = view.tail().len().checked_sub(1) {

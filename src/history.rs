@@ -1,4 +1,4 @@
-//! Typed recovery of state from one durable base and ordered WAL tail.
+//! Authenticated recovery from one durable base and ordered WAL tail.
 
 use crate::{CheckpointRecord, CommitRecord, Error, Log, ObjectRef, StagedObject, View};
 

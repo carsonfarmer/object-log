@@ -50,7 +50,9 @@ returns false. Read from the same snapshot before preparing when the application
 needs the previous value. A mismatched CAS returns false and changes nothing for
 that command. Other batch commands still execute. Invalid integers, overflow, or
 limits abort the entire preparation.
-Even a no-op batch records durable results when committed.
+`prepare` records results for every committed batch, including a no-op batch.
+Use `prepare_if_changed` when those results are unnecessary: it returns `None`
+and uses no WAL tail slot if no command changes a value in the snapshot.
 
 ## Operating a small-record store
 
@@ -139,7 +141,7 @@ when preparation returns.
 
 This is not a process-memory or allocator quota. Input `Bytes` backing belongs to
 the caller and can retain a larger allocation than the admitted slice. WAL view,
-decode, head, materialization, and collection buffers; provider and error bodies;
+decode, head, checkpoint, and collection buffers; provider and error bodies;
 the async runtime; allocator slack; and returned values retained by the caller
 are separate. Concurrent calls multiply their respective envelopes. Whole-process
 RSS therefore corroborates the selected deployment profile but does not prove
@@ -163,7 +165,8 @@ event recording. These measurements are local in-memory results, not S3 latency.
 
 Run memory and filesystem capability checks before the provider tests. The
 filesystem backend is expected to reject conditional updates. From the repository
-root (Docker, AWS CLI, and curl installed; `ps` is optional for RSS reporting):
+root (Docker, AWS CLI, Python 3, and curl installed; `ps` is optional for RSS
+reporting):
 
 ```sh
 cargo test --workspace --all-features

@@ -128,6 +128,8 @@ head-write permission even when Git pushes are disabled.
 their complete ordered references. It does not fetch referenced payloads or
 nodes. An adapter reads only the objects that it needs. The `history` cursor
 returns the authenticated checkpoint and commits in order for state recovery.
+`tail_record` reads one authenticated active-tail commit and its publication
+proofs without reading or certifying the rest of the history.
 
 `refresh` uses a conditional read. An unchanged index returns `None`. A changed
 index returns `Some(View)`. The caller then reads the base and active tail that
@@ -234,11 +236,14 @@ base checkpoint, removes the covered tail prefix, preserves the suffix,
 preserves the resolution window, and increments the generation.
 
 A rejected conditional update is classified against the readable head; a failed
-classification remains pending. Retention-only contention retries up to 16
-times, then returns `Conflict`. An uncertain update returns a
+classification remains pending. Publication retries up to 16 times if the
+original tail is an exact prefix of the current tail and the checkpoint,
+recent outcomes, collection epoch, and active plan are unchanged. This permits
+concurrent appends and retention changes while preserving the exact covered
+prefix. Exhausted contention returns `Conflict`. An uncertain update returns a
 `PendingCheckpoint`. `resolve_checkpoint` preserves the exact original
-checkpoint and source view; it can reconcile reader-retention-only head
-revisions. Other later head movement can make the outcome `Expired`.
+checkpoint and source view and can make the same compatible retry. Other later
+head movement can make the outcome `Expired`.
 
 The core treats snapshot and node payload bytes as opaque. The adapter must put
 every durable dependency in the checkpoint roots or a reference-node edge.
@@ -300,23 +305,33 @@ when storage failures or concurrent head updates occur.
 The plan object is not in its positive set. After a rejected fence update,
 the library reloads the head before cleanup: a matching active plan means the
 update succeeded. A head that does not name the plan permits cleanup. The
-library also cleans up after a successful clear. A later collection can
-remove the plan if that cleanup fails.
+library also cleans up after a successful clear. The clear can return `Conflict`
+after 16 lost updates if other writers change the head faster than one
+conditional-update round trip. The plan stays active for a later retry. A later
+collection can remove the plan if cleanup fails.
+
+One `View` caches the authenticated deletion candidates after its first plan
+read. Repeated publications from that view reuse them; a new view reads and
+authenticates its plan independently.
 
 A retention ID protects the full log namespace and has no automatic expiry.
 Any retention blocks plan installation. An active plan blocks a new retention.
 A caller reuses one ID only to resolve an uncertain retention update. It uses a
 new ID after a confirmed release.
+Retention acquisition retries against newer heads while the ID is still absent,
+even if unrelated commits or checkpoints arrived. It conflicts if the collection
+epoch advanced. Release and drained recovery clear do not retry automatically.
 If a stopped process loses an ID, `clear_retentions_after_drain` can clear all
 retentions through the same head CAS. The caller must first stop new acquisition
 and drain every reader. Normal collection never performs this recovery because
 clearing a live reader would be unsafe.
 
 Retention bookkeeping does not change an application's publication base. A
-commit or checkpoint whose conditional head update meets only newer retention
-revisions retries against those revisions while preserving its original
-operation and recovery evidence. A log, checkpoint, or collection change still
-produces the ordinary conflict result.
+commit whose conditional head update meets only newer retention revisions
+retries while preserving its original operation and recovery evidence.
+Checkpoint publication can also reconcile an appended tail suffix under the
+conditions above. Changes outside those conditions produce the ordinary
+conflict or pending result.
 
 Object, node, tail, and checkpoint reads take a `View`. A missing object from a
 view in an older collection epoch returns `ViewExpired`. A missing object from

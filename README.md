@@ -253,8 +253,9 @@ formats are intentionally absent. A tagged durable-format release will require a
 new format version for incompatible changes.
 
 The crate forbids unsafe Rust and denies missing public documentation. CI runs
-`make check` and the Spin key-value provider checks. `make check` covers native
-tests and strict linting, including a `WASIp2` type-check. The API examples are
+`make check`, the composed WASI credential tests, and the Spin key-value provider
+checks. `make check` covers native tests and strict linting, including a `WASIp2`
+type-check. The API examples are
 `no_run` doctests: compiled but not executed. The local `MinIO` and
 large-collection suites are opt-in. Qualify your object-store provider, limits,
 and maintenance schedule with your own workload before deploying.

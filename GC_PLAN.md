@@ -22,8 +22,9 @@ future changes must preserve; executable tests are the acceptance record.
    from one view before installing a plan.
 3. Any reader retention blocks plan installation. An active plan blocks new
    retentions.
-4. Publication preserves the active plan and rejects direct or transitive
-   references to its deletion set.
+4. Publication preserves the active plan. Same-handle staged proofs are fenced
+   by collection epoch; imported references are fully checked against the
+   plan's deletion set, as is each new commit key.
 5. Deletion is repeatable. A failed or cancelled attempt leaves the exact plan
    active, and the next attempt submits its complete set again.
 6. The head clears the exact plan only after all deletion submissions have a

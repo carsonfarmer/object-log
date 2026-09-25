@@ -75,7 +75,7 @@ The upstream-go-git service passes local MinIO tests and the full provider suite
 against public EC2 HTTPS with S3. Real Cognito login, helper refresh, repository
 permissions, role replacement, process/host recovery and configuration-only
 repository addition have passed. All five live core S3 tests also pass.
-The remote long-history and concurrent large-object gates have passed. Service
+The remote long-history and concurrent large-object workloads have passed. Service
 readiness checks, independent review and verified teardown are complete.
 
 ## Dependency policy
@@ -196,8 +196,8 @@ original delegation restored. Issue #45 records completion.
 
 Every tranche gets focused tests and independent correctness/simplification
 review before root integration. Keep existing native, WASIp2, memory, filesystem,
-MinIO, recovery and collection gates. Complete #6 measurements using existing
-benchmarks. Re-run affected remote gates after behavioral changes during
+MinIO, recovery and collection checks. Complete #6 measurements using existing
+benchmarks. Re-run affected remote suites after behavioral changes during
 qualification.
 
 Update public setup instructions from a clean checkout and have a reviewer

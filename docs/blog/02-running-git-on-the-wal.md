@@ -73,8 +73,10 @@ small as Git's repacking machinery would produce.
 ## Run it on a laptop
 
 The local setup needs Git, Go 1.27.1, the repository's pinned Rust toolchain,
-Spin 4, `wac`, MinIO, and MinIO's `mc` client. It uses MinIO for storage and
-Spin for HTTP. No cloud account is needed.
+Spin 4.1.0, `wac` 0.11.0, a MinIO binary, the AWS CLI, `jq`, Python 3, and
+`curl`. The [contributor guide](../../CONTRIBUTING.md) covers setup, including
+a MinIO build from pinned source. MinIO supplies storage; Spin serves HTTP.
+No cloud account is needed.
 
 From the repository root, build the component:
 
@@ -93,20 +95,19 @@ In one terminal, start an isolated local object store:
 ```sh
 minio_data="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-minio.XXXXXX")"
 echo "MinIO data: $minio_data"
+minio_binary="${OBJECT_LOG_MINIO_BINARY:-$(go env GOPATH)/bin/minio}"
 MINIO_ROOT_USER=objectlog MINIO_ROOT_PASSWORD=local-test-secret \
-  minio server "$minio_data" --address 127.0.0.1:19090
+  "$minio_binary" server "$minio_data" --address 127.0.0.1:19090
 ```
 
 In a second terminal, start from the repository root and create a bucket and
 the service configuration. These credentials are disposable local examples.
-The temporary `mc` configuration keeps them separate from any existing MinIO
-setup.
 
 ```sh
 local_config="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-config.XXXXXX")"
-mc --config-dir "$local_config/mc" alias set local-git \
-  http://127.0.0.1:19090 objectlog local-test-secret
-mc --config-dir "$local_config/mc" mb local-git/wal-proof
+AWS_ACCESS_KEY_ID=objectlog AWS_SECRET_ACCESS_KEY=local-test-secret \
+  AWS_DEFAULT_REGION=us-east-1 aws --endpoint-url http://127.0.0.1:19090 \
+  s3api create-bucket --bucket wal-proof
 test_id="local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 (
   umask 077
@@ -128,7 +129,8 @@ With Spin running, validate the storage settings from another terminal before
 sending Git traffic:
 
 ```sh
-curl --fail-with-body -X POST http://127.0.0.1:19100/_validate_backend
+curl --fail-with-body -u git:local-git-password \
+  -X POST http://127.0.0.1:19100/_validate_backend
 ```
 
 The default configuration exposes

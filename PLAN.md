@@ -11,9 +11,9 @@ The Git service is the primary proof: unchanged Git clients exercise the WAL
 through an established Git implementation. The key-value consumer uses sparse
 radix-tree paths and the same recovery and collection contract. Its bounded
 small-record profile and local growth, contention and recovery qualification
-are in #39. Quantified working-memory bounds remain in #49 and batch I/O reuse
-in #50; remote hosting and
-large-value streaming are separate from that initial library delivery.
+are in #39. Working-memory bounds (#49) and batch I/O reuse (#50) are complete;
+remote hosting and large-value streaming are separate from that initial library
+delivery.
 
 ## Authority and storage
 

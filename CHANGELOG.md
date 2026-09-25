@@ -9,3 +9,8 @@ may change without compatibility readers.
 - Added the initial generic object-storage WAL, recovery, checkpoints,
   retention, and bounded collection.
 - Added and qualified the go-git smart-HTTP example for SHA-1 and SHA-256.
+- Replaced `Materializer`, `Materialized`, `MaterializeError`, `materialize`, and
+  `Log::materialization_read_bound` with the authenticated `history` cursor and
+  single-record `tail_record` read. Added `inspect_recovery_token` for recorded
+  result bytes. Recovery tokens from earlier pre-release revisions are
+  incompatible and currently fail with `digest has an invalid length`.
