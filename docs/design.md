@@ -280,9 +280,11 @@ the same already deleted prefix indefinitely. Choose new plan sizes that fit
 the caller's full execution budget; reserve additional capacity for retries
 when storage failures or concurrent head updates occur.
 
-The plan object is not in its positive set. After a definite rejected fence
-CAS or a successful clear, the library deletes the plan object on a
-best-effort basis. A later collection can remove it if that cleanup fails.
+The plan object is not in its positive set. After a rejected fence update,
+the library reloads the head before cleanup: a matching active plan means the
+update succeeded. A head that does not name the plan permits cleanup. The
+library also cleans up after a successful clear. A later collection can
+remove the plan if that cleanup fails.
 
 A retention ID protects the full log namespace and has no automatic expiry.
 Any retention blocks plan installation. An active plan blocks a new retention.

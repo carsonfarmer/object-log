@@ -715,7 +715,7 @@ impl Log {
         let mut candidate = view.head().clone();
         candidate.advance_generation()?;
         candidate.collection_epoch = epoch;
-        candidate.active_plan = Some(plan_ref);
+        candidate.active_plan = Some(plan_ref.clone());
         let bytes = format::encode_head(&candidate)?;
         self.validate_encoded_head(&bytes)?;
         match self
@@ -727,14 +727,17 @@ impl Log {
                 Self::view(candidate, version),
                 report,
             )),
-            Ok(None) => {
-                self.cleanup_collection_plan(plan_key).await?;
-                match self.load().await {
-                    Ok(current) => Ok(CollectionStart::Conflict(current)),
-                    Err(Error::Store(_) | Error::RequestDenied) => Ok(CollectionStart::Pending),
-                    Err(error) => Err(error),
+            Ok(None) => match self.load().await {
+                Ok(current) if current.head().active_plan.as_ref() == Some(&plan_ref) => {
+                    Ok(CollectionStart::Installed(current, report))
                 }
-            }
+                Ok(current) => {
+                    self.cleanup_collection_plan(plan_key).await?;
+                    Ok(CollectionStart::Conflict(current))
+                }
+                Err(Error::Store(_) | Error::RequestDenied) => Ok(CollectionStart::Pending),
+                Err(error) => Err(error),
+            },
             Err(Error::Store(_)) => Ok(CollectionStart::Pending),
             Err(error) => Err(error),
         }
