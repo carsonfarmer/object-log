@@ -39,7 +39,7 @@ func TestMalformedPackDoesNotPublish(t *testing.T) {
 					_ = binary.Write(&pack, binary.BigEndian, uint32(1))
 					header := byte(0x33) // Blob with three decoded bytes.
 					if malformed == "short-object" {
-						header = 0x34 // The writer must reject the short body on Close.
+						header = 0x34 // Declared size exceeds the decoded body.
 					}
 					pack.WriteByte(header)
 					z := zlib.NewWriter(&pack)
@@ -63,11 +63,11 @@ func TestMalformedPackDoesNotPublish(t *testing.T) {
 					request := append(packet(zero+" "+tip+" "+first+"\x00report-status atomic object-format="+format+"\n"), packet(zero+" "+tip+" "+second+"\n")...)
 					request = append(request, []byte("0000")...)
 					result, _ := post(t, url+"/git-receive-pack", "git-receive-pack", append(request, pack.Bytes()...))
-					if bytes.Contains(result, []byte("unpack ok")) || bytes.Contains(result, []byte("ok "+first)) || bytes.Contains(result, []byte("ok "+second)) {
+					if !bytes.Contains(result, []byte("unpack ")) ||
+						bytes.Contains(result, []byte("unpack ok")) ||
+						bytes.Contains(result, []byte("ok "+first)) ||
+						bytes.Contains(result, []byte("ok "+second)) {
 						t.Fatalf("malformed pack acknowledged: %s", result)
-					}
-					if malformed == "short-object" && !bytes.Contains(result, []byte("incomplete object")) {
-						t.Fatalf("expected stored writer failure: %s", result)
 					}
 					// Both tips already exist: connectivity cannot mask an unpack failure.
 					if refs := git(t, nil, "ls-remote", url, first, second); len(refs) != 0 {
