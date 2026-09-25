@@ -227,7 +227,6 @@ enum CheckpointEvidence {
     Published(View),
     NotPublished(View),
     Expired(View),
-    Retry,
 }
 
 const MAX_HEAD_PUBLICATION_ATTEMPTS: usize = 16;
@@ -1251,10 +1250,10 @@ impl Log {
                     commit_ref,
                 };
                 match Self::classify_resolution(&pending, current)? {
-                    Some(Resolution::Committed(view)) => Ok(CommitStatus::Committed(view)),
-                    Some(Resolution::NotCommitted(view)) => Ok(CommitStatus::Conflict(view)),
-                    Some(Resolution::Expired(_)) | None => Ok(CommitStatus::Pending(pending)),
-                    Some(Resolution::StillPending(_)) => Err(Error::InvalidFormat(
+                    Resolution::Committed(view) => Ok(CommitStatus::Committed(view)),
+                    Resolution::NotCommitted(view) => Ok(CommitStatus::Conflict(view)),
+                    Resolution::Expired(_) => Ok(CommitStatus::Pending(pending)),
+                    Resolution::StillPending(_) => Err(Error::InvalidFormat(
                         "an in-memory classification returned pending evidence".to_owned(),
                     )),
                 }
@@ -1283,11 +1282,10 @@ impl Log {
             Err(error) => return Err(error),
         };
 
-        let publication_view = if let Some(current) =
+        let Some(publication_view) =
             Self::retention_publication_view(&pending.prepared.view, &current)?
-        {
-            current
-        } else if let Some(resolution) = Self::classify_resolution(&pending, current)? {
+        else {
+            let resolution = Self::classify_resolution(&pending, current)?;
             if let Resolution::Committed(view) = &resolution
                 && Self::tail_contains(view, &pending.commit_ref)
                 && !self.proof_matches(&pending.prepared.staging_domain)
@@ -1301,8 +1299,6 @@ impl Log {
                 }
             }
             return Ok(resolution);
-        } else {
-            pending.prepared.view.clone()
         };
 
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
@@ -1346,10 +1342,7 @@ impl Log {
             }
             Ok(HeadPublication::Contended(current)) => Ok(Resolution::NotCommitted(current)),
             Err(error) => Err(error),
-            Ok(HeadPublication::Changed(current)) => {
-                Ok(Self::classify_resolution(&pending, current)?
-                    .unwrap_or(Resolution::StillPending(pending)))
-            }
+            Ok(HeadPublication::Changed(current)) => Self::classify_resolution(&pending, current),
         }
     }
 
@@ -1604,9 +1597,7 @@ impl Log {
                 match Self::classify_checkpoint(&pending, current)? {
                     CheckpointEvidence::Published(view) => Ok(CheckpointStatus::Published(view)),
                     CheckpointEvidence::NotPublished(view) => Ok(CheckpointStatus::Conflict(view)),
-                    CheckpointEvidence::Expired(_) | CheckpointEvidence::Retry => {
-                        Ok(CheckpointStatus::Pending(pending))
-                    }
+                    CheckpointEvidence::Expired(_) => Ok(CheckpointStatus::Pending(pending)),
                 }
             }
             HeadPublication::Contended(current) => Ok(CheckpointStatus::Conflict(current)),
@@ -1647,32 +1638,29 @@ impl Log {
             }
             Err(error) => return Err(error),
         };
-        let publication_view =
-            if let Some(current) = Self::checkpoint_publication_view(&pending.view, &current)? {
-                current
-            } else {
-                match Self::classify_checkpoint(&pending, current)? {
-                    CheckpointEvidence::Published(view) => {
-                        if self.proof_matches(&pending.staging_domain) {
-                            return Ok(CheckpointResolution::Published(view));
+        let Some(publication_view) = Self::checkpoint_publication_view(&pending.view, &current)?
+        else {
+            match Self::classify_checkpoint(&pending, current)? {
+                CheckpointEvidence::Published(view) => {
+                    if self.proof_matches(&pending.staging_domain) {
+                        return Ok(CheckpointResolution::Published(view));
+                    }
+                    return match self.verify_checkpoint(&pending.checkpoint).await {
+                        Ok(()) => Ok(CheckpointResolution::Published(view)),
+                        Err(Error::Store(_) | Error::RequestDenied) => {
+                            Ok(CheckpointResolution::StillPending(pending))
                         }
-                        return match self.verify_checkpoint(&pending.checkpoint).await {
-                            Ok(()) => Ok(CheckpointResolution::Published(view)),
-                            Err(Error::Store(_) | Error::RequestDenied) => {
-                                Ok(CheckpointResolution::StillPending(pending))
-                            }
-                            Err(error) => Err(error),
-                        };
-                    }
-                    CheckpointEvidence::NotPublished(view) => {
-                        return Ok(CheckpointResolution::NotPublished(view));
-                    }
-                    CheckpointEvidence::Expired(view) => {
-                        return Ok(CheckpointResolution::Expired(view));
-                    }
-                    CheckpointEvidence::Retry => pending.view.clone(),
+                        Err(error) => Err(error),
+                    };
                 }
-            };
+                CheckpointEvidence::NotPublished(view) => {
+                    return Ok(CheckpointResolution::NotPublished(view));
+                }
+                CheckpointEvidence::Expired(view) => {
+                    return Ok(CheckpointResolution::Expired(view));
+                }
+            }
+        };
 
         match self.verify_tail(&pending.view).await {
             Ok(()) => {}
@@ -1712,7 +1700,6 @@ impl Log {
                         Ok(CheckpointResolution::NotPublished(view))
                     }
                     CheckpointEvidence::Expired(view) => Ok(CheckpointResolution::Expired(view)),
-                    CheckpointEvidence::Retry => Ok(CheckpointResolution::StillPending(pending)),
                 }
             }
         }
@@ -2153,14 +2140,11 @@ impl Log {
         Ok(head)
     }
 
-    fn classify_resolution(
-        pending: &PendingCommit,
-        current: View,
-    ) -> Result<Option<Resolution>, Error> {
+    fn classify_resolution(pending: &PendingCommit, current: View) -> Result<Resolution, Error> {
         let target = &pending.commit_ref;
         let head = current.head();
         if Self::contains_commit(&current, target) {
-            return Ok(Some(Resolution::Committed(current)));
+            return Ok(Resolution::Committed(current));
         }
 
         if head.next_sequence > target.sequence {
@@ -2170,9 +2154,9 @@ impl Log {
                 .chain(&head.recent_outcomes)
                 .any(|entry| entry.sequence == target.sequence);
             if exact_sequence_is_retained {
-                return Ok(Some(Resolution::NotCommitted(current)));
+                return Ok(Resolution::NotCommitted(current));
             }
-            return Ok(Some(Resolution::Expired(current)));
+            return Ok(Resolution::Expired(current));
         }
         if head.next_sequence < target.sequence {
             return Err(Error::InvalidFormat(
@@ -2180,11 +2164,7 @@ impl Log {
             ));
         }
 
-        let source = &pending.prepared.view;
-        if head == source.head() && current.storage_version() == source.storage_version() {
-            return Ok(None);
-        }
-        Ok(Some(Resolution::NotCommitted(current)))
+        Ok(Resolution::NotCommitted(current))
     }
 
     fn contains_commit(view: &View, target: &CommitRef) -> bool {
@@ -2205,11 +2185,6 @@ impl Log {
     ) -> Result<CheckpointEvidence, Error> {
         if current.checkpoint() == Some(&pending.checkpoint) {
             return Ok(CheckpointEvidence::Published(current));
-        }
-        if current.head() == pending.view.head()
-            && current.storage_version() == pending.view.storage_version()
-        {
-            return Ok(CheckpointEvidence::Retry);
         }
         let next_generation = pending
             .view
