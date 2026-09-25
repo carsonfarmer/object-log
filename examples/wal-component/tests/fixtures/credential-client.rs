@@ -27,10 +27,10 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
         secret_key: String::new(),
         session_token: None,
         prefix: "credentials".into(),
-        log_id: if path == "/missing" {
-            "missing"
-        } else {
-            "existing"
+        log_id: match path {
+            "/missing" => "missing",
+            "/lost-head" => "lost-head",
+            _ => "existing",
         }
         .into(),
         log_limits: wal::LogLimits {
@@ -58,10 +58,20 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             assert!(!session.has_active_collection());
             let recovery = session.recover()?;
             assert!(recovery.next()?.is_none());
+            let candidate = recovery.prepare(&[7; 16], b"operation", b"result", &[])?;
+            assert!(matches!(candidate.publish()?, wal::Outcome::Committed));
         }
         "/existing" => {
             let session = wal::open_existing(&settings)?;
             assert!(!session.has_active_collection());
+            let recovery = session.recover()?;
+            let Some(wal::HistoryItem::Commit(commit)) = recovery.next()? else {
+                panic!("open-existing did not load the published commit")
+            };
+            assert_eq!(commit.transaction_id, vec![7; 16]);
+            assert_eq!(commit.operation, b"operation");
+            assert_eq!(commit.recorded_result, b"result");
+            assert!(recovery.next()?.is_none());
         }
         "/missing" => {
             assert!(matches!(
@@ -74,6 +84,13 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
                 Err(wal::Failure::Missing)
             ));
         }
+        "/mismatched-options" => {
+            settings.log_limits.max_tail_entries += 1;
+            assert!(matches!(
+                wal::open_existing(&settings),
+                Err(wal::Failure::Other(_))
+            ));
+        }
         "/slow-metadata" => {
             for _ in 0..2 {
                 assert!(matches!(wal::open(&settings), Err(wal::Failure::Other(_))));
@@ -81,6 +98,10 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
         }
         "/unavailable" | "/renewal-unavailable" => {
             assert!(matches!(wal::open(&settings), Err(wal::Failure::Other(_))));
+        }
+        "/lost-head" => {
+            let session = wal::open(&settings)?;
+            assert!(session.recover()?.next()?.is_none());
         }
         _ => panic!("unknown fixture scenario"),
     }

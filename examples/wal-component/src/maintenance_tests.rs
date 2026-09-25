@@ -9,19 +9,19 @@ async fn session() -> SessionState {
     session_on(Arc::new(InMemory::new())).await
 }
 async fn session_on(store: Arc<dyn ObjectStore>) -> SessionState {
+    session_on_with_options(store, Options::default()).await
+}
+async fn session_on_with_options(
+    store: Arc<dyn ObjectStore>,
+    mut options: Options,
+) -> SessionState {
     let backend = object_log::ValidatedBackend::new(store, Path::from("maintenance-tests"))
         .await
         .unwrap();
-    let log = Log::open(
-        &backend,
-        &object_log::LogId::new("repo").unwrap(),
-        Options {
-            max_collection_objects: 4,
-            ..Options::default()
-        },
-    )
-    .await
-    .unwrap();
+    options.max_collection_objects = 4;
+    let log = Log::open(&backend, &object_log::LogId::new("repo").unwrap(), options)
+        .await
+        .unwrap();
     let view = log.load().await.unwrap();
     SessionState {
         log,
@@ -432,6 +432,88 @@ async fn pending_checkpoint_reports_a_definite_loser_once() {
     assert_eq!(
         GuestPendingCheckpoint::resolve(&pending).unwrap(),
         CheckpointResolution::NotPublished
+    );
+    assert!(pending.pending.borrow().is_none());
+    assert!(GuestPendingCheckpoint::resolve(&pending).is_err());
+}
+
+#[tokio::test]
+async fn resume_reports_expired_after_checkpoint_discards_commit_evidence() {
+    let s = session_on_with_options(
+        Arc::new(InMemory::new()),
+        Options {
+            resolution_window: 0,
+            ..Options::default()
+        },
+    )
+    .await;
+    let prepared = s
+        .log
+        .prepare(
+            &s.current_view(),
+            TransactionId::new(),
+            Bytes::from_static(b"old commit"),
+            Bytes::new(),
+            vec![],
+        )
+        .unwrap();
+    let token = prepared.recovery_token().unwrap().to_vec();
+    let CommitStatus::Committed(committed) = s.log.commit(prepared).await.unwrap() else {
+        panic!("commit did not publish")
+    };
+    assert!(matches!(
+        maintenance::checkpoint(&s.log, &committed, b"snapshot".to_vec(), vec![])
+            .await
+            .unwrap(),
+        CheckpointStatus::Published(_)
+    ));
+
+    assert_eq!(s.current_view().generation(), 0);
+    assert!(matches!(
+        GuestSession::resume(&s, token).unwrap(),
+        Resolution::Expired
+    ));
+    assert_eq!(s.current_view().generation(), 2);
+    assert!(s.current_view().checkpoint().is_some());
+    assert!(s.current_view().tail().is_empty());
+}
+
+#[tokio::test]
+async fn pending_checkpoint_reports_expired_after_head_advances_again() {
+    let faults = FaultStore::new(InMemory::new());
+    let mut s = session_on(Arc::new(faults.clone())).await;
+    append(&mut s, vec![]).await;
+    let view = s.current_view();
+    faults.reset();
+    faults.schedule(StoreFailure {
+        operation: Operation::Put,
+        occurrence: 2,
+        phase: FailurePhase::Before,
+    });
+    let CheckpointStatus::Pending(pending) =
+        maintenance::checkpoint(&s.log, &view, b"old snapshot".to_vec(), vec![])
+            .await
+            .unwrap()
+    else {
+        panic!("checkpoint did not retain pending evidence")
+    };
+    faults.reset();
+    assert!(matches!(
+        maintenance::checkpoint(&s.log, &view, b"replacement".to_vec(), vec![])
+            .await
+            .unwrap(),
+        CheckpointStatus::Published(_)
+    ));
+    s.view.replace(s.log.load().await.unwrap());
+    append(&mut s, vec![]).await;
+
+    let pending = PendingCheckpointState {
+        log: s.log.clone(),
+        pending: RefCell::new(Some(pending)),
+    };
+    assert_eq!(
+        GuestPendingCheckpoint::resolve(&pending).unwrap(),
+        CheckpointResolution::Expired
     );
     assert!(pending.pending.borrow().is_none());
     assert!(GuestPendingCheckpoint::resolve(&pending).is_err());

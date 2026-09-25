@@ -32,6 +32,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     metadata_starts = []
     signatures = []
     storage_paths = []
+    lost_head_puts = []
     errors = []
 
     def log_message(self, *_):
@@ -115,11 +116,21 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         previous = Fixture.objects.get(self.path)
         etag = '"' + hashlib.sha256(previous).hexdigest() + '"' if previous is not None else None
         if self.command == "PUT":
+            lost_head = Fixture.mode == "lost-head" and self.path.endswith("/lost-head/index.cbor")
+            if lost_head:
+                Fixture.lost_head_puts.append((body, self.headers.get("If-None-Match")))
             if self.headers.get("If-None-Match") == "*" and previous is not None:
                 return self.reply(412)
             if "If-Match" in self.headers and self.headers["If-Match"] != etag:
                 return self.reply(412)
             Fixture.objects[self.path] = body
+            if lost_head:
+                # The first conditional create succeeds, but its HTTP response
+                # disappears. The WASI connector must classify this transport
+                # error as retryable and replay the identical condition.
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.close_connection = True
+                return
             return self.reply(200, ETag='"' + hashlib.sha256(body).hexdigest() + '"')
         if self.command == "DELETE":
             Fixture.objects.pop(self.path, None)
@@ -192,10 +203,11 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             time.sleep(0.1)
                     else:
                         raise RuntimeError("Spin did not listen")
-                    for scenario in ("obtain", "existing", "missing", "unavailable", "renewal-unavailable", "slow-metadata"):
+                    for scenario in ("obtain", "existing", "missing", "mismatched-options", "unavailable", "renewal-unavailable", "slow-metadata", "lost-head"):
                         Fixture.mode, Fixture.issued = scenario, 0
                         Fixture.metadata, Fixture.metadata_starts, Fixture.signatures = [], [], []
                         Fixture.storage_paths = []
+                        Fixture.lost_head_puts = []
                         try:
                             with urllib.request.urlopen(f"http://127.0.0.1:{spin_port}/{scenario}", timeout=10) as response:
                                 assert response.read() == b"ok"
@@ -217,9 +229,16 @@ allowed_outbound_hosts = ["http://127.0.0.1:19092"]
                             assert Fixture.issued == 1 and Fixture.signatures == [1]
                         elif scenario == "missing":
                             assert any("/missing-after-error/" in path for path in Fixture.storage_paths)
+                        elif scenario == "mismatched-options":
+                            assert Fixture.issued == 1 and Fixture.signatures == [1]
                         else:
                             assert Fixture.issued == 2, f"expiry renewal not observed: {Fixture.issued}"
                             assert Fixture.signatures[0] == 1 and set(Fixture.signatures[1:]) == {2}
+                        if scenario == "lost-head":
+                            assert len(Fixture.lost_head_puts) == 2, "lost response did not replay conditional create"
+                            assert Fixture.lost_head_puts[0] == Fixture.lost_head_puts[1]
+                            assert Fixture.lost_head_puts[0][1] == "*"
+                            assert any(path.endswith("/lost-head/index.cbor") for path in Fixture.objects), Fixture.objects.keys()
                         assert not any(path.endswith("/missing/index.cbor") for path in Fixture.objects)
                         print(f"PASS {scenario}: metadata={len(Fixture.metadata)} signed-storage={len(Fixture.signatures)} credential-generations={Fixture.issued}")
                 except Exception:
