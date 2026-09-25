@@ -456,15 +456,16 @@ impl PreparedCommit {
 #[must_use = "uncertain publication evidence must be resolved or preserved for recovery"]
 #[derive(Clone, Debug)]
 pub struct PendingCommit {
-    pub(crate) prepared: Box<PreparedCommit>,
+    pub(crate) prepared: Option<Box<PreparedCommit>>,
     pub(crate) commit_ref: CommitRef,
+    pub(crate) token: Option<Bytes>,
 }
 
 impl PendingCommit {
     /// Returns the stable operation identity.
     #[must_use]
     pub const fn transaction_id(&self) -> TransactionId {
-        self.prepared.transaction_id
+        self.commit_ref.transaction_id
     }
 
     /// Encodes the exact candidate for recovery after process loss.
@@ -473,8 +474,50 @@ impl PendingCommit {
     ///
     /// Returns an error when the candidate cannot use the canonical format.
     pub fn recovery_token(&self) -> Result<Bytes, Error> {
-        self.prepared.recovery_token()
+        match (&self.prepared, &self.token) {
+            (Some(prepared), _) => prepared.recovery_token(),
+            (None, Some(token)) => Ok(token.clone()),
+            (None, None) => Err(Error::InvalidFormat(
+                "pending commit has no recovery evidence".into(),
+            )),
+        }
     }
+}
+
+/// Data recorded in a recovery token for completing an application response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryRecord {
+    transaction_id: TransactionId,
+    result: Bytes,
+}
+
+impl RecoveryRecord {
+    /// Returns the stable identity of the candidate operation.
+    #[must_use]
+    pub const fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the result bytes recorded with the candidate.
+    #[must_use]
+    pub const fn result(&self) -> &Bytes {
+        &self.result
+    }
+}
+
+/// Reads the transaction identity and result bytes from a recovery token.
+/// This checks the token's encoding, not whether its candidate was published;
+/// use [`Log::resume`] before treating the result as committed.
+///
+/// # Errors
+///
+/// Returns an error when the token is corrupt or invalid.
+pub fn inspect_recovery_token(token: &[u8]) -> Result<RecoveryRecord, Error> {
+    let recovered = format::decode_recovery_token(token)?;
+    Ok(RecoveryRecord {
+        transaction_id: recovered.transaction_id,
+        result: recovered.result,
+    })
 }
 
 /// Evidence for one checkpoint publication with an uncertain outcome.

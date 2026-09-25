@@ -3,8 +3,8 @@
 use crate::log::Options;
 use crate::store::{ImmutableKey, ImmutableKind};
 use crate::{
-    CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, ObservedState,
-    PreparedCommit, RetentionId, StorageId, TransactionId, View,
+    CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, PreparedCommit,
+    RetentionId, StorageId, TransactionId,
 };
 use bytes::Bytes;
 use minicbor::bytes::ByteVec;
@@ -13,7 +13,6 @@ use object_store::UpdateVersion;
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
-use std::sync::Arc;
 use uuid::Uuid;
 
 pub(crate) const FORMAT_VERSION: u32 = 1;
@@ -438,7 +437,7 @@ struct RecoveryTokenWire {
     #[n(1)]
     format_version: u32,
     #[cbor(n(2), with = "minicbor::bytes")]
-    head: Vec<u8>,
+    head_digest: Vec<u8>,
     #[n(3)]
     e_tag: Option<String>,
     #[n(4)]
@@ -453,6 +452,38 @@ struct RecoveryTokenWire {
     objects: Vec<ObjectRefWire>,
     #[cbor(n(9), with = "minicbor::bytes")]
     storage_id: Vec<u8>,
+    #[cbor(n(10), with = "minicbor::bytes")]
+    publication_base_digest: Vec<u8>,
+    #[n(11)]
+    generation: u64,
+    #[n(12)]
+    next_sequence: u64,
+    #[n(13)]
+    tip: Option<ByteVec>,
+    #[n(14)]
+    log_id: String,
+    #[cbor(n(15), with = "minicbor::bytes")]
+    incarnation: Vec<u8>,
+    #[cbor(n(16), with = "minicbor::bytes")]
+    options_digest: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecoveryToken {
+    pub head_digest: Digest,
+    pub publication_base_digest: Digest,
+    pub version: UpdateVersion,
+    pub generation: u64,
+    pub next_sequence: u64,
+    pub tip: Option<Digest>,
+    pub log_id: LogId,
+    pub incarnation: Uuid,
+    pub options_digest: Digest,
+    pub transaction_id: TransactionId,
+    pub operation: Bytes,
+    pub result: Bytes,
+    pub objects: Vec<ObjectRef>,
+    pub storage_id: StorageId,
 }
 
 #[derive(Clone, Debug, Decode, Encode, PartialEq)]
@@ -1075,36 +1106,79 @@ fn invalid_canonical_object() -> Error {
 }
 
 pub(crate) fn encode_recovery_token(prepared: &PreparedCommit) -> Result<Bytes, Error> {
-    encode_envelope(&RecoveryTokenWire {
-        format_version: FORMAT_VERSION,
-        head: encode_head(prepared.view.head())?.to_vec(),
-        e_tag: prepared.view.storage_version().e_tag.clone(),
-        storage_version: prepared.view.storage_version().version.clone(),
-        transaction_id: prepared.transaction_id.as_uuid().as_bytes().to_vec(),
-        operation: prepared.operation.to_vec(),
-        result: prepared.result.to_vec(),
-        objects: prepared.objects.iter().map(ObjectRefWire::from).collect(),
-        storage_id: prepared.storage_id.as_uuid().as_bytes().to_vec(),
-    })
+    let head = prepared.view.head();
+    RecoveryToken {
+        head_digest: Digest::of(&encode_head(head)?),
+        publication_base_digest: publication_base_digest(head)?,
+        version: prepared.view.storage_version().clone(),
+        generation: head.generation,
+        next_sequence: head.next_sequence,
+        tip: head.tip(),
+        log_id: head.log_id.clone(),
+        incarnation: head.incarnation,
+        options_digest: options_digest(head.options)?,
+        transaction_id: prepared.transaction_id,
+        operation: prepared.operation.clone(),
+        result: prepared.result.clone(),
+        objects: prepared.objects.clone(),
+        storage_id: prepared.storage_id,
+    }
+    .encode()
 }
 
-pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Error> {
+pub(crate) fn publication_base_digest(head: &Head) -> Result<Digest, Error> {
+    let mut base = head.clone();
+    base.generation = base.next_sequence.max(base.collection_epoch);
+    base.retention_ids.clear();
+    Ok(Digest::of(&encode_head(&base)?))
+}
+
+pub(crate) fn options_digest(options: Options) -> Result<Digest, Error> {
+    let wire = OptionsWire::try_from(options)?;
+    let bytes = minicbor::to_vec(wire)
+        .map_err(|error| Error::InvalidFormat(format!("CBOR encoding failed: {error}")))?;
+    Ok(Digest::of(&bytes))
+}
+
+impl RecoveryToken {
+    pub(crate) fn encode(&self) -> Result<Bytes, Error> {
+        encode_envelope(&RecoveryTokenWire {
+            format_version: FORMAT_VERSION,
+            head_digest: self.head_digest.as_bytes().to_vec(),
+            e_tag: self.version.e_tag.clone(),
+            storage_version: self.version.version.clone(),
+            transaction_id: self.transaction_id.as_uuid().as_bytes().to_vec(),
+            operation: self.operation.to_vec(),
+            result: self.result.to_vec(),
+            objects: self.objects.iter().map(ObjectRefWire::from).collect(),
+            storage_id: self.storage_id.as_uuid().as_bytes().to_vec(),
+            publication_base_digest: self.publication_base_digest.as_bytes().to_vec(),
+            generation: self.generation,
+            next_sequence: self.next_sequence,
+            tip: self.tip.map(|tip| ByteVec::from(tip.as_bytes().to_vec())),
+            log_id: self.log_id.to_string(),
+            incarnation: self.incarnation.as_bytes().to_vec(),
+            options_digest: self.options_digest.as_bytes().to_vec(),
+        })
+    }
+}
+
+pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<RecoveryToken, Error> {
     let wire: RecoveryTokenWire = decode_envelope(bytes)?;
     require_version(wire.format_version)?;
-    let prepared = PreparedCommit {
-        view: View {
-            observed: Arc::new(ObservedState {
-                verified_tail: std::sync::OnceLock::new(),
-                collection_candidates: std::sync::OnceLock::new(),
-                collection_candidates_load: futures::lock::Mutex::new(()),
-                head: decode_head(&wire.head)?,
-                version: UpdateVersion {
-                    e_tag: wire.e_tag,
-                    version: wire.storage_version,
-                },
-            }),
+    let recovered = RecoveryToken {
+        head_digest: digest(&wire.head_digest)?,
+        publication_base_digest: digest(&wire.publication_base_digest)?,
+        version: UpdateVersion {
+            e_tag: wire.e_tag,
+            version: wire.storage_version,
         },
-        staging_domain: Arc::new(crate::StagingDomain),
+        generation: wire.generation,
+        next_sequence: wire.next_sequence,
+        tip: wire.tip.map(|tip| digest(&tip)).transpose()?,
+        log_id: LogId::new(wire.log_id)?,
+        incarnation: uuid(&wire.incarnation, "log incarnation")?,
+        options_digest: digest(&wire.options_digest)?,
         transaction_id: transaction_id(&wire.transaction_id)?,
         storage_id: storage_id(&wire.storage_id)?,
         operation: Bytes::from(wire.operation),
@@ -1115,8 +1189,15 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
             .map(ObjectRef::try_from)
             .collect::<Result<_, _>>()?,
     };
-    require_canonical(bytes, &encode_recovery_token(&prepared)?)?;
-    Ok(prepared)
+    if recovered.generation < recovered.next_sequence
+        || recovered.tip.is_some() != (recovered.next_sequence > 0)
+    {
+        return Err(Error::InvalidFormat(
+            "recovery token source position is invalid".into(),
+        ));
+    }
+    require_canonical(bytes, &recovered.encode()?)?;
+    Ok(recovered)
 }
 
 pub(crate) fn encode_collection_plan(
@@ -2648,11 +2729,24 @@ mod tests {
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
         let decoded = decode_recovery_token(&encoded)
             .unwrap_or_else(|error| panic!("decode failed: {error}"));
-        assert_eq!(decoded.view.head(), prepared.view.head());
         assert_eq!(
-            decoded.view.storage_version(),
-            prepared.view.storage_version()
+            decoded.head_digest,
+            Digest::of(
+                &encode_head(prepared.view.head())
+                    .unwrap_or_else(|error| panic!("encode failed: {error}"))
+            )
         );
+        assert_eq!(
+            decoded.publication_base_digest,
+            super::publication_base_digest(prepared.view.head())
+                .unwrap_or_else(|error| panic!("digest failed: {error}"))
+        );
+        assert_eq!(decoded.version, *prepared.view.storage_version());
+        assert_eq!(decoded.generation, prepared.view.generation());
+        assert_eq!(decoded.next_sequence, prepared.view.head().next_sequence);
+        assert_eq!(decoded.tip, prepared.view.head().tip());
+        assert_eq!(decoded.log_id, prepared.view.head().log_id);
+        assert_eq!(decoded.incarnation, prepared.view.head().incarnation);
         assert_eq!(decoded.transaction_id, prepared.transaction_id);
         assert_eq!(decoded.storage_id, prepared.storage_id);
         assert_eq!(decoded.operation, prepared.operation);
@@ -2697,6 +2791,53 @@ mod tests {
         assert_eq!(with_proof, without_proof);
     }
 
+    #[test]
+    fn recovery_token_size_is_independent_of_a_mature_head()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut head = Head::empty(log_id(), incarnation(), Options::default());
+        head.recent_outcomes = (0..1_024_u64)
+            .map(|sequence| commit_ref(sequence, &sequence.to_be_bytes()))
+            .collect();
+        head.checkpoint = Some(CheckpointRef {
+            through_sequence: 1_023,
+            through_commit: head.recent_outcomes[1_023].digest,
+            object: object_ref(ObjectKind::Checkpoint, 4),
+        });
+        head.tail = (1_024..2_047_u64)
+            .map(|sequence| commit_ref(sequence, &sequence.to_be_bytes()))
+            .collect();
+        head.next_sequence = 2_047;
+        head.generation = 2_047;
+        let head_len = encode_head(&head)?.len();
+        assert!(head_len > 150_000, "fixture head was only {head_len} bytes");
+        let prepared = crate::PreparedCommit {
+            view: crate::View {
+                observed: Arc::new(crate::ObservedState {
+                    verified_tail: std::sync::OnceLock::new(),
+                    collection_candidates: std::sync::OnceLock::new(),
+                    collection_candidates_load: futures::lock::Mutex::new(()),
+                    head,
+                    version: object_store::UpdateVersion {
+                        e_tag: Some("etag".into()),
+                        version: None,
+                    },
+                }),
+            },
+            staging_domain: Arc::new(crate::StagingDomain),
+            transaction_id: crate::TransactionId::new(),
+            storage_id: storage_id(),
+            operation: Bytes::from_static(b"op"),
+            result: Bytes::from_static(b"ok"),
+            objects: Vec::new(),
+        };
+        let token = prepared.recovery_token()?;
+        assert!(token.len() < 512, "token was {} bytes", token.len());
+        let decoded = decode_recovery_token(&token)?;
+        assert_eq!(decoded.next_sequence, 2_047);
+        assert_eq!(decoded.result, Bytes::from_static(b"ok"));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn recovery_token_cannot_change_the_durable_options() {
         use object_store::memory::InMemory;
@@ -2729,12 +2870,12 @@ mod tests {
                 .unwrap_or_else(|error| panic!("token failed: {error}")),
         )
         .unwrap_or_else(|error| panic!("decode failed: {error}"));
-        Arc::get_mut(&mut tampered.view.observed)
-            .unwrap_or_else(|| panic!("decoded view is unexpectedly shared"))
-            .head
-            .options
-            .max_tail_entries = 1;
-        let token = encode_recovery_token(&tampered)
+        let mut changed_options = log.options();
+        changed_options.max_tail_entries = 1;
+        tampered.options_digest = super::options_digest(changed_options)
+            .unwrap_or_else(|error| panic!("digest failed: {error}"));
+        let token = tampered
+            .encode()
             .unwrap_or_else(|error| panic!("encode failed: {error}"));
 
         assert!(matches!(
@@ -2995,7 +3136,7 @@ mod tests {
         );
         let token_bytes = hex::decode(include_str!("../tests/fixtures/token-v1.hex").trim())?;
         assert_eq!(
-            encode_recovery_token(&decode_recovery_token(&token_bytes)?)?.as_ref(),
+            decode_recovery_token(&token_bytes)?.encode()?.as_ref(),
             token_bytes
         );
         Ok(())
@@ -3127,7 +3268,7 @@ mod tests {
 
             let mut unknown = payload.clone();
             unknown[0] += 1;
-            unknown.extend_from_slice(&[13, 0xf6]);
+            unknown.extend_from_slice(&[17, 0xf6]);
 
             let mut nonminimal = payload.clone();
             nonminimal.splice(first..=first, [0x18, 1]);

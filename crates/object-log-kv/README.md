@@ -90,8 +90,9 @@ delete objects in that namespace.
 
 Prepare and publish are separate so applications can persist recovery evidence
 before cancellation or process loss. Results are recorded in the WAL candidate;
-persist its `result()` bytes alongside `recovery_token()` for typed process-loss
-recovery, then use `Log::resume`. Only `Committed` permits returning those results.
+persist `recovery_token()` for typed process-loss recovery, then use `Log::resume`.
+`object_log::inspect_recovery_token` retrieves its transaction ID and result bytes.
+Only `Committed` permits returning those results.
 Retry as new work only after `Conflict` or `NotCommitted`. `StillPending` requires
 resolution; `Expired` means the result cannot safely be determined, not failure.
 The WAL retention window bounds deduplication and recovery evidence. Limit

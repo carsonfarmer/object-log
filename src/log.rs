@@ -1240,16 +1240,18 @@ impl Log {
                 Ok(CommitStatus::Committed(next))
             }
             HeadPublication::Pending => Ok(CommitStatus::Pending(PendingCommit {
-                prepared: Box::new(prepared),
+                prepared: Some(Box::new(prepared)),
                 commit_ref,
+                token: None,
             })),
             HeadPublication::Contended(current) => Ok(CommitStatus::Conflict(current)),
             HeadPublication::Changed(current) => {
                 let pending = PendingCommit {
-                    prepared: Box::new(prepared),
+                    prepared: Some(Box::new(prepared)),
                     commit_ref,
+                    token: None,
                 };
-                match Self::classify_resolution(&pending, current)? {
+                match Self::classify_resolution(&pending.commit_ref, current)? {
                     Resolution::Committed(view) => Ok(CommitStatus::Committed(view)),
                     Resolution::NotCommitted(view) => Ok(CommitStatus::Conflict(view)),
                     Resolution::Expired(_) => Ok(CommitStatus::Pending(pending)),
@@ -1273,7 +1275,13 @@ impl Log {
     /// this log.
     pub async fn resolve(&self, pending: PendingCommit) -> Result<Resolution, Error> {
         let mut pending = pending;
+        if pending.prepared.is_none() {
+            return Box::pin(self.resume(&pending.recovery_token()?)).await;
+        }
         self.validate_pending(&pending)?;
+        let prepared = pending.prepared.as_ref().ok_or_else(|| {
+            Error::InvalidFormat("pending commit has no prepared candidate".into())
+        })?;
         let current = match self.load().await {
             Ok(view) => view,
             Err(Error::Store(_) | Error::RequestDenied) => {
@@ -1282,13 +1290,12 @@ impl Log {
             Err(error) => return Err(error),
         };
 
-        let Some(publication_view) =
-            Self::retention_publication_view(&pending.prepared.view, &current)?
+        let Some(publication_view) = Self::retention_publication_view(&prepared.view, &current)?
         else {
-            let resolution = Self::classify_resolution(&pending, current)?;
+            let resolution = Self::classify_resolution(&pending.commit_ref, current)?;
             if let Resolution::Committed(view) = &resolution
                 && Self::tail_contains(view, &pending.commit_ref)
-                && !self.proof_matches(&pending.prepared.staging_domain)
+                && !self.proof_matches(&prepared.staging_domain)
             {
                 match self.verify_published_commit(&pending.commit_ref).await {
                     Ok(()) => {}
@@ -1301,13 +1308,13 @@ impl Log {
             return Ok(resolution);
         };
 
-        let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
+        let (_, commit_bytes) = self.encode_prepared(prepared)?;
         match self
             .verify_publication(
-                &pending.prepared.view,
+                &prepared.view,
                 self.commit_immutable_key(&pending.commit_ref),
-                &pending.prepared.objects,
-                &pending.prepared.staging_domain,
+                &prepared.objects,
+                &prepared.staging_domain,
             )
             .await
         {
@@ -1317,7 +1324,7 @@ impl Log {
             }
             Err(error) => return Err(error),
         }
-        if !self.proof_matches(&pending.prepared.staging_domain) {
+        if !self.proof_matches(&prepared.staging_domain) {
             match self
                 .ensure_immutable(self.commit_key(&pending.commit_ref), commit_bytes)
                 .await
@@ -1329,7 +1336,11 @@ impl Log {
                 Err(error) => return Err(error),
             }
         }
-        pending.prepared.staging_domain = Arc::clone(&self.staging_domain);
+        pending
+            .prepared
+            .as_mut()
+            .ok_or_else(|| Error::InvalidFormat("pending commit has no prepared candidate".into()))?
+            .staging_domain = Arc::clone(&self.staging_domain);
         match self
             .publish_head(&publication_view, |view| {
                 Self::candidate_head(view, &pending.commit_ref)
@@ -1342,7 +1353,9 @@ impl Log {
             }
             Ok(HeadPublication::Contended(current)) => Ok(Resolution::NotCommitted(current)),
             Err(error) => Err(error),
-            Ok(HeadPublication::Changed(current)) => Self::classify_resolution(&pending, current),
+            Ok(HeadPublication::Changed(current)) => {
+                Self::classify_resolution(&pending.commit_ref, current)
+            }
         }
     }
 
@@ -1357,13 +1370,118 @@ impl Log {
     /// Returns an error when the token is invalid, belongs to another log, or
     /// names corrupt durable data.
     pub async fn resume(&self, token: &[u8]) -> Result<Resolution, Error> {
-        let prepared = format::decode_recovery_token(token)?;
-        let (commit_ref, _) = self.encode_prepared(&prepared)?;
-        self.resolve(PendingCommit {
-            prepared: Box::new(prepared),
-            commit_ref,
+        let recovered = format::decode_recovery_token(token)?;
+        let commit_ref = self.recovered_commit_ref(&recovered)?;
+        let pending = || PendingCommit {
+            prepared: None,
+            commit_ref: commit_ref.clone(),
+            token: Some(Bytes::copy_from_slice(token)),
+        };
+        let current = match self.load().await {
+            Ok(view) => view,
+            Err(Error::Store(_) | Error::RequestDenied) => {
+                return Ok(Resolution::StillPending(pending()));
+            }
+            Err(error) => return Err(error),
+        };
+        let full_digest = Digest::of(&format::encode_head(current.head())?);
+        let exact = current.storage_version() == &recovered.version
+            && current.generation() == recovered.generation
+            && full_digest == recovered.head_digest;
+        let retention_only =
+            format::publication_base_digest(current.head())? == recovered.publication_base_digest;
+        if exact || (retention_only && current.generation() > recovered.generation) {
+            if current.head().next_sequence != recovered.next_sequence
+                || current.head().tip() != recovered.tip
+            {
+                return Err(Error::InvalidFormat(
+                    "recovery token source fields disagree".into(),
+                ));
+            }
+            let prepared = PreparedCommit {
+                view: current,
+                staging_domain: Arc::new(StagingDomain),
+                transaction_id: recovered.transaction_id,
+                storage_id: recovered.storage_id,
+                operation: recovered.operation,
+                result: recovered.result,
+                objects: recovered.objects,
+            };
+            let (recomputed, _) = self.encode_prepared(&prepared)?;
+            if recomputed != commit_ref {
+                return Err(Error::InvalidFormat(
+                    "recovery token candidate disagrees with source".into(),
+                ));
+            }
+            let resolution = self
+                .resolve(PendingCommit {
+                    prepared: Some(Box::new(prepared)),
+                    commit_ref: commit_ref.clone(),
+                    token: None,
+                })
+                .await?;
+            return Ok(match resolution {
+                Resolution::StillPending(_) => Resolution::StillPending(pending()),
+                other => other,
+            });
+        }
+        if retention_only && current.generation() <= recovered.generation {
+            return Err(Error::InvalidFormat(
+                "head version changed without a monotonic head change".into(),
+            ));
+        }
+        let resolution = Self::classify_resolution(&commit_ref, current)?;
+        if let Resolution::Committed(view) = &resolution
+            && Self::tail_contains(view, &commit_ref)
+        {
+            match self.verify_published_commit(&commit_ref).await {
+                Ok(()) => {}
+                Err(Error::Store(_) | Error::RequestDenied) => {
+                    return Ok(Resolution::StillPending(pending()));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(resolution)
+    }
+
+    fn recovered_commit_ref(&self, recovered: &format::RecoveryToken) -> Result<CommitRef, Error> {
+        if recovered.log_id != *self.store.log_id() {
+            return Err(Error::InvalidFormat(
+                "the view belongs to another log".into(),
+            ));
+        }
+        if recovered.incarnation != self.incarnation {
+            return Err(Error::InvalidFormat(
+                "the view belongs to another log incarnation".into(),
+            ));
+        }
+        if recovered.options_digest != format::options_digest(self.options)? {
+            return Err(Error::ConfigurationMismatch("options"));
+        }
+        self.validate_prepared_sizes(&recovered.operation, &recovered.result)?;
+        self.validate_dependencies(&recovered.objects)?;
+        let commit = format::Commit {
+            log_id: recovered.log_id.clone(),
+            incarnation: recovered.incarnation,
+            transaction_id: recovered.transaction_id,
+            expected_tip: recovered.tip,
+            operation: recovered.operation.clone(),
+            result: recovered.result.clone(),
+            objects: recovered.objects.clone(),
+        };
+        let commit_bytes = format::encode_commit(&commit)?;
+        if commit_bytes.len() > self.options.max_commit_bytes {
+            return Err(Error::LimitExceeded("encoded commit bytes"));
+        }
+        Ok(CommitRef {
+            sequence: recovered.next_sequence,
+            transaction_id: recovered.transaction_id,
+            storage_id: recovered.storage_id,
+            digest: Digest::of(&commit_bytes),
+            len: u64::try_from(commit_bytes.len())
+                .map_err(|_| Error::LimitExceeded("commit byte length"))?,
         })
-        .await
     }
 
     /// Reads and verifies every commit in the active tail.
@@ -2103,8 +2221,7 @@ impl Log {
         Ok(head)
     }
 
-    fn classify_resolution(pending: &PendingCommit, current: View) -> Result<Resolution, Error> {
-        let target = &pending.commit_ref;
+    fn classify_resolution(target: &CommitRef, current: View) -> Result<Resolution, Error> {
         let head = current.head();
         if Self::contains_commit(&current, target) {
             return Ok(Resolution::Committed(current));
@@ -2165,13 +2282,16 @@ impl Log {
     }
 
     fn validate_pending(&self, pending: &PendingCommit) -> Result<(), Error> {
-        self.validate_view(&pending.prepared.view)?;
-        self.validate_prepared_sizes(&pending.prepared.operation, &pending.prepared.result)?;
-        self.validate_dependencies(&pending.prepared.objects)?;
-        if pending.prepared.view.tail().len() >= self.options.max_tail_entries {
+        let prepared = pending.prepared.as_ref().ok_or_else(|| {
+            Error::InvalidFormat("pending commit has no prepared candidate".into())
+        })?;
+        self.validate_view(&prepared.view)?;
+        self.validate_prepared_sizes(&prepared.operation, &prepared.result)?;
+        self.validate_dependencies(&prepared.objects)?;
+        if prepared.view.tail().len() >= self.options.max_tail_entries {
             return Err(Error::LimitExceeded("active tail entries"));
         }
-        let (expected_ref, _) = self.encode_prepared(&pending.prepared)?;
+        let (expected_ref, _) = self.encode_prepared(prepared)?;
         if expected_ref != pending.commit_ref {
             return Err(Error::InvalidFormat(
                 "pending commit evidence does not match its candidate".to_owned(),
@@ -2709,6 +2829,75 @@ mod tests {
     use super::*;
 
     include!("request_guard_tests.rs");
+
+    #[tokio::test]
+    async fn cold_resume_keeps_the_exact_token_when_the_first_head_read_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let faults = FaultStore::new(InMemory::new());
+        let backend =
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("cold-token-read")).await?;
+        let id = LogId::new("cold-token-read")?;
+        let log = Log::open(&backend, &id, Options::default()).await?;
+        let prepared = log.prepare(
+            &log.load().await?,
+            TransactionId::new(),
+            Bytes::from_static(b"operation"),
+            Bytes::from_static(b"result"),
+            Vec::new(),
+        )?;
+        let token = prepared.recovery_token()?;
+        let record = crate::inspect_recovery_token(&token)?;
+        assert_eq!(record.transaction_id(), prepared.transaction_id);
+        assert_eq!(record.result(), &Bytes::from_static(b"result"));
+        faults.reset();
+        let guarded = log.with_request_guard(Guard::new(0));
+        let Resolution::StillPending(pending) = guarded.resume(&token).await? else {
+            return Err("failed first head read lost pending evidence".into());
+        };
+        assert_eq!(pending.recovery_token()?, token);
+        assert_eq!(pending.transaction_id(), record.transaction_id());
+        let Resolution::StillPending(pending) = guarded.resolve(pending).await? else {
+            return Err("repeated failed head read lost pending evidence".into());
+        };
+        assert_eq!(pending.recovery_token()?, token);
+        assert!(matches!(
+            log.resolve(pending).await?,
+            Resolution::Committed(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cold_resume_never_retries_from_unmatched_source_fingerprints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("unmatched-token-source", Options::default()).await?;
+        let view = log.load().await?;
+        let prepared = log.prepare(
+            &view,
+            TransactionId::new(),
+            Bytes::from_static(b"operation"),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let mut recovered = format::decode_recovery_token(&prepared.recovery_token()?)?;
+        recovered.head_digest = Digest::of(b"different full head");
+        recovered.publication_base_digest = Digest::of(b"different publication base");
+        let forged = recovered.encode()?;
+        assert!(matches!(
+            log.resume(&forged).await?,
+            Resolution::NotCommitted(_)
+        ));
+        let mut recovered = format::decode_recovery_token(&prepared.recovery_token()?)?;
+        recovered.tip = Some(Digest::of(b"false tip"));
+        assert!(matches!(
+            log.resume(&recovered.encode()?).await,
+            Err(Error::InvalidFormat(_))
+        ));
+        let current = log.load().await?;
+        assert_eq!(current.generation(), view.generation());
+        assert!(current.tail().is_empty());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn commit_ref_len_matches_the_encoded_commit_and_read_reference()

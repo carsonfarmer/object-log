@@ -106,9 +106,9 @@ let prepared = log.prepare(
     Vec::new(),
 )?;
 
-// Persist these before publication when the request must survive process loss.
+// Persist the token before publication when the request must survive process loss.
 let recovery_token = prepared.recovery_token()?;
-let result = prepared.result().clone();
+let result = object_log::inspect_recovery_token(&recovery_token)?.result().clone();
 
 match log.commit(prepared).await? {
     CommitStatus::Committed(next) => {
@@ -150,9 +150,10 @@ including its operation and result bytes. Durably retain it, along with any
 other application response or state needed to finish the request, before
 calling `commit`. Resolve a pending result with `Log::resume`; do not submit
 non-idempotent work again under a new transaction ID. `Committed` permits
-returning the saved result. `NotCommitted` permits a deliberate retry after the
-application revalidates current state. Preserve `StillPending` evidence and
-resolve it later. Once the answer is `Expired`, the library cannot prove whether
+returning the result from `inspect_recovery_token`. `NotCommitted` permits a
+deliberate retry after the application revalidates current state. Preserve
+`StillPending` evidence and resolve it later. Once the answer is `Expired`, the
+library cannot prove whether
 the candidate committed, so the application must not replay it.
 
 Large values can be written through `ByteWriter` and read with authenticated,

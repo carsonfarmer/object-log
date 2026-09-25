@@ -211,7 +211,7 @@ async fn request_guard_denied_recovery_preserves_exact_commit_evidence() -> Guar
         else {
             return Err("denial lost pending".into());
         };
-        assert_eq!(pending.prepared.recovery_token()?, token);
+        assert_eq!(pending.recovery_token()?, token);
         assert_eq!(guard.requests().len(), limit);
         assert!(matches!(
             cold.resolve(pending).await?,
@@ -368,7 +368,7 @@ async fn request_guard_denied_cold_success_verification_retains_evidence() -> Gu
     else {
         return Err("verification was skipped".into());
     };
-    assert_eq!(pending.prepared.recovery_token()?, token);
+    assert_eq!(pending.recovery_token()?, token);
     assert!(matches!(
         cold.resolve(pending).await?,
         Resolution::Committed(_)

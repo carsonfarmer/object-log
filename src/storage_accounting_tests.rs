@@ -319,7 +319,7 @@ async fn resumed_commit_validates_counts_before_retrying_publication() -> TestRe
     for count in [0, 1, 3, 4, u64::MAX] {
         let mut forged = format::decode_recovery_token(&token)?;
         forged.objects[0].subtree_objects = count;
-        let forged = forged.recovery_token()?;
+        let forged = forged.encode()?;
         faults.reset();
         assert!(matches!(
             cold.resume(&forged).await,
