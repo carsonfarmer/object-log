@@ -866,15 +866,9 @@ impl Log {
         if bytes.len() > self.options.max_object_bytes {
             return Err(Error::LimitExceeded("object bytes"));
         }
-        let blocked = self.active_collection_candidates(view.head()).await?;
+        let blocked = self.active_collection_candidates(view).await?;
         let object = self
-            .create_fresh_object_with(
-                ObjectKind::Blob,
-                bytes,
-                1,
-                blocked.as_deref(),
-                StorageId::new,
-            )
+            .create_fresh_object_with(ObjectKind::Blob, bytes, 1, blocked, StorageId::new)
             .await?;
         Ok(self.staged_object(view, object))
     }
@@ -929,13 +923,13 @@ impl Log {
         let node = format::Node { payload, children };
         let subtree_objects = format::subtree_objects(&node.children)?;
         let bytes = format::encode_node(&node, self.options)?;
-        let blocked = self.active_collection_candidates(view.head()).await?;
+        let blocked = self.active_collection_candidates(view).await?;
         let object = self
             .create_fresh_object_with(
                 ObjectKind::Node,
                 bytes,
                 subtree_objects,
-                blocked.as_deref(),
+                blocked,
                 StorageId::new,
             )
             .await?;
@@ -955,8 +949,7 @@ impl Log {
     ) -> Result<Vec<StagedObject>, Error> {
         self.validate_view(view)?;
         self.validate_dependencies(&objects)?;
-        self.verify_publication_dependencies(view.head(), &objects)
-            .await?;
+        self.verify_publication_dependencies(view, &objects).await?;
         Ok(objects
             .into_iter()
             .map(|object| self.staged_object(view, object))
@@ -1153,7 +1146,7 @@ impl Log {
         self.validate_prepared(&prepared)?;
         let (commit_ref, commit_bytes) = self.encode_prepared(&prepared)?;
         self.verify_publication(
-            prepared.view.head(),
+            &prepared.view,
             self.commit_immutable_key(&commit_ref),
             &prepared.objects,
             &prepared.staging_domain,
@@ -1242,7 +1235,7 @@ impl Log {
         let (_, commit_bytes) = self.encode_prepared(&pending.prepared)?;
         match self
             .verify_publication(
-                pending.prepared.view.head(),
+                &pending.prepared.view,
                 self.commit_immutable_key(&pending.commit_ref),
                 &pending.prepared.objects,
                 &pending.prepared.staging_domain,
@@ -1497,13 +1490,13 @@ impl Log {
         };
         let bytes = format::encode_checkpoint(&checkpoint)?;
         self.validate_checkpoint_bytes(bytes.len())?;
-        let blocked = self.active_collection_candidates(view.head()).await?;
+        let blocked = self.active_collection_candidates(view).await?;
         let object = self
             .create_fresh_object_with(
                 ObjectKind::Checkpoint,
                 bytes,
                 subtree_objects,
-                blocked.as_deref(),
+                blocked,
                 StorageId::new,
             )
             .await?;
@@ -1682,7 +1675,7 @@ impl Log {
         if self.proof_matches(&pending.staging_domain) {
             return self
                 .verify_publication(
-                    pending.view.head(),
+                    &pending.view,
                     self.object_immutable_key(&pending.checkpoint.object),
                     &[],
                     &pending.staging_domain,
@@ -1691,7 +1684,7 @@ impl Log {
         }
         let checkpoint = self.load_checkpoint(&pending.checkpoint).await?;
         self.verify_publication(
-            pending.view.head(),
+            &pending.view,
             self.object_immutable_key(&pending.checkpoint.object),
             &checkpoint.objects,
             &pending.staging_domain,
@@ -1775,6 +1768,8 @@ impl Log {
                 head,
                 version,
                 verified_tail: std::sync::OnceLock::new(),
+                collection_candidates: std::sync::OnceLock::new(),
+                collection_candidates_load: futures::lock::Mutex::new(()),
             }),
         }
     }
@@ -2198,42 +2193,34 @@ impl Log {
 
     async fn verify_publication(
         &self,
-        head: &Head,
+        view: &View,
         new_key: ImmutableKey,
         objects: &[ObjectRef],
         staging: &Arc<StagingDomain>,
     ) -> Result<(), Error> {
         let blocked = if self.proof_matches(staging) {
-            self.active_collection_candidates(head).await?
+            self.active_collection_candidates(view).await?
         } else {
-            self.verify_publication_dependencies(head, objects).await?
+            self.verify_publication_dependencies(view, objects).await?
         };
-        if blocked
-            .as_deref()
-            .is_some_and(|blocked| Self::is_collection_candidate(blocked, new_key))
-        {
+        if blocked.is_some_and(|blocked| Self::is_collection_candidate(blocked, new_key)) {
             return Err(Error::CollectionFence);
         }
         Ok(())
     }
 
-    async fn verify_publication_dependencies(
+    async fn verify_publication_dependencies<'a>(
         &self,
-        head: &Head,
+        view: &'a View,
         objects: &[ObjectRef],
-    ) -> Result<Option<Vec<CollectionCandidate>>, Error> {
-        let Some(blocked) = self.active_collection_candidates(head).await? else {
+    ) -> Result<Option<&'a [CollectionCandidate]>, Error> {
+        let Some(blocked) = self.active_collection_candidates(view).await? else {
             self.verify_object_graph(objects).await?;
             return Ok(None);
         };
         let mut visited = HashMap::with_capacity(objects.len());
-        self.mark_object_graph(
-            objects,
-            &mut visited,
-            Some(&blocked),
-            GraphWalk::VerifyBlobs,
-        )
-        .await?;
+        self.mark_object_graph(objects, &mut visited, Some(blocked), GraphWalk::VerifyBlobs)
+            .await?;
         Ok(Some(blocked))
     }
 
@@ -2243,15 +2230,28 @@ impl Log {
             .await
     }
 
-    async fn active_collection_candidates(
+    async fn active_collection_candidates<'a>(
         &self,
-        head: &Head,
-    ) -> Result<Option<Vec<CollectionCandidate>>, Error> {
-        let Some(plan_ref) = head.active_plan.as_ref() else {
+        view: &'a View,
+    ) -> Result<Option<&'a [CollectionCandidate]>, Error> {
+        let Some(plan_ref) = view.head().active_plan.as_ref() else {
             return Ok(None);
         };
+        if let Some(candidates) = view.observed.collection_candidates.get() {
+            return Ok(Some(candidates));
+        }
+        let _loading = view.observed.collection_candidates_load.lock().await;
+        if let Some(candidates) = view.observed.collection_candidates.get() {
+            return Ok(Some(candidates));
+        }
+        let candidates = self
+            .read_collection_plan(view.head(), plan_ref)
+            .await?
+            .candidates;
         Ok(Some(
-            self.read_collection_plan(head, plan_ref).await?.candidates,
+            view.observed
+                .collection_candidates
+                .get_or_init(|| candidates),
         ))
     }
 
@@ -4479,8 +4479,15 @@ mod tests {
         }
         let current = log.load().await?;
         faults.reset();
+        // The advanced view is cold: the older view verified and cached this
+        // immutable plan before the test removed it.
+        let attempt_view = if case == "advanced" {
+            &current
+        } else {
+            &fenced
+        };
         let result = log
-            .put_object(&fenced, Bytes::from_static(b"stale writer"))
+            .put_object(attempt_view, Bytes::from_static(b"stale writer"))
             .await;
         if matches!(case, "completed" | "superseded") {
             assert!(matches!(result, Err(Error::ViewExpired)), "{result:?}");

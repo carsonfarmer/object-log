@@ -1063,6 +1063,8 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<PreparedCommit, Erro
         view: View {
             observed: Arc::new(ObservedState {
                 verified_tail: std::sync::OnceLock::new(),
+                collection_candidates: std::sync::OnceLock::new(),
+                collection_candidates_load: futures::lock::Mutex::new(()),
                 head: decode_head(&wire.head)?,
                 version: UpdateVersion {
                     e_tag: wire.e_tag,
@@ -2536,6 +2538,8 @@ mod tests {
             view: crate::View {
                 observed: Arc::new(crate::ObservedState {
                     verified_tail: std::sync::OnceLock::new(),
+                    collection_candidates: std::sync::OnceLock::new(),
+                    collection_candidates_load: futures::lock::Mutex::new(()),
                     head: Head::empty(log_id(), incarnation(), Options::default()),
                     version: object_store::UpdateVersion {
                         e_tag: Some("etag".to_owned()),
@@ -2579,6 +2583,8 @@ mod tests {
             view: crate::View {
                 observed: Arc::new(crate::ObservedState {
                     verified_tail: std::sync::OnceLock::new(),
+                    collection_candidates: std::sync::OnceLock::new(),
+                    collection_candidates_load: futures::lock::Mutex::new(()),
                     head: Head::empty(log_id(), incarnation(), Options::default()),
                     version: object_store::UpdateVersion {
                         e_tag: Some("etag".to_owned()),
@@ -2855,6 +2861,8 @@ mod tests {
             view: crate::View {
                 observed: Arc::new(crate::ObservedState {
                     verified_tail: std::sync::OnceLock::new(),
+                    collection_candidates: std::sync::OnceLock::new(),
+                    collection_candidates_load: futures::lock::Mutex::new(()),
                     head: Head::empty(log_id(), incarnation(), Options::default()),
                     version: object_store::UpdateVersion {
                         e_tag: Some("etag".to_owned()),

@@ -330,6 +330,8 @@ impl CheckpointRef {
 #[derive(Debug)]
 pub(crate) struct ObservedState {
     pub(crate) verified_tail: OnceLock<Arc<StagingDomain>>,
+    pub(crate) collection_candidates: OnceLock<Vec<format::CollectionCandidate>>,
+    pub(crate) collection_candidates_load: futures::lock::Mutex<()>,
     pub(crate) head: format::Head,
     pub(crate) version: UpdateVersion,
 }
