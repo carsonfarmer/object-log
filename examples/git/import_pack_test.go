@@ -229,9 +229,13 @@ func TestImportPackRejectsInvalid(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			err := importPack(ctx, bytes.NewReader(p), newImportStorage(f), f, testPackLimits(1024))
+			s := newImportStorage(f)
+			err := importPack(ctx, bytes.NewReader(p), s, f, testPackLimits(1024))
 			if err == nil {
 				t.Fatal("accepted invalid pack")
+			}
+			if (mode == "checksum" || mode == "trailing") && s.writes != 0 {
+				t.Fatalf("stored objects before rejecting %s", mode)
 			}
 			if mode == "canceled" && !errors.Is(err, context.Canceled) {
 				t.Fatal(err)
@@ -377,6 +381,72 @@ func TestImportPackObjectFraming(t *testing.T) {
 
 func testPackLimits(size int64) requestLimits {
 	return requestLimits{objectBytes: size, metadataBytes: size, packObjects: 1_000_000}
+}
+
+func TestImportPackRejectsOversizedDeltaBeforeStorage(t *testing.T) {
+	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
+		t.Run(string(f), func(t *testing.T) {
+			base := []byte("abcd")
+			delta := []byte{4, 8, 0x90, 4, 0x90, 4}
+			for _, external := range []bool{false, true} {
+				t.Run(fmt.Sprint("external=", external), func(t *testing.T) {
+					entries := []packFixtureEntry{{kind: plumbing.BlobObject, data: base}, {kind: plumbing.OFSDeltaObject, ofs: 0, data: delta}}
+					s := newImportStorage(f)
+					if external {
+						entries = []packFixtureEntry{{kind: plumbing.REFDeltaObject, ref: blobID(f, base), data: delta}}
+						w, _ := s.RawObjectWriter(plumbing.BlobObject, int64(len(base)))
+						_, _ = w.Write(base)
+						if err := w.Close(); err != nil {
+							t.Fatal(err)
+						}
+						s.writes = 0
+					}
+					packed := fixturePack(t, f, entries)
+					if err := importPack(t.Context(), bytes.NewReader(packed), s, f, testPackLimits(6)); !errors.Is(err, errObjectLimit) || s.writes != 0 {
+						t.Fatalf("over limit: %v; writes=%d", err, s.writes)
+					}
+					if err := importPack(t.Context(), bytes.NewReader(packed), s, f, testPackLimits(8)); err != nil {
+						t.Fatalf("at limit: %v", err)
+					}
+				})
+			}
+			// The compressed pack is tiny, but its target header declares 512 MiB.
+			large := fixturePack(t, f, []packFixtureEntry{{kind: plumbing.REFDeltaObject, ref: blobID(f, base), data: []byte{4, 0x80, 0x80, 0x80, 0x80, 2}}})
+			s := newImportStorage(f)
+			if err := importPack(t.Context(), bytes.NewReader(large), s, f, testPackLimits(64<<20)); !errors.Is(err, errObjectLimit) || s.writes != 0 {
+				t.Fatalf("large declared result: %v; writes=%d", err, s.writes)
+			}
+		})
+	}
+}
+
+func TestImportPackRejectsMismatchedDeltaLengthBeforeStorage(t *testing.T) {
+	for _, f := range []format.ObjectFormat{format.SHA1, format.SHA256} {
+		for _, declared := range []byte{3, 5} {
+			t.Run(fmt.Sprintf("%s/%d", f, declared), func(t *testing.T) {
+				base := []byte("abc")
+				packed := fixturePack(t, f, []packFixtureEntry{
+					{kind: plumbing.REFDeltaObject, ref: blobID(f, base), data: []byte{3, 1, 0x90, 1}},
+					{kind: plumbing.BlobObject, data: base},
+				})
+				packed[12] = byte(plumbing.REFDeltaObject)<<4 | declared
+				var digest []byte
+				if f == format.SHA256 {
+					sum := sha256.Sum256(packed[:len(packed)-f.Size()])
+					digest = sum[:]
+				} else {
+					sum := sha1.Sum(packed[:len(packed)-f.Size()])
+					digest = sum[:]
+				}
+				copy(packed[len(packed)-f.Size():], digest)
+				s := newImportStorage(f)
+				err := importPack(t.Context(), bytes.NewReader(packed), s, f, testPackLimits(1024))
+				if !errors.Is(err, packfile.ErrMalformedPackfile) || s.writes != 0 {
+					t.Fatalf("declared %d: %v; writes=%d", declared, err, s.writes)
+				}
+			})
+		}
+	}
 }
 
 func TestPackEntryBounds(t *testing.T) {

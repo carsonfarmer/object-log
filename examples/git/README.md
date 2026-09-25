@@ -174,8 +174,9 @@ transport call budget may also need review for a substantially larger state.
 
 Invalid, zero, or inconsistent limits fail closed. These defaults are
 configurable service policy, not requirements of the WAL or Spin. They bound
-accepted requests and stored objects, not peak memory. go-git reconstructs
-incoming deltas before the service checks decoded object size. In a local
+accepted requests and stored objects, not peak memory. The import preflight
+rejects deltas declaring oversized results before reconstruction. Valid deltas
+and large instruction streams can still use substantial memory. In a local
 Spin/MinIO run, simultaneous 64 MiB delta pushes to one, two, and four separate
 repositories peaked at about 578 MiB, 928 MiB, and 1.59 GiB of process memory.
 These are observations, not an upper bound. Size the host for its admitted push
