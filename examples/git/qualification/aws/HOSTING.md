@@ -39,6 +39,10 @@ at boot. Data uses the separate `git/` prefix. The EC2 role can read that artifa
 and read/write/delete only that data prefix. IMDSv2 is required. No static S3 key
 or OAuth secret enters Spin variables or EC2 user data. The SSM core policy's
 broad Parameter Store reads are denied outside the worker's secret parameter.
+The role needs conditional writes even if Git pushes are disabled: clone and
+fetch register and release readers in the WAL head to prevent concurrent
+collection from deleting objects they use. The component also validates the
+backend on each session open, which currently requires list and delete access.
 The maintenance secret still exists in **Terraform state and saved plans**;
 protect those local files as credentials and never commit them.
 

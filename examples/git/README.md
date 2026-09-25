@@ -141,7 +141,7 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `git_cognito_host` | Cognito in `us-east-1` | Allowed outbound signing-key host; match the issuer's region |
 | `git_cognito_operator_client_id` | empty | Separate machine client allowed administration only; requires the access scope plus `git/maintenance` |
 | `git_boot_id` | `local-boot` | Instance identity exposed for recovery tests |
-| `git_read_only` | `false` | Reject push and maintenance when true |
+| `git_read_only` | `false` | Reject push and maintenance at the HTTP layer when true; fetch still needs WAL head writes |
 | `git_max_push_bytes` | `2147483648` | Incoming push body limit |
 | `git_max_negotiation_bytes` | `8388608` | Protocol command and negotiation limit |
 | `git_max_object_bytes` | `67108864` | Maximum decoded Git object stored or served |
@@ -200,6 +200,12 @@ User authentication is separate from storage authentication. On EC2, set
 `wal_credential_mode = "instance-role"` and leave all static credential fields
 empty. The established object_store provider obtains and renews role credentials
 through IMDSv2. Restrict the instance role to the application's bucket prefix.
+`git_read_only` and read-only repository groups restrict Git operations, not the
+S3 role. A clone, fetch, or ref advertisement registers and releases a reader
+in the WAL head so concurrent collection cannot remove its objects. Those reads
+need conditional-write permission on the head. The current per-session backend
+probe also needs write, list, and delete permission under the configured prefix.
+Do not give this service an S3 read-only credential.
 
 ## Test
 
