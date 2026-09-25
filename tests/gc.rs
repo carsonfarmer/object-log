@@ -1109,7 +1109,7 @@ async fn partial_delete_failures_leave_the_plan_and_repeat_the_complete_set() ->
 }
 
 #[tokio::test]
-async fn append_after_resume_loads_the_fence_wins_the_clear_cas() -> TestResult {
+async fn append_during_resume_does_not_prevent_fence_clear() -> TestResult {
     let fixture = Fixture::new("append-during-resume", Options::default()).await?;
     let source = fixture.log.load().await?;
     fixture
@@ -1127,18 +1127,87 @@ async fn append_after_resume_loads_the_fence_wins_the_clear_cas() -> TestResult 
     assert!(pause.wait_until_entered().await);
     let appended = append(&fixture.log, &fenced, b"append").await?;
     assert!(pause.release());
-    let CollectionFinish::Conflict(current, report) = collector.await?? else {
-        return Err("stale collector cleared a newer head".into());
+    let CollectionFinish::Complete(current, report) = collector.await?? else {
+        return Err("collector did not clear the fence after the append".into());
     };
-    assert_eq!(
-        current.tail().last().map(CommitRef::digest),
-        appended.tail().last().map(CommitRef::digest)
-    );
     assert_eq!(report.delete_attempts(), 1);
-    assert!(matches!(
-        fixture.log.resume_collection(&current).await?,
-        CollectionFinish::Complete(_, _)
-    ));
+    assert_eq!(current.tail(), appended.tail());
+    assert_eq!(
+        fixture
+            .store
+            .metrics()
+            .operation(Operation::Delete)
+            .requests,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_finishes_after_repeated_commits_during_deletion() -> TestResult {
+    let fixture = Fixture::new("commits-during-deletion", Options::default()).await?;
+    let source = fixture.log.load().await?;
+    for value in 0_u8..32 {
+        fixture
+            .log
+            .put_object(&source, Bytes::copy_from_slice(&[value]))
+            .await?;
+    }
+    let fenced = install_collection(&fixture.log, &source).await?;
+    fixture.store.reset();
+    let mut pause = Some(fixture.store.pause_delete_at(1, FailurePhase::Before));
+    let collector = tokio::spawn({
+        let log = fixture.log.clone();
+        let fenced = fenced.clone();
+        async move { log.resume_collection(&fenced).await }
+    });
+
+    let mut appended = fenced;
+    let mut clear_pause = None;
+    for next_delete in [Some(8), Some(16), Some(24), None] {
+        let mut stop = pause.take().ok_or("delete pause was not scheduled")?;
+        assert!(stop.wait_until_entered().await);
+        appended = append(&fixture.log, &appended, b"concurrent append").await?;
+        if next_delete.is_none() {
+            let next_put = fixture.store.metrics().operation(Operation::Put).requests + 1;
+            clear_pause = Some(fixture.store.pause_put_at(next_put, FailurePhase::Before));
+        }
+        pause = next_delete.map(|occurrence| {
+            fixture
+                .store
+                .pause_delete_at(occurrence, FailurePhase::Before)
+        });
+        assert!(stop.release());
+    }
+
+    // Keep writing across two rejected clear attempts, then let the retry win.
+    for retry in 0..2 {
+        let mut stop = clear_pause.take().ok_or("clear pause was not scheduled")?;
+        assert!(stop.wait_until_entered().await);
+        appended = append(&fixture.log, &appended, b"concurrent append").await?;
+        if retry == 0 {
+            let next_put = fixture.store.metrics().operation(Operation::Put).requests + 1;
+            clear_pause = Some(fixture.store.pause_put_at(next_put, FailurePhase::Before));
+        }
+        assert!(stop.release());
+    }
+
+    let CollectionFinish::Complete(cleared, report) = collector.await?? else {
+        return Err("collector did not clear after repeated appends".into());
+    };
+    assert_eq!(cleared.tail(), appended.tail());
+    assert_eq!(cleared.tail().len(), 6);
+    assert_eq!(fixture.log.read_tail(&cleared).await?.len(), 6);
+    assert_eq!(report.candidate_count(), 32);
+    assert_eq!(report.delete_attempts(), 32);
+    assert_eq!(
+        fixture
+            .store
+            .metrics()
+            .operation(Operation::Delete)
+            .requests,
+        33
+    );
     Ok(())
 }
 
@@ -1283,6 +1352,47 @@ async fn two_collectors_clear_only_the_exact_plan_and_delayed_delete_is_isolated
         fixture.log.read_object(&cleared, new.reference()).await?,
         Bytes::from_static(b"same content")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn delayed_clear_does_not_clear_a_different_plan() -> TestResult {
+    let fixture = Fixture::new("delayed-clear-new-plan", Options::default()).await?;
+    let source = fixture.log.load().await?;
+    fixture
+        .log
+        .put_object(&source, Bytes::from_static(b"old orphan"))
+        .await?;
+    let first = install_collection(&fixture.log, &source).await?;
+    fixture.store.reset();
+    let mut pause = fixture.store.pause_next_delete(FailurePhase::Before);
+    let delayed = tokio::spawn({
+        let log = fixture.log.clone();
+        let first = first.clone();
+        async move { log.resume_collection(&first).await }
+    });
+    assert!(pause.wait_until_entered().await);
+
+    let CollectionFinish::Complete(cleared, _) = fixture.log.resume_collection(&first).await?
+    else {
+        return Err("first plan did not clear".into());
+    };
+    fixture
+        .log
+        .put_object(&cleared, Bytes::from_static(b"new orphan"))
+        .await?;
+    let second = install_collection(&fixture.log, &cleared).await?;
+    assert!(pause.release());
+
+    let CollectionFinish::Conflict(current, report) = delayed.await?? else {
+        return Err("delayed collector did not recognize the new plan".into());
+    };
+    assert_eq!(report.delete_attempts(), 1);
+    assert_eq!(current.collection_epoch(), second.collection_epoch());
+    assert!(matches!(
+        fixture.log.resume_collection(&current).await?,
+        CollectionFinish::Complete(_, _)
+    ));
     Ok(())
 }
 

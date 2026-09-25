@@ -269,8 +269,10 @@ earlier collection.
 It submits the complete positive set in batches of at most 1,000 keys. A
 missing key is success. An error or cancellation leaves the plan active. A
 retry submits the complete set again. After all candidate submissions succeed,
-one head CAS clears the exact plan. The protocol has no progress bitmap,
-collector lease, background worker, or second authority.
+the collector retries a rejected head CAS against newer heads that still name
+the exact plan, without resubmitting deletes. The retry count is bounded.
+The protocol has no progress bitmap, collector lease, background worker, or
+second authority.
 
 Both start methods return an existing active plan unchanged. A smaller limit
 cannot shrink that plan. Execution budgets must cover its head and plan reads,

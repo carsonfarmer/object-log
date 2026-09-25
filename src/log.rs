@@ -229,7 +229,7 @@ enum CheckpointEvidence {
     Retry,
 }
 
-const MAX_RETENTION_PUBLICATION_ATTEMPTS: usize = 16;
+const MAX_HEAD_PUBLICATION_ATTEMPTS: usize = 16;
 
 enum HeadPublication {
     Updated(View),
@@ -764,8 +764,9 @@ impl Log {
 
     /// Deletes one active plan and conditionally clears its exact head fence.
     ///
-    /// Every retry submits the complete positive deletion set again. Missing
-    /// objects count as successful deletes.
+    /// Every call submits the complete positive deletion set. Missing objects
+    /// count as successful deletes. A concurrent head update can retry only
+    /// the fence clear while it still names the exact plan.
     /// If deletion of the plan object fails after fence clearing, a later
     /// collection can remove it. This does not change candidate completion.
     ///
@@ -792,8 +793,9 @@ impl Log {
                 CollectionReport::new(0, 0, 0),
             ));
         }
-        let plan_key = Self::collection_plan_key(current.head().incarnation, plan_ref);
-        let plan = self.read_collection_plan(current.head(), plan_ref).await?;
+        let plan_ref = plan_ref.clone();
+        let plan_key = Self::collection_plan_key(current.head().incarnation, &plan_ref);
+        let plan = self.read_collection_plan(current.head(), &plan_ref).await?;
         let candidate_bytes = plan.candidate_bytes()?;
         let mut report = CollectionReport::new(plan.candidates.len(), candidate_bytes, 0);
         for batch in plan.candidates.chunks(MAX_DELETE_BATCH) {
@@ -815,45 +817,75 @@ impl Log {
 
         drop(plan);
 
-        let mut candidate = current.head().clone();
-        candidate.active_plan = None;
-        candidate.advance_generation()?;
-        let bytes = format::encode_head(&candidate)?;
-        self.validate_encoded_head(&bytes)?;
-        match self
-            .store
-            .update(StoreKey::Head, bytes, current.storage_version().clone())
+        self.clear_collection_plan(current, &plan_ref, plan_key, report)
             .await
-        {
-            Ok(Some(version)) => {
-                self.cleanup_collection_plan(plan_key).await?;
-                Ok(CollectionFinish::Complete(
-                    Self::view(candidate, version),
-                    report,
-                ))
-            }
-            Ok(None) => {
-                let reloaded = match self.load().await {
-                    Ok(reloaded) => reloaded,
-                    Err(Error::Store(_) | Error::RequestDenied) => {
+    }
+
+    async fn clear_collection_plan(
+        &self,
+        mut current: View,
+        plan_ref: &CollectionPlanRef,
+        plan_key: ImmutableKey,
+        report: CollectionReport,
+    ) -> Result<CollectionFinish, Error> {
+        for attempt in 0..MAX_HEAD_PUBLICATION_ATTEMPTS {
+            let mut candidate = current.head().clone();
+            candidate.active_plan = None;
+            candidate.advance_generation()?;
+            let bytes = format::encode_head(&candidate)?;
+            self.validate_encoded_head(&bytes)?;
+            match self
+                .store
+                .update(StoreKey::Head, bytes, current.storage_version().clone())
+                .await
+            {
+                Ok(Some(version)) => {
+                    self.cleanup_collection_plan(plan_key).await?;
+                    return Ok(CollectionFinish::Complete(
+                        Self::view(candidate, version),
+                        report,
+                    ));
+                }
+                Ok(None) => {
+                    let reloaded = match self.load().await {
+                        Ok(reloaded) => reloaded,
+                        Err(Error::Store(_) | Error::RequestDenied) => {
+                            return Ok(CollectionFinish::Pending(report));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if reloaded.head() == current.head()
+                        && reloaded.storage_version() == current.storage_version()
+                    {
                         return Ok(CollectionFinish::Pending(report));
                     }
-                    Err(error) => return Err(error),
-                };
-                if reloaded.head() == current.head()
-                    && reloaded.storage_version() == current.storage_version()
-                {
-                    Ok(CollectionFinish::Pending(report))
-                } else if reloaded.head().active_plan.is_none() {
-                    self.cleanup_collection_plan(plan_key).await?;
-                    Ok(CollectionFinish::Complete(reloaded, report))
-                } else {
-                    Ok(CollectionFinish::Conflict(reloaded, report))
+                    match reloaded.head().active_plan.as_ref() {
+                        None => {
+                            self.cleanup_collection_plan(plan_key).await?;
+                            return Ok(CollectionFinish::Complete(reloaded, report));
+                        }
+                        Some(active) if active != plan_ref => {
+                            return Ok(CollectionFinish::Conflict(reloaded, report));
+                        }
+                        Some(_) => {}
+                    }
+                    if reloaded.generation() <= current.generation() {
+                        return Err(Error::InvalidFormat(
+                            "head version changed without a monotonic head change".to_owned(),
+                        ));
+                    }
+                    if attempt + 1 == MAX_HEAD_PUBLICATION_ATTEMPTS {
+                        return Ok(CollectionFinish::Conflict(reloaded, report));
+                    }
+                    current = reloaded;
                 }
+                Err(Error::Store(_) | Error::RequestDenied) => {
+                    return Ok(CollectionFinish::Pending(report));
+                }
+                Err(error) => return Err(error),
             }
-            Err(Error::Store(_) | Error::RequestDenied) => Ok(CollectionFinish::Pending(report)),
-            Err(error) => Err(error),
         }
+        unreachable!("collection clear attempts are positive")
     }
 
     /// Stores one immutable content-addressed blob for an observed collection epoch.
@@ -1953,7 +1985,7 @@ impl Log {
         candidate: impl Fn(&View) -> Result<Head, Error>,
     ) -> Result<HeadPublication, Error> {
         let mut view = source.clone();
-        for attempt in 0..MAX_RETENTION_PUBLICATION_ATTEMPTS {
+        for attempt in 0..MAX_HEAD_PUBLICATION_ATTEMPTS {
             let head = candidate(&view)?;
             let bytes = format::encode_head(&head)?;
             self.validate_encoded_head(&bytes)?;
@@ -1986,7 +2018,7 @@ impl Log {
                             "head version changed without a monotonic head change".to_owned(),
                         ));
                     }
-                    if attempt + 1 == MAX_RETENTION_PUBLICATION_ATTEMPTS {
+                    if attempt + 1 == MAX_HEAD_PUBLICATION_ATTEMPTS {
                         return Ok(HeadPublication::Contended(current));
                     }
                     view = current;
