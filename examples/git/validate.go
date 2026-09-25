@@ -3,24 +3,26 @@ package main
 import (
 	"fmt"
 	"maps"
-	"strings"
 
+	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 )
 
 func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	refs := map[string]string{}
 	maps.Copy(refs, st.meta.Refs)
 	seen := map[string]bool{}
+	refNames := dotgit.New(memfs.New())
 	for _, cmd := range cmds {
 		name := string(cmd.Name)
-		if seen[name] || !strings.HasPrefix(name, "refs/") || (cmd.Old.IsZero() && cmd.New.IsZero()) {
+		if seen[name] || (cmd.Old.IsZero() && cmd.New.IsZero()) {
 			return nil, fmt.Errorf("invalid ref update")
 		}
 		seen[name] = true
-		if e := cmd.Name.Validate(); e != nil {
+		if e := validateRefName(refNames, cmd.Name); e != nil {
 			return nil, e
 		}
 		old, exists := st.meta.Refs[name]

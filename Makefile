@@ -25,15 +25,15 @@ gc-acceptance:
 
 GIT_EXAMPLE_DIR = examples/git
 WAL_COMPONENT = examples/wal-component/Cargo.toml
-GIT_TEST_FILES = access.go access_test.go auth.go auth_test.go repositories.go repositories_test.go imports.go imports_test.go receive_transport.go receive_transport_test.go request_config.go request_config_test.go import_pack.go import_pack_test.go import_pack_lifecycle_test.go limits.go limits_test.go index.go index_test.go codec.go codec_test.go delta.go delta_test.go read_retry.go read_retry_test.go retention.go retention_test.go retry.go retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go
+GIT_TEST_FILES = access.go access_test.go auth.go auth_test.go repositories.go repositories_test.go imports.go imports_test.go receive_transport.go receive_transport_test.go request_config.go request_config_test.go import_pack.go import_pack_test.go import_pack_lifecycle_test.go limits.go limits_test.go index.go index_test.go codec.go codec_test.go delta.go delta_test.go read_retry.go read_retry_test.go retention.go retention_test.go retry.go retry_test.go fetch_policy.go fetch_policy_test.go validate_objects.go validate_objects_test.go validate.go validate_refname.go validate_refname_test.go validate_native_test.go
 
 git-check: git-qualification-tools-test
 	test -z "$$(gofmt -l $(GIT_EXAMPLE_DIR)/*.go $(GIT_EXAMPLE_DIR)/tests/*.go)"
 	$(MAKE) -C $(GIT_EXAMPLE_DIR) bindings
-	cd $(GIT_EXAMPLE_DIR) && go test -race $(GIT_TEST_FILES)
+	cd $(GIT_EXAMPLE_DIR) && go test -race -tags=git_native_test $(GIT_TEST_FILES)
 	# Canonical ABI bindings use uintptr conversions; type-check the complete WASI app.
 	cd $(GIT_EXAMPLE_DIR) && GOOS=wasip1 GOARCH=wasm go vet -unsafeptr=false .
-	cd $(GIT_EXAMPLE_DIR) && go vet $(GIT_TEST_FILES) && go vet ./tests && go test ./tests
+	cd $(GIT_EXAMPLE_DIR) && go vet -tags=git_native_test $(GIT_TEST_FILES) && go vet ./tests && go test ./tests
 	cargo fmt --manifest-path $(WAL_COMPONENT) --check
 	cargo test --locked --manifest-path $(WAL_COMPONENT) --lib
 	cargo clippy --locked --manifest-path $(WAL_COMPONENT) --all-targets -- -D warnings
