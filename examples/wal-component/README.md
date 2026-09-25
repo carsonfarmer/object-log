@@ -71,6 +71,7 @@ tests:
 make git-check
 make git-build
 make git-spin-config-test
+make wasi-credential-test
 ```
 
 The component remains pre-release with the core crate. Its WIT package is

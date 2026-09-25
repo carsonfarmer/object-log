@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test minio-performance gc-acceptance git-check git-build git-spin-config-test git-provider-test git-qualification-tools-test
+.PHONY: check test bench minio-test minio-performance gc-acceptance git-check git-build git-spin-config-test wasi-credential-test git-provider-test git-qualification-tools-test
 
 check:
 	cargo fmt --all --check
@@ -50,6 +50,9 @@ git-build:
 
 git-spin-config-test: git-build
 	./scripts/test-git-spin-config.sh
+
+wasi-credential-test:
+	python3 examples/wal-component/tests/test-credentials.py
 
 git-provider-test:
 	@test -n "$(GIT_PROBE_URL)" || (echo "Set GIT_PROBE_URL to an isolated Git test service"; exit 1)

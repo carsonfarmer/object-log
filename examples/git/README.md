@@ -201,7 +201,7 @@ Verify the composed component and Spin configuration:
 ```sh
 make git-spin-config-test
 ./scripts/test-git-auth-transport.sh
-python3 examples/wal-component/tests/test-credentials.py
+make wasi-credential-test
 ```
 
 Against a service with a fresh WAL prefix, run the unchanged-client provider

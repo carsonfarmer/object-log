@@ -27,6 +27,24 @@ jobs:
       - name: Check
         run: make check
 
+  wasi-credentials:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Spin and wac
+        run: |
+          mkdir -p "$RUNNER_TEMP/wasi-tools"
+          curl -fsSL https://github.com/spinframework/spin/releases/download/v4.1.0/spin-v4.1.0-linux-amd64.tar.gz -o "$RUNNER_TEMP/wasi-tools/spin.tar.gz"
+          echo "aeeb892f94cf861f5302546faa0bdaa82cc4be30539621299746a6dc011f3b5a  $RUNNER_TEMP/wasi-tools/spin.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/wasi-tools/spin.tar.gz" -C "$RUNNER_TEMP/wasi-tools" spin
+          curl -fsSL https://github.com/bytecodealliance/wac/releases/download/v0.11.0/wac-cli-x86_64-unknown-linux-musl -o "$RUNNER_TEMP/wasi-tools/wac"
+          echo "83259349b630f79a60490322b068e7ad2dba784720b0d467decccc0aecc743b5  $RUNNER_TEMP/wasi-tools/wac" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/wasi-tools/wac"
+          echo "$RUNNER_TEMP/wasi-tools" >> "$GITHUB_PATH"
+      - name: Test composed WASI credentials
+        run: make wasi-credential-test
+
   spin-key-value:
     runs-on: ubuntu-latest
     timeout-minutes: 30

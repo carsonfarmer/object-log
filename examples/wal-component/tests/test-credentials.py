@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in local test: stock Spin, composed WAL, and a strict IMDS/S3 wire fixture.
+"""Composed WAL test with stock Spin and a strict IMDS/S3 wire fixture.
 
 No AWS calls or credentials. The test-only bridge feature fixes metadata to this
 loopback listener; artifacts have a separate target directory from normal builds.
@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -37,10 +38,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     def reply(self, code, data=b"", **headers):
         self.send_response(code)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
         for name, value in headers.items():
             self.send_header(name.replace("_", "-"), value)
         self.end_headers()
         self.wfile.write(data)
+        self.close_connection = True
 
     def dispatch(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
@@ -71,14 +74,34 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             }
             return self.reply(200, json.dumps(credentials).encode())
 
-        assert self.path.startswith("/fixture/credentials/") or (self.command == "POST" and self.path == "/fixture?delete")
+        request = urllib.parse.urlsplit(self.path)
+        assert request.path.startswith("/fixture/credentials/") or (self.command in ("GET", "POST") and request.path == "/fixture")
         authorization = self.headers["Authorization"]
         match = re.search(r"Credential=key-(\d+)/\d+/us-west-2/s3/aws4_request", authorization)
         assert match, "missing role credential or wrong signing region"
         generation = int(match.group(1))
         assert self.headers["X-amz-security-token"] == f"session-{generation}"
         Fixture.signatures.append(generation)
+        if self.command == "GET" and request.path == "/fixture":
+            query = urllib.parse.parse_qs(request.query)
+            assert query.get("list-type") == ["2"]
+            assert len(query.get("prefix", [])) == 1
+            prefix = query["prefix"][0]
+            assert prefix.startswith("credentials/")
+            objects = sorted((path, data) for path, data in Fixture.objects.items() if path.startswith("/fixture/" + prefix))
+            result = ET.Element("ListBucketResult", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+            for name, value in (("Name", "fixture"), ("Prefix", prefix), ("KeyCount", str(len(objects))), ("IsTruncated", "false")):
+                ET.SubElement(result, name).text = value
+            for path, data in objects:
+                entry = ET.SubElement(result, "Contents")
+                ET.SubElement(entry, "Key").text = path.removeprefix("/fixture/")
+                ET.SubElement(entry, "LastModified").text = "2026-09-20T00:00:00Z"
+                ET.SubElement(entry, "ETag").text = '"' + hashlib.sha256(data).hexdigest() + '"'
+                ET.SubElement(entry, "Size").text = str(len(data))
+                ET.SubElement(entry, "StorageClass").text = "STANDARD"
+            return self.reply(200, ET.tostring(result), Content_Type="application/xml")
         if self.command == "POST":
+            assert self.path == "/fixture?delete"
             result = ET.Element("DeleteResult")
             for key in ET.fromstring(body).findall(".//{*}Key"):
                 assert key.text.startswith("credentials/")
