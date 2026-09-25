@@ -7,7 +7,7 @@ use bytes::Bytes;
 use minicbor::{CborLen, Decode, Encode, encode::Write};
 use object_log::{
     CheckpointStatus, Log, MaterializeError, Materializer, PreparedCommit, StagedObject,
-    TransactionId, View, materialize,
+    TransactionId, View, materialize, tail_record,
 };
 
 const FORMAT: &[u8] = b"object-log-kv/radix/1";
@@ -169,13 +169,20 @@ impl KvStore {
     /// # Errors
     /// Returns WAL errors or an incompatible KV operation/checkpoint format.
     pub async fn snapshot(&self) -> Result<KvSnapshot, KvError> {
-        let materialized = materialize(&self.log, self.log.load().await?, &Root)
-            .await
-            .map_err(|error| match error {
-                MaterializeError::Log(error) => KvError::Log(error),
-                MaterializeError::State(error) => error,
-            })?;
-        let (view, root) = materialized.into_parts();
+        let view = self.log.load().await?;
+        let root = if let Some(index) = view.tail().len().checked_sub(1) {
+            let latest = tail_record(&self.log, &view, index).await?;
+            Root.restore(latest.record().operation(), latest.proofs())?
+        } else {
+            materialize(&self.log, view.clone(), &Root)
+                .await
+                .map_err(|error| match error {
+                    MaterializeError::Log(error) => KvError::Log(error),
+                    MaterializeError::State(error) => error,
+                })?
+                .into_parts()
+                .1
+        };
         Ok(KvSnapshot {
             store: self.clone(),
             view,

@@ -4514,8 +4514,12 @@ mod tests {
         ));
         let probe = FoldProbe::default();
         assert!(matches!(
-            crate::materialize(&log, old, &probe).await,
+            crate::materialize(&log, old.clone(), &probe).await,
             Err(crate::MaterializeError::Log(Error::ViewExpired))
+        ));
+        assert!(matches!(
+            crate::tail_record(&log, &old, 0).await,
+            Err(Error::ViewExpired)
         ));
         assert!(probe.dropped.get());
         Ok(())

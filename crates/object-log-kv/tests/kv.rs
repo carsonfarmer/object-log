@@ -188,6 +188,32 @@ async fn optional_no_op_preparation_does_not_need_a_tail_slot() -> TestResult {
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn snapshot_reads_only_the_latest_complete_root() -> TestResult {
+    for tail_len in [1_u8, 32] {
+        let (backend, store, faults) = fixture(Options::default()).await?;
+        for key in 0..tail_len {
+            commit(&store, &[set(&[key], &[key])]).await?;
+        }
+        let cold = open(&backend, Options::default()).await?;
+        faults.reset();
+        let snapshot = cold.snapshot().await?;
+        assert_eq!(snapshot.view().tail().len(), usize::from(tail_len));
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 2);
+        assert_eq!(snapshot.get(&[0]).await?, Some(Bytes::from_static(&[0])));
+        let last = tail_len - 1;
+        assert_eq!(snapshot.get(&[last]).await?, Some(Bytes::from(vec![last])));
+
+        faults.reset();
+        assert!(matches!(
+            snapshot.checkpoint().await?,
+            Some(CheckpointStatus::Published(_))
+        ));
+        assert!(faults.metrics().operation(Operation::Get).requests >= u64::from(tail_len));
+    }
+    Ok(())
+}
 async fn checkpoint(store: &KvStore) -> TestResult {
     assert!(matches!(
         store.snapshot().await?.checkpoint().await?,

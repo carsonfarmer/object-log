@@ -209,10 +209,10 @@ can be collected, and a smaller mutation can then publish.
 
 Acceptance gates require exact model equality, untorn batches, definite
 conflicts, recoverable maintenance, and smaller storage after collection.
-Snapshot loading reads the head and any checkpoint and active-tail entries;
-it does not traverse the KV tree. Point reads use at
-most six GETs at the smaller stages and seven when the larger tree also contains
-the contention counters. Downloads stay below 32 KiB, within a 128 KiB tree
+Snapshot loading takes at most two logical GETs regardless of tail length.
+Point reads use at most six GETs at the smaller stages and seven when the larger
+tree also contains the contention counters. Downloads stay below 32 KiB, within
+a 128 KiB tree
 allowance even when live key/value data exceeds 4 MiB. The existing sparse-call
 test additionally requires at most three path GETs and PUTs for an overwrite on
 its binary-key fixture and no repeated path reads. Latency is reported, not used
@@ -236,9 +236,9 @@ RSS includes the oracle, runtime, transport, and allocator slack; it is neither
 peak RSS nor an exact allocator/admission measure. It reports `unavailable` when
 the platform cannot measure it. No per-request event archive
 is kept. Preserve raw command/Criterion output locally under ignored `target/`
-when comparing runs. Fresh-snapshot reads include bounded WAL replay, but do not
-flush provider or OS caches. These are local `MinIO` results; they do not establish
-remote-S3 latency or capacity for other key layouts and operation mixes.
+when comparing runs. Fresh-snapshot reads load the head and latest commit or
+checkpoint, but do not flush provider or OS caches. These local `MinIO` results
+do not establish remote-S3 latency or capacity for other key layouts and mixes.
 
 ## Remote AWS qualification
 

@@ -122,6 +122,24 @@ pub fn history(log: &Log, view: View) -> Result<HistoryCursor, Error> {
     })
 }
 
+/// Reads one commit from an exact view's active tail with publication proofs
+/// for its declared objects. This does not verify the other tail records or
+/// certify the complete history for checkpoint publication.
+///
+/// # Errors
+///
+/// Returns an error for a foreign view, an out-of-range index, a missing,
+/// corrupt, or expired commit, or a broken link to its declared predecessor.
+pub async fn tail_record(
+    log: &Log,
+    view: &View,
+    index: usize,
+) -> Result<Authenticated<CommitRecord>, Error> {
+    let record = log.read_tail_record(view, index).await?;
+    let proofs = record_proofs(log, view, record.objects());
+    Ok(Authenticated { record, proofs })
+}
+
 /// Applies opaque log data to one application state type.
 ///
 /// Callbacks may run before a later storage or state error is discovered.
@@ -295,6 +313,9 @@ mod tests {
         assert_eq!(record.result(), b"result".as_slice());
         assert_eq!(proofs.len(), 1);
         assert_eq!(proofs[0].reference(), object.reference());
+        let latest = tail_record(&log, history.view(), 0).await?;
+        assert_eq!(latest.record(), &record);
+        assert_eq!(latest.proofs()[0].reference(), object.reference());
         assert!(history.next().await?.is_none());
         assert!(history.is_complete());
         Ok(())

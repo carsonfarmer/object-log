@@ -19,7 +19,7 @@ pub use log::{
 };
 pub use materialize::{
     Authenticated, HistoryCursor, HistoryItem, MaterializeError, Materialized, Materializer,
-    history, materialize,
+    history, materialize, tail_record,
 };
 pub use store::{
     BackendCapabilities, BackendCapability, Request, RequestDenied, RequestGuard, ValidatedBackend,
