@@ -302,7 +302,8 @@ Never clear retentions while a reader may still be active.
 - Incoming delta reconstruction uses go-git's normal in-memory buffers. The
   service checks decoded object size after reconstruction. Large objects and
   long delta chains can use substantially more memory than the
-  compressed upload size. Plain object data and WAL reads remain streamed.
+  compressed upload size. `git_max_object_bytes` is an acceptance limit, not a
+  per-request memory cap. Plain object data and WAL reads remain streamed.
 - Fetch reuses compressed deltas supplied by Git clients; it does not calculate
   new deltas. Representations up to 64 KiB stay inline; larger ones up to 8 MiB
   live in separate WAL byte objects so unrelated catalog reads stay small.

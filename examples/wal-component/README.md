@@ -39,7 +39,9 @@ operation bytes, recorded result bytes, and staged object roots. Call
 `candidate.publish` when an operation must survive process loss. Publication
 reports committed, conflict, or pending explicitly. Resolve a saved token with
 `session.resume`; expired evidence never means that the operation was not
-committed.
+committed. After `candidate.publish` returns an error, do not retry that same
+candidate: its immutable object may already exist. Reopen a session and use
+`session.resume` with the token instead.
 
 An uncertain checkpoint returns an owned `pending-checkpoint` resource. Its
 `resolve` method keeps the same evidence while storage remains uncertain and

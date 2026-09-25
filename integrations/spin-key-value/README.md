@@ -218,14 +218,9 @@ openers must agree. The initial format is pre-release; use a fresh prefix after
 an incompatible format change. Host limit changes can make existing data
 unreadable if reduced below its required bounds.
 
-In a 64-write hot-namespace sample on local native MinIO (Apple M4 Pro,
-optimized Rust test build, 64-byte values), eight concurrent clients completed
-about 104 writes/s before grouping and 504–565 writes/s with the owner across
-two runs. The p95 write latency fell from 240 ms to 16–35 ms; logical
-object-store calls fell from 3,524 to 202–231, and HTTP conditional-write
-conflicts from 32 to zero. One client remained near 140 writes/s. Reads retain
-their independent path. The conditions and raw results are recorded in issue
-#57; these numbers do not predict remote S3 throughput.
+The owner groups concurrent writes to one namespace. Its throughput and latency
+depend on the backend and workload; qualify those on the deployment you intend
+to use. Reads retain their independent path.
 
 ## Maintenance and diagnostics
 

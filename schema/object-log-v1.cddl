@@ -20,7 +20,7 @@ index = {
   9: options,                      ; durable log contract
   10: uint,                        ; monotonic collection epoch
   ? 11: collection-plan-ref,       ; active positive deletion plan
-  12: [* retention-id]             ; sorted conservative reader retentions
+  12: [* retention-id]             ; strictly sorted, unique reader retentions
 }
 
 options = {
@@ -46,7 +46,7 @@ entry = {
   ? 4: digest,                     ; expected prior tip
   5: bstr,                         ; opaque operation
   6: bstr,                         ; opaque recorded result
-  7: [* object-ref],
+  7: [* object-ref<data-kind>],
   8: incarnation-id                ; durable log incarnation
 }
 
@@ -57,25 +57,25 @@ base = {
   4: digest,                       ; covered entry digest
   5: bstr,                         ; opaque snapshot
   6: incarnation-id,               ; durable log incarnation
-  7: [* object-ref]                ; all immutable objects needed by this base
+  7: [* object-ref<data-kind>]     ; all immutable objects needed by this base
 }
 
 reference-node = {
   1: 1,                            ; format version
   2: bstr,                         ; opaque adapter payload
-  3: [* object-ref]                ; payload or reference-node children
+  3: [* object-ref<data-kind>]     ; payload or reference-node children
 }
 
 ; Caller-owned recovery token. Persist before attempting publication.
 recovery-token = {
   1: 1,                            ; format version
-  2: bstr,                         ; canonical encoded source index
+  2: bstr,                         ; canonical enveloped source index
   ? 3: tstr,                       ; source ETag
   ? 4: tstr,                       ; source storage version
   5: transaction-id,
   6: bstr,                         ; opaque operation
   7: bstr,                         ; opaque recorded result
-  8: [* object-ref],
+  8: [* object-ref<data-kind>],
   9: storage-id                    ; exact entry physical identity
 }
 
@@ -90,11 +90,11 @@ entry-pointer = {
 checkpoint-ref = {
   1: uint,                         ; covered sequence
   2: digest,                       ; covered entry digest
-  3: object-ref
+  3: object-ref<2>
 }
 
-object-ref = {
-  1: object-kind,
+object-ref<kind> = {
+  1: kind,
   2: digest,
   3: uint,                         ; byte length
   4: storage-id,                   ; private physical identity
@@ -122,11 +122,12 @@ collection-candidate = {
   5: uint                          ; listed object bytes
 }
 
-object-kind = 1 / 2 / 3            ; payload / base / reference node
+data-kind = 1 / 3                 ; payload / reference node; base is 2
 immutable-kind = 1 / 2 / 3 / 4 / 5 ; entry / payload / node / base / plan
 digest = bstr .size 32
 transaction-id = bstr .size 16
 retention-id = bstr .size 16
 storage-id = bstr .size 16
 incarnation-id = bstr .size 16
-log-id = tstr .size (1..128)
+log-id = tstr .regexp "[A-Za-z0-9._-]{1,128}"
+; The log IDs "." and ".." are additionally forbidden.

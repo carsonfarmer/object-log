@@ -29,7 +29,7 @@ dependencies used by the example below:
 object-log = { git = "https://github.com/carsonfarmer/object-log", rev = "<commit>" }
 bytes = "1.10"
 object_store = { version = "0.14", default-features = false }
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.47", features = ["macros", "rt"] }
 ```
 
 The default crate compiles for native targets and `WASIp2`. The convenience `aws`
@@ -88,7 +88,7 @@ use object_log::{
 };
 use object_store::{memory::InMemory, path::Path};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), object_log::Error> {
 let backend = ValidatedBackend::new(
     Arc::new(InMemory::new()),
@@ -226,7 +226,7 @@ authentication concerns to the Rust library.
 
 ## Development
 
-The repository pins its Rust and Go toolchains. Run the complete local gate:
+The repository pins its Rust and Go toolchains. Run the portable project checks:
 
 ```sh
 make check
@@ -252,11 +252,12 @@ fresh object-store namespace; compatibility readers for earlier development
 formats are intentionally absent. A tagged durable-format release will require a
 new format version for incompatible changes.
 
-The crate forbids unsafe Rust and denies missing public documentation. Native
-and `WASIp2` builds, deterministic fault simulation, `MinIO` provider tests, large
-collection tests, and API doctests run in the project gates. Consumers should
-still qualify their object-store provider, limits, and maintenance schedule with
-their own workload before deploying it.
+The crate forbids unsafe Rust and denies missing public documentation. CI runs
+`make check` and the Spin key-value provider checks. `make check` covers native
+tests and strict linting, including a `WASIp2` type-check. The API examples are
+`no_run` doctests: compiled but not executed. The local `MinIO` and
+large-collection suites are opt-in. Qualify your object-store provider, limits,
+and maintenance schedule with your own workload before deploying.
 
 `object-log` is licensed under
 [Apache-2.0](https://github.com/carsonfarmer/object-log/blob/main/LICENSE).

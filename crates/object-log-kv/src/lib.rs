@@ -25,7 +25,7 @@ pub struct Limits {
     pub batch_bytes: usize,
     /// Maximum entries returned by one scan page.
     pub page_entries: usize,
-    /// Maximum combined key and value bytes returned by a page or multi-get.
+    /// Maximum key and value bytes in a scan page, or value bytes in a multi-get.
     pub response_bytes: usize,
     /// Cumulative stored-node, transient-tree, encoded-node, and traversal-prefix bytes.
     /// Includes repeated path work and all commands in a batch; excludes WAL work.

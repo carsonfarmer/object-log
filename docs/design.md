@@ -48,6 +48,7 @@ log_identity
 incarnation_id
 options
 generation
+next_sequence
 base_checkpoint
 tail[]
 recent_outcomes[]
@@ -66,6 +67,7 @@ deterministic BLAKE3 content identities within that namespace.
 open the log with the same options.
 
 `generation` increases for every head update, including maintenance updates.
+`next_sequence` is the position assigned to the next published commit.
 `tail` is ordered. Each element contains a sequence, transaction ID, entry
 digest, and encoded entry length. As in Micelio, the immutable entry has no
 assigned sequence. The mutable index pointer assigns its position. This keeps
@@ -106,10 +108,12 @@ Object-store ETags are concurrency tokens and are not content-integrity hashes.
 
 ## Open and refresh
 
-`ValidatedBackend::new` validates one backend and root once. `Log::open` takes
-that handle and a `LogId`, then derives the private tenant scope without a
-storage request. It creates the initial index when needed. It does not probe
-the backend or load all log data. This keeps tenant open and close cheap.
+`ValidatedBackend::new` probes one backend and root when the handle is created.
+Reuse that handle across logs and opens; the current `WASIp2` component creates
+one per session and therefore probes on each request. `Log::open` reads the
+derived log's index and conditionally creates it only when absent.
+`Log::open_existing` reads the index without creating it. Neither open loads
+the complete log history.
 
 The capability probe writes and deletes one private object when the backend
 handle is created. Provisioning and collection credentials need delete
@@ -172,10 +176,11 @@ before step 3.
 The result is:
 
 - `Committed` when the conditional update returns success.
-- `Conflict` when the store rejects the update and the winner can be read.
+- `Conflict` when a rejected update is classified against a readable winning
+  head, or retention-only contention exhausts 16 attempts.
 - `Pending` when the safe final view or classification is not available. This
-  includes an ambiguous update result and a rejected update followed by a
-  failed read of the winner.
+  includes an ambiguous update result, a rejected update followed by a
+  failed read of the winner, and a rejected update whose head remains unchanged.
 
 The core never retries a candidate against newer application or collection
 state. It can reconcile a head revision that changed only reader-retention
@@ -190,8 +195,8 @@ Resolution reads the current head:
 
 - A matching transaction ID and commit digest proves success.
 - The original head still present permits retry of the exact conditional write.
-- A different winner directly after the expected head proves that the candidate
-  did not publish.
+- A changed publication base at the expected sequence, or a different retained
+  commit at that sequence, proves that the candidate did not publish.
 - A checkpointed result is resolved from `recent_outcomes`.
 - Missing evidence after resolution-window expiry returns `Expired`.
 - Store unavailability returns `StillPending`.
@@ -222,7 +227,9 @@ same-handle proof avoids another root-graph read. The new index replaces the
 base checkpoint, removes the covered tail prefix, preserves the suffix,
 preserves the resolution window, and increments the generation.
 
-A definite CAS failure returns `Conflict`. An uncertain update returns a
+A rejected conditional update is classified against the readable head; a failed
+classification remains pending. Retention-only contention retries up to 16
+times, then returns `Conflict`. An uncertain update returns a
 `PendingCheckpoint`. `resolve_checkpoint` preserves the exact original
 checkpoint and source view; it can reconcile reader-retention-only head
 revisions. Other later head movement can make the outcome `Expired`.
@@ -258,8 +265,10 @@ the candidate limit plus one entries. Graph authentication still covers every
 live reference, independently of the candidate limit.
 
 Every head update preserves an active plan. Commit and checkpoint publication
-read that plan. They reject a direct or transitive reference to a planned key.
-They also reject a planned commit key. A checkpoint staging call selects
+read that plan. Same-handle staged proofs are bound to their collection epoch;
+references imported from another handle or recovery token undergo full graph
+validation against the plan. A new commit key is also checked against it.
+A checkpoint staging call selects
 another physical ID if its first new key is in the plan. Full graph validation
 also runs when existing references are staged or work resumes without a local
 proof. This prevents publication of an old node whose child was deleted by an

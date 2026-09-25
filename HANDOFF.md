@@ -102,12 +102,18 @@ The API and durable layout are pre-release. Use a fresh prefix after an
 incompatible format change; do not add readers for discarded development
 formats.
 
-## Gates
+## Checks and opt-in suites
 
-Run:
+The portable project check is:
 
 ```sh
 make check
+```
+
+Run the local, network-backed MinIO suite and composed Spin checks when
+qualifying changes to those paths:
+
+```sh
 make minio-test
 make git-build
 make git-spin-config-test

@@ -57,7 +57,8 @@ Even a no-op batch records durable results when committed.
 Use the profile above for small application records, metadata and ordered
 indexes. It is the profile exercised by the growth test below. KV limits such
 as `tree_bytes` apply per call: a tree can exceed that byte budget while its
-individual paths and pages fit. The WAL has a separate total-state ceiling:
+individual paths and pages fit. This does not bound total state or process
+memory. The WAL has a separate total-state ceiling:
 each commit or checkpoint counts its complete root graph plus its enclosing
 object against `Options::max_collection_objects` (100,000 by default). The
 number of keys that fit depends on the tree shape; it is not 100,000 keys. A
@@ -208,7 +209,8 @@ can be collected, and a smaller mutation can then publish.
 
 Acceptance gates require exact model equality, untorn batches, definite
 conflicts, recoverable maintenance, and smaller storage after collection.
-Checkpointed snapshot loading takes at most two logical GETs; point reads use at
+Snapshot loading reads the head and any checkpoint and active-tail entries;
+it does not traverse the KV tree. Point reads use at
 most six GETs at the smaller stages and seven when the larger tree also contains
 the contention counters. Downloads stay below 32 KiB, within a 128 KiB tree
 allowance even when live key/value data exceeds 4 MiB. The existing sparse-call

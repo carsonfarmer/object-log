@@ -69,11 +69,12 @@ cleanup, unchanged refs, cold mirrors, full fsck and independent review passed.
 Issue #45 records completed remote qualification, including independently
 verified removal of the created infrastructure.
 
-## Release gate
+## Release checks
 
 Before a tagged release:
 
-1. Keep `make check`, `make minio-test`, and the Git provider suites green.
+1. Keep `make check` green. Run the opt-in MinIO and Git provider suites when
+   qualifying affected paths and before public deployment.
 2. Keep crate packaging limited to library source, the schema, license, public
    README, integration tests, benchmarks, and Cargo metadata.
 3. Maintain public documentation for the current API and operator obligations.

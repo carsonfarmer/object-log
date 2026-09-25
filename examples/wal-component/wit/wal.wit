@@ -55,6 +55,8 @@ interface wal {
     variant history-item { checkpoint(entry), commit(commit-record) }
     resource candidate {
         recovery-token: func() -> result<list<u8>, failure>;
+        // Save the token before publishing. After any publish error, reopen and
+        // resolve with session.resume(token); do not publish this candidate again.
         publish: func() -> result<outcome, failure>;
     }
     resource byte-writer {
