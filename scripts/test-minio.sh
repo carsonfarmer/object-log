@@ -2,7 +2,7 @@
 set -euo pipefail
 
 image="minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
-container="object-log-minio-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+container="object-log-minio-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 access_key="objectlog"
 secret_key="objectlog-local-test-secret"
 bucket="object-log-test"
@@ -67,7 +67,11 @@ if [[ -n "${native_binary}" ]]; then
   [[ -x "${native_binary}" ]] || { echo 'OBJECT_LOG_MINIO_BINARY must name an executable.' >&2; exit 2; }
   command -v lsof >/dev/null || { echo 'Native MinIO mode requires lsof to verify listener ownership.' >&2; exit 2; }
   "${native_binary}" --version
-  shasum -a 256 "${native_binary}"
+  if command -v sha256sum >/dev/null; then
+    sha256sum "${native_binary}"
+  else
+    shasum -a 256 "${native_binary}"
+  fi
   native_data="$(mktemp -d "${TMPDIR:-/tmp}/object-log-minio.XXXXXX")"
   port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
   endpoint="http://127.0.0.1:${port}"
@@ -126,7 +130,8 @@ if [[ -n "${features}" ]]; then
 fi
 if [[ "$#" == "0" ]]; then
   test_command+=(--test minio --test protocol --test store_conformance
-    --test immutable_faults --test maintenance_model minio)
+    --test immutable_faults --test maintenance_model --test collection_limits
+    --test mature_tail minio)
 else
   test_command+=(--test "${test_target}" "${test_filter}")
 fi

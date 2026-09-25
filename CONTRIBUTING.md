@@ -7,12 +7,27 @@ the core.
 ## Setup
 
 Install the Rust toolchain pinned by `rust-toolchain.toml`, the Go version in
-`examples/git/go.mod`, and `jq`. The Git Makefile builds its pinned
+`examples/git/go.mod`, `jq`, Python 3, `curl`, and the AWS CLI. The Git Makefile builds its pinned
 `componentize-go` tool with Cargo.
 The complete gate uses `jq` for a self-contained test of the AWS
 temporary-credential helper; it does not contact AWS. Building the composed
-component additionally requires `wac`; running it requires Spin. MinIO is needed
-only for the opt-in storage tests.
+component additionally requires `wac`; running it requires Spin. Local
+S3-compatible tests use the pinned MinIO container image through Docker, or a
+native binary named by `OBJECT_LOG_MINIO_BINARY` (which also requires `lsof`
+and either `sha256sum` or `shasum`).
+Community binary downloads are unavailable; a native binary can be built from
+the archived MinIO source at a fixed revision:
+
+```sh
+go install github.com/minio/minio@7aac2a2c5b7c882e68c1ce017d8256be2feea27f
+OBJECT_LOG_MINIO_BINARY="$(go env GOPATH)/bin/minio" make minio-test
+```
+
+The test script prints the binary version and SHA-256 digest, uses disposable
+storage, and verifies that its listener stops. The default `make minio-test`
+includes collection-limit and mature-tail cases. The 10,001-object collection
+case remains in `make gc-acceptance`; finite provider measurements are in
+`make minio-performance`.
 
 Run the required local gate before submitting a change:
 
@@ -41,7 +56,7 @@ Run optimized benchmarks and the finite operation measurements separately:
 ```sh
 cargo bench --workspace --all-features
 cargo test --release --features test-util --test performance memory_performance -- --ignored --nocapture
-CARGO_PROFILE_TEST_OPT_LEVEL=3 ./scripts/test-minio.sh performance minio_performance
+make minio-performance
 ```
 
 Criterion covers payload sizes, replay depth, writer contention and collection

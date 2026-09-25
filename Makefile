@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test gc-acceptance git-check git-build git-spin-config-test git-provider-test git-qualification-tools-test
+.PHONY: check test bench minio-test minio-performance gc-acceptance git-check git-build git-spin-config-test git-provider-test git-qualification-tools-test
 
 check:
 	cargo fmt --all --check
@@ -15,6 +15,9 @@ bench:
 
 minio-test:
 	./scripts/test-minio.sh
+
+minio-performance:
+	CARGO_PROFILE_TEST_OPT_LEVEL=3 ./scripts/test-minio.sh performance minio_performance
 
 gc-acceptance:
 	cargo test --features test-util --test gc_acceptance memory_gc_removes_100k_objects -- --ignored --nocapture

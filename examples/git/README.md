@@ -26,7 +26,8 @@ when changing incompatible revisions.
 ## Build
 
 Install Go 1.27.1, the repository's pinned Rust toolchain, Spin 4, `wac`, MinIO,
-and the MinIO `mc` client. Then run from the repository root:
+and the AWS CLI. For a pinned MinIO container or a native source build, see
+[the contributor setup](../../CONTRIBUTING.md). Then run from the repository root:
 
 ```sh
 rustup target add wasm32-wasip2
@@ -41,14 +42,16 @@ the cached binary.
 
 ## Run locally
 
-Start an isolated MinIO instance in one terminal. The command prints its unique
-data directory; remove that directory after stopping MinIO:
+Start an isolated MinIO instance in one terminal using the native binary from
+the contributor setup. The command prints its unique data directory; remove
+that directory after stopping MinIO:
 
 ```sh
 minio_data="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-minio.XXXXXX")"
 echo "MinIO data: $minio_data"
+minio_binary="${OBJECT_LOG_MINIO_BINARY:-$(go env GOPATH)/bin/minio}"
 MINIO_ROOT_USER=objectlog MINIO_ROOT_PASSWORD=local-test-secret \
-  minio server "$minio_data" --address 127.0.0.1:19090
+  "$minio_binary" server "$minio_data" --address 127.0.0.1:19090
 ```
 
 In another terminal, create the bucket and a protected Spin variables file.
@@ -56,9 +59,9 @@ Each run gets a new WAL prefix:
 
 ```sh
 local_config="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-config.XXXXXX")"
-mc --config-dir "$local_config/mc" alias set local-git \
-  http://127.0.0.1:19090 objectlog local-test-secret
-mc --config-dir "$local_config/mc" mb --ignore-existing local-git/wal-proof
+AWS_ACCESS_KEY_ID=objectlog AWS_SECRET_ACCESS_KEY=local-test-secret \
+  AWS_DEFAULT_REGION=us-east-1 aws --endpoint-url http://127.0.0.1:19090 \
+  s3api create-bucket --bucket wal-proof
 test_id="local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 (
   umask 077
