@@ -130,7 +130,7 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `wal_session_token` | empty | Optional temporary-credential token |
 | `wal_credential_mode` | `static` | Explicit keys or `instance-role` for renewing EC2 IMDSv2 credentials |
 | `wal_collection_candidates` | `1000` | Maximum entries in a new deletion plan, capped by the durable graph limit |
-| `wal_max_collection_objects` | `100000` | Publication graph bound (shared paths count separately); maximum unique live objects or entries per collection plan |
+| `wal_max_collection_objects` | `100000` | Complete publication graph and distinct collection live-object bound; shared paths count separately for publication |
 | `wal_recover_retentions_after_drain` | `false` | Exclusive lost-retention recovery mode |
 | `git_repositories` | two demo entries | JSON map of paths, WAL identities, formats, default branches and permissions |
 | `git_auth_mode` | `password` | `password`, `cognito`, or explicit local `anonymous` mode |
@@ -149,6 +149,19 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `git_max_pack_objects` | `1000000` | Maximum entries declared by one incoming pack |
 | `git_max_catalog_bytes` | `67108864` | Catalog data decoded during one request |
 | `git_request_timeout` | `5m` | Cooperative request deadline |
+
+Each Git publication includes the reachable catalog and its separately stored
+objects. The default WAL bound therefore limits total repository state, not
+just one push. Compressed objects larger than the 512-byte inline threshold,
+retained deltas, and catalog nodes use WAL objects; a repository with around
+100,000 such objects may reach the bound sooner because the root and shared
+paths also count. That is a sizing estimate, not a tested repository capacity. Set
+`wal_max_collection_objects` consistently for every host before provisioning a
+larger repository; this durable option cannot be changed in place. Each new
+collection plan traverses the live graph and scans the namespace, so a higher
+bound can increase maintenance reads and time. More garbage than
+`wal_collection_candidates` requires repeated passes. The fixed
+transport call budget may also need review for a substantially larger state.
 
 Invalid, zero, or inconsistent limits fail closed. These defaults are
 configurable service policy, not requirements of the WAL or Spin. They bound

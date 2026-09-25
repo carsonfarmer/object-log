@@ -180,6 +180,20 @@ Optional `[key_value_store.<label>.limits]` fields and defaults:
 | `checkpoint_entries` | 64 | Automatic checkpoint threshold before mutations |
 | `collection_candidates` | 1,024 | One collection plan |
 
+The WAL's separate `max_collection_objects` option defaults to 100,000. Each
+write publishes a complete KV root, so this bounds total tree objects and can
+stop growth even when each individual call fits the KV byte limits. Key capacity
+depends on tree shape. Guests receive the distinct message
+`object-log total-state object limit exceeded`; the failed write changes
+nothing. Set
+`[key_value_store.<label>.wal].max_collection_objects` for a larger state when
+creating the store. This durable option cannot be changed in place; every
+opener must retain it. Collection also bounds distinct live objects by it. Each
+new plan walks the live graph and scans the namespace. Each pass deletes up to
+`collection_candidates` objects, so repeated passes repeat this work. Measure
+the `requests` allowance and host maintenance time as the state grows instead
+of only raising the object limit.
+
 `get_keys` returns a complete bounded listing, never silent truncation.
 Collection response accounting includes the outer `Vec` header, even for an
 empty result, as well as each element's headers and payload bytes.

@@ -392,6 +392,29 @@ async fn limits_reject_whole_batches_and_lists() -> Result {
 }
 
 #[tokio::test]
+async fn complete_state_limit_has_a_distinct_guest_error() -> Result {
+    let host = Manager::new(
+        Arc::new(InMemory::new()),
+        "state-limit",
+        Options {
+            max_collection_objects: 3,
+            ..Options::default()
+        },
+        HostLimits::default(),
+    )?;
+    let store = host.get("default").await?;
+    store.set("aa", b"one").await?;
+    let error = store.set("ab", b"two").await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Other(message) if message == "object-log total-state object limit exceeded"
+    ));
+    assert_eq!(store.get("aa", usize::MAX).await?, Some(b"one".to_vec()));
+    assert_eq!(store.get("ab", usize::MAX).await?, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn collection_preserves_roots_and_respects_retentions() -> Result {
     let memory: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let limits = HostLimits {

@@ -55,12 +55,24 @@ Even a no-op batch records durable results when committed.
 ## Operating a small-record store
 
 Use the profile above for small application records, metadata and ordered
-indexes. It is the profile exercised by the growth test below. Limits apply to
-each call, not the total database: a tree can exceed `tree_bytes` while individual
-paths and pages still fit. A batch that exceeds its tree budget fails as a whole,
-even if its keys and values each fit. Keep the key layout and batch sizes within
-the measured workload for your deployment; value-bearing ancestors increase
-path-copying cost.
+indexes. It is the profile exercised by the growth test below. KV limits such
+as `tree_bytes` apply per call: a tree can exceed that byte budget while its
+individual paths and pages fit. The WAL has a separate total-state ceiling:
+each commit or checkpoint counts its complete root graph plus its enclosing
+object against `Options::max_collection_objects` (100,000 by default). The
+number of keys that fit depends on the tree shape; it is not 100,000 keys. A
+batch that exceeds its tree budget fails as a whole, even if its keys and values
+each fit. Keep the key layout and batch sizes within the measured workload for
+your deployment; value-bearing ancestors increase path-copying cost.
+
+Set `max_collection_objects` when creating the WAL if a larger state is needed;
+the durable option cannot be changed in place. All openers must use it. Raising
+it also allows a larger live graph during collection. Every new deletion plan
+walks that graph and scans the namespace. More live nodes and more plans mean
+more reads and listing work. Size the maintenance request budget and candidate
+batch for the measured workload; raising the object limit alone does not make
+collection cheap. Checkpoint the full tail before collecting, because several
+historical roots can exceed the live-graph bound together.
 
 The qualified WAL options use `max_tail_entries = 64` and
 `resolution_window = 16`, with other options at their defaults. The growth

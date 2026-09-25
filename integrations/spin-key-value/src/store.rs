@@ -12,7 +12,7 @@ use object_log::{
     CheckpointResolution, CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus,
     PreparedCommit, Request, RequestDenied, RequestGuard, Resolution, TransactionId,
 };
-use object_log_kv::{KvCommand, KvSnapshot, KvStore};
+use object_log_kv::{KvCommand, KvError, KvSnapshot, KvStore};
 use spin_factor_key_value::{Cas, Error, Store, SwapError, v3};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tracing::Instrument;
@@ -199,7 +199,7 @@ impl Writer {
         let candidate = snapshot
             .prepare(TransactionId::new(), commands)
             .await
-            .map_err(public_error)?;
+            .map_err(public_kv_error)?;
         self.commit(candidate).await
     }
 
@@ -278,6 +278,18 @@ pub enum Maintenance {
 pub(crate) fn public_error(error: impl std::fmt::Display) -> Error {
     tracing::warn!(error = %error, "object-log key-value operation failed");
     Error::Other("object-log storage or admission error".into())
+}
+
+fn public_kv_error(error: KvError) -> Error {
+    if matches!(
+        error,
+        KvError::Log(object_log::Error::LimitExceeded("publication objects"))
+    ) {
+        tracing::warn!(error = %error, "object-log key-value operation failed");
+        other("object-log total-state object limit exceeded")
+    } else {
+        public_error(error)
+    }
 }
 
 fn other(message: &str) -> Error {
@@ -380,7 +392,7 @@ impl BackendStore {
     }
 
     async fn checkpoint(snapshot: &KvSnapshot, kv: &KvStore) -> Result<bool, Error> {
-        match snapshot.checkpoint().await.map_err(public_error)? {
+        match snapshot.checkpoint().await.map_err(public_kv_error)? {
             None | Some(CheckpointStatus::Published(_)) => Ok(true),
             Some(CheckpointStatus::Conflict(_)) => Ok(false),
             Some(CheckpointStatus::Pending(pending)) => {
