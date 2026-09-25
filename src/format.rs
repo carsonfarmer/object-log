@@ -403,9 +403,9 @@ struct CommitWire<'a> {
     transaction_id: Cow<'a, [u8]>,
     #[cbor(n(4), with = "minicbor::bytes")]
     expected_tip: Option<Cow<'a, [u8]>>,
-    #[cbor(n(5), with = "minicbor::bytes")]
+    #[cbor(n(5), with = "minicbor::bytes", borrow)]
     operation: Cow<'a, [u8]>,
-    #[cbor(n(6), with = "minicbor::bytes")]
+    #[cbor(n(6), with = "minicbor::bytes", borrow)]
     result: Cow<'a, [u8]>,
     #[n(7)]
     objects: Vec<ObjectRefWire>,
@@ -424,7 +424,7 @@ struct CheckpointWire<'a> {
     through_sequence: u64,
     #[cbor(n(4), with = "minicbor::bytes")]
     through_commit: Cow<'a, [u8]>,
-    #[cbor(n(5), with = "minicbor::bytes")]
+    #[cbor(n(5), with = "minicbor::bytes", borrow)]
     snapshot: Cow<'a, [u8]>,
     #[cbor(n(6), with = "minicbor::bytes")]
     incarnation: Cow<'a, [u8]>,
@@ -743,23 +743,25 @@ pub(crate) fn encode_commit(commit: &Commit) -> Result<Bytes, Error> {
     })
 }
 
-pub(crate) fn decode_commit(bytes: &[u8]) -> Result<Commit, Error> {
-    let wire: CommitWire = decode_envelope(bytes)?;
+pub(crate) fn decode_commit(bytes: &Bytes) -> Result<Commit, Error> {
+    let payload = &bytes[decode_borrowed_envelope(bytes)?];
+    let wire: CommitWire<'_> = decode_exact(payload)?;
     require_version(wire.format_version)?;
+    let canonical = require_canonical_wire(payload, &wire);
     let commit = Commit {
         log_id: LogId::new(wire.log_id.into_owned())?,
         incarnation: uuid(&wire.incarnation, "log incarnation")?,
         transaction_id: transaction_id(&wire.transaction_id)?,
         expected_tip: wire.expected_tip.map(|value| digest(&value)).transpose()?,
-        operation: Bytes::from(wire.operation.into_owned()),
-        result: Bytes::from(wire.result.into_owned()),
+        operation: shared_bytes(bytes, &wire.operation)?,
+        result: shared_bytes(bytes, &wire.result)?,
         objects: wire
             .objects
             .into_iter()
             .map(ObjectRef::try_from)
             .collect::<Result<_, _>>()?,
     };
-    require_canonical(bytes, &encode_commit(&commit)?)?;
+    canonical?;
     Ok(commit)
 }
 
@@ -775,23 +777,36 @@ pub(crate) fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Bytes, Error>
     })
 }
 
-pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, Error> {
-    let wire: CheckpointWire = decode_envelope(bytes)?;
+pub(crate) fn decode_checkpoint(bytes: &Bytes) -> Result<Checkpoint, Error> {
+    let payload = &bytes[decode_borrowed_envelope(bytes)?];
+    let wire: CheckpointWire<'_> = decode_exact(payload)?;
     require_version(wire.format_version)?;
+    let canonical = require_canonical_wire(payload, &wire);
     let checkpoint = Checkpoint {
         log_id: LogId::new(wire.log_id.into_owned())?,
         incarnation: uuid(&wire.incarnation, "log incarnation")?,
         through_sequence: wire.through_sequence,
         through_commit: digest(&wire.through_commit)?,
-        snapshot: Bytes::from(wire.snapshot.into_owned()),
+        snapshot: shared_bytes(bytes, &wire.snapshot)?,
         objects: wire
             .objects
             .into_iter()
             .map(ObjectRef::try_from)
             .collect::<Result<_, _>>()?,
     };
-    require_canonical(bytes, &encode_checkpoint(&checkpoint)?)?;
+    canonical?;
     Ok(checkpoint)
+}
+
+fn shared_bytes(encoded: &Bytes, field: &[u8]) -> Result<Bytes, Error> {
+    let start = (field.as_ptr() as usize)
+        .checked_sub(encoded.as_ptr() as usize)
+        .ok_or_else(invalid_canonical_object)?;
+    let end = start
+        .checked_add(field.len())
+        .ok_or_else(invalid_canonical_object)?;
+    valid(end <= encoded.len())?;
+    Ok(encoded.slice(start..end))
 }
 
 pub(crate) fn encode_node(node: &Node, options: Options) -> Result<Bytes, Error> {
@@ -1230,9 +1245,9 @@ where
     decode_exact(&envelope.payload)
 }
 
-fn decode_exact<M>(bytes: &[u8]) -> Result<M, Error>
+fn decode_exact<'bytes, M>(bytes: &'bytes [u8]) -> Result<M, Error>
 where
-    M: for<'bytes> Decode<'bytes, ()>,
+    M: Decode<'bytes, ()>,
 {
     let mut decoder = minicbor::Decoder::new(bytes);
     let value = decoder
@@ -1262,6 +1277,12 @@ fn require_canonical(input: &[u8], canonical: &[u8]) -> Result<(), Error> {
         ));
     }
     Ok(())
+}
+
+fn require_canonical_wire<M: Encode<()>>(payload: &[u8], wire: &M) -> Result<(), Error> {
+    let mut writer = MatchingWriter(payload);
+    minicbor::encode(wire, &mut writer).map_err(|_| invalid_canonical_object())?;
+    valid(writer.0.is_empty())
 }
 
 fn digest(value: &[u8]) -> Result<Digest, Error> {
@@ -1504,10 +1525,9 @@ mod tests {
         Checkpoint, CheckpointWire, CollectionCandidate, CollectionCandidateWire, CollectionPlan,
         CollectionPlanRef, CollectionPlanWire, Commit, CommitWire, EnvelopeWire, FORMAT_VERSION,
         Head, HeadWire, Node, ObjectRefWire, OptionsWire, decode_checkpoint,
-        decode_collection_plan, decode_commit, decode_envelope, decode_head, decode_node,
-        decode_recovery_token, encode_checkpoint, encode_collection_plan, encode_commit,
-        encode_envelope, encode_head, encode_node as encode_node_with_options,
-        encode_recovery_token,
+        decode_collection_plan, decode_commit, decode_head, decode_node, decode_recovery_token,
+        encode_checkpoint, encode_collection_plan, encode_commit, encode_envelope, encode_head,
+        encode_node as encode_node_with_options, encode_recovery_token,
     };
     use crate::store::{ImmutableKey, ImmutableKind};
     use crate::{CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, Options};
@@ -1998,11 +2018,13 @@ mod tests {
 
         let encoded =
             encode_commit(&commit).unwrap_or_else(|error| panic!("encode failed: {error}"));
-        let wire: CommitWire<'static> =
-            decode_envelope(&encoded).unwrap_or_else(|error| panic!("wire decode failed: {error}"));
+        let payload = &encoded[super::decode_borrowed_envelope(&encoded)
+            .unwrap_or_else(|error| panic!("envelope decode failed: {error}"))];
+        let wire: CommitWire<'_> = super::decode_exact(payload)
+            .unwrap_or_else(|error| panic!("wire decode failed: {error}"));
         assert!(matches!(wire.log_id, Cow::Owned(_)));
-        assert!(matches!(wire.operation, Cow::Owned(_)));
-        assert!(matches!(wire.result, Cow::Owned(_)));
+        assert!(matches!(wire.operation, Cow::Borrowed(_)));
+        assert!(matches!(wire.result, Cow::Borrowed(_)));
         let decoded =
             decode_commit(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(decoded, commit);
@@ -2037,13 +2059,57 @@ mod tests {
             objects: checkpoint.objects.iter().map(ObjectRefWire::from).collect(),
         })
         .unwrap_or_else(|error| panic!("owned encode failed: {error}"));
-        let wire: CheckpointWire<'static> =
-            decode_envelope(&encoded).unwrap_or_else(|error| panic!("wire decode failed: {error}"));
-        assert!(matches!(wire.snapshot, Cow::Owned(_)));
+        let payload = &encoded[super::decode_borrowed_envelope(&encoded)
+            .unwrap_or_else(|error| panic!("envelope decode failed: {error}"))];
+        let wire: CheckpointWire<'_> = super::decode_exact(payload)
+            .unwrap_or_else(|error| panic!("wire decode failed: {error}"));
+        assert!(matches!(wire.snapshot, Cow::Borrowed(_)));
         let decoded =
             decode_checkpoint(&encoded).unwrap_or_else(|error| panic!("decode failed: {error}"));
         assert_eq!(encoded, owned);
         assert_eq!(decoded, checkpoint);
+    }
+
+    #[test]
+    fn large_commit_and_checkpoint_fields_share_stored_bytes() -> Result<(), Error> {
+        let commit = Commit {
+            log_id: log_id(),
+            incarnation: incarnation(),
+            transaction_id: crate::TransactionId::new(),
+            expected_tip: None,
+            operation: Bytes::from(vec![0x5a; 1024 * 1024]),
+            result: Bytes::from(vec![0xa5; 1024 * 1024]),
+            objects: Vec::new(),
+        };
+        let encoded = encode_commit(&commit)?;
+        let decoded = decode_commit(&encoded)?;
+        for field in [&decoded.operation, &decoded.result] {
+            let offset = encoded
+                .windows(field.len())
+                .position(|candidate| candidate == field)
+                .ok_or(Error::CorruptObject)?;
+            assert!(std::ptr::eq(field.as_ptr(), encoded[offset..].as_ptr()));
+        }
+
+        let checkpoint = Checkpoint {
+            log_id: log_id(),
+            incarnation: incarnation(),
+            through_sequence: 0,
+            through_commit: Digest::of(b"commit"),
+            snapshot: Bytes::from(vec![0x3c; 1024 * 1024]),
+            objects: Vec::new(),
+        };
+        let encoded = encode_checkpoint(&checkpoint)?;
+        let decoded = decode_checkpoint(&encoded)?;
+        let offset = encoded
+            .windows(decoded.snapshot.len())
+            .position(|candidate| candidate == decoded.snapshot)
+            .ok_or(Error::CorruptObject)?;
+        assert!(std::ptr::eq(
+            decoded.snapshot.as_ptr(),
+            encoded[offset..].as_ptr()
+        ));
+        Ok(())
     }
 
     #[test]
@@ -2693,7 +2759,10 @@ mod tests {
         let index = encoded.len().saturating_sub(1);
         encoded[index] ^= 1;
 
-        assert!(matches!(decode_commit(&encoded), Err(Error::CorruptObject)));
+        assert!(matches!(
+            decode_commit(&Bytes::from(encoded)),
+            Err(Error::CorruptObject)
+        ));
     }
 
     #[test]
@@ -2910,13 +2979,16 @@ mod tests {
         ] {
             assert_eq!(hex::encode(bytes), golden.trim());
         }
-        let commit_bytes = hex::decode(include_str!("../tests/fixtures/commit-v1.hex").trim())?;
+        let commit_bytes = Bytes::from(hex::decode(
+            include_str!("../tests/fixtures/commit-v1.hex").trim(),
+        )?);
         assert_eq!(
             encode_commit(&decode_commit(&commit_bytes)?)?.as_ref(),
             commit_bytes
         );
-        let checkpoint_bytes =
-            hex::decode(include_str!("../tests/fixtures/checkpoint-v1.hex").trim())?;
+        let checkpoint_bytes = Bytes::from(hex::decode(
+            include_str!("../tests/fixtures/checkpoint-v1.hex").trim(),
+        )?);
         assert_eq!(
             encode_checkpoint(&decode_checkpoint(&checkpoint_bytes)?)?.as_ref(),
             checkpoint_bytes
@@ -3107,8 +3179,12 @@ mod tests {
             Err(Error::InvalidFormat(message))
                 if message == "encoded object is not canonical format version 1"
         ));
-        check(&commit, |bytes| decode_commit(bytes).map(|_| ()))?;
-        check(&checkpoint, |bytes| decode_checkpoint(bytes).map(|_| ()))?;
+        check(&commit, |bytes| {
+            decode_commit(&Bytes::copy_from_slice(bytes)).map(|_| ())
+        })?;
+        check(&checkpoint, |bytes| {
+            decode_checkpoint(&Bytes::copy_from_slice(bytes)).map(|_| ())
+        })?;
         check(&node, |bytes| {
             decode_node(&Bytes::copy_from_slice(bytes), Options::default()).map(|_| ())
         })?;
