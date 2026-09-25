@@ -169,7 +169,8 @@ accepted requests and stored objects, not peak memory. go-git reconstructs
 incoming deltas before the service checks decoded object size. In a local
 Spin/MinIO run, simultaneous 64 MiB delta pushes to one, two, and four separate
 repositories peaked at about 578 MiB, 928 MiB, and 1.59 GiB of process memory.
-Deployment capacity must account for concurrent requests and headroom.
+These are observations, not an upper bound. Size the host for its admitted push
+concurrency, with headroom for other requests.
 When upgrading an existing repository containing larger objects, retain a
 configured limit high enough to read them; lowering it blocks those objects.
 
