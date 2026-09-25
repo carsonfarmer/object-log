@@ -470,6 +470,12 @@ impl Log {
         self.options
     }
 
+    // Keep concurrent encoded commits within one maximum-sized object, except
+    // that one commit must fit even when its limit exceeds the object limit.
+    pub(crate) fn commit_read_window(&self, cap: usize) -> usize {
+        cap.min((self.options.max_object_bytes / self.options.max_commit_bytes.max(1)).max(1))
+    }
+
     /// Loads and verifies the current durable head.
     ///
     /// # Errors
@@ -1508,6 +1514,17 @@ impl Log {
         view: &View,
         index: usize,
     ) -> Result<CommitRecord, Error> {
+        match self.read_tail_record_optional(view, index).await? {
+            Some(record) => Ok(record),
+            None => Err(self.missing_read_error(view).await?),
+        }
+    }
+
+    pub(crate) async fn read_tail_record_optional(
+        &self,
+        view: &View,
+        index: usize,
+    ) -> Result<Option<CommitRecord>, Error> {
         self.validate_view(view)?;
         let reference = view.tail().get(index).cloned().ok_or_else(|| {
             Error::InvalidFormat("history cursor exceeds the active tail".to_owned())
@@ -1519,14 +1536,14 @@ impl Log {
             Some(view.tail()[index - 1].digest)
         };
         let Some(record) = self.read_commit_optional(reference).await? else {
-            return Err(self.missing_read_error(view).await?);
+            return Ok(None);
         };
         if record.expected_tip != expected_tip {
             return Err(Error::InvalidFormat(
                 "the commit tail has a broken parent chain".to_owned(),
             ));
         }
-        Ok(record)
+        Ok(Some(record))
     }
 
     // Proofs cover immutable commit bodies and their complete ordered chain,
@@ -1566,9 +1583,10 @@ impl Log {
         let mut expected_tip = view
             .checkpoint()
             .map(|checkpoint| checkpoint.through_commit);
+        let window = self.commit_read_window(MAX_CONCURRENT_READS);
         Ok(stream::iter(view.tail().iter().cloned())
             .map(move |reference| self.read_commit_optional(reference))
-            .buffered(MAX_CONCURRENT_READS)
+            .buffered(window)
             .then(move |record| async move {
                 match record? {
                     Some(record) => Ok(record),
@@ -1883,7 +1901,7 @@ impl Log {
         Ok(checkpoint)
     }
 
-    async fn missing_read_error(&self, view: &View) -> Result<Error, Error> {
+    pub(crate) async fn missing_read_error(&self, view: &View) -> Result<Error, Error> {
         let current = self.load().await?;
         match current.collection_epoch().cmp(&view.collection_epoch()) {
             std::cmp::Ordering::Greater => Ok(Error::ViewExpired),
@@ -4485,7 +4503,14 @@ mod tests {
 
     #[tokio::test]
     async fn collection_marks_roots_across_a_long_tail() -> Result<(), Box<dyn std::error::Error>> {
-        let (log, _, _) = staged_read_log("streamed-tail-collection", Options::default()).await?;
+        let (log, faults, _) = staged_read_log(
+            "streamed-tail-collection",
+            Options {
+                max_object_bytes: 128 * 1024,
+                ..Options::default()
+            },
+        )
+        .await?;
         let mut view = log.load().await?;
         let mut roots = Vec::new();
         for byte in 0..=MAX_CONCURRENT_READS {
@@ -4496,7 +4521,15 @@ mod tests {
             roots.push(root);
         }
         let orphan = log.put_object(&view, Bytes::from_static(b"orphan")).await?;
-        let CollectionStart::Installed(fenced, report) = log.start_collection(&view).await? else {
+        faults.reset();
+        let pause = faults.pause_next_get(FailurePhase::Before);
+        let mut start = Box::pin(log.start_collection(&view));
+        for _ in 0..roots.len() {
+            assert!(futures::poll!(&mut start).is_pending());
+        }
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+        assert!(pause.release());
+        let CollectionStart::Installed(fenced, report) = start.await? else {
             return Err("collection did not install".into());
         };
         assert_eq!(report.candidate_count(), 1);
@@ -4553,7 +4586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_cursor_reads_one_record_before_application()
+    async fn history_cursor_prefetches_bounded_records_before_application()
     -> Result<(), Box<dyn std::error::Error>> {
         let faults = FaultStore::new(InMemory::new());
         let backend =
@@ -4572,8 +4605,8 @@ mod tests {
         let state = fold_history(&log, view, &probe).await?;
         assert_eq!(state.state().total, count);
         assert_eq!(probe.applied.get(), count);
-        // The cursor returns each authenticated record before reading the next.
-        assert_eq!(probe.maximum_ahead.get(), 1);
+        // Prefetch is bounded while each call yields one authenticated record.
+        assert_eq!(probe.maximum_ahead.get(), 8);
         assert_eq!(
             faults.metrics().operation(Operation::Get).requests,
             u64::try_from(count)?

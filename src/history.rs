@@ -1,6 +1,9 @@
 //! Authenticated recovery from one durable base and ordered WAL tail.
 
 use crate::{CheckpointRecord, CommitRecord, Error, Log, ObjectRef, StagedObject, View};
+use std::collections::VecDeque;
+
+const READ_AHEAD: usize = 8;
 
 /// One decoded durable record and publication proofs for its object references.
 #[derive(Clone, Debug)]
@@ -39,13 +42,28 @@ pub enum HistoryItem {
 }
 
 /// A bounded cursor over one exact view's checkpoint and active tail.
-#[derive(Clone, Debug)]
+/// Reads ahead by at most eight commits under the log's byte budget.
+#[derive(Debug)]
 pub struct HistoryCursor {
     log: Log,
     view: View,
     checkpoint_read: bool,
     next_commit: usize,
+    ready: VecDeque<Result<Option<CommitRecord>, Error>>,
     complete: bool,
+}
+
+impl Clone for HistoryCursor {
+    fn clone(&self) -> Self {
+        Self {
+            log: self.log.clone(),
+            view: self.view.clone(),
+            checkpoint_read: self.checkpoint_read,
+            next_commit: self.next_commit,
+            ready: VecDeque::new(),
+            complete: self.complete,
+        }
+    }
 }
 
 impl HistoryCursor {
@@ -84,10 +102,27 @@ impl HistoryCursor {
             }
         }
         if self.next_commit < self.view.tail().len() {
-            let record = self
-                .log
-                .read_tail_record(&self.view, self.next_commit)
-                .await?;
+            if self.ready.is_empty() {
+                let window = self.log.commit_read_window(READ_AHEAD);
+                let end = self.view.tail().len().min(self.next_commit + window);
+                self.ready = futures::future::join_all(
+                    (self.next_commit..end)
+                        .map(|index| self.log.read_tail_record_optional(&self.view, index)),
+                )
+                .await
+                .into();
+            }
+            let record = match self.ready.pop_front().ok_or(Error::CorruptObject)? {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    self.ready.clear();
+                    return Err(self.log.missing_read_error(&self.view).await?);
+                }
+                Err(error) => {
+                    self.ready.clear();
+                    return Err(error);
+                }
+            };
             self.next_commit += 1;
             let proofs = record_proofs(&self.log, &self.view, record.objects());
             return Ok(Some(HistoryItem::Commit(Authenticated { record, proofs })));
@@ -113,6 +148,7 @@ pub fn history(log: &Log, view: View) -> Result<HistoryCursor, Error> {
         view,
         checkpoint_read: false,
         next_commit: 0,
+        ready: VecDeque::new(),
         complete: false,
     })
 }
@@ -151,13 +187,23 @@ mod tests {
     use object_store::{memory::InMemory, path::Path};
 
     use super::*;
+    use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
     use crate::{CommitStatus, LogId, Options, TransactionId, ValidatedBackend};
 
     #[tokio::test]
     async fn history_cursor_preserves_metadata_proofs_and_order() -> Result<(), Error> {
+        let faults = FaultStore::new(InMemory::new());
         let backend =
-            ValidatedBackend::new(Arc::new(InMemory::new()), Path::from("history-test")).await?;
-        let log = Log::open(&backend, &LogId::new("history")?, Options::default()).await?;
+            ValidatedBackend::new(Arc::new(faults.clone()), Path::from("history-test")).await?;
+        let log = Log::open(
+            &backend,
+            &LogId::new("history")?,
+            Options {
+                max_object_bytes: 128 * 1024,
+                ..Options::default()
+            },
+        )
+        .await?;
         let view = log.load().await?;
         let object = log.put_object(&view, Bytes::from_static(b"value")).await?;
         let transaction_id = TransactionId::from_uuid(uuid::Uuid::from_u128(7));
@@ -173,6 +219,15 @@ mod tests {
         };
 
         let mut history = history(&log, view)?;
+        faults.reset();
+        for occurrence in 1..=3 {
+            faults.schedule(Failure {
+                operation: Operation::Get,
+                occurrence,
+                phase: FailurePhase::Before,
+            });
+        }
+        assert!(history.next().await.is_err());
         let Some(HistoryItem::Commit(authenticated)) = history.next().await? else {
             return Err(Error::InvalidFormat("test history has wrong item".into()));
         };
@@ -231,6 +286,13 @@ mod tests {
             };
             assert_eq!(record.record().reference().sequence(), sequence as u64);
             drop(record);
+            if sequence == 0 {
+                let mut cloned = cursor.clone();
+                let Some(HistoryItem::Commit(next)) = cloned.next().await? else {
+                    return Err(Error::CorruptObject);
+                };
+                assert_eq!(next.record().reference().sequence(), 1);
+            }
         }
         assert!(cursor.next().await?.is_none());
         assert!(cursor.is_complete());
