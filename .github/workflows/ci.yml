@@ -45,6 +45,20 @@ jobs:
       - name: Test composed WASI credentials
         run: make wasi-credential-test
 
+  repo-viewer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: examples/git/viewer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.13"
+      - name: Lint, typecheck, and build viewer
+        run: bun install --frozen-lockfile && bun run check && bun run build
+
   spin-key-value:
     runs-on: ubuntu-latest
     timeout-minutes: 30

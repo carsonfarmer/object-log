@@ -4,3 +4,5 @@
 /git.wasm
 /.spin/
 /.componentize/
+
+/spin.viewer.toml
