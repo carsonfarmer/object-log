@@ -87,6 +87,11 @@ go-pkg PR #13 while it remains under review. Dependency provenance and reference
 authority. Use ordinary Spin and unmodified
 S3-compatible storage.
 
+The optional repository viewer has its own TypeScript Spin API and reads the
+existing WAL catalog; it adds no routes or code to the Go Git service. Its
+compiler temporarily uses the focused opaque-resource fix in ComponentizeJS
+PR #357, with exact provenance in `THIRD_PARTY.md`.
+
 Spin 4.1's affected OpenTelemetry SDK remains pinned pending its coordinated
 upstream upgrade. The optional Caddy host rejects oversized or overlong W3C
 `baggage` before Spin; other HTTP embeddings must enforce the same boundary.

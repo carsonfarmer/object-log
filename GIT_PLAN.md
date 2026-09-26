@@ -84,7 +84,9 @@ The service uses unmodified upstream go-git and componentize-go, including its
 bundled adapter. It pins the unchanged go-pkg PR #13 revision pending upstream
 review. Exact revisions, licenses, and upstream references live in `THIRD_PARTY.md`.
 New fork-only behavior requires owner review and focused tests. The service uses
-ordinary Spin and unmodified object storage.
+ordinary Spin and unmodified object storage. The optional TypeScript viewer
+uses the owner-approved opaque-resource compiler fix in ComponentizeJS PR #357;
+remove its package override when a release includes the fix.
 
 ## Service readiness
 

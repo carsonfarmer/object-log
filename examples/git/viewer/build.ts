@@ -7,6 +7,7 @@ if (!client.success) throw new AggregateError(client.logs, "Browser build failed
 const component = await Bun.build({
   entrypoints: ["src/index.ts"],
   target: "browser",
+  external: ["object-log:*", "fermyon:*"],
   outdir: "build",
   naming: "component.js",
   define: {
@@ -16,14 +17,19 @@ const component = await Bun.build({
   },
 });
 if (!component.success) throw new AggregateError(component.logs, "Spin bundle failed");
-const routes = ["/browse", "/browse/assets/client.js", "/browse/assets/style.css"];
+const manifest = await Bun.file("../spin.toml").text();
+const variables = [...manifest.matchAll(/^(wal_\w+|git_repositories) = "\{\{ (\w+) \}\}"$/gm)]
+  .map((match) => `${match[1]} = "{{ ${match[2]} }}"\n`)
+  .join("");
+const routes = ["/browse", "/browse/assets/client.js", "/browse/assets/style.css", "/browse/api"];
 await Bun.write(
   "../spin.viewer.toml",
-  (await Bun.file("../spin.toml").text()) +
+  manifest +
     routes
       .map((route) => `\n[[trigger.http]]\nroute = "${route}"\ncomponent = "viewer"\n`)
       .join("") +
-    '\n[component.viewer]\nsource = "viewer/dist/viewer.wasm"\nallowed_outbound_hosts = []\n',
+    '\n[component.viewer]\nsource = "viewer/dist/viewer.wasm"\nallowed_outbound_hosts = ["http://git.spin.internal", "{{ wal_endpoint }}", "http://169.254.169.254"]\n[component.viewer.variables]\n' +
+    variables,
 );
 
 export {};

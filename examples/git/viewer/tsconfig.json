@@ -9,7 +9,10 @@
     "noEmit": true,
     "lib": ["ES2022", "DOM", "WebWorker"],
     "skipLibCheck": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "paths": {
+      "object-log:storage/wal@0.1.0": ["./build/types/interfaces/object-log-storage-wal.d.ts"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "build.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "build.ts", "prepare.ts"]
 }

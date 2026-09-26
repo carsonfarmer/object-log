@@ -1,10 +1,10 @@
-export {};
+import { browse } from "./api";
 
 declare const CLIENT_SCRIPT: string;
 declare const STYLES: string;
 declare const PAGE: string;
 
-function handle(request: Request): Response {
+async function handle(request: Request): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new Response("Method not allowed", {
       status: 405,
@@ -12,6 +12,7 @@ function handle(request: Request): Response {
     });
   }
   const path = new URL(request.url).pathname;
+  if (path === "/browse/api" && request.method === "GET") return browse(request);
   if (
     path !== "/browse" &&
     path !== "/browse/assets/client.js" &&
@@ -38,5 +39,10 @@ function handle(request: Request): Response {
 
 addEventListener("fetch", (event: Event) => {
   const request = event as FetchEvent;
-  request.respondWith(handle(request.request));
+  request.respondWith(
+    handle(request.request).catch((error) => {
+      console.error(error);
+      return new Response("Repository unavailable", { status: 503 });
+    }),
+  );
 });

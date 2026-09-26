@@ -1,21 +1,7 @@
 import { render, type VNode } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 
-interface Commit {
-  id: string;
-  title: string;
-  author: string;
-  date: string;
-}
-interface Snapshot {
-  branch: string;
-  branches: string[];
-  path: string;
-  history: Commit[];
-  entries: { name: string; kind: string; id: string }[];
-  more: boolean;
-  file?: { id: string; size: number; state: string; text?: string };
-}
+import type { Commit, Snapshot } from "./repository";
 
 function validRepository(name: string): boolean {
   return (
@@ -108,9 +94,13 @@ function Code({
                   a.name.localeCompare(b.name),
               )
               .map((entry) => (
-                <article key={entry.name}>
+                <article key={`${entry.unavailable ? "bytes" : "text"}:${entry.name}`}>
                   <span aria-hidden="true">{entry.kind === "directory" ? "▸" : "·"}</span>
-                  {link(entry.name, [view.path, entry.name].filter(Boolean).join("/"))}
+                  {entry.unavailable ? (
+                    <span title="This filename is not UTF-8">{entry.name}</span>
+                  ) : (
+                    link(entry.name, [view.path, entry.name].filter(Boolean).join("/"))
+                  )}
                   <code>{entry.id.slice(0, 7)}</code>
                 </article>
               ))}
@@ -150,8 +140,7 @@ function App() {
     void (async () => {
       try {
         const params = new URLSearchParams(search);
-        params.delete("repo");
-        const response = await fetch(`/${repository}/_browse?${params}`, {
+        const response = await fetch(`/browse/api?${params}`, {
           headers: authorization.header ? { Authorization: authorization.header } : {},
           credentials: "omit",
           cache: "no-store",

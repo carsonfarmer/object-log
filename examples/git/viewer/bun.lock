@@ -5,7 +5,10 @@
     "": {
       "name": "object-log-repo-viewer",
       "dependencies": {
+        "@noble/hashes": "2.4.0",
+        "@spinframework/spin-variables": "1.0.1",
         "@spinframework/wasi-http-proxy": "2.0.0",
+        "fflate": "0.8.3",
         "preact": "10.29.8",
       },
       "devDependencies": {
@@ -18,7 +21,7 @@
     },
   },
   "overrides": {
-    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/componentize-js": "https://github.com/carsonfarmer/ComponentizeJS/releases/download/opaque-resource-v0.23.0/bytecodealliance-componentize-js-0.23.0-opaque-resource.1.tgz",
   },
   "packages": {
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],
@@ -57,7 +60,7 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.5.14", "", { "os": "win32", "cpu": "x64" }, "sha512-oJWmBhoHsnhUKIke+0gXDX0mltJrWHA1UyHsrTlXwX0TL64ilVZAo+TYZm97baecV0esBdpzy3k96q+09JaZUQ=="],
 
-    "@bytecodealliance/componentize-js": ["@bytecodealliance/componentize-js@0.23.0", "", { "dependencies": { "@bytecodealliance/jco": "^1.15.1", "@bytecodealliance/weval": "^0.5.0", "@bytecodealliance/wizer": "^10.0.0", "es-module-lexer": "^1.6.0", "oxc-parser": "^0.76.0" }, "bin": { "componentize-js": "src/cli.js" } }, "sha512-Qc2+lrwJHU7lq4CBMyVVYE8ASyUFeegMYdRnMVG0wNpNiATzGDF/mWpjDNTeVZeT8L9chhK3vuLaQE9FVANvfw=="],
+    "@bytecodealliance/componentize-js": ["@bytecodealliance/componentize-js@https://github.com/carsonfarmer/ComponentizeJS/releases/download/opaque-resource-v0.23.0/bytecodealliance-componentize-js-0.23.0-opaque-resource.1.tgz", { "dependencies": { "@bytecodealliance/jco": "^1.15.1", "@bytecodealliance/weval": "^0.5.0", "@bytecodealliance/wizer": "^10.0.0", "es-module-lexer": "^1.6.0", "oxc-parser": "^0.76.0" }, "bin": { "componentize-js": "src/cli.js" } }, "sha512-yBBXoRshOde6eKRn4fbrUWNENUIsZvLpzAmd/ba4HPR/uxCwbDbrp5oZiWMe4TMvftIST/4hyz6Mj17d6FEffg=="],
 
     "@bytecodealliance/componentize-js-0-19-3": ["@bytecodealliance/componentize-js@0.19.3", "", { "dependencies": { "@bytecodealliance/jco": "^1.15.1", "@bytecodealliance/wizer": "^10.0.0", "es-module-lexer": "^1.6.0", "oxc-parser": "^0.76.0" }, "bin": { "componentize-js": "src/cli.js" } }, "sha512-ju7Y4WeF0B9uMkSPHJgmT6ouEfSwbe9M1uR/YOnYZjBpxJjH9qzxIkJg/kf8NycVDyFJ2/lscmJ1E1uPiDQVRQ=="],
 
@@ -158,6 +161,8 @@
     "@napi-rs/lzma-win32-x64-msvc": ["@napi-rs/lzma-win32-x64-msvc@1.5.1", "", { "os": "win32", "cpu": "x64" }, "sha512-EKW4t/iqdCT/xnd5t9oXLvVER/PMNAWXKqUAl3fgvUcOILeZIIht77/dVnfFcc9htA/DCBXC/6YQWdW+LusjFA=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@0.2.12", "", { "dependencies": { "@emnapi/core": "^1.4.3", "@emnapi/runtime": "^1.4.3", "@tybys/wasm-util": "^0.10.0" } }, "sha512-ZVWUcfwY4E/yPitQJl481FjFo3K22D6qF0DuFH6Y/nbnE11GY5uguDxZMGXPQ8WQ0128MXQD7TnfHyK4oWoIJQ=="],
+
+    "@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
 
     "@oxc-minify/binding-android-arm-eabi": ["@oxc-minify/binding-android-arm-eabi@0.136.0", "", { "os": "android", "cpu": "arm" }, "sha512-gk1jzky1vLeOcK7w9Ib2RT/UooZ7O21s8YSeXCsy4tzsmguKb3Cbsv/Ra2fKhMp4mKeKCzvC1Xa41OfSBWfWdQ=="],
 
@@ -264,6 +269,8 @@
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
 
     "@spinframework/build-tools": ["@spinframework/build-tools@2.1.1", "", { "dependencies": { "@ampproject/remapping": "^2.3.0", "@bytecodealliance/componentize-js": "^0.23.0", "@bytecodealliance/jco": "^1.17.9", "acorn-walk": "^8.3.4", "acron": "^1.0.5", "magic-string": "^0.30.17", "regexpu-core": "^6.2.0", "yargs": "^18.0.0" }, "bin": { "j2w": "dist/index.js" } }, "sha512-VF4NRtkqW0vUv3MzgwbyZKzG4qC1D2DrmFbr+P3uJPLq0stuLqcuASqq3LzrxTbTnpAeeswn8JhEe+wPbH1Lng=="],
+
+    "@spinframework/spin-variables": ["@spinframework/spin-variables@1.0.1", "", { "peerDependencies": { "@spinframework/build-tools": ">=1.0.0 <3.0.0" } }, "sha512-PRapjCzTQSVSKpDcX8nNg/EJ/RWx6c+7PhtDGT0JCrqAM4G07+dvJLMjlKOssSsj0TMTxKfzEDzyXijFDXArAA=="],
 
     "@spinframework/wasi-http-proxy": ["@spinframework/wasi-http-proxy@2.0.0", "", { "peerDependencies": { "@spinframework/build-tools": "^2.0.0" } }, "sha512-nMW4QcueYajZ4fqcC3gTbfWuJv3hm8oc6sJfc5FI4y1hEOH1K7ciV6g+9R3EEmQl8GjeZhI5rdQ9Anz3N4NVqQ=="],
 
