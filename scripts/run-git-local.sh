@@ -114,7 +114,7 @@ git_password = "local-git-password"
 EOF
 chmod 600 "$demo_dir/variables.toml"
 
-(cd "$root/examples/git" && spin up --listen "127.0.0.1:$git_port" \
+(cd "$root/examples/git" && spin up -f "${OBJECT_LOG_GIT_LOCAL_MANIFEST:-spin.toml}" --listen "127.0.0.1:$git_port" \
   --variable "@$demo_dir/variables.toml") >"$demo_dir/spin.log" 2>&1 &
 spin_pid=$!
 
