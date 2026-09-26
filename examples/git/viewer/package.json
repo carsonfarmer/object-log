@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "packageManager": "bun@1.3.13",
   "scripts": {
-    "build": "cargo build --locked --release --manifest-path ../../wal-component/Cargo.toml --target wasm32-wasip2 && bun run prepare && bun build.ts && j2w -i build/component.js -o build/viewer.wasm && wac plug --plug ../../wal-component/target/wasm32-wasip2/release/object_log_component.wasm build/viewer.wasm -o dist/viewer.wasm",
+    "build": "cargo build --locked --release --manifest-path ../../wal-component/Cargo.toml --target wasm32-wasip2 && bun run prepare && bun build.ts && j2w -i build/component.js -o build/viewer.wasm && mkdir -p dist && wac plug --plug ../../wal-component/target/wasm32-wasip2/release/object_log_component.wasm build/viewer.wasm -o dist/viewer.wasm",
     "check": "bun run prepare && biome check . && tsc --noEmit",
     "format": "biome check --write .",
     "prepare": "bun prepare.ts",
