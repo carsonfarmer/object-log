@@ -183,6 +183,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	for _, service := range []string{
 		"info/refs", transport.UploadPackService, transport.ReceivePackService,
+		"_browse",
 		"maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain",
 	} {
 		suffix := "/" + service
@@ -198,7 +199,9 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	route.Repository = repository
 	route.Method = http.MethodPost
-	if route.Service == "info/refs" {
+	if route.Service == "_browse" {
+		route.Method = http.MethodGet
+	} else if route.Service == "info/refs" {
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		services := query["service"]
 		if err != nil || len(query) != 1 || len(services) != 1 {
@@ -209,11 +212,11 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 		if route.Service != transport.UploadPackService && route.Service != transport.ReceivePackService {
 			return repositoryRoute{}, errRepositoryNotFound
 		}
-	} else if r.URL.RawQuery != "" || r.URL.ForceQuery {
+	} else if route.Service != "_browse" && (r.URL.RawQuery != "" || r.URL.ForceQuery) {
 		return repositoryRoute{}, errRepositoryNotFound
 	}
 	switch route.Service {
-	case transport.UploadPackService:
+	case transport.UploadPackService, "_browse":
 		route.Action = gitRead
 	case transport.ReceivePackService:
 		route.Action = gitWrite

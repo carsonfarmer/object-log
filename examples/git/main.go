@@ -202,7 +202,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		}
 		return err
 	}
-	if service == transport.UploadPackService {
+	if service == transport.UploadPackService || service == "_browse" {
 		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
 			retain, release := sessionRetention(session)
 			return retained(r.Context(), retain, release, func() error {
@@ -215,6 +215,9 @@ func serve(response http.ResponseWriter, r *http.Request) {
 					return errLogMissing
 				}
 				attempt.failure = &s.failure
+				if service == "_browse" {
+					return serveBrowse(attempt, request, s)
+				}
 				if request.Method == http.MethodPost {
 					var body io.Reader = request.Body
 					if request.Header.Get("Content-Encoding") == "gzip" {

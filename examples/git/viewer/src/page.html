@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Repository · object-log</title>
+    <link rel="stylesheet" href="/browse/assets/style.css" />
+    <script type="module" src="/browse/assets/client.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a href="/browse" class="brand"
+        ><span class="mark" aria-hidden="true">◈</span> object-log</a
+      ><span class="topbar-note">Repository explorer</span>
+    </header>
+    <main>
+      <div class="heading">
+        <h1 id="repository">Repository</h1>
+        <span class="badge">Read only</span>
+      </div>
+      <form id="open-repo" hidden class="panel open-form">
+        <label for="repo-name">Repository path</label>
+        <div class="form-row">
+          <input
+            id="repo-name"
+            placeholder="team/project.git"
+            required
+          /><button type="submit" class="primary">Open repository</button>
+        </div>
+      </form>
+      <p id="status" role="status" aria-live="polite">Loading repository…</p>
+      <form id="auth" hidden class="panel auth-form">
+        <h2>Sign in to read this repository</h2>
+        <label for="auth-mode">Credential</label>
+        <select id="auth-mode">
+          <option value="basic">Git password</option>
+          <option value="bearer">Cognito access token</option>
+        </select>
+        <label for="credential">Password or token</label>
+        <input
+          id="credential"
+          type="password"
+          autocomplete="off"
+          maxlength="8192"
+          required
+        />
+        <button type="submit" class="primary">Sign in</button>
+        <p class="muted">Used for this page only.</p>
+      </form>
+      <div id="content" hidden>
+        <nav class="tabs" aria-label="Repository views">
+          <button id="code-tab" class="tab active" aria-pressed="true">
+            Code</button
+          ><button id="commits-tab" class="tab" aria-pressed="false">
+            Commits <span id="commit-count" class="count"></span>
+          </button>
+        </nav>
+        <div class="toolbar">
+          <label for="branch" class="sr-only">Branch</label
+          ><select id="branch"></select
+          ><span id="branch-count" class="muted"></span>
+          <details class="clone">
+            <summary class="primary">Clone</summary>
+            <div class="clone-box">
+              <label for="clone-url">Clone URL</label
+              ><input id="clone-url" readonly /><button
+                id="copy-url"
+                type="button"
+              >
+                Copy URL
+              </button>
+            </div>
+          </details>
+        </div>
+        <section id="code-view" aria-label="Code">
+          <nav
+            id="breadcrumbs"
+            class="breadcrumbs"
+            aria-label="File path"
+          ></nav>
+          <div id="tip" class="commit-tip"></div>
+          <div id="files" class="panel"></div>
+        </section>
+        <section id="commits-view" hidden aria-label="Recent commits">
+          <p class="muted">Recent commits on this branch · first parent</p>
+          <div id="history" class="panel"></div>
+        </section>
+      </div>
+    </main>
+    <footer>A small window into Git on object storage.</footer>
+  </body>
+</html>
