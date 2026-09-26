@@ -20,10 +20,7 @@ function handle(request: Request): Response {
     return new Response("Not found", { status: 404 });
   }
   const assets: Record<string, [string, string]> = {
-    "/browse/assets/client.js": [
-      CLIENT_SCRIPT,
-      "text/javascript; charset=utf-8",
-    ],
+    "/browse/assets/client.js": [CLIENT_SCRIPT, "text/javascript; charset=utf-8"],
     "/browse/assets/style.css": [STYLES, "text/css; charset=utf-8"],
   };
   const [body, type] = assets[path] ?? [PAGE, "text/html; charset=utf-8"];

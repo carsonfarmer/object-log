@@ -1,79 +1,51 @@
 # Repository explorer
 
-A small read-only repository UI implemented in TypeScript as its own Spin
-component. It browses branches, directories and text files, and shows the eight
-most recent commits along the first parent. The browser uses no framework or
-third-party runtime library.
+A small read-only UI for the Git example, built with TypeScript and Preact. It
+browses branches, directories, text files and recent first-parent commits. A
+separate Spin component serves the page; the existing Git service supplies the
+data through its read authorization, retention and retry path. The WAL is
+unchanged.
 
-## Run
+## Run locally
 
-Install the [Git example prerequisites](../README.md) plus Node.js 24 or later.
-Build the optional viewer and start both components from a checkout:
+Install the [Git prerequisites](../README.md) and [Bun](https://bun.com/).
+From the repository root:
 
 ```sh
 cd examples/git/viewer
-npm ci
-npm run check
-npm run build
+bun install --frozen-lockfile
+bun run check
+bun run build
 cd ../../..
 OBJECT_LOG_GIT_LOCAL_MANIFEST=spin.viewer.toml make git-local
 ```
 
-The starter builds Git, starts an isolated MinIO backend, validates it, and
-prints the Git URLs and password. Push a repository, then open:
+Push to a printed Git URL, then open
+`http://127.0.0.1:19100/browse?repo=sha256.git` and enter the printed password.
+`/browse` also accepts a configured path such as `team/project.git`. Cognito
+access tokens work with the same repository permissions. Credentials stay in
+page memory and clear on reload. Branch and path selections stay in the URL;
+Back/Forward and ordinary modified link clicks work.
 
-```text
-http://127.0.0.1:19100/browse?repo=sha256.git
-```
+For an existing backend, use `spin up -f spin.viewer.toml` from `examples/git`
+with your protected variables file. Hosted proxies must forward the three exact
+viewer routes and `/<repository>/_browse` to the service.
 
-For an existing backend, build Git with `make git-build` and pass
-`-f spin.viewer.toml` to the Git guide's normal `spin up` command, using the same
-protected variables file.
+## Build and checks
 
-The `/browse` landing page also accepts a repository path such as
-`team/project.git`. Sign in with the Git password or a Cognito access token.
-The page keeps the credential in memory and clears it on reload; it never puts
-it in a URL, cookie, or browser storage. Directory links preserve the selected
-branch, and browser Back/Forward works.
+Bun bundles the browser and static handler; Spin's standard `j2w` compiler makes
+the WASI component. `bun run check` runs Biome linting/formatting and strict
+TypeScript checks. `bun run format` applies formatting and safe lint fixes. CI
+checks and builds the viewer with the frozen Bun lockfile.
 
-`npm run build` creates `viewer/dist/viewer.wasm` and the ignored
-`examples/git/spin.viewer.toml`. That manifest copies the authoritative
-`spin.toml` and adds three exact UI/asset routes. Rebuild the viewer after
-changing the base manifest. The normal Git build and manifest require no Node
-installation. A hosted reverse proxy must forward those exact viewer routes
-and `/<repository>/_browse` through its existing backend admission rules.
+The build generates `viewer/dist/viewer.wasm` and `spin.viewer.toml` from the
+existing manifest. Rebuild after changing `spin.toml`. Normal Git builds do not
+require Bun. The component has no storage credentials or outbound hosts.
 
-## Data and limits
+## Scope
 
-The TypeScript component serves only the page and its assets. It receives no
-storage credentials, has no outbound hosts, and does not read the WAL. The
-existing Git component supplies a narrow `GET /<repository>/_browse` adapter
-because Git smart HTTP has no tree or file browsing API. That adapter uses the
-same read authorization, existing repository open, reader retention, and retry
-path as fetch. The core log is unchanged.
-
-Only branch tips are selectable. Tags and arbitrary object IDs are not exposed.
-The prototype returns up to 500 entries in one directory, eight first-parent
-commits, and UTF-8 text previews up to 256 KiB. Binary and larger files show a
-summary; symlinks show their stored target without following it. Submodules
-show their commit ID. Commit titles are bounded to 512 bytes. Paths are bounded
-to 64 segments and 4096 UTF-8 bytes. File content is rendered as plain text.
-
-Run the adapter tests and Git gates from the repository root:
-
-```sh
-make git-check
-```
-
-Check the UI source and locked build dependencies from this directory:
-
-```sh
-npm run format:check
-npm run check
-npm audit
-npm run build
-```
-
-The build pins `componentize-js` consistently across Spin's compiler packages
-and explicitly supplies its preview shim. All compiler packages run at build
-time; the resulting component needs only Spin at runtime.
+Only branch tips are selectable. The UI shows eight first-parent commits,
+500 entries per directory and UTF-8 text previews up to 256 KiB. Binary and
+larger files show a summary. Symlinks show their stored target; submodules show
+their commit ID. Names and file content render as text. The adapter's tests are
+included in `make git-check`.
