@@ -1,20 +1,21 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import type { Session } from "object-log:storage/wal@0.1.0";
+import type { Config, Session } from "object-log:storage/wal@0.1.0";
 import { zlibSync } from "fflate";
 
 let opened = 0;
-let openSession: () => Session = () => {
+const defaultPolicies = '{"team/demo.git":{"log_id":"demo","format":"sha256"}}';
+let policies = defaultPolicies;
+let openSession: (config: Config) => Session = () => {
   throw new Error("Unexpected storage access");
 };
 mock.module("object-log:storage/wal@0.1.0", () => ({
-  openExisting: () => {
+  openExisting: (config: Config) => {
     opened++;
-    return openSession();
+    return openSession(config);
   },
 }));
 mock.module("@spinframework/spin-variables", () => ({
-  get: (name: string) =>
-    name === "git_repositories" ? '{"team/demo.git":{"log_id":"demo","format":"sha256"}}' : "",
+  get: (name: string) => (name === "git_repositories" ? policies : ""),
 }));
 const { Catalog } = await import("./wal");
 const { browse } = await import("./api");
@@ -22,9 +23,192 @@ const { snapshot } = await import("./repository");
 const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  policies = defaultPolicies;
   openSession = () => {
     throw new Error("Unexpected storage access");
   };
+});
+
+function emptySession(format: string): Session {
+  const dispose = () => undefined;
+  let next = true;
+  return {
+    recover: () => ({
+      next: () => {
+        if (!next) return undefined;
+        next = false;
+        return { tag: "checkpoint", val: { objects: [{ [Symbol.dispose]: dispose }] } };
+      },
+      readNode: () => ({
+        data: new TextEncoder().encode(
+          JSON.stringify({
+            Validated: true,
+            Format: format,
+            Head: "refs/heads/main",
+            Refs: {},
+            Buckets: [],
+          }),
+        ),
+        objects: [],
+      }),
+      [Symbol.dispose]: dispose,
+    }),
+    usage: () => ({ calls: 0n, bytes: 0n }),
+    [Symbol.dispose]: dispose,
+  } as unknown as Session;
+}
+
+const discovery = () =>
+  new Response("refs", {
+    headers: { "Content-Type": "application/x-git-upload-pack-advertisement" },
+  });
+
+test("wildcard repositories recover their stored format and canonical WAL identity", async () => {
+  policies = '{"*":{}}';
+  for (const format of ["sha1", "sha256"]) {
+    policies = format === "sha1" ? '{"*":{}}' : '{"*":{},"team/project":{"log_id":"","format":""}}';
+    for (const name of ["team/project", "team/project.git", "team/project.GIT"]) {
+      const canonical = name === "team/project.GIT" ? "team/project.GIT.git" : "team/project.git";
+      let authorized = false;
+      globalThis.fetch = mock(async (url: RequestInfo | URL) => {
+        expect(String(url)).toBe(
+          `http://git.spin.internal/${canonical}/info/refs?service=git-upload-pack`,
+        );
+        authorized = true;
+        return discovery();
+      }) as unknown as typeof fetch;
+      openSession = (config) => {
+        expect(authorized).toBe(true);
+        expect(config.logId).toBe(
+          `auto-${new Bun.CryptoHasher("sha256").update(canonical).digest("hex")}`,
+        );
+        return emptySession(format);
+      };
+      expect(
+        (await browse(new Request(`https://viewer.test/browse/api?repo=${name}`))).status,
+      ).toBe(200);
+    }
+  }
+});
+
+test("exact aliases override the whole wildcard policy and enforce pinned formats", async () => {
+  globalThis.fetch = mock(async () => discovery()) as unknown as typeof fetch;
+  for (const key of ["team/project", "team/project.git"]) {
+    policies = JSON.stringify({
+      "*": { format: "sha256" },
+      [key]: { log_id: "custom", format: "" },
+    });
+    openSession = (config) => {
+      expect(config.logId).toBe("custom");
+      return emptySession("sha1");
+    };
+    for (const name of ["team/project", "team/project.git"])
+      expect(
+        (await browse(new Request(`https://viewer.test/browse/api?repo=${name}`))).status,
+      ).toBe(200);
+  }
+  policies = '{"*":{"format":"sha256"}}';
+  openSession = () => emptySession("sha1");
+  await expect(
+    browse(new Request("https://viewer.test/browse/api?repo=team/project")),
+  ).rejects.toThrow("Invalid repository catalog");
+  policies = '{"*":{}}';
+  openSession = () => emptySession("md5");
+  await expect(
+    browse(new Request("https://viewer.test/browse/api?repo=team/project")),
+  ).rejects.toThrow("Invalid repository catalog");
+});
+
+test("creation forwards raw JSON and credentials and preserves outcomes without WAL access", async () => {
+  policies = '{"*":{}}';
+  const baseline = opened;
+  for (const status of [201, 400, 401, 403, 408, 409, 413, 503]) {
+    const body =
+      status === 400
+        ? '{"format":"sha1","format":"sha256"}'
+        : ' { "format": "sha256", "default_branch": "main" }\n';
+    const responseBody =
+      status === 503 ? "Publication pending; recover before retrying" : "Creation denied";
+    globalThis.fetch = mock(async (url: RequestInfo | URL, options?: RequestInit) => {
+      expect(String(url)).toBe("http://git.spin.internal/team/project.git/create");
+      expect(options?.method).toBe("POST");
+      expect(options?.headers).toEqual({
+        Authorization: "Bearer write-token",
+        "Content-Type": "application/json",
+      });
+      expect(options?.redirect).toBe("manual");
+      expect(options?.body).toBe(body);
+      return status === 201
+        ? Response.json({ created: true }, { status })
+        : new Response(responseBody, { status });
+    }) as unknown as typeof fetch;
+    const response = await browse(
+      new Request("https://viewer.test/browse/api?repo=team/project", {
+        method: "POST",
+        headers: { Authorization: "Bearer write-token" },
+        body,
+      }),
+    );
+    expect(response.status).toBe(status);
+    if (status === 201) expect(await response.json()).toEqual({ created: true });
+    else expect(await response.text()).toBe(responseBody);
+    expect(opened).toBe(baseline);
+  }
+});
+
+test("creation bounds HTTP bodies and rejects invalid names before forwarding", async () => {
+  policies = '{"*":{}}';
+  const forwarded = mock(async () => {
+    throw new Error("Unexpected HTTP call");
+  });
+  globalThis.fetch = forwarded as unknown as typeof fetch;
+  for (const [body, status] of [
+    ["x".repeat(4097), 413],
+    [Uint8Array.of(255), 400],
+  ] as const)
+    expect(
+      (
+        await browse(
+          new Request("https://viewer.test/browse/api?repo=team/project", { method: "POST", body }),
+        )
+      ).status,
+    ).toBe(status);
+  for (const name of ["*", "", "../project", "team//project", "project%3Fother"])
+    expect(
+      (
+        await browse(
+          new Request(`https://viewer.test/browse/api?repo=${name}`, {
+            method: "POST",
+            body: "{}",
+          }),
+        )
+      ).status,
+    ).toBe(404);
+  expect(forwarded).not.toHaveBeenCalled();
+  globalThis.fetch = mock(
+    async () => new Response("unexpected response", { status: 201 }),
+  ) as unknown as typeof fetch;
+  expect(
+    (
+      await browse(
+        new Request("https://viewer.test/browse/api?repo=team/project", {
+          method: "POST",
+          body: "{}",
+        }),
+      )
+    ).status,
+  ).toBe(502);
+  globalThis.fetch = mock(async () =>
+    Response.json({ data: "x".repeat(65536) }, { status: 201 }),
+  ) as unknown as typeof fetch;
+  await expect(
+    browse(
+      new Request("https://viewer.test/browse/api?repo=team/project", {
+        method: "POST",
+        body: "{}",
+      }),
+    ),
+  ).rejects.toThrow("HTTP body exceeds limit");
 });
 
 function fixture(

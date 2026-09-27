@@ -20,8 +20,11 @@ export const hex = (bytes: Uint8Array) =>
 
 export interface Repository {
   log_id: string;
-  format: "sha1" | "sha256";
+  format?: "sha1" | "sha256" | "";
 }
+export const canonicalName = (name: string) => (name.endsWith(".git") ? name : `${name}.git`);
+export const automaticLogId = (name: string) =>
+  `auto-${hex(sha256(new TextEncoder().encode(name)))}`;
 interface Item {
   ID: string;
   Kind: number;
@@ -83,7 +86,7 @@ export class Catalog {
 
   constructor(
     session: Session,
-    format: string,
+    format: string | undefined,
     private budget: { bytes: number },
   ) {
     this.recovery = session.recover();
@@ -99,7 +102,8 @@ export class Catalog {
       this.root = json<Root>(node.data);
       if (
         !this.root.Validated ||
-        this.root.Format !== format ||
+        !["sha1", "sha256"].includes(this.root.Format) ||
+        (format && this.root.Format !== format) ||
         this.root.Buckets.length !== node.objects.length
       )
         throw new Error("Invalid repository catalog");

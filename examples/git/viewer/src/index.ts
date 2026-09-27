@@ -5,14 +5,18 @@ declare const STYLES: string;
 declare const PAGE: string;
 
 async function handle(request: Request): Promise<Response> {
+  const path = new URL(request.url).pathname;
+  if (path === "/browse/api") {
+    if (request.method !== "GET" && request.method !== "POST")
+      return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
+    return browse(request);
+  }
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new Response("Method not allowed", {
       status: 405,
       headers: { Allow: "GET, HEAD" },
     });
   }
-  const path = new URL(request.url).pathname;
-  if (path === "/browse/api" && request.method === "GET") return browse(request);
   if (
     path !== "/browse" &&
     path !== "/browse/assets/client.js" &&

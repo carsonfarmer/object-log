@@ -3,9 +3,19 @@ import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 
 import type { Commit, Snapshot } from "./repository";
 
+const messages: Record<number, string> = {
+  400: "Invalid repository, branch or path.",
+  401: "Authentication required.",
+  403: "This credential cannot read this repository.",
+  404: "Repository or path not found.",
+  409: "This repository already exists. Open it to browse.",
+};
+
 function validRepository(name: string): boolean {
   return (
-    name.endsWith(".git") &&
+    name !== "" &&
+    name !== "*" &&
+    name !== ".git" &&
     !/[\s%?#\\]/.test(name) &&
     name.split("/").every((part) => part !== "" && part !== "." && part !== "..") &&
     new URL(`/${name}`, location.origin).pathname === `/${name}`
@@ -116,7 +126,8 @@ function Code({
 function App() {
   const [search, setSearch] = useState(location.search);
   const [authorization, setAuthorization] = useState({ header: "" });
-  const [result, setResult] = useState<{ view?: Snapshot; error?: string }>({});
+  const [result, setResult] = useState<{ view?: Snapshot; error?: string; status?: number }>({});
+  const [created, setCreated] = useState("");
   const [tab, setTab] = useState("code");
   const [copied, setCopied] = useState(false);
   const cloneInput = useRef<HTMLInputElement>(null);
@@ -147,13 +158,12 @@ function App() {
           signal: request.signal,
         });
         if (!response.ok) {
-          const messages: Record<number, string> = {
-            400: "Invalid branch or path.",
-            401: "Authentication required.",
-            403: "This credential does not have read access.",
-            404: "Repository or path not found. Push a branch before browsing.",
-          };
-          throw new Error(messages[response.status] ?? "Repository unavailable. Try again.");
+          if (!request.signal.aborted)
+            setResult({
+              error: messages[response.status] ?? "Repository unavailable. Try again.",
+              status: response.status,
+            });
+          return;
         }
         const snapshot: Snapshot = await response.json();
         if (!request.signal.aborted) setResult({ view: snapshot });
@@ -194,10 +204,12 @@ function App() {
         <span>Repository explorer</span>
       </header>
       <main>
-        <h1>
-          {repository.replace(/\.git$/, "") || "Repository"}
-          <small>Read only</small>
-        </h1>
+        <h1>{repository.replace(/\.git$/, "") || "Repository"}</h1>
+        {created && created === repository && (
+          <p role="status">
+            Repository created. Push to <code>{cloneURL}</code>.
+          </p>
+        )}
         {!valid ? (
           <form
             class="panel"
@@ -218,6 +230,60 @@ function App() {
         ) : !view ? (
           <>
             <p role="status">{result.error ?? "Loading repository…"}</p>
+            {created !== repository &&
+              (result.status === 403 || result.status === 404) &&
+              !query.get("ref") &&
+              !query.get("path") && (
+                <form
+                  class="panel"
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    const format = String(new FormData(event.currentTarget).get("format"));
+                    setResult({});
+                    try {
+                      const response = await fetch(
+                        `/browse/api?${new URLSearchParams({ repo: repository })}`,
+                        {
+                          method: "POST",
+                          headers: {
+                            Authorization: authorization.header,
+                            "Content-Type": "application/json",
+                          },
+                          body: JSON.stringify({ format }),
+                          credentials: "omit",
+                          cache: "no-store",
+                        },
+                      );
+                      if (response.ok || response.status === 409) {
+                        if (response.status === 201) setCreated(repository);
+                        navigate(new URLSearchParams({ repo: repository }));
+                        setAuthorization({ header: authorization.header });
+                      } else
+                        setResult({
+                          error:
+                            (await response.text()) ||
+                            messages[response.status] ||
+                            "Repository unavailable. Try again.",
+                          status: response.status,
+                        });
+                    } catch {
+                      setResult({ error: "Repository unavailable. Try again." });
+                    }
+                  }}
+                >
+                  <label>
+                    Git format
+                    <select name="format">
+                      <option value="sha1">SHA-1</option>
+                      <option value="sha256">SHA-256</option>
+                    </select>
+                  </label>
+                  <button type="submit">Create repository</button>
+                  <p class="muted">
+                    Creates an empty repository at {repository}; default branch main.
+                  </p>
+                </form>
+              )}
             {result.error && (
               <form
                 class="panel"
