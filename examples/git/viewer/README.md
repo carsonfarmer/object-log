@@ -17,17 +17,29 @@ From the repository root:
 ```sh
 cd examples/git/viewer
 bun install --frozen-lockfile
-bun run check
-bun test
-bun run build
+bun start
 ```
 
-Follow the [Git example's local setup](../README.md#run-locally), adding
-`-f spin.viewer.toml` to its `spin up` command. Push a repository, then open
-`http://127.0.0.1:19100/browse?repo=sha256.git` and enter the configured password.
+This builds both components, starts disposable local MinIO and Spin, and prints
+the Git URLs. Push a repository, then open
+`http://127.0.0.1:19100/browse?repo=sha1.git` with password `local-git-password`.
+For example, from an existing SHA-1 repository in another terminal:
+
+```sh
+git push http://127.0.0.1:19100/sha1.git HEAD:main
+```
+
+When Git prompts, use username `git` and password `local-git-password`.
+Press Ctrl-C in the startup terminal to stop both services and remove their
+disposable data. Each restart begins with empty storage.
+
 Other configured paths, such as `team/project.git`, work too. Cognito access
 tokens use the Git service's existing read permissions. Credentials stay in page
 memory and clear on reload. Branch and path selections stay in the URL.
+
+For an existing backend, use `bun run build`, then follow the
+[Git example's configuration](../README.md#configuration) and add
+`-f spin.viewer.toml` to its `spin up` command.
 
 Hosted proxies must forward `/browse`, `/browse/api`, `/browse/assets/client.js`
 and `/browse/assets/style.css` to Spin. The API is `GET /browse/api` with a

@@ -1,4 +1,4 @@
-.PHONY: check test bench minio-test minio-performance gc-acceptance git-check git-build git-spin-config-test wasi-credential-test git-provider-test git-qualification-tools-test
+.PHONY: check test bench minio-test minio-performance gc-acceptance git-check git-build git-local git-spin-config-test wasi-credential-test git-provider-test git-qualification-tools-test
 
 check:
 	cargo fmt --all --check
@@ -47,6 +47,9 @@ git-build:
 	cargo build --locked --release --manifest-path $(WAL_COMPONENT) --target wasm32-wasip2
 	$(MAKE) -C $(GIT_EXAMPLE_DIR) build
 	cd $(GIT_EXAMPLE_DIR) && wac plug --plug ../wal-component/target/wasm32-wasip2/release/object_log_component.wasm main.wasm -o git.wasm
+
+git-local:
+	./scripts/run-git-local.sh
 
 git-spin-config-test: git-build
 	./scripts/test-git-spin-config.sh

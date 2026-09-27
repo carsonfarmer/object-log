@@ -10,7 +10,8 @@
     "check": "bun run prepare && biome check . && tsc --noEmit",
     "format": "biome check --write .",
     "prepare": "bun prepare.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "start": "bun run build && OBJECT_LOG_GIT_LOCAL_MANIFEST=spin.viewer.toml ../../../scripts/run-git-local.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",

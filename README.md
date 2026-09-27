@@ -216,7 +216,8 @@ host. Spin dependencies remain outside the core and KV workspaces.
   [AWS host](https://github.com/carsonfarmer/object-log/blob/main/examples/git/qualification/aws/HOSTING.md)
   supplies HTTPS, instance-role credentials, and a worker that schedules those
   endpoints.
-  Use the provider suite to qualify the intended storage, client and host limits.
+  Run `make git-local` for a disposable local service, or use the provider suite
+  to qualify the intended storage, client and host limits.
 
 The core library has no Git, Spin, or serverless-runtime dependency.
 
