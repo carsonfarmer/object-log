@@ -21,6 +21,31 @@ type closeProbe struct {
 	closeErr error
 }
 
+func TestRootInfersOnlyAuthenticatedSupportedFormat(t *testing.T) {
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		data, err := json.Marshal(rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{
+			"refs/heads/main": strings.Repeat("1", format.HexSize()),
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, err := decodeRoot(data, "", 0)
+		if err != nil || root.Format != format {
+			t.Fatalf("stored format not recovered: %v", err)
+		}
+		other := config.SHA1
+		if format == other {
+			other = config.SHA256
+		}
+		if _, err := decodeRoot(data, other, 0); !errors.Is(err, config.ErrInvalidObjectFormat) {
+			t.Fatal("configured format mismatch accepted")
+		}
+	}
+	if _, err := decodeRoot([]byte(`{"Validated":true,"Format":"sha512","Refs":{}}`), "", 0); err == nil {
+		t.Fatal("unsupported stored format accepted")
+	}
+}
+
 func (r *closeProbe) Close() error { r.closed = true; return r.closeErr }
 
 func TestLooseRoundTripAndValidation(t *testing.T) {

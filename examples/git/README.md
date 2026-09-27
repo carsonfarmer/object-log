@@ -141,7 +141,7 @@ All values are Spin variables. The defaults target the local MinIO setup above.
 | `wal_collection_candidates` | `1000` | Maximum entries in a new deletion plan, capped by the durable graph limit |
 | `wal_max_collection_objects` | `100000` | Complete publication graph and distinct collection live-object bound; shared paths count separately for publication |
 | `wal_recover_retentions_after_drain` | `false` | Exclusive lost-retention recovery mode |
-| `git_repositories` | two demo entries | JSON map of paths, WAL identities, formats, default branches and permissions |
+| `git_repositories` | default policy and two demo entries | JSON access policies; optional fixed identities, formats and default branches |
 | `git_auth_mode` | `password` | `password`, `cognito`, or explicit local `anonymous` mode |
 | `git_password` | empty | Required password for local password mode |
 | `git_cognito_issuer` | empty | HTTPS Cognito user-pool issuer |
@@ -186,17 +186,43 @@ configured limit high enough to read them; lowering it blocks those objects.
 
 ## Repositories and permissions
 
-Repository names come from configuration, including nested names. For example:
+Create a repository through the API, then use ordinary Git. Names can be nested,
+and the `.git` suffix is optional; both URLs select the same repository.
 
-```toml
-git_repositories = '{"team/project.git":{"log_id":"team-project","format":"sha1","default_branch":"main","read_groups":["developers"],"write_groups":["developers"],"admin_groups":["operators"]}}'
+```sh
+curl --fail-with-body -u git:local-git-password \
+  -H 'Content-Type: application/json' \
+  -d '{"format":"sha1","default_branch":"main"}' \
+  http://127.0.0.1:19100/team/project/create
+git push http://127.0.0.1:19100/team/project HEAD:main
 ```
 
-Each name has its own WAL identity. Duplicate identities, ambiguous names and
-invalid formats are rejected. Add another entry and reload Spin to provision a
-repository without rebuilding. Keep each identity stable. The first authorized
-push discovery persists its format and default branch; subsequent configuration
-cannot reinterpret that stored format or change its default branch.
+Creation requires write permission and publishes the format and default branch
+through the repository's WAL. Defaults are SHA-1 and `main`; choose SHA-256 for a
+SHA-256 client repository. A successful creation returns 201; an existing
+repository returns 409. A pending publication returns 503: check the repository
+before retrying. Reads and ordinary pushes to a missing name do not create it.
+The two explicitly configured demo repositories also support first-push setup.
+
+One `"*"` policy grants access to new names without a configuration edit or
+restart. For Cognito, configure the groups once:
+
+```toml
+git_repositories = '{"*":{"read_groups":["developers"],"write_groups":["developers"],"admin_groups":["operators"]},"team/private":{"read_groups":["private-team"],"write_groups":["private-team"]}}'
+```
+
+An exact entry replaces the whole default policy; omitted groups deny access.
+An omitted `log_id` derives an isolated identity from the canonical name, so
+adding a permission override preserves the existing repository. Explicit IDs
+must be unique and cannot use the reserved `auto-` prefix. An optional `format`
+pins that policy to SHA-1 or SHA-256; otherwise readers recover the stored format.
+Creation settings cannot change permissions or reinterpret an existing repository.
+The local shared-password mode grants the password holder access to all names;
+anonymous mode allows public creation and writes.
+
+The optional host maintenance worker currently visits named configuration entries.
+Repositories created under `"*"` still checkpoint their log during pushes and expose
+the same maintenance endpoints, but need an operator to schedule collection by name.
 
 Cognito mode checks signed access tokens, issuer, client, expiry and scope before
 opening storage. Git supplies the access token as its Basic password through an

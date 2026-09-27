@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/storage"
@@ -46,12 +47,7 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 		return nil, err
 	}
 	format := repository.Format
-	mem := memory.NewStorage(memory.WithObjectFormat(format))
-	// Memory storage returns its owned configuration; no save is needed.
-	cfg, _ := mem.Config()
-	// Reuse stored deltas without comparing object contents to generate new ones.
-	cfg.Pack.Window = 1
-	s := &store{ctx: ctx, limits: limits, Storer: mem, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
+	s := &store{ctx: ctx, limits: limits, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
 			s.Close()
@@ -78,10 +74,17 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 		for i, key := range s.meta.Buckets {
 			s.buckets[key] = root.Objects[i]
 		}
-		for name, id := range s.meta.Refs {
-			if e := s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id))); e != nil {
-				return nil, e
-			}
+	}
+	if s.meta.Format == "" {
+		s.meta.Format = config.SHA1
+	}
+	s.Storer = memory.NewStorage(memory.WithObjectFormat(s.meta.Format))
+	cfg, _ := s.Storer.Config()
+	// Reuse stored deltas without comparing object contents to generate new ones.
+	cfg.Pack.Window = 1
+	for name, id := range s.meta.Refs {
+		if e := s.Storer.SetReference(plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id))); e != nil {
+			return nil, e
 		}
 	}
 	// An empty repository has no unchecked objects. Existing roots must certify validation.

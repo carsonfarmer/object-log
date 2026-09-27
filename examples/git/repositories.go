@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,8 +36,7 @@ type repositoryConfig struct {
 	repositoryAccess
 }
 
-// GIT_REPOSITORIES is an object keyed by canonical names such as team/project.git.
-// Missing configuration provides no repositories. There are no implicit aliases.
+// Exact policies override "*". Bare names and their .git URLs identify one log.
 func loadRepositories(getenv func(string) string) (map[string]repositoryConfig, error) {
 	text := getenv("GIT_REPOSITORIES")
 	if len(text) > repositoriesConfigBytes || !utf8.ValidString(text) {
@@ -52,17 +52,32 @@ func loadRepositories(getenv func(string) string) (map[string]repositoryConfig, 
 	}
 	identities := map[string]string{}
 	for name, encoded := range entries {
-		if !validRepositoryName(name) {
+		if name != "*" && !validRepositoryName(name) {
 			return nil, fmt.Errorf("GIT_REPOSITORIES: noncanonical repository name %q", name)
+		}
+		if name != "*" {
+			name = canonicalRepositoryName(name)
+		}
+		if _, exists := repositories[name]; exists {
+			return nil, fmt.Errorf("duplicate repository name %q", name)
 		}
 		repository, err := parseRepository(encoded)
 		if err != nil {
 			return nil, fmt.Errorf("GIT_REPOSITORIES: repository %q: %w", name, err)
 		}
-		if other, exists := identities[repository.LogID]; exists {
-			return nil, fmt.Errorf("repositories %q and %q share log_id %q", other, name, repository.LogID)
+		if name == "*" {
+			if repository.LogID != "" {
+				return nil, errors.New("wildcard policy must not specify log_id")
+			}
+		} else {
+			if repository.LogID == "" {
+				repository.LogID = automaticRepositoryID(name)
+			}
+			if other, exists := identities[repository.LogID]; exists {
+				return nil, fmt.Errorf("repositories %q and %q share log_id %q", other, name, repository.LogID)
+			}
+			identities[repository.LogID] = name
 		}
-		identities[repository.LogID] = name
 		repositories[name] = repository
 	}
 	return repositories, nil
@@ -88,10 +103,11 @@ func parseRepository(encoded []byte) (repositoryConfig, error) {
 		return repository, err
 	}
 	validID := repositoryLogID.MatchString(repository.LogID)
-	if !validID || repository.LogID == "." || repository.LogID == ".." {
+	if repository.LogID != "" && (!validID || repository.LogID == "." || repository.LogID == ".." ||
+		strings.HasPrefix(repository.LogID, "auto-")) {
 		return repository, errors.New("log_id must satisfy the WAL log identifier contract")
 	}
-	if repository.Format != config.SHA1 && repository.Format != config.SHA256 {
+	if repository.Format != "" && repository.Format != config.SHA1 && repository.Format != config.SHA256 {
 		return repository, config.ErrInvalidObjectFormat
 	}
 	if repository.DefaultBranch != "" {
@@ -107,6 +123,43 @@ func parseRepository(encoded []byte) (repositoryConfig, error) {
 		}
 	}
 	return repository, nil
+}
+
+func repositoryCreation(body io.Reader, policy repositoryConfig) (repositoryConfig, error) {
+	data, err := io.ReadAll(io.LimitReader(body, 4097))
+	if err != nil {
+		return policy, err
+	}
+	if len(data) > 4096 {
+		return policy, errObjectLimit
+	}
+	fields, err := uniqueRepositoryObject(data)
+	if err != nil {
+		return policy, err
+	}
+	for name := range fields {
+		if name != "format" && name != "default_branch" {
+			return policy, fmt.Errorf("unknown creation field %q", name)
+		}
+	}
+	creation, err := parseRepository(data)
+	if err != nil {
+		return policy, err
+	}
+	if creation.Format == "" {
+		creation.Format = policy.Format
+	}
+	if creation.Format == "" {
+		creation.Format = config.SHA1
+	}
+	if policy.Format != "" && policy.Format != creation.Format {
+		return policy, config.ErrInvalidObjectFormat
+	}
+	policy.Format = creation.Format
+	if creation.DefaultBranch != "" {
+		policy.DefaultBranch = creation.DefaultBranch
+	}
+	return policy, nil
 }
 
 // Decode only an object, rejecting duplicate keys before normal JSON decoding
@@ -146,7 +199,7 @@ func uniqueRepositoryObject(encoded []byte) (map[string]json.RawMessage, error) 
 }
 
 func validRepositoryName(name string) bool {
-	if !strings.HasSuffix(name, ".git") || strings.Contains(name, `\`) {
+	if len(name) == 0 || len(name) > 4096 || name == "*" || strings.Contains(name, `\`) {
 		return false
 	}
 	path := &url.URL{Path: name}
@@ -162,9 +215,21 @@ func validRepositoryName(name string) bool {
 	return segments[len(segments)-1] != ".git"
 }
 
+func canonicalRepositoryName(name string) string {
+	if !strings.HasSuffix(name, ".git") {
+		return name + ".git"
+	}
+	return name
+}
+
+func automaticRepositoryID(name string) string {
+	return fmt.Sprintf("auto-%x", sha256.Sum256([]byte(name)))
+}
+
 type repositoryRoute struct {
 	Name       string
 	Repository repositoryConfig
+	Configured bool
 	Service    string
 	Method     string
 	Action     gitAction
@@ -183,7 +248,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	for _, service := range []string{
 		"info/refs", transport.UploadPackService, transport.ReceivePackService,
-		"maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain",
+		"create", "maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain",
 	} {
 		suffix := "/" + service
 		if strings.HasSuffix(r.URL.Path, suffix) {
@@ -192,8 +257,17 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 			break
 		}
 	}
+	if !validRepositoryName(route.Name) {
+		return repositoryRoute{}, errRepositoryNotFound
+	}
+	route.Name = canonicalRepositoryName(route.Name)
 	repository, ok := repositories[route.Name]
-	if !ok || !validRepositoryName(route.Name) {
+	route.Configured = ok
+	if !ok {
+		repository, ok = repositories["*"]
+		repository.LogID = automaticRepositoryID(route.Name)
+	}
+	if !ok {
 		return repositoryRoute{}, errRepositoryNotFound
 	}
 	route.Repository = repository
@@ -215,7 +289,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	switch route.Service {
 	case transport.UploadPackService:
 		route.Action = gitRead
-	case transport.ReceivePackService:
+	case transport.ReceivePackService, "create":
 		route.Action = gitWrite
 	default:
 		route.Action = gitAdmin
