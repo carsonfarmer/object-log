@@ -199,7 +199,7 @@ func uniqueRepositoryObject(encoded []byte) (map[string]json.RawMessage, error) 
 }
 
 func validRepositoryName(name string) bool {
-	if len(name) == 0 || len(name) > 4096 || name == "*" || strings.Contains(name, `\`) {
+	if len(name) == 0 || len(canonicalRepositoryName(name)) > 4096 || name == "*" || strings.Contains(name, `\`) {
 		return false
 	}
 	path := &url.URL{Path: name}

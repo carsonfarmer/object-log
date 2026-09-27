@@ -286,6 +286,9 @@ func TestRepositoryRoutePolicyIsIndependentPerRepositoryAndAction(t *testing.T) 
 }
 
 func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
+	if !validRepositoryName(strings.Repeat("a", 4092)) || validRepositoryName(strings.Repeat("a", 4093)) {
+		t.Fatal("name limit must include the optional .git suffix")
+	}
 	repositories, err := repositoriesFromText(`{"*":{"write_groups":["writers"]},"team/private":{}}`)
 	if err != nil {
 		t.Fatal(err)
