@@ -133,6 +133,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	service, method := route.Service, route.Method
+	creating := service == "create"
 	maintenance := service == "maintenance"
 	collect := service == "collect"
 	pruneInvalidRefs := service == "prune-invalid-refs"
@@ -150,7 +151,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, message, status)
 		return
 	}
-	if limits.readOnly && (service == transport.ReceivePackService || maintenance || collect || pruneInvalidRefs) {
+	if limits.readOnly && (route.Action == gitWrite || maintenance || collect || pruneInvalidRefs) {
 		http.Error(response, "repository is read-only", http.StatusForbidden)
 		return
 	}
@@ -164,15 +165,26 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
+	if creating {
+		route.Repository, e = repositoryCreation(r.Body, route.Repository)
+		if e != nil {
+			status := operationStatus(e)
+			if status == http.StatusInternalServerError {
+				status = http.StatusBadRequest
+			}
+			http.Error(response, e.Error(), status)
+			return
+		}
+	}
+
 	settings, e := walSettings(getConfig, route.Repository.LogID, limits)
 	if e != nil {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
 	}
 	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
-		// First-push discovery requires an empty repository advertisement. Only
-		// a configured repository and an authorized writer may create its head.
-		if route.Action == gitWrite {
+		// Only creation and explicitly provisioned writer requests may open a log.
+		if creating || route.Action == gitWrite && route.Configured {
 			return wal.Open(settings)
 		}
 		return wal.OpenExisting(settings)
@@ -274,7 +286,11 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	s, e := retryOpenStore(open, refresh)
 	if e != nil {
 		log.Printf("git request setup failed stage=open-store: %v", e)
-		http.Error(w, "Git storage unavailable", operationStatus(e))
+		status := operationStatus(e)
+		if creating && errors.Is(e, config.ErrInvalidObjectFormat) {
+			status = http.StatusConflict
+		}
+		http.Error(w, "Git storage unavailable", status)
 		return
 	}
 	defer func() {
@@ -282,8 +298,33 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			s.Close()
 		}
 	}()
+	if creating {
+		if s.stateRoot != nil {
+			http.Error(w, "repository already exists", http.StatusConflict)
+			return
+		}
+		if err := s.publish(s.meta.Refs); err != nil {
+			var pending *pendingError
+			if errors.As(err, &pending) {
+				http.Error(w, "repository creation pending; check the repository before retrying", http.StatusServiceUnavailable)
+				return
+			}
+			status := operationStatus(err)
+			if errors.Is(err, errPublicationConflict) {
+				status = http.StatusConflict
+			}
+			http.Error(w, "repository creation was not confirmed", status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(struct {
+			Repository string `json:"repository"`
+		}{route.Name})
+		return
+	}
 	if s.stateRoot == nil {
-		if route.Action != gitWrite {
+		if route.Action != gitWrite || !route.Configured {
 			http.NotFound(w, r)
 			return
 		}

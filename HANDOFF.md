@@ -58,9 +58,12 @@ The Git service supports unchanged SHA-1 and SHA-256 clients, protocol-v2 clone
 and have-aware fetch, shallow history, classic push, branches, tags, access
 control, cold recovery, automatic tail checkpoints, and explicit maintenance.
 Refs and its sparse object catalog publish atomically through one WAL commit.
-Local MinIO tests pass with unmodified go-git. Repository paths, formats, default
-branches and per-action groups now come from configuration. Only an authorized
-writer can materialize a configured repository; reads open existing state.
+Local MinIO tests pass with unmodified go-git. Repository creation is available through an authenticated API without per-name
+configuration. A wildcard access policy supplies defaults; exact entries replace
+it. Canonical names derive isolated WAL identities, and the creation publication
+persists the format and default branch. Reads and wildcard pushes only open
+existing Git roots; explicitly configured names also retain first-push provisioning.
+The host maintenance worker still visits only named configuration entries.
 Cognito access-token validation and a separate administration-only machine
 client are wired. Password mode is the explicit local default and requires a
 password. Public EC2 HTTPS qualification has passed real Cognito browser login,

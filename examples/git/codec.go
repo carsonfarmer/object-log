@@ -25,8 +25,12 @@ func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta
 	if err := decodeMetadata(data, &meta); err != nil {
 		return meta, err
 	}
-	if !meta.Validated || meta.Format != format || len(meta.Buckets) != children {
+	validFormat := meta.Format == config.SHA1 || meta.Format == config.SHA256
+	if !meta.Validated || !validFormat || len(meta.Buckets) != children {
 		return meta, fmt.Errorf("invalid repository root")
+	}
+	if format != "" && meta.Format != format {
+		return meta, fmt.Errorf("%w: repository format differs from stored state", config.ErrInvalidObjectFormat)
 	}
 	if meta.Head != "" {
 		head := plumbing.ReferenceName(meta.Head)
@@ -34,7 +38,7 @@ func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta
 			return meta, fmt.Errorf("invalid repository head")
 		}
 	}
-	if err := validateRefs(format, meta.Refs); err != nil {
+	if err := validateRefs(meta.Format, meta.Refs); err != nil {
 		return meta, err
 	}
 	for i, prefix := range meta.Buckets {
