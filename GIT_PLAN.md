@@ -104,7 +104,7 @@ identities, immutable object formats, default branches and independent
 read/write/admin groups. Duplicate identities, aliases and malformed paths are
 rejected. A wildcard policy admits authenticated API creation of new names;
 missing repositories remain absent on reads, administration and wildcard push.
-Explicitly provisioned names also support authorized first-push discovery.
+All names require authorized API creation before the first Git push.
 The format and default branch are published through the existing repository WAL.
 Scheduled maintenance currently requires named entries; dynamic discovery is
 separate work.

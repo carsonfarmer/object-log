@@ -103,6 +103,8 @@ export class Catalog {
       if (
         !this.root.Validated ||
         !["sha1", "sha256"].includes(this.root.Format) ||
+        typeof this.root.Head !== "string" ||
+        !/^refs\/heads\/.+$/.test(this.root.Head) ||
         (format && this.root.Format !== format) ||
         this.root.Buckets.length !== node.objects.length
       )

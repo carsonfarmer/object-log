@@ -9,7 +9,6 @@ import (
 	"io"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
@@ -89,22 +88,14 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 	}
 	// An empty repository has no unchecked objects. Existing roots must certify validation.
 	s.meta.Validated = true
-	head := s.meta.Head
-	if head == "" {
-		branch := "main"
-		if configured := repository.DefaultBranch; s.stateRoot == nil && configured != "" {
-			branch = configured
+	if s.stateRoot == nil {
+		branch := repository.DefaultBranch
+		if branch == "" {
+			branch = "main"
 		}
-		head = "refs/heads/" + branch
+		s.meta.Head = "refs/heads/" + branch
 	}
-	if !strings.HasPrefix(head, "refs/heads/") {
-		return nil, fmt.Errorf("invalid default branch")
-	}
-	if e := plumbing.ReferenceName(head).Validate(); e != nil {
-		return nil, e
-	}
-	s.meta.Head = head
-	if e := s.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(head))); e != nil {
+	if e := s.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(s.meta.Head))); e != nil {
 		return nil, e
 	}
 	return s, nil
@@ -169,21 +160,8 @@ func (s *store) EncodedObjectSize(id plumbing.Hash) (int64, error) {
 	v, e := s.lookup(id)
 	return v.Size, e
 }
-func (s *store) IterEncodedObjects(kind plumbing.ObjectType) (storer.EncodedObjectIter, error) {
-	items := map[string]indexed{}
-	for prefix, root := range s.buckets {
-		if e := walkRadix(prefix, root, s.loadBucket, func(id string, item indexed) { items[id] = item }); e != nil {
-			return nil, e
-		}
-	}
-	maps.Copy(items, s.pending)
-	result := make([]plumbing.EncodedObject, 0, len(items))
-	for _, item := range items {
-		if kind == plumbing.AnyObject || item.Kind == kind {
-			result = append(result, &storedObject{s, item})
-		}
-	}
-	return storer.NewEncodedObjectSliceIter(result), nil
+func (*store) IterEncodedObjects(plumbing.ObjectType) (storer.EncodedObjectIter, error) {
+	return nil, errors.ErrUnsupported
 }
 func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteCloser, error) {
 	if err := s.ctx.Err(); err != nil {
@@ -201,23 +179,8 @@ func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteC
 	}
 	return &objectWriter{s: s, kind: kind, size: size, codec: codec, sink: sink}, nil
 }
-func (s *store) SetEncodedObject(o plumbing.EncodedObject) (plumbing.Hash, error) {
-	r, e := o.Reader()
-	if e != nil {
-		return plumbing.ZeroHash, e
-	}
-	defer r.Close()
-	w, e := s.RawObjectWriter(o.Type(), o.Size())
-	if e != nil {
-		return plumbing.ZeroHash, e
-	}
-	if _, e = io.Copy(w, r); e != nil {
-		return plumbing.ZeroHash, e
-	}
-	if e = w.Close(); e != nil {
-		return plumbing.ZeroHash, e
-	}
-	return w.(*objectWriter).codec.Hash(), nil
+func (*store) SetEncodedObject(plumbing.EncodedObject) (plumbing.Hash, error) {
+	return plumbing.ZeroHash, errors.ErrUnsupported
 }
 
 type objectWriter struct {

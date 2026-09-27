@@ -29,7 +29,7 @@ afterEach(() => {
   };
 });
 
-function emptySession(format: string): Session {
+function emptySession(format: string, overrides: Record<string, unknown> = {}): Session {
   const dispose = () => undefined;
   let next = true;
   return {
@@ -47,6 +47,7 @@ function emptySession(format: string): Session {
             Head: "refs/heads/main",
             Refs: {},
             Buckets: [],
+            ...overrides,
           }),
         ),
         objects: [],
@@ -62,6 +63,18 @@ const discovery = () =>
   new Response("refs", {
     headers: { "Content-Type": "application/x-git-upload-pack-advertisement" },
   });
+
+test("catalog requires a persisted branch HEAD and accepts an unborn branch", () => {
+  for (const format of ["sha1", "sha256"]) {
+    for (const Head of [undefined, "", "refs/tags/main", "refs/heads/"])
+      expect(() => new Catalog(emptySession(format, { Head }), "", { bytes: 0 })).toThrow(
+        "Invalid repository catalog",
+      );
+    const catalog = new Catalog(emptySession(format), "", { bytes: 0 });
+    expect(snapshot(catalog, new URLSearchParams()).branches).toEqual([]);
+    catalog.close();
+  }
+});
 
 test("wildcard repositories recover their stored format and canonical WAL identity", async () => {
   policies = '{"*":{}}';

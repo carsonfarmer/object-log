@@ -56,8 +56,8 @@ http://127.0.0.1:19100/sha1.git
 http://127.0.0.1:19100/sha256.git
 ```
 
-Initialize a repository with its first push. Enter `git` and `local-git-password`
-when Git prompts. Reads never create repositories:
+The local launcher creates the two demo repositories through the API. Push an
+initial commit, entering `git` and `local-git-password` when Git prompts:
 
 ```sh
 git init --object-format=sha256 -b main demo
@@ -162,7 +162,6 @@ through the repository's WAL. Defaults are SHA-1 and `main`; choose SHA-256 for 
 SHA-256 client repository. A successful creation returns 201; an existing
 repository returns 409. A pending publication returns 503: check the repository
 before retrying. Reads and ordinary pushes to a missing name do not create it.
-The two explicitly configured demo repositories also support first-push setup.
 
 One `"*"` policy grants access to new names without a configuration edit or
 restart. For Cognito, configure the groups once:
@@ -290,20 +289,6 @@ Each new plan authenticates live metadata and preserves referenced blob keys
 without reading opaque leaf payloads. Ordinary reads and publication still
 verify those bytes. Continuous readers can delay cleanup; scheduling alone
 does not remove that constraint.
-
-Repositories published before the current ref-name rule may contain refs that
-Git can advertise but no longer accepts for updates or deletion. An operator
-can explicitly remove only those invalid names with `POST
-/<repository>/prune-invalid-refs` using administrator credentials. The response
-lists removed names after the new ref map is committed through the WAL head.
-An empty list with no `default_head` means no change. If the stored default
-HEAD is invalid, ensure another valid branch exists, then supply
-its full name in `X-Git-Replacement-Head` on this call; the new HEAD and any
-removed refs publish together. Without that header, the call refuses to
-change an invalid default HEAD.
-On a publication conflict, retry; on an uncertain result, inspect the refs
-and repeat the request. This action does not run on the maintenance timer. Run
-ordinary maintenance afterward to reclaim objects no longer reachable from a ref.
 
 Every fetch acquires WAL retention before opening catalog data and releases it
 after the last response byte. If a stopped instance loses a retention ID, stop

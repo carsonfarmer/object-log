@@ -8,6 +8,8 @@
 - Do not add garbage collection until checkpoint safety and uncertain-result
   resolution have tests.
 - Do not use OpenSpec.
+- Do not add compatibility readers, migrations, or repair paths for discarded
+  revisions. Reject unsupported durable state and use a fresh storage namespace.
 
 ## Design
 

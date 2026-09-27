@@ -39,9 +39,10 @@ of both Spin and Git, and can also run natively.
 
 Configuration maps repository paths to stable WAL identities, hash formats,
 default branches, and permissions. Each repository has its own storage
-namespace. An authorized writer's first push discovery creates its durable
-state; reads only open existing repositories. Adding a repository changes
-configuration, not the component binary.
+namespace. An authorized writer creates durable state through the repository
+API before the first push; reads only open existing repositories. A wildcard
+access policy can admit new repository names without changing the component
+binary or configuration.
 
 ## From a push to durable refs
 

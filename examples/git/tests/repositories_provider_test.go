@@ -37,7 +37,20 @@ func TestRepositoryIsolation(t *testing.T) {
 		repositoryStatus(t, read, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusNotFound)
 		repositoryStatus(t, write, "invalid-token", http.StatusUnauthorized)
 		repositoryStatus(t, read, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusNotFound)
-		repositoryStatus(t, write, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusOK)
+		repositoryStatus(t, write, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusNotFound)
+		request, err := http.NewRequest(http.MethodPost, repo.url+"/create", strings.NewReader(`{"format":"`+repo.format+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.SetBasicAuth("git", os.Getenv("GIT_PROBE_PASSWORD"))
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: creation returned HTTP %d", repo.name, response.StatusCode)
+		}
 		repositoryStatus(t, read, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusOK)
 	}
 	for _, path := range []string{
