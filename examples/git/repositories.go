@@ -229,7 +229,6 @@ func automaticRepositoryID(name string) string {
 type repositoryRoute struct {
 	Name       string
 	Repository repositoryConfig
-	Configured bool
 	Service    string
 	Method     string
 	Action     gitAction
@@ -262,7 +261,6 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	route.Name = canonicalRepositoryName(route.Name)
 	repository, ok := repositories[route.Name]
-	route.Configured = ok
 	if !ok {
 		repository, ok = repositories["*"]
 		repository.LogID = automaticRepositoryID(route.Name)

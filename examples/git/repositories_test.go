@@ -299,7 +299,7 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if route.Configured || route.Name != "team/project.git" || route.Action != gitWrite || route.Repository.Format != "" {
+		if route.Name != "team/project.git" || route.Action != gitWrite || route.Repository.Format != "" {
 			t.Fatalf("unexpected automatic route: %+v", route)
 		}
 		if first.Name != "" && first.Repository.LogID != route.Repository.LogID {

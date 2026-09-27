@@ -183,8 +183,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
-		// Only creation and explicitly provisioned writer requests may open a log.
-		if creating || route.Action == gitWrite && route.Configured {
+		if creating {
 			return wal.Open(settings)
 		}
 		return wal.OpenExisting(settings)
@@ -324,27 +323,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.stateRoot == nil {
-		if route.Action != gitWrite || !route.Configured {
-			http.NotFound(w, r)
-			return
-		}
-		// Persist the format and default branch before the first advertisement.
-		// A competing creator must reload the winning root before proceeding.
-		if err := s.publish(s.meta.Refs); err != nil && !errors.Is(err, errPublicationConflict) {
-			http.Error(w, "repository initialization failed", operationStatus(err))
-			return
-		}
-		s.Close()
-		if e = refresh(); e == nil {
-			s, e = retryOpenStore(open, refresh)
-		}
-		if e == nil && s.stateRoot == nil {
-			e = errPublicationConflict
-		}
-		if e != nil {
-			http.Error(w, "repository initialization failed", operationStatus(e))
-			return
-		}
+		http.NotFound(w, r)
+		return
 	}
 	if service == transport.ReceivePackService && method == http.MethodPost {
 		e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {

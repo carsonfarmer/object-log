@@ -62,7 +62,7 @@ Local MinIO tests pass with unmodified go-git. Repository creation is available 
 configuration. A wildcard access policy supplies defaults; exact entries replace
 it. Canonical names derive isolated WAL identities, and the creation publication
 persists the format and default branch. Reads and wildcard pushes only open
-existing Git roots; explicitly configured names also retain first-push provisioning.
+existing Git roots; creation is the only path that initializes a repository.
 The host maintenance worker still visits only named configuration entries.
 Cognito access-token validation and a separate administration-only machine
 client are wired. Password mode is the explicit local default and requires a

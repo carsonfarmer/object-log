@@ -30,9 +30,11 @@ use that larger limit only on a host with measured headroom.
 `host_repositories` provisions canonical names, unique stable WAL IDs, SHA-1 or
 SHA-256 formats, default branches, and independent read/write/admin groups.
 Declare all referenced groups in `host_groups`. Users and membership are managed
-in Cognito outside Terraform; self-registration is disabled. Adding a repository
-requires configuration, not rebuilding. An authorized first-push discovery
-materializes it. Do not change a stored repository's format or identity to migrate it.
+in Cognito outside Terraform; self-registration is disabled. Named policies
+require a configuration change to admit new paths; a wildcard policy admits
+new names without one. An authorized writer creates a repository with
+`POST /<repository>/create`. Do not change a stored repository's format or
+identity to migrate it.
 
 The artifact is staged under this run's `artifacts/` prefix and SHA-256 checked
 at boot. Data uses the separate `git/` prefix. The EC2 role can read that artifact
@@ -132,9 +134,9 @@ git config --global --add credential.https://git.example.com.helper oauth
 git clone https://git.example.com/team/project.git
 ```
 
-A fresh configured repository returns 404 to reads until a writer's first push
-materializes it. Push from a local repository with the configured object format
-and initial branch before trying to clone it.
+A fresh configured repository returns 404 until an authorized writer calls
+`POST /<repository>/create` with its format and initial branch. Then push from a
+local repository with that object format before trying to clone it.
 
 The helper uses authorization-code S256 PKCE and sends the access token as an
 ordinary Basic password. Its fixed `http://localhost:53119` callback matches the

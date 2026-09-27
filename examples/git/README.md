@@ -56,8 +56,8 @@ http://127.0.0.1:19100/sha1.git
 http://127.0.0.1:19100/sha256.git
 ```
 
-Initialize a repository with its first push. Enter `git` and `local-git-password`
-when Git prompts. Reads never create repositories:
+The local launcher creates the two demo repositories through the API. Push an
+initial commit, entering `git` and `local-git-password` when Git prompts:
 
 ```sh
 git init --object-format=sha256 -b main demo
@@ -162,7 +162,6 @@ through the repository's WAL. Defaults are SHA-1 and `main`; choose SHA-256 for 
 SHA-256 client repository. A successful creation returns 201; an existing
 repository returns 409. A pending publication returns 503: check the repository
 before retrying. Reads and ordinary pushes to a missing name do not create it.
-The two explicitly configured demo repositories also support first-push setup.
 
 One `"*"` policy grants access to new names without a configuration edit or
 restart. For Cognito, configure the groups once:
