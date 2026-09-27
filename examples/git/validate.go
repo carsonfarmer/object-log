@@ -57,7 +57,7 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 		}
 		refs[name] = cmd.New.String()
 	}
-	if err := validateRefs(st.meta.Format, refs); err != nil {
+	if err := validateRefs(refNames, st.meta.Format, refs); err != nil {
 		return nil, err
 	}
 	ids := make([]plumbing.Hash, 0, len(st.pending))

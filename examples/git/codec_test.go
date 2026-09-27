@@ -237,7 +237,7 @@ func TestInlineMetadataBound(t *testing.T) {
 func TestRepositoryRootAdmission(t *testing.T) {
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
 		t.Run(format.String(), func(t *testing.T) {
-			empty := rootMeta{Validated: true, Format: format, Refs: map[string]string{}, Buckets: []string{}}
+			empty := rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{}, Buckets: []string{}}
 			data, err := json.Marshal(empty)
 			if err != nil {
 				t.Fatal(err)
@@ -248,13 +248,16 @@ func TestRepositoryRootAdmission(t *testing.T) {
 			id := strings.Repeat("a", format.HexSize())
 			valid := rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{"refs/heads/main": id}, Buckets: []string{"0a", "ab"}}
 			invalid := map[string]rootMeta{
-				"head":            {Validated: true, Format: format, Head: "refs/tags/main", Refs: valid.Refs, Buckets: valid.Buckets},
-				"reference":       {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"HEAD": id}, Buckets: valid.Buckets},
-				"hash":            {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.ToUpper(id)}, Buckets: valid.Buckets},
-				"zero hash":       {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.Repeat("0", format.HexSize())}, Buckets: valid.Buckets},
-				"ref collision":   {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": id, "refs/heads/main/nested": id}, Buckets: valid.Buckets},
-				"bucket order":    {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"ab", "0a"}},
-				"bucket encoding": {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"AZ"}},
+				"empty head":       {Validated: true, Format: format, Refs: valid.Refs, Buckets: valid.Buckets},
+				"head":             {Validated: true, Format: format, Head: "refs/tags/main", Refs: valid.Refs, Buckets: valid.Buckets},
+				"unsafe head":      {Validated: true, Format: format, Head: "refs/heads/\u200c./review-probe", Refs: valid.Refs, Buckets: valid.Buckets},
+				"reference":        {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"HEAD": id}, Buckets: valid.Buckets},
+				"unsafe reference": {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/\u200c./review-probe": id}, Buckets: valid.Buckets},
+				"hash":             {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.ToUpper(id)}, Buckets: valid.Buckets},
+				"zero hash":        {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.Repeat("0", format.HexSize())}, Buckets: valid.Buckets},
+				"ref collision":    {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": id, "refs/heads/main/nested": id}, Buckets: valid.Buckets},
+				"bucket order":     {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"ab", "0a"}},
+				"bucket encoding":  {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"AZ"}},
 			}
 			data, err = json.Marshal(valid)
 			if err != nil {
@@ -264,6 +267,7 @@ func TestRepositoryRootAdmission(t *testing.T) {
 				t.Fatalf("rejected valid root: %v", err)
 			}
 			for name, malformed := range map[string][]byte{
+				"missing head":   []byte(strings.Replace(string(data), `"Head":"refs/heads/main",`, "", 1)),
 				"unknown field":  []byte(strings.Replace(string(data), `"Buckets":`, `"Unknown":true,"Buckets":`, 1)),
 				"trailing value": append(append([]byte(nil), data...), []byte(`{}`)...),
 			} {
@@ -294,7 +298,7 @@ func TestRepositoryRootAdmission(t *testing.T) {
 				{"validated", true, true},
 			} {
 				t.Run(test.name, func(t *testing.T) {
-					root := map[string]any{"Format": format, "Buckets": []string{"ab"}}
+					root := map[string]any{"Format": format, "Head": "refs/heads/main", "Buckets": []string{"ab"}}
 					if test.marker != nil {
 						root["Validated"] = test.marker
 					}

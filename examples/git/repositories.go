@@ -13,9 +13,11 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/transport"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 )
 
 const repositoriesConfigBytes = 64 << 10
@@ -111,7 +113,11 @@ func parseRepository(encoded []byte) (repositoryConfig, error) {
 		return repository, config.ErrInvalidObjectFormat
 	}
 	if repository.DefaultBranch != "" {
-		if err := plumbing.ValidateBranchName(repository.DefaultBranch); err != nil {
+		err := plumbing.ValidateBranchName(repository.DefaultBranch)
+		if err == nil {
+			err = validateRefName(dotgit.New(memfs.New()), plumbing.NewBranchReferenceName(repository.DefaultBranch))
+		}
+		if err != nil {
 			return repository, fmt.Errorf("default_branch: %w", err)
 		}
 	}
@@ -247,7 +253,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	for _, service := range []string{
 		"info/refs", transport.UploadPackService, transport.ReceivePackService,
-		"create", "maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain",
+		"create", "maintenance", "collect", "recover-retentions-after-drain",
 	} {
 		suffix := "/" + service
 		if strings.HasSuffix(r.URL.Path, suffix) {

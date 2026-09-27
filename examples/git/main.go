@@ -136,7 +136,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	creating := service == "create"
 	maintenance := service == "maintenance"
 	collect := service == "collect"
-	pruneInvalidRefs := service == "prune-invalid-refs"
 	recoverRetentions := service == "recover-retentions-after-drain"
 	limits, e := loadLimits(getConfig)
 	if e != nil {
@@ -151,7 +150,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, message, status)
 		return
 	}
-	if limits.readOnly && (route.Action == gitWrite || maintenance || collect || pruneInvalidRefs) {
+	if limits.readOnly && (route.Action == gitWrite || maintenance || collect) {
 		http.Error(response, "repository is read-only", http.StatusForbidden)
 		return
 	}
@@ -348,40 +347,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	if maintenance {
 		report, err := s.maintain()
 		writeMaintenance(w, report, err)
-		return
-	} else if pruneInvalidRefs {
-		if len(r.Header.Values("X-Git-Replacement-Head")) > 1 {
-			http.Error(w, "multiple replacement HEAD values", http.StatusBadRequest)
-			return
-		}
-		clean, removed, err := withoutInvalidRefs(s.meta, r.Header.Get("X-Git-Replacement-Head"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
-		newHead := ""
-		if clean.Head != s.meta.Head {
-			newHead = clean.Head
-		}
-		if len(removed) != 0 || newHead != "" {
-			s.meta.Head = clean.Head
-			if err := s.publish(clean.Refs); err != nil {
-				status := operationStatus(err)
-				var pending *pendingError
-				if errors.Is(err, errPublicationConflict) {
-					status = http.StatusConflict
-				} else if errors.As(err, &pending) {
-					status = http.StatusServiceUnavailable
-				}
-				http.Error(w, "ref cleanup was not confirmed: "+err.Error(), status)
-				return
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(struct {
-			Removed []string `json:"removed_refs"`
-			Head    string   `json:"default_head,omitempty"`
-		}{removed, newHead})
 		return
 	} else if service == transport.ReceivePackService && method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")

@@ -9,7 +9,6 @@ import (
 	"io"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
@@ -89,22 +88,14 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 	}
 	// An empty repository has no unchecked objects. Existing roots must certify validation.
 	s.meta.Validated = true
-	head := s.meta.Head
-	if head == "" {
-		branch := "main"
-		if configured := repository.DefaultBranch; s.stateRoot == nil && configured != "" {
-			branch = configured
+	if s.stateRoot == nil {
+		branch := repository.DefaultBranch
+		if branch == "" {
+			branch = "main"
 		}
-		head = "refs/heads/" + branch
+		s.meta.Head = "refs/heads/" + branch
 	}
-	if !strings.HasPrefix(head, "refs/heads/") {
-		return nil, fmt.Errorf("invalid default branch")
-	}
-	if e := plumbing.ReferenceName(head).Validate(); e != nil {
-		return nil, e
-	}
-	s.meta.Head = head
-	if e := s.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(head))); e != nil {
+	if e := s.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(s.meta.Head))); e != nil {
 		return nil, e
 	}
 	return s, nil

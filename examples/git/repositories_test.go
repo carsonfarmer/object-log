@@ -86,6 +86,7 @@ func TestLoadRepositoriesRejectsInvalidConfiguration(t *testing.T) {
 		{name: "invalid branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"a..b"}}`},
 		{name: "HEAD branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"HEAD"}}`},
 		{name: "hyphen branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"-bad"}}`},
+		{name: "unsafe branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"\u200c./review-probe"}}`},
 		{name: "null branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":null}}`},
 		{name: "string groups", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":"everyone"}}`},
 		{name: "null groups", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":null}}`},
@@ -184,7 +185,6 @@ func TestResolveRepositorySelectsServiceAndAction(t *testing.T) {
 		{name: "write RPC", method: http.MethodPost, path: "git-receive-pack",
 			service: transport.ReceivePackService, action: gitWrite},
 		{name: "logical maintenance", method: http.MethodPost, path: "maintenance", service: "maintenance", action: gitAdmin},
-		{name: "legacy ref cleanup", method: http.MethodPost, path: "prune-invalid-refs", service: "prune-invalid-refs", action: gitAdmin},
 		{name: "physical collection", method: http.MethodPost, path: "collect", service: "collect", action: gitAdmin},
 		{name: "retention recovery", method: http.MethodPost, path: "recover-retentions-after-drain",
 			service: "recover-retentions-after-drain", action: gitAdmin},
@@ -259,7 +259,6 @@ func TestRepositoryRoutePolicyIsIndependentPerRepositoryAndAction(t *testing.T) 
 		{name: "writer read denied", group: "writers", path: "team/alpha.git/git-upload-pack"},
 		{name: "writer admin denied", group: "writers", path: "team/alpha.git/maintenance"},
 		{name: "admin maintenance", group: "operators", path: "team/alpha.git/maintenance", want: true},
-		{name: "admin ref cleanup", group: "operators", path: "team/alpha.git/prune-invalid-refs", want: true},
 		{name: "admin collection", group: "operators", path: "team/alpha.git/collect", want: true},
 		{name: "admin recovery", group: "operators", path: "team/alpha.git/recover-retentions-after-drain", want: true},
 		{name: "admin read denied", group: "operators", path: "team/alpha.git/git-upload-pack"},
@@ -358,6 +357,7 @@ func TestRepositoryCreationSettings(t *testing.T) {
 	for _, text := range []string{
 		`{"format":"sha512"}`, `{"format":null}`, `{"format":"sha1","format":"sha256"}`,
 		`{"default_branch":"../main"}`, `{"write_groups":["everyone"]}`, `{"log_id":"other"}`,
+		`{"default_branch":"\u200c./review-probe"}`,
 		`{} {}`, strings.Repeat(" ", 4097),
 	} {
 		if _, err := repositoryCreation(strings.NewReader(text), policy); err == nil {
