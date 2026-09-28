@@ -19,6 +19,10 @@ func TestRepositoryCreation(t *testing.T) {
 	if endpoint == "" || os.Getenv("GIT_PROBE_CREATE") != "1" {
 		t.Skip("set GIT_PROBE_URL and GIT_PROBE_CREATE=1 for a local service with wildcard policy")
 	}
+	operatorPassword := os.Getenv("GIT_PROBE_OPERATOR_PASSWORD")
+	if operatorPassword == "" {
+		operatorPassword = os.Getenv("GIT_PROBE_PASSWORD")
+	}
 	request := func(method, url, password, body string, want int) []byte {
 		t.Helper()
 		r, err := http.NewRequest(method, url, strings.NewReader(body))
@@ -50,7 +54,7 @@ func TestRepositoryCreation(t *testing.T) {
 				t.Helper()
 				operation := "maintenance"
 				for range 32 {
-					data := request(http.MethodPost, maintenanceURL+operation, password, "", 200)
+					data := request(http.MethodPost, maintenanceURL+operation, operatorPassword, "", 200)
 					var result struct{ State string }
 					if err := json.Unmarshal(data, &result); err != nil {
 						t.Fatal(err)
@@ -65,7 +69,7 @@ func TestRepositoryCreation(t *testing.T) {
 				}
 				t.Fatal("maintenance did not finish")
 			}
-			request(http.MethodPost, maintenanceURL+"maintenance", password, "", 404)
+			request(http.MethodPost, maintenanceURL+"maintenance", operatorPassword, "", 404)
 			request(http.MethodGet, url+"/info/refs?service=git-receive-pack", "wrong-password", "", 401)
 			request(http.MethodGet, read, password, "", 404)
 			request(http.MethodGet, url+"/info/refs?service=git-receive-pack", password, "", 200)

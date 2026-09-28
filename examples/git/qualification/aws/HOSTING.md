@@ -192,6 +192,11 @@ also configure `alpha/project.git` and `beta/project.git` as SHA-1 and
 `hash256/project.git` as SHA-256, with separate IDs and the same test permissions;
 set `GIT_MULTI_REPOSITORIES=1`. These are fixture names, not service restrictions.
 
+For first-push tests with a wildcard policy, set `GIT_PROBE_CREATE=1` and supply
+the maintenance client's access token as `GIT_PROBE_OPERATOR_PASSWORD`. Only
+`/_maintenance` requests use that token. It defaults to `GIT_PROBE_PASSWORD` for
+local shared-password testing.
+
 The deterministic provider tests assert exact cleanup counts. In the SSM host
 session, stop the timer and let any running worker finish before starting them:
 
