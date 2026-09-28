@@ -106,8 +106,9 @@ rejected. A wildcard policy admits authorized first pushes to new names.
 Missing repositories remain absent on reads; discovery for a first push advertises
 both formats without initializing storage. The first successful push publishes
 format, default branch, refs and catalog through the existing repository WAL.
-Scheduled maintenance currently requires named entries; dynamic discovery is
-separate work.
+Scheduled maintenance discovers existing WAL logs in bounded batches and
+authenticates each log through the operator endpoint. It includes repositories
+created by first push without requiring named entries.
 
 Remote tests added a nested SHA-256 repository through configuration while
 preserving the component artifact. Read discovery returned 404 with no durable
