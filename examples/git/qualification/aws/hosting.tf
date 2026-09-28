@@ -49,10 +49,10 @@ variable "host_git_max_object_bytes" {
 }
 
 variable "host_repositories" {
-  description = "Explicit repository provisioning and independent group permissions."
+  description = "Repository policies; '*' supplies defaults for API-created repositories."
   type = map(object({
-    log_id         = string
-    format         = string
+    log_id         = optional(string, "")
+    format         = optional(string, "")
     default_branch = optional(string, "main")
     read_groups    = optional(list(string), [])
     write_groups   = optional(list(string), [])
@@ -60,8 +60,8 @@ variable "host_repositories" {
   }))
   default = {}
   validation {
-    condition     = alltrue([for repo in var.host_repositories : contains(["sha1", "sha256"], repo.format)])
-    error_message = "Repository format must be sha1 or sha256."
+    condition     = alltrue([for repo in var.host_repositories : contains(["", "sha1", "sha256"], repo.format)])
+    error_message = "Repository format must be empty, sha1 or sha256."
   }
 }
 
@@ -183,7 +183,7 @@ locals {
       token_url        = "${local.cognito_login_origin}/oauth2/token"
       service_url      = "http://127.0.0.1:8081"
       validation_url   = "http://127.0.0.1:3000/_validate_backend"
-      repositories     = sort(keys(var.host_repositories))
+      repositories     = sort([for name in keys(var.host_repositories) : name if name != "*"])
       budget_seconds   = var.host_maintenance_budget_seconds
       pause_seconds    = var.host_maintenance_pause_seconds
     }))
@@ -191,8 +191,8 @@ locals {
     run_timeout = length(var.host_repositories) * var.host_maintenance_budget_seconds + 65
     retry_after = max(1, length(var.host_repositories) * var.host_maintenance_pause_seconds)
     admin_paths = jsonencode(flatten([for name in sort(keys(var.host_repositories)) : [
-      for operation in ["maintenance", "collect", "prune-invalid-refs", "recover-retentions-after-drain"] : "/${name}/${operation}"
-    ]]))
+      for operation in ["maintenance", "collect", "recover-retentions-after-drain"] : "/${name}/${operation}"
+    ] if name != "*"]))
   }) : ""
 }
 

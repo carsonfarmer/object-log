@@ -1,0 +1,42 @@
+{
+  "name": "object-log-repo-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "bun@1.3.13",
+  "scripts": {
+    "build": "cargo build --locked --release --manifest-path ../../wal-component/Cargo.toml --target wasm32-wasip2 && bun run prepare && bun build.ts && j2w -i build/component.js -o build/viewer.wasm && mkdir -p dist && wac plug --plug ../../wal-component/target/wasm32-wasip2/release/object_log_component.wasm build/viewer.wasm -o dist/viewer.wasm",
+    "check": "bun run prepare && biome check . && tsc --noEmit",
+    "format": "biome check --write .",
+    "prepare": "bun prepare.ts",
+    "test": "bun test",
+    "start": "bun run build && OBJECT_LOG_GIT_LOCAL_MANIFEST=spin.viewer.toml ../../../scripts/run-git-local.sh"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@bytecodealliance/preview2-shim": "0.26.0",
+    "@spinframework/build-tools": "2.1.1",
+    "@types/bun": "1.3.13",
+    "typescript": "7.0.2"
+  },
+  "overrides": {
+    "@bytecodealliance/componentize-js": "https://github.com/carsonfarmer/ComponentizeJS/releases/download/opaque-resource-v0.23.0/bytecodealliance-componentize-js-0.23.0-opaque-resource.1.tgz"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@spinframework/spin-variables": "1.0.1",
+    "@spinframework/wasi-http-proxy": "2.0.0",
+    "fflate": "0.8.3",
+    "preact": "10.29.8"
+  },
+  "config": {
+    "witDependencies": [
+      {
+        "witPath": "./build/wit",
+        "package": "object-log:storage@0.1.0",
+        "world": "reader"
+      }
+    ]
+  }
+}

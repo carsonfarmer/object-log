@@ -12,7 +12,7 @@ import (
 )
 
 // Configure these three names with distinct log IDs on a fresh storage prefix,
-// password/token authentication, and default branch main. The test uses the
+// password/token authentication. The first push selects default branch main. The test uses the
 // supplied server as-is; it does not rebuild or relaunch Spin.
 func TestRepositoryIsolation(t *testing.T) {
 	if os.Getenv("GIT_MULTI_REPOSITORIES") != "1" {
@@ -38,12 +38,12 @@ func TestRepositoryIsolation(t *testing.T) {
 		repositoryStatus(t, write, "invalid-token", http.StatusUnauthorized)
 		repositoryStatus(t, read, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusNotFound)
 		repositoryStatus(t, write, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusOK)
-		repositoryStatus(t, read, os.Getenv("GIT_PROBE_PASSWORD"), http.StatusOK)
+
 	}
 	for _, path := range []string{
 		"unknown/project.git", "alpha/project.git/extra", "alpha//project.git",
 	} {
-		repositoryStatus(t, endpoint+"/"+path+"/info/refs?service=git-receive-pack",
+		repositoryStatus(t, endpoint+"/"+path+"/info/refs?service=git-upload-pack",
 			os.Getenv("GIT_PROBE_PASSWORD"), http.StatusNotFound)
 	}
 	for i := range repositories {

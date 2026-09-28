@@ -36,3 +36,22 @@ func TestValidateRejectsUnsafeRefBeforePublication(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRejectsMixedCommandFormats(t *testing.T) {
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		st := &store{Storage: memory.NewStorage(memory.WithObjectFormat(format)), meta: rootMeta{Format: format, Refs: map[string]string{}}}
+		other := config.SHA1
+		if format == other {
+			other = config.SHA256
+		}
+		for _, ids := range [][2]config.ObjectFormat{{other, format}, {format, other}} {
+			command := &packp.Command{Name: "refs/heads/main",
+				Old: plumbing.NewHash(strings.Repeat("1", ids[0].HexSize())),
+				New: plumbing.NewHash(strings.Repeat("0", ids[1].HexSize())),
+			}
+			if refs, err := validate(st, []*packp.Command{command}); err == nil || refs != nil || !strings.Contains(err.Error(), "object format") {
+				t.Fatalf("mixed-format deletion accepted: refs=%v error=%v", refs, err)
+			}
+		}
+	}
+}

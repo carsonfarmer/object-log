@@ -137,16 +137,15 @@ fi
 
 cat <<EOF
 Git service ready at http://127.0.0.1:$git_port
-  SHA-1:   http://127.0.0.1:$git_port/sha1.git
-  SHA-256: http://127.0.0.1:$git_port/sha256.git
   Spin log: $demo_dir/spin.log
+  Git log:  $root/examples/git/.spin/logs/git_stderr.txt
 
-Create a repository with an initial push:
-  git init --object-format=sha256 -b main demo
+Storage starts empty. Push an initial commit to create a repository:
+  git init -b main demo
   cd demo
   echo hello > README.md
   git add README.md && git commit -m 'Initial commit'
-  git push http://127.0.0.1:$git_port/sha256.git main
+  git push http://127.0.0.1:$git_port/team/demo.git main
 
 When prompted, use username git and password local-git-password.
 Press Ctrl-C here to stop Spin and MinIO and remove their disposable data.

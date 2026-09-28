@@ -46,6 +46,25 @@ pins through go-pkg's public `Unpin` function after the bindings return Go
 values. Build inputs are recorded in `examples/git/Makefile` and `go.mod`;
 their upstream licenses apply.
 
+## Optional TypeScript repository viewer
+
+The viewer uses Bun, TypeScript, Biome, Preact, `fflate`, `@noble/hashes` and the
+Spin JavaScript SDK. Its `examples/git/viewer/bun.lock` records exact versions
+and package integrity. Their upstream licenses apply.
+
+The compiler uses a temporary package based on official ComponentizeJS 0.23.0,
+with the binding splicer rebuilt from
+[revision `a47770b`](https://github.com/carsonfarmer/ComponentizeJS/commit/a47770bd1b63a7497d785c5b32e841812de16700).
+[Upstream PR #357](https://github.com/bytecodealliance/ComponentizeJS/pull/357)
+fixes missing classes for imported resources without methods, reported in
+[issue #221](https://github.com/bytecodealliance/ComponentizeJS/issues/221).
+The packaged JavaScript bindings and all engine/cache files remain identical
+to the official release; only the compiled binding splicer changes. Source and
+build details accompany the
+[temporary package](https://github.com/carsonfarmer/ComponentizeJS/releases/tag/opaque-resource-v0.23.0).
+Remove the package override once an upstream release includes this fix.
+The compiler change adds no viewer behavior or Git-specific code.
+
 ## Native Spin provider
 
 The isolated [Spin key-value provider](integrations/spin-key-value/README.md)

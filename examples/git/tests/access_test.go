@@ -30,7 +30,6 @@ func TestAccess(t *testing.T) {
 		{"POST", "/sha1.git/info/refs?service=git-upload-pack", password, 405},
 		{"GET", "/sha1.git/git-upload-pack", password, 405},
 		{"GET", "/sha1.git/maintenance", password, 405},
-		{"GET", "/sha1.git/prune-invalid-refs", password, 405},
 		{"GET", "/sha1.git/recover-retentions-after-drain", password, 405},
 		{"POST", "/sha1.git/recover-retentions-after-drain", password, 403},
 		{"GET", "/sha1.git/info/refs?service=maintenance", password, 404},
@@ -40,7 +39,6 @@ func TestAccess(t *testing.T) {
 	}
 	if os.Getenv("GIT_PROBE_READ_ONLY") == "true" {
 		cases = append(cases, request{"POST", "/sha1.git/maintenance", password, 403})
-		cases = append(cases, request{"POST", "/sha1.git/prune-invalid-refs", password, 403})
 	}
 	if password != "" {
 		cases = append(cases, request{"GET", "/sha1.git/info/refs?service=git-upload-pack", "wrong", 401})
@@ -60,7 +58,10 @@ func TestAccess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if response.StatusCode != c.status {
+		// Fresh storage has no catalog until the first push. The Git workflow
+		// test verifies successful reads after publication.
+		absent := os.Getenv("GIT_PROBE_CREATE") == "1" && c.status == http.StatusOK && strings.HasSuffix(c.path, "service=git-upload-pack") && response.StatusCode == http.StatusNotFound
+		if response.StatusCode != c.status && !absent {
 			t.Errorf("%s %s: got %d, want %d", c.method, c.path, response.StatusCode, c.status)
 		}
 		if bootID != "" && response.Header.Get("X-Git-Boot-ID") != bootID {
@@ -77,6 +78,9 @@ func TestPersistedHead(t *testing.T) {
 	endpoint, branch := os.Getenv("GIT_PROBE_URL"), os.Getenv("GIT_PROBE_BRANCH")
 	if endpoint == "" || branch == "" || os.Getenv("GIT_PROBE_PERSISTED_HEAD") != "true" {
 		t.Skip("set GIT_PROBE_URL and GIT_PROBE_BRANCH for an initialized repository")
+	}
+	if os.Getenv("GIT_PROBE_CREATE") == "1" {
+		endpoint = strings.TrimRight(endpoint, "/") + "/workflow"
 	}
 	for _, format := range []string{"sha1", "sha256"} {
 		refs := string(git(t, nil, "ls-remote", "--symref", strings.TrimRight(endpoint, "/")+"/"+format+".git", "HEAD"))

@@ -58,9 +58,12 @@ The Git service supports unchanged SHA-1 and SHA-256 clients, protocol-v2 clone
 and have-aware fetch, shallow history, classic push, branches, tags, access
 control, cold recovery, automatic tail checkpoints, and explicit maintenance.
 Refs and its sparse object catalog publish atomically through one WAL commit.
-Local MinIO tests pass with unmodified go-git. Repository paths, formats, default
-branches and per-action groups now come from configuration. Only an authorized
-writer can materialize a configured repository; reads open existing state.
+Local MinIO tests pass with unmodified go-git. The first successful authorized
+push creates a repository without per-name configuration. A wildcard policy
+supplies defaults; exact entries replace it. Canonical names derive isolated WAL
+identities. The initial push publishes format, default branch, refs and catalog
+through one WAL commit; browsing and rejected pushes publish no Git root.
+The host maintenance worker still visits only named configuration entries.
 Cognito access-token validation and a separate administration-only machine
 client are wired. Password mode is the explicit local default and requires a
 password. Public EC2 HTTPS qualification has passed real Cognito browser login,
@@ -86,6 +89,11 @@ go-pkg PR #13 while it remains under review. Dependency provenance and reference
 `THIRD_PARTY.md`. Do not add another Git implementation or local storage
 authority. Use ordinary Spin and unmodified
 S3-compatible storage.
+
+The optional repository viewer has its own TypeScript Spin API and reads the
+existing WAL catalog; it adds no routes or code to the Go Git service. Its
+compiler temporarily uses the focused opaque-resource fix in ComponentizeJS
+PR #357, with exact provenance in `THIRD_PARTY.md`.
 
 Spin 4.1's affected OpenTelemetry SDK remains pinned pending its coordinated
 upstream upgrade. The optional Caddy host rejects oversized or overlong W3C

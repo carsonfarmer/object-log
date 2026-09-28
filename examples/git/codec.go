@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	"io"
 	"strings"
 )
@@ -25,16 +27,18 @@ func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta
 	if err := decodeMetadata(data, &meta); err != nil {
 		return meta, err
 	}
-	if !meta.Validated || meta.Format != format || len(meta.Buckets) != children {
+	validFormat := meta.Format == config.SHA1 || meta.Format == config.SHA256
+	if !meta.Validated || !validFormat || len(meta.Buckets) != children {
 		return meta, fmt.Errorf("invalid repository root")
 	}
-	if meta.Head != "" {
-		head := plumbing.ReferenceName(meta.Head)
-		if !head.IsBranch() || head.Validate() != nil {
-			return meta, fmt.Errorf("invalid repository head")
-		}
+	if format != "" && meta.Format != format {
+		return meta, fmt.Errorf("%w: repository format differs from stored state", config.ErrInvalidObjectFormat)
 	}
-	if err := validateRefs(format, meta.Refs); err != nil {
+	refNames := dotgit.New(memfs.New())
+	if head := plumbing.ReferenceName(meta.Head); !head.IsBranch() || validateRefName(refNames, head) != nil {
+		return meta, fmt.Errorf("invalid repository head")
+	}
+	if err := validateRefs(refNames, meta.Format, meta.Refs); err != nil {
 		return meta, err
 	}
 	for i, prefix := range meta.Buckets {
@@ -57,10 +61,10 @@ func decodeMetadata(data []byte, value any) error {
 	return nil
 }
 
-func validateRefs(format config.ObjectFormat, refs map[string]string) error {
+func validateRefs(refNames *dotgit.DotGit, format config.ObjectFormat, refs map[string]string) error {
 	for name, id := range refs {
 		ref := plumbing.ReferenceName(name)
-		if !strings.HasPrefix(name, "refs/") || ref.Validate() != nil || !validID(format, id) {
+		if validateRefName(refNames, ref) != nil || !validID(format, id) {
 			return fmt.Errorf("invalid repository reference")
 		}
 		for parent := name; ; {

@@ -15,7 +15,7 @@ wal_secret_key = { default = "", secret = true }
 wal_session_token = { default = "", secret = true }
 wal_max_collection_objects = { default = "100000" }
 wal_recover_retentions_after_drain = { default = "false" }
-git_repositories = { default = '{"sha1.git":{"log_id":"repo-sha1","format":"sha1"},"sha256.git":{"log_id":"repo-sha256","format":"sha256"}}' }
+git_repositories = { default = '{"*":{}}' }
 git_auth_mode = { default = "password" }
 git_cognito_issuer = { default = "" }
 git_cognito_client_id = { default = "" }

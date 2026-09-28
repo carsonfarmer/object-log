@@ -11,9 +11,9 @@ rules remain outside the Rust core.
 - Classic receive-pack push, branches, annotated tags, stale-write rejection,
   fast-forward policy, connectivity validation, and malformed-input rejection.
 - Atomic publication of refs and the sparse object catalog.
-- Arbitrary configured repository paths with isolated WAL identities and an
-  explicit SHA-1 or SHA-256 format. Adding a repository requires configuration,
-  not source changes.
+- Arbitrary repository paths with isolated WAL identities and an explicit
+  SHA-1 or SHA-256 format. First-push creation requires no per-repository
+  configuration or restart; named access policies remain optional overrides.
 - Per-repository reader, writer, and administrator permissions; read-only mode;
   a persisted default branch; and recovery without a local repository cache.
 - Automatic maintenance that prunes unreachable Git objects and invokes bounded
@@ -84,7 +84,9 @@ The service uses unmodified upstream go-git and componentize-go, including its
 bundled adapter. It pins the unchanged go-pkg PR #13 revision pending upstream
 review. Exact revisions, licenses, and upstream references live in `THIRD_PARTY.md`.
 New fork-only behavior requires owner review and focused tests. The service uses
-ordinary Spin and unmodified object storage.
+ordinary Spin and unmodified object storage. The optional TypeScript viewer
+uses the owner-approved opaque-resource compiler fix in ComponentizeJS PR #357;
+remove its package override when a release includes the fix.
 
 ## Service readiness
 
@@ -100,9 +102,12 @@ in #39.
 The declarative repository map supplies canonical nested paths, stable WAL
 identities, immutable object formats, default branches and independent
 read/write/admin groups. Duplicate identities, aliases and malformed paths are
-rejected. Unknown repositories fail closed. Reads and administration open
-existing WALs; an authorized first-push discovery can materialize a configured
-repository before accepting a pack.
+rejected. A wildcard policy admits authorized first pushes to new names.
+Missing repositories remain absent on reads; discovery for a first push advertises
+both formats without initializing storage. The first successful push publishes
+format, default branch, refs and catalog through the existing repository WAL.
+Scheduled maintenance currently requires named entries; dynamic discovery is
+separate work.
 
 Remote tests added a nested SHA-256 repository through configuration while
 preserving the component artifact. Read discovery returned 404 with no durable

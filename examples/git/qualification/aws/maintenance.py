@@ -82,7 +82,7 @@ class Client:
                 url, data=b"", headers={"Authorization": f"Bearer {token}"},
             ), deadline)["state"]
         except urllib.error.HTTPError as error:
-            # Configured repositories are materialized by their first writer.
+            # A configured repository may not yet have been created.
             if error.code == 404:
                 error.close()
                 return "not materialized"

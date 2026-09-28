@@ -46,29 +46,31 @@ With the tools above installed, run from the repository root:
 make git-local
 ```
 
-This builds the service, starts isolated MinIO and Spin instances, creates the
-bucket, and validates storage before printing the Git URLs. It uses a native
-MinIO binary when available, otherwise the pinned Docker image. No AWS account
-is involved. The default URLs are:
-
-```text
-http://127.0.0.1:19100/sha1.git
-http://127.0.0.1:19100/sha256.git
-```
-
-Initialize a repository with its first push. Enter `git` and `local-git-password`
-when Git prompts. Reads never create repositories:
+This builds the service, starts disposable MinIO and Spin instances, creates the
+bucket, and validates storage. It uses a native MinIO binary when available,
+otherwise the pinned Docker image. No AWS account is involved. Storage starts
+empty. Push an initial commit to any permitted repository name to create it,
+entering `git` and `local-git-password` when Git prompts:
 
 ```sh
-git init --object-format=sha256 -b main demo
+git init -b main demo
 cd demo
 echo 'Git on object-log' > README.md
 git add README.md
 git commit -m 'Initial commit'
-git push http://127.0.0.1:19100/sha256.git main
+git push http://127.0.0.1:19100/team/demo.git main
 cd ..
-git clone http://127.0.0.1:19100/sha256.git cloned-demo
+git clone http://127.0.0.1:19100/team/demo.git cloned-demo
 ```
+
+Git defaults to SHA-1. To use SHA-256, initialize the local repository with
+`git init --object-format=sha256`; its first push selects the remote format.
+
+Push progress shows pack checks, imported-object counts, delta indexing,
+validation, and publication. Import counts update about once a second as objects
+finish; final push status follows durable publication. Use `git push --progress`
+to request feedback when stderr is redirected. `-q` and `--no-progress` suppress
+these messages.
 
 Press Ctrl-C in the service terminal to stop Spin and MinIO and remove all demo
 data. Set `OBJECT_LOG_GIT_LOCAL_PORT` to choose another loopback port.
@@ -101,7 +103,7 @@ credentials for its disposable MinIO instance.
 | `wal_collection_candidates` | `1000` | Maximum entries in a new deletion plan, capped by the durable graph limit |
 | `wal_max_collection_objects` | `100000` | Complete publication graph and distinct collection live-object bound; shared paths count separately for publication |
 | `wal_recover_retentions_after_drain` | `false` | Exclusive lost-retention recovery mode |
-| `git_repositories` | two demo entries | JSON map of paths, WAL identities, formats, default branches and permissions |
+| `git_repositories` | `{"*":{}}` | JSON access policies; optional fixed identities, formats and default branches |
 | `git_auth_mode` | `password` | `password`, `cognito`, or explicit local `anonymous` mode |
 | `git_password` | empty | Required password for local password mode |
 | `git_cognito_issuer` | empty | HTTPS Cognito user-pool issuer |
@@ -146,17 +148,40 @@ configured limit high enough to read them; lowering it blocks those objects.
 
 ## Repositories and permissions
 
-Repository names come from configuration, including nested names. For example:
+The first successful push creates a repository. Names can be nested, and the
+`.git` suffix is optional; both URLs select the same repository:
 
-```toml
-git_repositories = '{"team/project.git":{"log_id":"team-project","format":"sha1","default_branch":"main","read_groups":["developers"],"write_groups":["developers"],"admin_groups":["operators"]}}'
+```sh
+git push http://127.0.0.1:19100/team/project HEAD:main
 ```
 
-Each name has its own WAL identity. Duplicate identities, ambiguous names and
-invalid formats are rejected. Add another entry and reload Spin to provision a
-repository without rebuilding. Keep each identity stable. The first authorized
-push discovery persists its format and default branch; subsequent configuration
-cannot reinterpret that stored format or change its default branch.
+The push requires write permission and publishes its Git format, default branch,
+refs and object catalog together through the existing WAL. The first pushed
+branch becomes the default unless configuration specifies `default_branch`;
+a tag-only first push leaves an unborn `main`. Later pushes preserve the stored
+format and default branch. Read discovery never initializes storage. Failed
+pushes can leave unreachable staged objects or an empty WAL head, but no
+published Git repository.
+
+One `"*"` policy grants access to new names without a configuration edit or
+restart. For Cognito, configure the groups once:
+
+```toml
+git_repositories = '{"*":{"read_groups":["developers"],"write_groups":["developers"],"admin_groups":["operators"]},"team/private":{"read_groups":["private-team"],"write_groups":["private-team"]}}'
+```
+
+An exact entry replaces the whole default policy; omitted groups deny access.
+An omitted `log_id` derives an isolated identity from the canonical name, so
+adding a permission override preserves the existing repository. Explicit IDs
+must be unique and cannot use the reserved `auto-` prefix. An optional `format`
+pins that policy to SHA-1 or SHA-256; otherwise readers recover the stored format.
+Clients cannot change permissions or reinterpret an existing repository.
+The local shared-password mode grants the password holder access to all names;
+anonymous mode allows public writes, including first-push creation.
+
+The optional host maintenance worker currently visits named configuration entries.
+Repositories created under `"*"` still checkpoint their log during pushes and expose
+the same maintenance endpoints, but need an operator to schedule collection by name.
 
 Cognito mode checks signed access tokens, issuer, client, expiry and scope before
 opening storage. Git supplies the access token as its Basic password through an
@@ -202,17 +227,20 @@ make wasi-credential-test
 
 Against a service with a fresh WAL prefix, run the unchanged-client provider
 suite. The suite creates its own refs; do not reuse a repository containing
-manual demo commits. Stop Spin, choose a new `wal_prefix` in the variables file,
+manual demo commits. `GIT_PROBE_CREATE=1` enables first-push creation checks and
+gives the ordinary Git workflow its own repository names; it requires a wildcard
+policy. Stop Spin, choose a new `wal_prefix` in the variables file,
 and restart it before the first suite run or a rerun:
 
 ```sh
 GIT_PROBE_URL=http://127.0.0.1:19100 \
 GIT_PROBE_PASSWORD=local-git-password \
-GIT_PROBE_LOG=/path/to/printed/spin.log make git-provider-test
+GIT_PROBE_CREATE=1 GIT_MULTI_REPOSITORIES=1 \
+GIT_PROBE_LOG="$PWD/examples/git/.spin/logs/git_stderr.txt" make git-provider-test
 ```
 
 Set `GIT_PROBE_PASSWORD` and `GIT_PROBE_BRANCH` when those values are configured.
-Use the Spin log path printed by `make git-local` for `GIT_PROBE_LOG`; it supplies
+Use the Git component log path printed by `make git-local` for `GIT_PROBE_LOG`; it supplies
 per-request storage counters when Spin omits HTTP trailers.
 The provider suite uses installed Git as an independent protocol and integrity
 oracle. Larger opt-in cases are controlled by these environment variables:
@@ -264,20 +292,6 @@ Each new plan authenticates live metadata and preserves referenced blob keys
 without reading opaque leaf payloads. Ordinary reads and publication still
 verify those bytes. Continuous readers can delay cleanup; scheduling alone
 does not remove that constraint.
-
-Repositories published before the current ref-name rule may contain refs that
-Git can advertise but no longer accepts for updates or deletion. An operator
-can explicitly remove only those invalid names with `POST
-/<repository>/prune-invalid-refs` using administrator credentials. The response
-lists removed names after the new ref map is committed through the WAL head.
-An empty list with no `default_head` means no change. If the stored default
-HEAD is invalid, ensure another valid branch exists, then supply
-its full name in `X-Git-Replacement-Head` on this call; the new HEAD and any
-removed refs publish together. Without that header, the call refuses to
-change an invalid default HEAD.
-On a publication conflict, retry; on an uncertain result, inspect the refs
-and repeat the request. This action does not run on the maintenance timer. Run
-ordinary maintenance afterward to reclaim objects no longer reachable from a ref.
 
 Every fetch acquires WAL retention before opening catalog data and releases it
 after the last response byte. If a stopped instance loses a retention ID, stop

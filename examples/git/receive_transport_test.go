@@ -73,3 +73,65 @@ func TestReceiveCommandLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestReceiveFormat(t *testing.T) {
+	for _, tc := range []struct {
+		name, caps string
+		width      int
+		want       config.ObjectFormat
+	}{
+		{"legacy SHA-1", "report-status", 40, config.SHA1},
+		{"SHA-1", "object-format=sha1", 40, config.SHA1},
+		{"SHA-256", "object-format=sha256", 64, config.SHA256},
+		{"missing SHA-256 capability", "report-status", 64, ""},
+		{"wrong width", "object-format=sha256", 40, ""},
+		{"unknown format", "object-format=other", 40, ""},
+		{"missing format", "object-format", 40, ""},
+		{"multiple formats", "object-format=sha1 object-format=sha256", 40, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var prefix bytes.Buffer
+			_, err := pktline.Writef(&prefix, "%s %s refs/heads/main\x00%s\n", strings.Repeat("0", tc.width), strings.Repeat("1", tc.width), tc.caps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packet := bytes.Clone(prefix.Bytes())
+			input := append(bytes.Clone(packet), []byte("0000PACKpayload")...)
+			body := bytes.NewBuffer(input)
+			format, caps, replay, err := receiveFormat(body, int64(len(packet)))
+			if tc.want == "" {
+				if err == nil {
+					t.Fatal("invalid format accepted")
+				}
+				return
+			}
+			if err != nil || format != tc.want || body.Len() != len("0000PACKpayload") {
+				t.Fatalf("format=%s error=%v unread=%d", format, err, body.Len())
+			}
+			if caps.String() != tc.caps {
+				t.Fatalf("capabilities changed: %s", caps.String())
+			}
+			data, err := io.ReadAll(replay)
+			if err != nil || !bytes.Equal(data, input) {
+				t.Fatalf("push body was changed: %v", err)
+			}
+			if _, _, _, err := receiveFormat(bytes.NewReader(input), int64(len(packet)-1)); !errors.Is(err, errObjectLimit) {
+				t.Fatalf("negotiation limit: %v", err)
+			}
+		})
+	}
+	for _, input := range []string{"0000", string(packetForTest("shallow "+strings.Repeat("1", 40)+"\n")) + "0000"} {
+		format, caps, replay, err := receiveFormat(strings.NewReader(input), int64(len(input)))
+		if err != nil || format != "" || caps != nil {
+			t.Fatalf("no-op push: format=%s error=%v", format, err)
+		}
+		data, err := io.ReadAll(replay)
+		if err != nil || string(data) != input {
+			t.Fatalf("no-op body was changed: %v", err)
+		}
+	}
+}
+
+func packetForTest(text string) []byte {
+	return []byte(fmt.Sprintf("%04x%s", len(text)+4, text))
+}

@@ -39,9 +39,10 @@ of both Spin and Git, and can also run natively.
 
 Configuration maps repository paths to stable WAL identities, hash formats,
 default branches, and permissions. Each repository has its own storage
-namespace. An authorized writer's first push discovery creates its durable
-state; reads only open existing repositories. Adding a repository changes
-configuration, not the component binary.
+namespace. The first successful authorized push publishes the format, refs and
+catalog together; reads only open existing repositories. A wildcard
+access policy can admit new repository names without changing the component
+binary or configuration.
 
 ## From a push to durable refs
 
@@ -133,9 +134,8 @@ curl --fail-with-body -u git:local-git-password \
   -X POST http://127.0.0.1:19100/_validate_backend
 ```
 
-The default configuration exposes
-`http://127.0.0.1:19100/sha1.git` and
-`http://127.0.0.1:19100/sha256.git`.
+Storage starts empty. The first successful push creates a repository at the
+chosen path and records its Git format with the refs.
 
 In a third terminal, push a commit and clone it back. Use an empty working
 directory for these commands and keep your ordinary Git author configuration:
@@ -146,11 +146,11 @@ cd demo
 echo 'Stored through object-log.' >README.md
 git add README.md
 git commit -m 'Try object-log'
-git remote add origin http://127.0.0.1:19100/sha256.git
+git remote add origin http://127.0.0.1:19100/team/project.git
 git push -u origin main
 cd ..
 git -c protocol.version=2 clone \
-  http://127.0.0.1:19100/sha256.git demo-clone
+  http://127.0.0.1:19100/team/project.git demo-clone
 git -C demo-clone fsck --full
 ```
 
