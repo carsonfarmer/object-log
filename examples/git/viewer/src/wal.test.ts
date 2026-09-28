@@ -17,7 +17,7 @@ mock.module("object-log:storage/wal@0.1.0", () => ({
 mock.module("@spinframework/spin-variables", () => ({
   get: (name: string) => (name === "git_repositories" ? policies : ""),
 }));
-const { Catalog, MissingObject } = await import("./wal");
+const { Catalog, MissingObject, drop } = await import("./wal");
 const { browse } = await import("./api");
 const { NotFound, snapshot } = await import("./repository");
 const originalFetch = globalThis.fetch;
@@ -72,7 +72,7 @@ test("catalog requires a persisted branch HEAD and accepts an unborn branch", ()
       );
     const catalog = new Catalog(emptySession(format), "", { bytes: 0 });
     expect(snapshot(catalog, new URLSearchParams()).branches).toEqual([]);
-    catalog.close();
+    drop(catalog);
   }
 });
 
@@ -227,7 +227,7 @@ for (const format of ["sha1", "sha256"] as const) {
           "abc",
         );
       } finally {
-        sample.catalog.close();
+        drop(sample.catalog);
       }
       expect(sample.counts().drops).toBe(storage === "inline" ? 3 : storage === "full" ? 5 : 7);
       expect(sample.counts().reads).toBe(storage === "inline" ? 0 : Math.ceil(encoded.length / 3));
@@ -245,7 +245,7 @@ test("inflation rejects excess decoded bytes and truncated input", () => {
     try {
       expect(() => sample.catalog.object(sample.id, 3, 256)).toThrow();
     } finally {
-      sample.catalog.close();
+      drop(sample.catalog);
     }
     expect(sample.counts().drops).toBe(3);
   }
@@ -257,7 +257,7 @@ test("large preview reads only metadata", () => {
   try {
     expect(sample.catalog.object(sample.id, 3, 2)).toEqual({ size: 3 });
   } finally {
-    sample.catalog.close();
+    drop(sample.catalog);
   }
   expect(sample.counts().reads).toBe(0);
 });
@@ -271,7 +271,7 @@ test("a catalogued blob cannot be selected as a commit", () => {
       NotFound,
     );
   } finally {
-    sample.catalog.close();
+    drop(sample.catalog);
   }
   expect(sample.counts()).toEqual({ reads: 0, drops: 3 });
 });
@@ -303,6 +303,27 @@ test("Git authorization completes before viewer storage is opened", async () => 
     (await browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git&path=..")))
       .status,
   ).toBe(400);
+  expect(opened).toBe(baseline);
+});
+
+test("bounded discovery drain cancels its stream and releases the reader before storage", async () => {
+  const baseline = opened;
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(8 << 20));
+      controller.enqueue(new Uint8Array(1));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  globalThis.fetch = mock(async () => new Response(body)) as unknown as typeof fetch;
+  await expect(
+    browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git")),
+  ).rejects.toThrow("Git discovery exceeds 8 MiB");
+  expect(cancelled).toBe(true);
+  expect(body.locked).toBe(false);
   expect(opened).toBe(baseline);
 });
 

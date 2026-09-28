@@ -38,6 +38,13 @@ select,
 summary {
   cursor: pointer;
 }
+select {
+  appearance: none;
+  padding-right: 32px;
+  background: #f6f8fa
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='%23656d76' stroke-width='1.5'/%3E%3C/svg%3E")
+    no-repeat right 10px center;
+}
 input {
   background: white;
   min-width: 0;
@@ -46,8 +53,13 @@ input {
   outline: 2px solid #0969da;
   outline-offset: 2px;
 }
-header {
+.row {
   display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.site-header {
   gap: 24px;
   padding: 20px 32px;
   background: #f6f8fa;
@@ -59,31 +71,19 @@ header a {
 }
 header span,
 .muted,
-code,
-small {
+code {
   color: #656d76;
 }
 main {
   max-width: 1120px;
   margin: auto;
   padding: 32px;
+  overflow-wrap: anywhere;
 }
 h1 {
-  display: flex;
-  align-items: center;
-  gap: 16px;
   margin: 0 0 24px;
   font-size: 22px;
   color: #0969da;
-  overflow-wrap: anywhere;
-}
-small {
-  font-size: 12px;
-  font-weight: 400;
-  border: 1px solid #d0d7de;
-  border-radius: 20px;
-  padding: 2px 8px;
-  white-space: nowrap;
 }
 h2 {
   margin: 0;
@@ -96,7 +96,6 @@ h2 {
 }
 p.panel {
   padding: 16px 24px;
-  overflow-wrap: anywhere;
 }
 .panel + .panel,
 p[role="status"] + .panel {
@@ -125,7 +124,6 @@ p {
   margin: 0;
 }
 .tabs {
-  display: flex;
   gap: 8px;
   border-bottom: 1px solid #d0d7de;
   margin-bottom: 20px;
@@ -142,50 +140,26 @@ p {
   font-weight: 600;
 }
 .toolbar {
-  display: flex;
   flex-wrap: wrap;
-  align-items: center;
   gap: 16px;
   margin-bottom: 20px;
 }
 .toolbar label {
-  display: flex;
-  align-items: center;
+  gap: 6px;
 }
 .toolbar select {
   max-width: 220px;
 }
-.select-control {
-  position: relative;
-  display: inline-flex;
-}
-.select-control select {
-  appearance: none;
-  -webkit-appearance: none;
-  padding-right: 32px;
-}
-.select-control svg {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  pointer-events: none;
-}
-summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  list-style: none;
-}
-summary::-webkit-details-marker {
-  display: none;
-}
-summary svg:last-child {
-  margin-left: 8px;
-}
 details {
   position: relative;
   margin-left: auto;
+}
+summary.row {
+  gap: 8px;
+  list-style: none;
+}
+summary svg:last-child {
+  margin-left: 8px;
 }
 .clone-box {
   position: absolute;
@@ -194,42 +168,27 @@ details {
   width: min(340px, calc(100vw - 32px));
   padding: 16px;
   background: white;
-  border: 1px solid #d0d7de;
-  border-radius: 6px;
 }
 .clone-box button {
   margin-top: 8px;
 }
 .breadcrumbs {
   margin-bottom: 12px;
-  overflow-wrap: anywhere;
 }
 article {
-  display: flex;
-  align-items: center;
-  gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid #d0d7de;
 }
 article:last-child {
   border-bottom: 0;
 }
-article > a,
-article > div,
-article > strong {
+article > a {
   flex: 1;
   min-width: 0;
-  overflow-wrap: anywhere;
 }
 .tip {
   background: #f6f8fa;
   justify-content: space-between;
-}
-.commit-link {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
 }
 .commit-title {
   overflow: hidden;
@@ -243,7 +202,7 @@ pre {
     12px / 1.65 ui-monospace,
     monospace;
 }
-.commit-link code {
+code {
   flex-shrink: 0;
 }
 pre {
@@ -258,7 +217,7 @@ pre {
   text-align: center;
 }
 @media (max-width: 600px) {
-  header {
+  .site-header {
     padding: 16px;
   }
   header span {
