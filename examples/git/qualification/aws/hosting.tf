@@ -49,7 +49,7 @@ variable "host_git_max_object_bytes" {
 }
 
 variable "host_repositories" {
-  description = "Repository policies; '*' supplies defaults for API-created repositories."
+  description = "Repository policies; '*' supplies defaults for repositories created on first push."
   type = map(object({
     log_id         = optional(string, "")
     format         = optional(string, "")
@@ -88,6 +88,16 @@ variable "host_maintenance_budget_seconds" {
   validation {
     condition     = var.host_maintenance_budget_seconds >= 1 && floor(var.host_maintenance_budget_seconds) == var.host_maintenance_budget_seconds
     error_message = "host_maintenance_budget_seconds must be a positive integer."
+  }
+}
+
+variable "host_maintenance_run_budget_seconds" {
+  description = "Maximum worker time for one bounded discovery batch and its log operations."
+  type        = number
+  default     = 300
+  validation {
+    condition     = var.host_maintenance_run_budget_seconds >= 1 && floor(var.host_maintenance_run_budget_seconds) == var.host_maintenance_run_budget_seconds
+    error_message = "host_maintenance_run_budget_seconds must be a positive integer."
   }
 }
 
@@ -177,19 +187,21 @@ locals {
     public_ip_https    = var.host_name == ""
     maintenance_script = base64encode(file("${path.module}/maintenance.py"))
     maintenance_config = base64encode(jsonencode({
-      region           = var.aws_region
-      secret_parameter = aws_ssm_parameter.maintenance_secret[0].name
-      client_id        = aws_cognito_user_pool_client.maintenance[0].id
-      token_url        = "${local.cognito_login_origin}/oauth2/token"
-      service_url      = "http://127.0.0.1:8081"
-      validation_url   = "http://127.0.0.1:3000/_validate_backend"
-      repositories     = sort([for name in keys(var.host_repositories) : name if name != "*"])
-      budget_seconds   = var.host_maintenance_budget_seconds
-      pause_seconds    = var.host_maintenance_pause_seconds
+      region             = var.aws_region
+      secret_parameter   = aws_ssm_parameter.maintenance_secret[0].name
+      client_id          = aws_cognito_user_pool_client.maintenance[0].id
+      token_url          = "${local.cognito_login_origin}/oauth2/token"
+      service_url        = "http://127.0.0.1:8081"
+      validation_url     = "http://127.0.0.1:3000/_validate_backend"
+      wal_bucket         = aws_s3_bucket.qualification.bucket
+      wal_prefix         = local.host_wal_prefix
+      run_budget_seconds = var.host_maintenance_run_budget_seconds
+      budget_seconds     = var.host_maintenance_budget_seconds
+      pause_seconds      = var.host_maintenance_pause_seconds
     }))
     interval    = var.host_maintenance_interval
-    run_timeout = length(var.host_repositories) * var.host_maintenance_budget_seconds + 65
-    retry_after = max(1, length(var.host_repositories) * var.host_maintenance_pause_seconds)
+    run_timeout = var.host_maintenance_run_budget_seconds + 65
+    retry_after = max(1, var.host_maintenance_pause_seconds)
     admin_paths = jsonencode(flatten([for name in sort(keys(var.host_repositories)) : [
       for operation in ["maintenance", "collect", "recover-retentions-after-drain"] : "/${name}/${operation}"
     ] if name != "*"]))

@@ -1,11 +1,12 @@
 #!/usr/bin/python3
-"""One logical pass per repository, then resume only physical collection."""
+"""Discover existing logs, prune once, then resume only physical collection."""
 
 import base64
 import contextlib
 import http.client
 import json
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -71,22 +72,53 @@ class Client:
                     raise
                 time.sleep(min(0.2, max(0, deadline - time.monotonic())))
 
-    def post(self, repository, operation, deadline):
-        # Canonical repository paths can contain URL-safe punctuation. Encoding
-        # those characters would create aliases rejected by the service router.
-        name = urllib.parse.quote(repository, safe="/:@!$&'()*+,;=-._~")
-        url = f'{self.config["service_url"]}/{name}/{operation}'
+    def post(self, log_id, operation, deadline):
+        query = urllib.parse.urlencode({"log_id": log_id, "operation": operation})
         token = self.access_token(deadline)
         try:
             return request_json(urllib.request.Request(
-                url, data=b"", headers={"Authorization": f"Bearer {token}"},
+                f'{self.config["service_url"]}/_maintenance?{query}', data=b"",
+                headers={"Authorization": f"Bearer {token}"},
             ), deadline)["state"]
         except urllib.error.HTTPError as error:
-            # A configured repository may not yet have been created.
             if error.code == 404:
                 error.close()
                 return "not materialized"
             raise
+
+
+def discover_logs(config, deadline, cursor=Path("/run/object-log-maintenance/cursor")):
+    # Listing is only a candidate hint. The service authenticates each existing
+    # head; losing this local cursor merely restarts the scan.
+    prefix = config["wal_prefix"].strip("/")
+    prefix = f"{prefix}/v1/logs/" if prefix else "v1/logs/"
+    after = ""
+    if cursor.exists():
+        with cursor.open(encoding="utf-8") as source:
+            after = source.read(1025)
+        if len(after) > 1024 or not after.startswith(prefix) or not after.endswith("/"):
+            after = ""
+    command = ["aws", "--region", config["region"], "s3api", "list-objects-v2",
+               "--bucket", config["wal_bucket"], "--prefix", prefix, "--delimiter", "/",
+               "--max-keys", "32", "--no-paginate", "--output", "json"]
+    if after:
+        command.extend(["--start-after", after])
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return
+    page = json.loads(subprocess.check_output(command, timeout=min(60, remaining)))
+    for entry in page.get("CommonPrefixes", []):
+        if time.monotonic() >= deadline:
+            return
+        path = entry["Prefix"]
+        if not path.startswith(prefix) or not path.endswith("/") or len(path) > 1024:
+            raise ValueError("invalid log prefix")
+        log_id = path[len(prefix):-1]
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", log_id) and log_id not in {".", ".."}:
+            yield log_id
+        cursor.write_text(path, encoding="utf-8")
+    if not page.get("IsTruncated", False):
+        cursor.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -106,12 +138,15 @@ def time_budget(seconds):
 
 
 def maintain(repositories, post, budget_seconds=300, pause_seconds=0,
-             marker=Path("/run/object-log-maintenance/pause")):
+             marker=Path("/run/object-log-maintenance/pause"), run_deadline=float("inf")):
     failed = False
     for repository in repositories:
         try:
-            seconds = pause_seconds or budget_seconds
-            deadline = time.monotonic() + seconds
+            now = time.monotonic()
+            seconds = min(pause_seconds or budget_seconds, run_deadline - now)
+            if seconds <= 0:
+                break
+            deadline = now + seconds
             if pause_seconds:
                 marker.touch()
             with time_budget(seconds):
@@ -169,8 +204,9 @@ def main():
             print(f"backend validation failed: {type(error).__name__}", file=sys.stderr)
             return 1
         return 0
-    return maintain(config["repositories"], client.post,
-                    config["budget_seconds"], config["pause_seconds"])
+    deadline = time.monotonic() + config["run_budget_seconds"]
+    return maintain(discover_logs(config, deadline), client.post,
+                    config["budget_seconds"], config["pause_seconds"], run_deadline=deadline)
 
 
 if __name__ == "__main__":

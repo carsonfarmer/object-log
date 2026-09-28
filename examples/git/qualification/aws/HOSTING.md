@@ -77,13 +77,15 @@ Spin binds to `127.0.0.1:3000`; Caddy serves public HTTPS. The local maintenance
 worker calls Caddy's `127.0.0.1:8081` listener with its Cognito token, so cleanup does not
 depend on the Git service's public DNS or certificate renewal. The systemd timer runs
 after boot, then `host_maintenance_interval` seconds after each completed run,
-without overlap. A run starts with `/maintenance` per repository, then uses
-`/collect` after `more` or `retained`. Every repository has an absolute
-`host_maintenance_budget_seconds` deadline; systemd also limits the total run to
-that budget times the repository count plus 65 seconds for setup/cleanup.
-Unmaterialized repositories are skipped; an error does not prevent other
-repositories from being serviced. There is no job database or detached component
-work. Graph scans and S3 costs still need measurement on the deployed workload.
+without overlap. Each run discovers up to 32 existing WAL log prefixes, including
+repositories created on first push. It calls the operator-only `/_maintenance`
+endpoint by log ID, pruning once and then resuming physical collection after
+`more` or `retained`. Every log has an absolute `host_maintenance_budget_seconds`
+deadline within the total `host_maintenance_run_budget_seconds` budget. Systemd
+allows another 65 seconds for setup and cleanup. Headless prefixes are skipped;
+an individual log's error does not prevent visiting others. A local cursor resumes
+the next batch and wraps after each sweep; losing it restarts discovery. The WAL
+head remains the authority. Graph scans and S3 costs depend on the workload.
 
 Caddy rejects an inbound W3C `baggage` header above 8,192 bytes or 64 list
 members with HTTP 431 before proxying it to Spin. This bounds the availability
@@ -98,12 +100,13 @@ next timer. Continuous traffic can prevent collection from progressing. Set
 `host_maintenance_pause_seconds` explicitly to enable an optional ingress gap,
 bounded by the repository budget. During each repository's gap, Caddy returns
 503 with Retry-After for new ordinary requests; existing requests continue.
-Exact configured POST admin paths still reach Spin and require its authentication.
+The operator endpoint and configured POST admin paths still reach Spin and require
+its authentication.
 The worker retries retained/conflict/pending outcomes within the gap, switching
 permanently to physical collection after pruning. Each gap ends when that pass
-finishes or its deadline expires. Sequential repositories can produce consecutive
-gaps; the maximum is their count times the configured pause. A `finally` removes
-the marker, and systemd's runtime directory cleanup handles a killed worker.
+finishes or its deadline expires. Sequential logs can produce consecutive gaps
+within the total run budget. A `finally` removes the marker, and systemd's
+`ExecStopPost` removes it after a killed worker while retaining the discovery cursor.
 Progress depends on admitted requests finishing inside the gap and on configured
 operation deadlines. Lost retentions still require manual drained recovery;
 the worker never clears them.

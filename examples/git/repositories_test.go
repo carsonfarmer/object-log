@@ -238,6 +238,47 @@ func TestResolveRepositoryMethodErrorPreservesWriteDiscoveryAction(t *testing.T)
 	}
 }
 
+func TestDiscoveredLogMaintenanceRequiresScopeOperator(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []string{"maintenance", "collect"} {
+		request := httptest.NewRequest(http.MethodPost, "/_maintenance?log_id=auto-123&operation="+operation, nil)
+		route, err := resolveRepository(nil, request)
+		if err != nil || route.Repository.LogID != "auto-123" || route.Service != operation || route.Action != gitAdmin {
+			t.Fatalf("route=%+v error=%v", route, err)
+		}
+		for _, principal := range []gitPrincipal{{}, {subject: "repository-admin", groups: []string{"operators"}}} {
+			if principal.Allows(route.Repository.repositoryAccess, route.Action) {
+				t.Fatal("discovered log bypassed repository policy without a scope operator")
+			}
+		}
+		if !(gitPrincipal{subject: "scheduler", operator: true}).Allows(route.Repository.repositoryAccess, route.Action) {
+			t.Fatal("scope operator cannot maintain a discovered log")
+		}
+		request.Method = http.MethodGet
+		if route, err := resolveRepository(nil, request); !errors.Is(err, errRepositoryMethod) || route.Action != gitAdmin {
+			t.Fatalf("read-only method route=%+v error=%v", route, err)
+		}
+	}
+	for _, query := range []string{
+		"", "log_id=auto-123", "log_id=auto-123&operation=read",
+		"log_id=auto-123&operation=maintenance&extra=1",
+		"log_id=auto-123&log_id=other&operation=maintenance",
+		"log_id=auto-123&operation=maintenance&operation=collect",
+		"log_id=..&operation=maintenance", "log_id=a%2Fb&operation=collect",
+		"log_id=&operation=maintenance", "log_id=%ZZ&operation=maintenance",
+	} {
+		if _, err := resolveRepository(nil, httptest.NewRequest(http.MethodPost, "/_maintenance?"+query, nil)); !errors.Is(err, errRepositoryNotFound) {
+			t.Fatalf("query %q error=%v", query, err)
+		}
+	}
+	// A repository with this name still has ordinary Git routes and permissions.
+	route, err := resolveRepository(map[string]repositoryConfig{"_maintenance.git": {LogID: "named", Format: config.SHA1}},
+		httptest.NewRequest(http.MethodGet, "/_maintenance/info/refs?service=git-upload-pack", nil))
+	if err != nil || route.Repository.LogID != "named" || route.Action != gitRead {
+		t.Fatalf("named repository route=%+v error=%v", route, err)
+	}
+}
+
 func TestRepositoryRoutePolicyIsIndependentPerRepositoryAndAction(t *testing.T) {
 	t.Parallel()
 	repositories := repositoriesForTest(t)

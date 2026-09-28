@@ -179,9 +179,9 @@ Clients cannot change permissions or reinterpret an existing repository.
 The local shared-password mode grants the password holder access to all names;
 anonymous mode allows public writes, including first-push creation.
 
-The optional host maintenance worker currently visits named configuration entries.
-Repositories created under `"*"` still checkpoint their log during pushes and expose
-the same maintenance endpoints, but need an operator to schedule collection by name.
+The optional host maintenance worker discovers existing WAL logs, including
+repositories created under `"*"`, and visits them in bounded batches. Discovery
+does not create repositories or introduce a repository registry.
 
 Cognito mode checks signed access tokens, issuer, client, expiry and scope before
 opening storage. Git supplies the access token as its Basic password through an
@@ -264,6 +264,14 @@ from normal development and must never target production data.
 The optional [AWS deployment](qualification/aws/HOSTING.md) runs maintenance
 automatically through a systemd timer. Other hosts can schedule the same calls
 with an authenticated operator identity.
+
+The worker lists immediate log prefixes under `<wal_prefix>/v1/logs/` and calls
+`POST /_maintenance?log_id=<id>&operation=maintenance`, followed by
+`operation=collect` for further physical batches. This endpoint requires the
+scope-wide machine operator in Cognito mode; a repository administrator cannot
+use it to bypass another repository's permissions. The service opens an existing
+head and recovers its Git format from authenticated state. Empty abandoned first
+pushes are collected without creating a Git repository.
 
 Automatic checkpointing keeps the WAL tail bounded; it does not remove
 unreachable Git objects. Run authenticated maintenance periodically and after
