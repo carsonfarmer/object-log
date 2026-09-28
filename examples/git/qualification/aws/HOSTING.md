@@ -10,6 +10,18 @@ make git-build
 tar -C examples/git -czf "$qualification_state/git.tar.gz" spin.toml git.wasm
 ```
 
+To include the [repository viewer](../../viewer/README.md), build it, stage its
+generated `spin.viewer.toml` as `spin.toml`, and include `viewer/dist/viewer.wasm`:
+
+```sh
+viewer_stage="$qualification_state/viewer-artifact"
+mkdir -p "$viewer_stage/viewer/dist"
+cp examples/git/spin.viewer.toml "$viewer_stage/spin.toml"
+cp examples/git/git.wasm "$viewer_stage/git.wasm"
+cp examples/git/viewer/dist/viewer.wasm "$viewer_stage/viewer/dist/viewer.wasm"
+tar -C "$viewer_stage" -czf "$qualification_state/git.tar.gz" spin.toml git.wasm viewer/dist/viewer.wasm
+```
+
 Enable the commented `host_*` inputs in `terraform.tfvars.example`. For a domain,
 supply an unused `host_name` in an existing public `host_route53_zone_id`.
 Alternatively, leave both empty to use the Elastic IP with a publicly trusted
@@ -179,6 +191,11 @@ default branch `main` and a distinct WAL ID. To include repository isolation,
 also configure `alpha/project.git` and `beta/project.git` as SHA-1 and
 `hash256/project.git` as SHA-256, with separate IDs and the same test permissions;
 set `GIT_MULTI_REPOSITORIES=1`. These are fixture names, not service restrictions.
+
+For first-push tests with a wildcard policy, set `GIT_PROBE_CREATE=1` and supply
+the maintenance client's access token as `GIT_PROBE_OPERATOR_PASSWORD`. Only
+`/_maintenance` requests use that token. It defaults to `GIT_PROBE_PASSWORD` for
+local shared-password testing.
 
 The deterministic provider tests assert exact cleanup counts. In the SSM host
 session, stop the timer and let any running worker finish before starting them:
