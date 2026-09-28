@@ -74,7 +74,7 @@ cat > /etc/caddy/Caddyfile <<'CADDY'
 (git_routes) {
     @admin {
         method POST
-        expression `{http.request.uri.path} in ${admin_paths}`
+        expression `{http.request.uri.path} == '/_maintenance' || {http.request.uri.path} in ${admin_paths}`
     }
     @paused file {
         root /run/object-log-maintenance
@@ -123,8 +123,10 @@ Type=oneshot
 User=object-log-git
 Group=object-log-git
 ExecStart=/usr/local/bin/object-log-maintenance /etc/object-log-git/maintenance.json
+ExecStopPost=/usr/bin/rm -f /run/object-log-maintenance/pause
 RuntimeDirectory=object-log-maintenance
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 TimeoutStartSec=${run_timeout}s
 TimeoutStopSec=5s
 NoNewPrivileges=true

@@ -63,7 +63,11 @@ push creates a repository without per-name configuration. A wildcard policy
 supplies defaults; exact entries replace it. Canonical names derive isolated WAL
 identities. The initial push publishes format, default branch, refs and catalog
 through one WAL commit; browsing and rejected pushes publish no Git root.
-The host maintenance worker still visits only named configuration entries.
+The host maintenance worker discovers existing WAL prefixes in bounded batches,
+including first-push repositories and abandoned initial uploads. A disposable
+local cursor provides fair progress; the service opens and authenticates each
+existing head through a scope-operator-only endpoint. It does not add a registry
+or publish Git roots for empty logs.
 Cognito access-token validation and a separate administration-only machine
 client are wired. Password mode is the explicit local default and requires a
 password. Public EC2 HTTPS qualification has passed real Cognito browser login,

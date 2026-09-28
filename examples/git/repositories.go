@@ -214,6 +214,22 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	if r.URL.Fragment != "" || r.URL.Opaque != "" || !strings.HasPrefix(r.URL.Path, "/") {
 		return route, errRepositoryNotFound
 	}
+	if r.URL.Path == "/_maintenance" {
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		id, operation := query.Get("log_id"), query.Get("operation")
+		if err != nil || len(query) != 2 || len(query["log_id"]) != 1 || len(query["operation"]) != 1 ||
+			!repositoryLogID.MatchString(id) || id == "." || id == ".." ||
+			(operation != "maintenance" && operation != "collect") {
+			return route, errRepositoryNotFound
+		}
+		// Empty repository groups restrict discovered IDs to the scope-wide
+		// operator in Cognito mode.
+		route = repositoryRoute{Repository: repositoryConfig{LogID: id}, Service: operation, Method: http.MethodPost, Action: gitAdmin}
+		if r.Method != route.Method {
+			return route, errRepositoryMethod
+		}
+		return route, nil
+	}
 	for _, service := range []string{
 		"info/refs", transport.UploadPackService, transport.ReceivePackService,
 		"maintenance", "collect", "recover-retentions-after-drain",

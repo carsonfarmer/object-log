@@ -325,6 +325,11 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			s.Close()
 		}
 	}()
+	if maintenance {
+		report, err := s.maintain()
+		writeMaintenance(w, report, err)
+		return
+	}
 	if s.stateRoot == nil && service != transport.ReceivePackService {
 		http.NotFound(w, r)
 		return
@@ -348,11 +353,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if maintenance {
-		report, err := s.maintain()
-		writeMaintenance(w, report, err)
-		return
-	} else if service == transport.ReceivePackService && method == http.MethodGet {
+	if service == transport.ReceivePackService && method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 		e = advertise(w, s, s.stateRoot == nil && route.Repository.Format == "")
 	} else if service == transport.ReceivePackService {

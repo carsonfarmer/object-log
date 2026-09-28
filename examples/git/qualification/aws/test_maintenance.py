@@ -1,6 +1,7 @@
 import contextlib
 import http.client
 import io
+import json
 from pathlib import Path
 import tempfile
 import time
@@ -48,7 +49,7 @@ class MaintenanceTest(unittest.TestCase):
                     self.assertEqual(post.call_count, 2)
                     self.assertNotIn("secret", stderr.getvalue())
 
-    def test_token_reuse_renewal_and_exact_repository_path(self):
+    def test_token_reuse_renewal_and_exact_log_id(self):
         client = maintenance.Client({"client_id": "client", "token_url": "https://login/oauth2/token",
                                      "service_url": "https://git.example"}, "secret")
         responses = [
@@ -58,13 +59,13 @@ class MaintenanceTest(unittest.TestCase):
         ]
         with patch("maintenance.request_json", side_effect=responses) as request:
             with patch("maintenance.time.monotonic", side_effect=[0, 0, 10, 41, 41]):
-                self.assertEqual(client.post("R&D/lib+client@v2.git", "maintenance", 1000), "more")
-                self.assertEqual(client.post("R&D/lib+client@v2.git", "collect", 1000), "complete")
+                self.assertEqual(client.post("auto-123", "maintenance", 1000), "more")
+                self.assertEqual(client.post("auto-123", "collect", 1000), "complete")
                 self.assertEqual(client.post("b.git", "maintenance", 1000), "complete")
             sent = [call.args[0] for call in request.call_args_list]
             self.assertEqual(sent[0].get_header("Authorization"), "Basic Y2xpZW50OnNlY3JldA==")
             self.assertIn(b"git%2Fmaintenance", sent[0].data)
-            self.assertEqual(sent[1].full_url, "https://git.example/R&D/lib+client@v2.git/maintenance")
+            self.assertEqual(sent[1].full_url, "https://git.example/_maintenance?log_id=auto-123&operation=maintenance")
             self.assertEqual(sent[2].get_header("Authorization"), "Bearer one")
             self.assertEqual(sent[4].get_header("Authorization"), "Bearer two")
 
@@ -87,6 +88,64 @@ class MaintenanceTest(unittest.TestCase):
 
     def test_redirect_is_not_followed(self):
         self.assertIsNone(maintenance.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other"))
+
+    def test_discovery_resumes_after_attempted_logs_and_wraps(self):
+        config = {"wal_prefix": "git/", "wal_bucket": "bucket", "region": "us-west-2"}
+        prefix = "git/v1/logs/"
+        with tempfile.TemporaryDirectory() as directory:
+            cursor = Path(directory) / "cursor"
+            page = {"CommonPrefixes": [{"Prefix": prefix + value + "/"} for value in
+                                       ["auto-first", "auto-second"]], "IsTruncated": True}
+            with patch("maintenance.subprocess.check_output", return_value=json.dumps(page)) as listing:
+                logs = maintenance.discover_logs(config, time.monotonic() + 10, cursor)
+                self.assertEqual(next(logs), "auto-first")
+                self.assertFalse(cursor.exists())  # Not advanced before this log is attempted.
+                self.assertEqual(next(logs), "auto-second")
+                self.assertEqual(cursor.read_text(), prefix + "auto-first/")
+                logs.close()  # A run deadline can leave the second log unattempted.
+                self.assertIn("32", listing.call_args.args[0])
+            last_page = {"CommonPrefixes": [{"Prefix": prefix + "auto-second/"}]}
+            with patch("maintenance.subprocess.check_output", return_value=json.dumps(last_page)) as listing:
+                self.assertEqual(list(maintenance.discover_logs(config, time.monotonic() + 10, cursor)),
+                                 ["auto-second"])
+                self.assertEqual(listing.call_args.args[0][-2:], ["--start-after", prefix + "auto-first/"])
+            self.assertFalse(cursor.exists())  # Revisit earlier logs on the next sweep.
+
+    def test_discovery_skips_invalid_ids_without_stalling(self):
+        config = {"wal_prefix": "", "wal_bucket": "bucket", "region": "us-west-2"}
+        with tempfile.TemporaryDirectory() as directory:
+            cursor = Path(directory) / "cursor"
+            cursor.write_text("wrong-prefix/")
+            page = {"CommonPrefixes": [{"Prefix": "v1/logs/../"},
+                                       {"Prefix": "v1/logs/valid/"}], "IsTruncated": True}
+            with patch("maintenance.subprocess.check_output", return_value=json.dumps(page)) as listing:
+                self.assertEqual(list(maintenance.discover_logs(config, time.monotonic() + 10, cursor)),
+                                 ["valid"])
+                self.assertNotIn("--start-after", listing.call_args.args[0])
+            self.assertEqual(cursor.read_text(), "v1/logs/valid/")
+
+    def test_run_deadline_preserves_cursor_for_unattempted_log(self):
+        config = {"wal_prefix": "git", "wal_bucket": "bucket", "region": "us-west-2"}
+        page = {"CommonPrefixes": [{"Prefix": "git/v1/logs/first/"},
+                                   {"Prefix": "git/v1/logs/second/"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            cursor = Path(directory) / "cursor"
+            calls = []
+            deadline = time.monotonic() + 0.05
+
+            def post(repo, operation, request_deadline):
+                calls.append(repo)
+                self.assertLessEqual(request_deadline, deadline)
+                time.sleep(0.07)
+                return "complete"
+
+            with patch("maintenance.subprocess.check_output", return_value=json.dumps(page)):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(maintenance.maintain(
+                        maintenance.discover_logs(config, deadline, cursor), post,
+                        run_deadline=deadline), 1)
+            self.assertEqual(calls, ["first"])
+            self.assertEqual(cursor.read_text(), "git/v1/logs/first/")
 
     def test_pause_resumes_collection_without_repeating_prune(self):
         with tempfile.TemporaryDirectory() as directory:

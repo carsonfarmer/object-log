@@ -2,6 +2,8 @@ package tests
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +19,7 @@ func TestRepositoryCreation(t *testing.T) {
 	if endpoint == "" || os.Getenv("GIT_PROBE_CREATE") != "1" {
 		t.Skip("set GIT_PROBE_URL and GIT_PROBE_CREATE=1 for a local service with wildcard policy")
 	}
-	request := func(method, url, password, body string, want int) {
+	request := func(method, url, password, body string, want int) []byte {
 		t.Helper()
 		r, err := http.NewRequest(method, url, strings.NewReader(body))
 		if err != nil {
@@ -34,6 +36,7 @@ func TestRepositoryCreation(t *testing.T) {
 		if err != nil || response.StatusCode != want {
 			t.Fatalf("%s: HTTP %d, want %d: %s (%v)", url, response.StatusCode, want, data, err)
 		}
+		return data
 	}
 	for _, format := range []string{"sha1", "sha256"} {
 		t.Run(format, func(t *testing.T) {
@@ -41,6 +44,28 @@ func TestRepositoryCreation(t *testing.T) {
 			url := strings.TrimRight(endpoint, "/") + "/" + name
 			password := os.Getenv("GIT_PROBE_PASSWORD")
 			read := url + "/info/refs?service=git-upload-pack"
+			maintenanceURL := fmt.Sprintf("%s/_maintenance?log_id=auto-%x&operation=",
+				strings.TrimRight(endpoint, "/"), sha256.Sum256([]byte(name+".git")))
+			maintain := func() {
+				t.Helper()
+				operation := "maintenance"
+				for range 32 {
+					data := request(http.MethodPost, maintenanceURL+operation, password, "", 200)
+					var result struct{ State string }
+					if err := json.Unmarshal(data, &result); err != nil {
+						t.Fatal(err)
+					}
+					if result.State == "complete" {
+						return
+					}
+					if result.State != "more" {
+						t.Fatalf("maintenance did not progress: %s", data)
+					}
+					operation = "collect"
+				}
+				t.Fatal("maintenance did not finish")
+			}
+			request(http.MethodPost, maintenanceURL+"maintenance", password, "", 404)
 			request(http.MethodGet, url+"/info/refs?service=git-receive-pack", "wrong-password", "", 401)
 			request(http.MethodGet, read, password, "", 404)
 			request(http.MethodGet, url+"/info/refs?service=git-receive-pack", password, "", 200)
@@ -53,6 +78,7 @@ func TestRepositoryCreation(t *testing.T) {
 			}
 			command := packet(strings.Repeat("0", width) + " " + strings.Repeat("1", width) + " refs/heads/release\x00report-status object-format=" + format + "\n")
 			request(http.MethodPost, url+"/git-receive-pack", password, string(command)+"0000broken pack", 200)
+			maintain() // An abandoned first push has a WAL head but no Git root.
 			request(http.MethodGet, read, password, "", 404)
 			root := t.TempDir()
 			git(t, nil, "init", "--object-format="+format, "-b", "release", root)
@@ -60,6 +86,7 @@ func TestRepositoryCreation(t *testing.T) {
 			git(t, nil, "-C", root, "add", ".")
 			git(t, nil, "-C", root, "commit", "-m", "created by first push")
 			git(t, nil, "-C", root, "push", url, "HEAD:refs/heads/release")
+			maintain() // Recover the format from authenticated state, not policy configuration.
 			clone := filepath.Join(t.TempDir(), "clone")
 			git(t, nil, "-c", "protocol.version=2", "clone", url+".git", clone)
 			git(t, nil, "-C", clone, "fsck", "--full")

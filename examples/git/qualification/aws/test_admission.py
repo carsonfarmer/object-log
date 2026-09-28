@@ -59,7 +59,7 @@ class Backend(http.server.BaseHTTPRequestHandler):
     def handle_request(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         Backend.calls.append((self.command, self.path))
-        admin = self.path.endswith(("/maintenance", "/collect"))
+        admin = self.path.endswith(("/maintenance", "/collect")) or self.path.startswith("/_maintenance?")
         status = 401 if admin and self.headers.get("Authorization") != "Bearer fixture" else 200
         data = b"git"
         if self.path == "/_validate_backend":
@@ -196,12 +196,14 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(paused.getheader("Retry-After"), "2")
         paused.read()
         for method, path in [("POST", "/alpha/project.git/git-upload-pack"),
+                             ("GET", "/_maintenance?log_id=auto-123&operation=maintenance"),
                              ("GET", "/alpha/project.git/maintenance"),
                              ("POST", "/unknown.git/maintenance"),
                              ("POST", "/starXproject.git/maintenance")]:
             self.assertEqual(self.request(method, path)[0], 503, path)
         for path in ("/alpha/project.git/maintenance", "/alpha/project.git/collect",
-                     "/star*project.git/maintenance"):
+                     "/star*project.git/maintenance",
+                     "/_maintenance?log_id=auto-123&operation=maintenance"):
             self.assertEqual(self.request("POST", path)[0], 401, path)
             self.assertEqual(self.request("POST", path, {"Authorization": "Bearer fixture"})[0], 200, path)
         Backend.release.set()
@@ -323,6 +325,7 @@ maintenance.maintain(["repo.git"], post, 30, 30)
             command("docker", "cp", str(path), f"{container}:/etc/systemd/system/{path.name}")
         name = "object-log-admission-test.service"
         self.addCleanup(execute, "rm", "-f", f"/etc/systemd/system/{name}")
+        self.addCleanup(execute, "rm", "-r", "-f", "/run/object-log-maintenance")
         self.addCleanup(execute, "systemctl", "stop", name)
         execute("systemctl", "daemon-reload")
 
@@ -334,17 +337,18 @@ maintenance.maintain(["repo.git"], post, 30, 30)
                 execute("/bin/sh", "-c", f"echo {mode} >/opt/object-log-admission/mode")
                 execute("systemctl", "start", "--no-block", name)
                 wait_for(marker_exists)
+                execute("/bin/sh", "-c", "echo cursor >/run/object-log-maintenance/cursor")
                 if mode == "stop":
                     execute("systemctl", "stop", name)
                 elif mode == "kill":
                     execute("systemctl", "kill", "--signal=KILL", "--kill-whom=main", name)
                 elif mode == "restart":
-                    execute("touch", "/run/object-log-maintenance/stale")
+                    previous = execute("systemctl", "show", "--property=InvocationID", "--value", name)
                     execute("systemctl", "restart", "--no-block", name)
-                    wait_for(lambda: marker_exists() and execute("/bin/sh", "-c", "test ! -e /run/object-log-maintenance/stale && echo yes || echo no") == "yes")
+                    wait_for(lambda: marker_exists() and execute("systemctl", "show", "--property=InvocationID", "--value", name) != previous)
                     execute("systemctl", "stop", name)
                 wait_for(lambda: not marker_exists())
-                self.assertEqual(execute("/bin/sh", "-c", "test ! -e /run/object-log-maintenance && echo yes || echo no"), "yes")
+                self.assertEqual(execute("cat", "/run/object-log-maintenance/cursor"), "cursor")
                 if mode in {"kill", "timeout"}:
                     expected = "signal" if mode == "kill" else "timeout"
                     self.assertEqual(execute("systemctl", "show", "--property=Result", "--value", name), expected)
