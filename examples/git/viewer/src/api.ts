@@ -16,10 +16,11 @@ export async function browse(request: Request): Promise<Response> {
   if (
     [...query.keys()].some(
       (key) =>
-        !["repo", "ref", "path"].includes(key) ||
+        !["repo", "ref", "commit", "path"].includes(key) ||
         query.getAll(key).length !== 1 ||
         (query.get(key)?.length ?? 0) > 4096,
     ) ||
+    (query.has("commit") && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(query.get("commit") ?? "")) ||
     (path &&
       (path.split("/").length > 64 ||
         path
@@ -95,7 +96,7 @@ export async function browse(request: Request): Promise<Response> {
         });
       } catch (error) {
         if (error instanceof NotFound)
-          return new Response("Branch or path not found", { status: 404 });
+          return new Response("Branch, commit or path not found", { status: 404 });
         if (attempt === 0 && (error as { payload?: { tag: string } }).payload?.tag === "expired") {
           const fresh = session.refresh();
           drop(session);

@@ -25,6 +25,7 @@ export interface Repository {
 export const canonicalName = (name: string) => (name.endsWith(".git") ? name : `${name}.git`);
 export const automaticLogId = (name: string) =>
   `auto-${hex(sha256(new TextEncoder().encode(name)))}`;
+export class MissingObject extends Error {}
 interface Item {
   ID: string;
   Kind: number;
@@ -149,12 +150,8 @@ export class Catalog {
       for (const item of items) {
         const value = item.Inline ? undefined : node.objects[child++];
         if (item.ID !== id) continue;
-        if (
-          item.Kind !== kind ||
-          item.Encoding !== "zlib" ||
-          !Number.isSafeInteger(item.Size) ||
-          item.Size < 0
-        )
+        if (item.Kind !== kind) throw new MissingObject("Git object has a different kind");
+        if (item.Encoding !== "zlib" || !Number.isSafeInteger(item.Size) || item.Size < 0)
           throw new Error("Invalid Git object metadata");
         if (item.Size > maxBytes) {
           if (kind !== 3) throw new Error("Git object exceeds metadata limit");
@@ -200,7 +197,7 @@ export class Catalog {
       }
       break;
     }
-    throw new Error("Git object not found");
+    throw new MissingObject("Git object not found");
   }
 
   close() {

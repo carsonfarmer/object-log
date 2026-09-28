@@ -1,4 +1,4 @@
-import { type Catalog, hex } from "./wal";
+import { type Catalog, hex, MissingObject } from "./wal";
 
 export interface Commit {
   id: string;
@@ -101,12 +101,21 @@ export function snapshot(catalog: Catalog, query: URLSearchParams): Snapshot {
     entries: [],
     more: false,
   };
-  if (!branches.length && !query.get("ref") && !view.path) return view;
+  const selected = query.get("commit");
+  if (!branches.length && !query.get("ref") && !selected && !view.path) return view;
   if (!branches.includes(branch)) throw new NotFound();
-  let id = catalog.root.Refs[branch],
+  if (selected && selected.length !== (catalog.root.Format === "sha256" ? 64 : 40))
+    throw new NotFound();
+  let id = selected || catalog.root.Refs[branch],
     tip = "";
   for (let i = 0; id && i < 8; i++) {
-    const current = commit(catalog, id);
+    let current: ReturnType<typeof commit>;
+    try {
+      current = commit(catalog, id);
+    } catch (error) {
+      if (i === 0 && selected && error instanceof MissingObject) throw new NotFound();
+      throw error;
+    }
     if (i === 0) tip = current.tree;
     view.history.push(current.summary);
     id = current.parent;
