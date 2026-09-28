@@ -19,17 +19,20 @@ struct SessionState {
     view: RefCell<View>,
     transport: transport::Transport,
 }
-struct CandidateState {
+// Resource state shares its log handle while each value retains its own lifecycle.
+struct LogState<T> {
     log: Log,
-    prepared: RefCell<Option<object_log::PreparedCommit>>,
+    value: RefCell<T>,
 }
-struct RecoveryState {
-    log: Log,
-    cursor: RefCell<object_log::HistoryCursor>,
-}
-struct PendingCheckpointState {
-    log: Log,
-    pending: RefCell<Option<LogPendingCheckpoint>>,
+type CandidateState = LogState<Option<object_log::PreparedCommit>>;
+type RecoveryState = LogState<object_log::HistoryCursor>;
+type PendingCheckpointState = LogState<Option<LogPendingCheckpoint>>;
+
+impl<T> LogState<Option<T>> {
+    fn live(&self, closed: &str) -> Result<Ref<'_, T>, Failure> {
+        Ref::filter_map(self.value.borrow(), Option::as_ref)
+            .map_err(|_| Failure::Other(closed.into()))
+    }
 }
 impl SessionState {
     fn current_view(&self) -> View {
@@ -59,8 +62,6 @@ fn s3_builder(
         .with_endpoint(settings.endpoint.as_str())
         .with_bucket_name(settings.bucket.as_str())
         .with_region(settings.region.as_str())
-        .with_virtual_hosted_style_request(false)
-        .with_disable_bulk_delete(false)
         .with_client_options(
             object_store::ClientOptions::new()
                 .with_allow_http(settings.endpoint.starts_with("http://"))
@@ -102,12 +103,7 @@ fn s3_builder(
             }
             // No static setters: object_store obtains and refreshes IMDSv2
             // credentials through the same injected WASI HTTP connector.
-            builder = builder
-                .with_metadata_endpoint(INSTANCE_METADATA_ENDPOINT)
-                .with_config(
-                    object_store::aws::AmazonS3ConfigKey::ImdsV1Fallback,
-                    "false",
-                );
+            builder = builder.with_metadata_endpoint(INSTANCE_METADATA_ENDPOINT);
         }
     }
     Ok(builder)
@@ -119,12 +115,14 @@ const INSTANCE_METADATA_ENDPOINT: &str = "http://169.254.169.254";
 #[cfg(feature = "test-imds")]
 const INSTANCE_METADATA_ENDPOINT: &str = "http://127.0.0.1:19092";
 
-fn failure(error: object_log::Error) -> Failure {
-    match error {
-        object_log::Error::LogNotFound => Failure::Missing,
-        object_log::Error::ViewExpired => Failure::Expired,
-        object_log::Error::LimitExceeded(limit) => Failure::Limit(limit.into()),
-        error => Failure::Other(error.to_string()),
+impl From<object_log::Error> for Failure {
+    fn from(error: object_log::Error) -> Self {
+        match error {
+            object_log::Error::LogNotFound => Failure::Missing,
+            object_log::Error::ViewExpired => Failure::Expired,
+            object_log::Error::LimitExceeded(limit) => Failure::Limit(limit.into()),
+            error => Failure::Other(error.to_string()),
+        }
     }
 }
 fn proofs(objects: &[ObjectBorrow<'_>]) -> Vec<StagedObject> {
@@ -147,7 +145,7 @@ impl GuestByteWriter for WriterState {
         let writer = writer
             .as_mut()
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
-        executor::run(writer.write(&data)).map_err(failure)
+        Ok(executor::run(writer.write(&data))?)
     }
     fn finish(&self) -> Result<Object, Failure> {
         let writer = self
@@ -155,9 +153,7 @@ impl GuestByteWriter for WriterState {
             .borrow_mut()
             .take()
             .ok_or_else(|| Failure::Other("closed byte writer".into()))?;
-        executor::run(writer.finish())
-            .map(Object::new)
-            .map_err(failure)
+        Ok(Object::new(executor::run(writer.finish())?))
     }
 }
 impl GuestByteReader for ReaderState {
@@ -165,9 +161,7 @@ impl GuestByteReader for ReaderState {
         self.0.borrow().len()
     }
     fn read_at(&self, offset: u64, max_len: u32) -> Result<Vec<u8>, Failure> {
-        executor::run(self.0.borrow_mut().read_at(offset, max_len as usize))
-            .map(|bytes| bytes.to_vec())
-            .map_err(failure)
+        Ok(executor::run(self.0.borrow_mut().read_at(offset, max_len as usize))?.to_vec())
     }
 }
 impl GuestObject for StagedObject {}
@@ -177,19 +171,17 @@ impl GuestSession for SessionState {
     }
     fn retain(&self, id: Vec<u8>) -> Result<RetentionState, Failure> {
         let view = self.current_view();
-        let status = executor::run(self.log.retain(&view, retention_id(id)?)).map_err(failure)?;
+        let status = executor::run(self.log.retain(&view, retention_id(id)?))?;
         Ok(self.accept_retention(status))
     }
     fn release_retention(&self, id: Vec<u8>) -> Result<RetentionState, Failure> {
         let view = self.current_view();
-        let status =
-            executor::run(self.log.release_retention(&view, retention_id(id)?)).map_err(failure)?;
+        let status = executor::run(self.log.release_retention(&view, retention_id(id)?))?;
         Ok(self.accept_retention(status))
     }
     fn clear_retentions_after_drain(&self) -> Result<RetentionState, Failure> {
         let view = self.current_view();
-        let status =
-            executor::run(self.log.clear_retentions_after_drain(&view)).map_err(failure)?;
+        let status = executor::run(self.log.clear_retentions_after_drain(&view))?;
         Ok(self.accept_retention(status))
     }
     fn collect(&self, max_candidates: u64) -> Result<CollectionResult, Failure> {
@@ -203,9 +195,7 @@ impl GuestSession for SessionState {
     }
     fn refresh(&self) -> Result<Session, Failure> {
         let current = self.current_view();
-        let view = executor::run(self.log.refresh(&current))
-            .map_err(failure)?
-            .unwrap_or(current);
+        let view = executor::run(self.log.refresh(&current))?.unwrap_or(current);
         Ok(Session::new(Self {
             log: self.log.clone(),
             view: RefCell::new(view),
@@ -215,50 +205,39 @@ impl GuestSession for SessionState {
 
     fn recover(&self) -> Result<Recovery, Failure> {
         let view = self.current_view();
-        object_log::history(&self.log, view)
-            .map(|cursor| {
-                Recovery::new(RecoveryState {
-                    log: self.log.clone(),
-                    cursor: RefCell::new(cursor),
-                })
-            })
-            .map_err(failure)
+        Ok(Recovery::new(RecoveryState {
+            log: self.log.clone(),
+            value: RefCell::new(object_log::history(&self.log, view)?),
+        }))
     }
 
     fn resume(&self, token: Vec<u8>) -> Result<Resolution, Failure> {
-        match executor::run(self.log.resume(&token)).map_err(failure)? {
-            LogResolution::Committed(view) => {
-                self.view.replace(view);
-                Ok(Resolution::Committed)
+        let (resolution, view) = match executor::run(self.log.resume(&token))? {
+            LogResolution::Committed(view) => (Resolution::Committed, view),
+            LogResolution::NotCommitted(view) => (Resolution::NotCommitted, view),
+            LogResolution::Expired(view) => (Resolution::Expired, view),
+            LogResolution::StillPending(pending) => {
+                return Ok(Resolution::StillPending(pending.recovery_token()?.to_vec()));
             }
-            LogResolution::NotCommitted(view) => {
-                self.view.replace(view);
-                Ok(Resolution::NotCommitted)
-            }
-            LogResolution::StillPending(pending) => Ok(Resolution::StillPending(
-                pending.recovery_token().map_err(failure)?.to_vec(),
-            )),
-            LogResolution::Expired(view) => {
-                self.view.replace(view);
-                Ok(Resolution::Expired)
-            }
-        }
+        };
+        self.view.replace(view);
+        Ok(resolution)
     }
 }
 impl RecoveryState {
-    fn require_complete(&self) -> Result<Ref<'_, object_log::HistoryCursor>, Failure> {
-        let cursor = self.cursor.borrow();
+    fn recovered_view(&self) -> Result<Ref<'_, View>, Failure> {
+        let cursor = self.value.borrow();
         if !cursor.is_complete() {
             return Err(Failure::Other(
                 "recovery history must be consumed before publication".into(),
             ));
         }
-        Ok(cursor)
+        Ok(Ref::map(cursor, object_log::HistoryCursor::view))
     }
 }
 impl GuestRecovery for RecoveryState {
     fn next(&self) -> Result<Option<HistoryItem>, Failure> {
-        let item = executor::run(self.cursor.borrow_mut().next()).map_err(failure)?;
+        let item = executor::run(self.value.borrow_mut().next())?;
         Ok(item.map(|item| match item {
             LogHistoryItem::Checkpoint(authenticated) => {
                 let (record, objects) = authenticated.into_parts();
@@ -269,14 +248,10 @@ impl GuestRecovery for RecoveryState {
             }
             LogHistoryItem::Commit(authenticated) => {
                 let (record, objects) = authenticated.into_parts();
+                let reference = record.reference();
                 HistoryItem::Commit(CommitRecord {
-                    sequence: record.reference().sequence(),
-                    transaction_id: record
-                        .reference()
-                        .transaction_id()
-                        .as_uuid()
-                        .as_bytes()
-                        .to_vec(),
+                    sequence: reference.sequence(),
+                    transaction_id: reference.transaction_id().as_uuid().as_bytes().to_vec(),
                     operation: record.operation().to_vec(),
                     recorded_result: record.result().to_vec(),
                     objects: objects.into_iter().map(Object::new).collect(),
@@ -286,39 +261,34 @@ impl GuestRecovery for RecoveryState {
     }
 
     fn write_bytes(&self) -> Result<ByteWriter, Failure> {
-        let cursor = self.require_complete()?;
-        self.log
-            .byte_writer(cursor.view())
-            .map(|writer| ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
-            .map_err(failure)
+        let view = self.recovered_view()?;
+        let writer = self.log.byte_writer(&view)?;
+        Ok(ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
     }
 
     fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
         let value = value.get::<StagedObject>();
-        let cursor = self.require_complete()?;
-        executor::run(self.log.open_bytes(cursor.view(), value.reference()))
-            .map(|reader| ByteReader::new(ReaderState(RefCell::new(reader))))
-            .map_err(failure)
+        let view = self.recovered_view()?;
+        let reader = executor::run(self.log.open_bytes(&view, value.reference()))?;
+        Ok(ByteReader::new(ReaderState(RefCell::new(reader))))
     }
 
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<StagedObject>();
-        let cursor = self.require_complete()?;
-        executor::run(self.log.read_staged_node(cursor.view(), value))
-            .map(|(data, objects)| Entry {
-                data: data.into(),
-                objects: objects.into_iter().map(Object::new).collect(),
-            })
-            .map_err(failure)
+        let view = self.recovered_view()?;
+        let (data, objects) = executor::run(self.log.read_staged_node(&view, value))?;
+        Ok(Entry {
+            data: data.into(),
+            objects: objects.into_iter().map(Object::new).collect(),
+        })
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {
-        let cursor = self.require_complete()?;
-        executor::run(
-            self.log
-                .put_node(cursor.view(), Bytes::from(data), proofs(&children)),
-        )
-        .map(Object::new)
-        .map_err(failure)
+        let view = self.recovered_view()?;
+        Ok(Object::new(executor::run(self.log.put_node(
+            &view,
+            Bytes::from(data),
+            proofs(&children),
+        ))?))
     }
     fn prepare(
         &self,
@@ -327,23 +297,20 @@ impl GuestRecovery for RecoveryState {
         result: Vec<u8>,
         roots: Vec<ObjectBorrow<'_>>,
     ) -> Result<Candidate, Failure> {
-        let cursor = self.require_complete()?;
+        let view = self.recovered_view()?;
         let transaction_id = uuid::Uuid::from_slice(&transaction_id)
             .map(TransactionId::from_uuid)
             .map_err(|_| Failure::Other("transaction ID must contain 16 bytes".into()))?;
-        let prepared = self
-            .log
-            .prepare(
-                cursor.view(),
-                transaction_id,
-                Bytes::from(operation),
-                Bytes::from(result),
-                proofs(&roots),
-            )
-            .map_err(failure)?;
+        let prepared = self.log.prepare(
+            &view,
+            transaction_id,
+            Bytes::from(operation),
+            Bytes::from(result),
+            proofs(&roots),
+        )?;
         Ok(Candidate::new(CandidateState {
             log: self.log.clone(),
-            prepared: RefCell::new(Some(prepared)),
+            value: RefCell::new(Some(prepared)),
         }))
     }
 
@@ -352,11 +319,15 @@ impl GuestRecovery for RecoveryState {
         data: Vec<u8>,
         roots: Vec<ObjectBorrow<'_>>,
     ) -> Result<CheckpointOutcome, Failure> {
-        let cursor = self.require_complete()?;
-        match executor::run(maintenance::checkpoint(
-            &self.log,
-            cursor.view(),
-            data,
+        let view = self.recovered_view()?;
+        let through = view
+            .tail()
+            .last()
+            .ok_or_else(|| Failure::Other("checkpoint requires an active tail".into()))?;
+        match executor::run(self.log.publish_checkpoint(
+            &view,
+            through,
+            data.into(),
             proofs(&roots),
         ))? {
             CheckpointStatus::Published(_) => Ok(CheckpointOutcome::Published),
@@ -364,7 +335,7 @@ impl GuestRecovery for RecoveryState {
             CheckpointStatus::Pending(pending) => Ok(CheckpointOutcome::Pending(
                 PendingCheckpoint::new(PendingCheckpointState {
                     log: self.log.clone(),
-                    pending: RefCell::new(Some(pending)),
+                    value: RefCell::new(Some(pending)),
                 }),
             )),
         }
@@ -372,58 +343,34 @@ impl GuestRecovery for RecoveryState {
 }
 impl GuestPendingCheckpoint for PendingCheckpointState {
     fn resolve(&self) -> Result<CheckpointResolution, Failure> {
-        let pending = self
-            .pending
-            .borrow()
-            .as_ref()
-            .ok_or_else(|| Failure::Other("resolved checkpoint".into()))?
-            .clone();
-        match executor::run(self.log.resolve_checkpoint(pending)).map_err(failure)? {
-            LogCheckpointResolution::Published(_) => {
-                self.pending.borrow_mut().take();
-                Ok(CheckpointResolution::Published)
-            }
-            LogCheckpointResolution::NotPublished(_) => {
-                self.pending.borrow_mut().take();
-                Ok(CheckpointResolution::NotPublished)
-            }
+        let pending = self.live("resolved checkpoint")?.clone();
+        let (resolution, pending) = match executor::run(self.log.resolve_checkpoint(pending))? {
+            LogCheckpointResolution::Published(_) => (CheckpointResolution::Published, None),
+            LogCheckpointResolution::NotPublished(_) => (CheckpointResolution::NotPublished, None),
+            LogCheckpointResolution::Expired(_) => (CheckpointResolution::Expired, None),
             LogCheckpointResolution::StillPending(pending) => {
-                self.pending.replace(Some(pending));
-                Ok(CheckpointResolution::StillPending)
+                (CheckpointResolution::StillPending, Some(pending))
             }
-            LogCheckpointResolution::Expired(_) => {
-                self.pending.borrow_mut().take();
-                Ok(CheckpointResolution::Expired)
-            }
-        }
+        };
+        self.value.replace(pending);
+        Ok(resolution)
     }
 }
 impl GuestCandidate for CandidateState {
     fn recovery_token(&self) -> Result<Vec<u8>, Failure> {
-        self.prepared
-            .borrow()
-            .as_ref()
-            .ok_or_else(|| Failure::Other("published candidate".into()))?
-            .recovery_token()
-            .map(|token| token.to_vec())
-            .map_err(failure)
+        Ok(self.live("published candidate")?.recovery_token()?.to_vec())
     }
 
     fn publish(&self) -> Result<Outcome, Failure> {
-        let prepared = self
-            .prepared
-            .borrow()
-            .as_ref()
-            .ok_or_else(|| Failure::Other("published candidate".into()))?
-            .clone();
-        let status = executor::run(self.log.commit(prepared)).map_err(failure)?;
-        self.prepared.borrow_mut().take();
+        let prepared = self.live("published candidate")?.clone();
+        let status = executor::run(self.log.commit(prepared))?;
+        self.value.borrow_mut().take();
         match status {
             CommitStatus::Committed(_) => Ok(Outcome::Committed),
             CommitStatus::Conflict(_) => Ok(Outcome::Conflict),
-            CommitStatus::Pending(pending) => Ok(Outcome::Pending(
-                pending.recovery_token().map_err(failure)?.to_vec(),
-            )),
+            CommitStatus::Pending(pending) => {
+                Ok(Outcome::Pending(pending.recovery_token()?.to_vec()))
+            }
         }
     }
 }
@@ -448,8 +395,7 @@ impl Guest for Component {
                 store,
                 object_store::path::Path::from(settings.prefix),
             )
-            .await
-            .map_err(failure)?;
+            .await?;
             Ok(())
         })
     }
@@ -476,15 +422,14 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
             store,
             object_store::path::Path::from(settings.prefix),
         );
-        let log_id = object_log::LogId::new(settings.log_id).map_err(failure)?;
+        let log_id = object_log::LogId::new(settings.log_id)?;
         let options = log_options(settings.log_limits)?;
         let log = if create {
             Log::open(&backend, &log_id, options).await
         } else {
             Log::open_existing(&backend, &log_id, options).await
-        }
-        .map_err(failure)?;
-        let view = log.load().await.map_err(failure)?;
+        }?;
+        let view = log.load().await?;
         Ok(Session::new(SessionState {
             log,
             view: RefCell::new(view),

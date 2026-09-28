@@ -35,22 +35,17 @@ struct Budget {
 }
 impl Budget {
     fn call(&self) -> Result<(), HttpError> {
-        self.calls
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current
-                    .checked_add(1)
-                    .filter(|&next| next <= self.max_calls)
-            })
-            .map(|_| ())
-            .map_err(|_| http_error(QUOTA_EXCEEDED))
+        Self::charge(&self.calls, self.max_calls, 1)
     }
     fn transfer(&self, bytes: impl TryInto<u64>) -> Result<(), HttpError> {
         let bytes = bytes.try_into().map_err(|_| http_error(QUOTA_EXCEEDED))?;
-        self.bytes
+        Self::charge(&self.bytes, self.max_bytes, bytes)
+    }
+
+    fn charge(counter: &AtomicU64, limit: u64, amount: u64) -> Result<(), HttpError> {
+        counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current
-                    .checked_add(bytes)
-                    .filter(|&next| next <= self.max_bytes)
+                current.checked_add(amount).filter(|&next| next <= limit)
             })
             .map(|_| ())
             .map_err(|_| http_error(QUOTA_EXCEEDED))

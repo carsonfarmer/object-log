@@ -91,6 +91,20 @@ fn instance_settings() -> Config {
     }
 }
 
+#[test]
+fn s3_defaults_keep_path_style_bulk_delete_and_imdsv2() {
+    for config in [settings(), instance_settings()] {
+        let builder = s3_builder(&config, Metadata::default()).unwrap();
+        for key in [
+            AmazonS3ConfigKey::VirtualHostedStyleRequest,
+            AmazonS3ConfigKey::DisableBulkDelete,
+            AmazonS3ConfigKey::ImdsV1Fallback,
+        ] {
+            assert_eq!(builder.get_config_value(&key).as_deref(), Some("false"));
+        }
+    }
+}
+
 #[tokio::test]
 async fn static_credentials_preserve_optional_session_token_without_metadata() {
     for session_token in [None, Some("temporary-session-token".into())] {
@@ -262,11 +276,19 @@ async fn unavailable_metadata_rejects_initial_credentials_and_expiry_renewal() {
 #[test]
 fn missing_head_has_a_distinct_failure() {
     assert!(matches!(
-        failure(object_log::Error::LogNotFound),
+        Failure::from(object_log::Error::LogNotFound),
         Failure::Missing
     ));
     assert!(matches!(
-        failure(object_log::Error::InvalidFormat("bad head".into())),
+        Failure::from(object_log::Error::InvalidFormat("bad head".into())),
         Failure::Other(_)
+    ));
+    assert!(matches!(
+        Failure::from(object_log::Error::ViewExpired),
+        Failure::Expired
+    ));
+    assert!(matches!(
+        Failure::from(object_log::Error::LimitExceeded("read bytes")),
+        Failure::Limit(message) if message == "read bytes"
     ));
 }

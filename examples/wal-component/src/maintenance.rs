@@ -1,22 +1,5 @@
-use super::{CollectionResult, Failure, MaintenanceState, SessionState, failure};
-use object_log::{
-    CheckpointStatus, CollectionFinish, CollectionReport, CollectionStart, Log, StagedObject, View,
-};
-
-pub(super) async fn checkpoint(
-    log: &Log,
-    view: &View,
-    data: Vec<u8>,
-    roots: Vec<StagedObject>,
-) -> Result<CheckpointStatus, Failure> {
-    let through = view
-        .tail()
-        .last()
-        .ok_or_else(|| Failure::Other("checkpoint requires an active tail".into()))?;
-    log.publish_checkpoint(view, through, data.into(), roots)
-        .await
-        .map_err(failure)
-}
+use super::{CollectionResult, Failure, MaintenanceState, SessionState};
+use object_log::{CollectionFinish, CollectionReport, CollectionStart};
 
 // One durable deletion plan per call; a later call resumes an interrupted plan.
 pub(super) async fn collect(
@@ -24,33 +7,24 @@ pub(super) async fn collect(
     max_candidates: usize,
 ) -> Result<CollectionResult, Failure> {
     let current = session.current_view();
-    let view = match session
+    let (view, state) = match session
         .log
         .start_collection_with_limit(&current, max_candidates)
-        .await
-        .map_err(failure)?
+        .await?
     {
-        CollectionStart::Empty(report) => return Ok(result(MaintenanceState::Complete, report)),
-        CollectionStart::Installed(view, _) | CollectionStart::Active(view) => {
-            session.view.replace(view.clone());
-            view
+        CollectionStart::Empty(report) => {
+            return Ok(result(MaintenanceState::Complete, Some(report)));
         }
-        CollectionStart::Conflict(view) => {
-            session.view.replace(view);
-            return Ok(empty(MaintenanceState::Conflict));
-        }
-        CollectionStart::Pending => return Ok(empty(MaintenanceState::Pending)),
-        CollectionStart::Retained(view) => {
-            session.view.replace(view);
-            return Ok(empty(MaintenanceState::Retained));
-        }
+        CollectionStart::Installed(view, _) | CollectionStart::Active(view) => (view, None),
+        CollectionStart::Conflict(view) => (view, Some(MaintenanceState::Conflict)),
+        CollectionStart::Retained(view) => (view, Some(MaintenanceState::Retained)),
+        CollectionStart::Pending => return Ok(result(MaintenanceState::Pending, None)),
     };
-    let (state, report) = match session
-        .log
-        .resume_collection(&view)
-        .await
-        .map_err(failure)?
-    {
+    session.view.replace(view.clone());
+    if let Some(state) = state {
+        return Ok(result(state, None));
+    }
+    let (state, report) = match session.log.resume_collection(&view).await? {
         CollectionFinish::Complete(view, report) => {
             session.view.replace(view);
             (MaintenanceState::More, report)
@@ -61,19 +35,12 @@ pub(super) async fn collect(
             (MaintenanceState::Conflict, report)
         }
     };
-    Ok(result(state, report))
+    Ok(result(state, Some(report)))
 }
-fn empty(state: MaintenanceState) -> CollectionResult {
+fn result(state: MaintenanceState, report: Option<CollectionReport>) -> CollectionResult {
     CollectionResult {
         state,
-        objects: 0,
-        bytes: 0,
-    }
-}
-fn result(state: MaintenanceState, report: CollectionReport) -> CollectionResult {
-    CollectionResult {
-        state,
-        objects: report.candidate_count() as u64,
-        bytes: report.candidate_bytes(),
+        objects: report.map_or(0, |report| report.candidate_count() as u64),
+        bytes: report.map_or(0, |report| report.candidate_bytes()),
     }
 }

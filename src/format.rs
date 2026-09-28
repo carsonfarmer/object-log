@@ -4,7 +4,7 @@ use crate::log::Options;
 use crate::store::{ImmutableKey, ImmutableKind};
 use crate::{
     CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, PreparedCommit,
-    RetentionId, StorageId, TransactionId,
+    RetentionId, StorageId, TransactionId, invalid,
 };
 use bytes::Bytes;
 use minicbor::bytes::ByteVec;
@@ -97,31 +97,24 @@ impl Head {
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.tail.len() > self.options.max_tail_entries {
-            return Err(Error::InvalidFormat(
-                "head tail exceeds its durable limit".into(),
-            ));
+            return Err(invalid("head tail exceeds its durable limit"));
         }
         if self.recent_outcomes.len() > self.options.resolution_window {
-            return Err(Error::InvalidFormat(
-                "head outcomes exceed their durable limit".into(),
-            ));
+            return Err(invalid("head outcomes exceed their durable limit"));
         }
         if self.generation < self.next_sequence {
-            return Err(Error::InvalidFormat(
-                "head generation precedes its commit sequence".into(),
-            ));
+            return Err(invalid("head generation precedes its commit sequence"));
         }
         self.validate_collection_state()?;
         let expected_start = match self.checkpoint.as_ref() {
             Some(checkpoint) => {
                 if checkpoint.object.kind != ObjectKind::Checkpoint {
-                    return Err(Error::InvalidFormat(
-                        "head base names a non-checkpoint object".into(),
-                    ));
+                    return Err(invalid("head base names a non-checkpoint object"));
                 }
-                checkpoint.through_sequence.checked_add(1).ok_or_else(|| {
-                    Error::InvalidFormat("head base sequence cannot advance".into())
-                })?
+                checkpoint
+                    .through_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("head base sequence cannot advance"))?
             }
             None => 0,
         };
@@ -129,45 +122,37 @@ impl Head {
         let identity_count = self.tail.len().saturating_add(self.recent_outcomes.len());
         let mut transaction_ids = HashSet::with_capacity(identity_count);
         validate_commit_sequence(&self.tail, expected_start, &mut transaction_ids)?;
-        let tail_len = u64::try_from(self.tail.len())
-            .map_err(|_| Error::InvalidFormat("tail length exceeds u64".into()))?;
+        let tail_len =
+            u64::try_from(self.tail.len()).map_err(|_| invalid("tail length exceeds u64"))?;
         let expected_next = expected_start
             .checked_add(tail_len)
-            .ok_or_else(|| Error::InvalidFormat("head next sequence cannot advance".into()))?;
+            .ok_or_else(|| invalid("head next sequence cannot advance"))?;
         if self.next_sequence != expected_next {
-            return Err(Error::InvalidFormat(
-                "head next sequence does not follow its base and tail".into(),
+            return Err(invalid(
+                "head next sequence does not follow its base and tail",
             ));
         }
 
         let expected_outcome_start = match self.checkpoint.as_ref() {
             None if self.recent_outcomes.is_empty() => None,
             None => {
-                return Err(Error::InvalidFormat(
-                    "head outcomes exist without a base checkpoint".into(),
-                ));
+                return Err(invalid("head outcomes exist without a base checkpoint"));
             }
             Some(checkpoint) => {
-                let available = checkpoint.through_sequence.checked_add(1).ok_or_else(|| {
-                    Error::InvalidFormat("head base sequence cannot advance".into())
-                })?;
+                let available = expected_start;
                 let window = u64::try_from(self.options.resolution_window)
-                    .map_err(|_| Error::InvalidFormat("outcome window exceeds u64".into()))?;
+                    .map_err(|_| invalid("outcome window exceeds u64"))?;
                 let retained = u64::try_from(self.recent_outcomes.len())
-                    .map_err(|_| Error::InvalidFormat("outcome count exceeds u64".into()))?;
+                    .map_err(|_| invalid("outcome count exceeds u64"))?;
                 if retained != available.min(window) {
-                    return Err(Error::InvalidFormat(
-                        "head does not retain the required outcome suffix".into(),
-                    ));
+                    return Err(invalid("head does not retain the required outcome suffix"));
                 }
                 if self
                     .recent_outcomes
                     .last()
                     .is_some_and(|commit| commit.digest != checkpoint.through_commit)
                 {
-                    return Err(Error::InvalidFormat(
-                        "head outcome suffix does not match its checkpoint".into(),
-                    ));
+                    return Err(invalid("head outcome suffix does not match its checkpoint"));
                 }
                 Some(available - retained)
             }
@@ -182,31 +167,25 @@ impl Head {
 
     fn validate_collection_state(&self) -> Result<(), Error> {
         if self.collection_epoch > self.generation {
-            return Err(Error::InvalidFormat(
-                "head collection epoch exceeds its generation".into(),
-            ));
+            return Err(invalid("head collection epoch exceeds its generation"));
         }
         if self.retention_ids.len() > self.options.max_retention_ids {
-            return Err(Error::InvalidFormat(
-                "head retention IDs exceed their durable limit".into(),
-            ));
+            return Err(invalid("head retention IDs exceed their durable limit"));
         }
         if self.active_plan.is_some() && !self.retention_ids.is_empty() {
-            return Err(Error::InvalidFormat(
-                "head has an active plan and active retentions".into(),
-            ));
+            return Err(invalid("head has an active plan and active retentions"));
         }
         if let Some(plan) = self.active_plan.as_ref() {
             let plan_len = usize::try_from(plan.len)
-                .map_err(|_| Error::InvalidFormat("collection plan length exceeds usize".into()))?;
+                .map_err(|_| invalid("collection plan length exceeds usize"))?;
             if self.collection_epoch == 0 {
-                return Err(Error::InvalidFormat(
-                    "head has an active plan before the first collection epoch".into(),
+                return Err(invalid(
+                    "head has an active plan before the first collection epoch",
                 ));
             }
             if plan_len > self.options.max_collection_plan_bytes {
-                return Err(Error::InvalidFormat(
-                    "head collection plan exceeds its durable byte limit".into(),
+                return Err(invalid(
+                    "head collection plan exceeds its durable byte limit",
                 ));
             }
         }
@@ -231,13 +210,11 @@ pub(crate) struct CollectionPlan {
 impl CollectionPlan {
     fn validate(&self, options: Options) -> Result<(), Error> {
         if self.collection_epoch == 0 {
-            return Err(Error::InvalidFormat(
-                "collection plan epoch must be positive".into(),
-            ));
+            return Err(invalid("collection plan epoch must be positive"));
         }
         if self.candidates.is_empty() {
-            return Err(Error::InvalidFormat(
-                "collection plan must contain a positive deletion set".into(),
+            return Err(invalid(
+                "collection plan must contain a positive deletion set",
             ));
         }
         if self.candidates.len() > options.max_collection_objects {
@@ -248,8 +225,8 @@ impl CollectionPlan {
             .windows(2)
             .all(|pair| pair[0].key < pair[1].key)
         {
-            return Err(Error::InvalidFormat(
-                "collection plan candidates are not strictly sorted".into(),
+            return Err(invalid(
+                "collection plan candidates are not strictly sorted",
             ));
         }
         self.candidate_bytes()?;
@@ -277,21 +254,16 @@ fn validate_commit_sequence(
     transaction_ids: &mut HashSet<TransactionId>,
 ) -> Result<(), Error> {
     for (offset, commit) in commits.iter().enumerate() {
-        let offset = u64::try_from(offset)
-            .map_err(|_| Error::InvalidFormat("commit offset exceeds u64".into()))?;
+        let offset = u64::try_from(offset).map_err(|_| invalid("commit offset exceeds u64"))?;
         if commit.sequence
             != start
                 .checked_add(offset)
-                .ok_or_else(|| Error::InvalidFormat("head commit sequence cannot advance".into()))?
+                .ok_or_else(|| invalid("head commit sequence cannot advance"))?
         {
-            return Err(Error::InvalidFormat(
-                "head commits are not contiguous".into(),
-            ));
+            return Err(invalid("head commits are not contiguous"));
         }
         if !transaction_ids.insert(commit.transaction_id) {
-            return Err(Error::InvalidFormat(
-                "head contains a duplicate transaction".into(),
-            ));
+            return Err(invalid("head contains a duplicate transaction"));
         }
     }
     Ok(())
@@ -1069,7 +1041,7 @@ fn decode_node_payload(
         let kind = match exact_value!(decoder, encoder, u8) {
             value if value == ObjectKindWire::Blob as u8 => ObjectKind::Blob,
             value if value == ObjectKindWire::Node as u8 => ObjectKind::Node,
-            _ => return Err(Error::InvalidFormat("invalid node child kind".into())),
+            _ => return Err(invalid("invalid node child kind")),
         };
         valid(exact_value!(decoder, encoder, u8) == 2)?;
         let digest_bytes = exact_value!(decoder, encoder, bytes);
@@ -1115,7 +1087,7 @@ fn valid(condition: bool) -> Result<(), Error> {
 }
 
 fn invalid_canonical_object() -> Error {
-    Error::InvalidFormat("encoded object is not canonical format version 1".into())
+    invalid("encoded object is not canonical format version 1")
 }
 
 pub(crate) fn encode_recovery_token(prepared: &PreparedCommit) -> Result<Bytes, Error> {
@@ -1205,9 +1177,7 @@ pub(crate) fn decode_recovery_token(bytes: &[u8]) -> Result<RecoveryToken, Error
     if recovered.generation < recovered.next_sequence
         || recovered.tip.is_some() != (recovered.next_sequence > 0)
     {
-        return Err(Error::InvalidFormat(
-            "recovery token source position is invalid".into(),
-        ));
+        return Err(invalid("recovery token source position is invalid"));
     }
     require_canonical(bytes, &recovered.encode()?)?;
     Ok(recovered)
@@ -1287,7 +1257,7 @@ fn decode_collection_payload(bytes: &[u8], options: Options) -> Result<Collectio
             value if value == ImmutableKindWire::CollectionPlan as u8 => {
                 ImmutableKind::CollectionPlan
             }
-            _ => return Err(Error::InvalidFormat("invalid immutable kind".into())),
+            _ => return Err(invalid("invalid immutable kind")),
         };
         valid(exact_value!(decoder, encoder, u8) == 3)?;
         let storage_id = storage_id(exact_value!(decoder, encoder, bytes))?;
@@ -1348,9 +1318,7 @@ where
         .decode()
         .map_err(|error| Error::InvalidFormat(error.to_string()))?;
     if decoder.position() != bytes.len() {
-        return Err(Error::InvalidFormat(
-            "encoded object contains trailing bytes".into(),
-        ));
+        return Err(invalid("encoded object contains trailing bytes"));
     }
     Ok(value)
 }
@@ -1366,9 +1334,7 @@ fn require_version(version: u32) -> Result<(), Error> {
 
 fn require_canonical(input: &[u8], canonical: &[u8]) -> Result<(), Error> {
     if input != canonical {
-        return Err(Error::InvalidFormat(
-            "encoded object is not canonical format version 1".into(),
-        ));
+        return Err(invalid("encoded object is not canonical format version 1"));
     }
     Ok(())
 }
@@ -1382,7 +1348,7 @@ fn require_canonical_wire<M: Encode<()>>(payload: &[u8], wire: &M) -> Result<(),
 fn digest(value: &[u8]) -> Result<Digest, Error> {
     let bytes: [u8; DIGEST_LEN] = value
         .try_into()
-        .map_err(|_| Error::InvalidFormat("digest has an invalid length".into()))?;
+        .map_err(|_| invalid("digest has an invalid length"))?;
     Ok(Digest(bytes))
 }
 
@@ -1401,9 +1367,7 @@ fn retention_ids(values: Vec<ByteVec>) -> Result<BTreeSet<RetentionId>, Error> {
     for value in values {
         let id = RetentionId::from_uuid(uuid(value.as_ref(), "retention ID")?);
         if previous.is_some_and(|previous| previous >= id) {
-            return Err(Error::InvalidFormat(
-                "head retention IDs are not strictly sorted".into(),
-            ));
+            return Err(invalid("head retention IDs are not strictly sorted"));
         }
         previous = Some(id);
         ids.insert(id);
@@ -1463,11 +1427,11 @@ impl TryFrom<CheckpointRefWire> for CheckpointRef {
     fn try_from(value: CheckpointRefWire) -> Result<Self, Self::Error> {
         let object: ObjectRef = value
             .object
-            .ok_or_else(|| Error::InvalidFormat("checkpoint object is missing".into()))?
+            .ok_or_else(|| invalid("checkpoint object is missing"))?
             .try_into()?;
         if object.kind != ObjectKind::Checkpoint {
-            return Err(Error::InvalidFormat(
-                "checkpoint reference names a non-checkpoint object".into(),
+            return Err(invalid(
+                "checkpoint reference names a non-checkpoint object",
             ));
         }
         Ok(Self {
@@ -1503,7 +1467,7 @@ impl TryFrom<ObjectRefWire> for ObjectRef {
             value if value == ObjectKindWire::Checkpoint as u8 => ObjectKind::Checkpoint,
             value if value == ObjectKindWire::Node as u8 => ObjectKind::Node,
             _ => {
-                return Err(Error::InvalidFormat("invalid object kind".into()));
+                return Err(invalid("invalid object kind"));
             }
         };
         let object = Self {

@@ -13,7 +13,7 @@ use crate::store::{
 use crate::{
     CheckpointRef, CommitRef, Digest, Error, LogId, ObjectKind, ObjectRef, ObservedState,
     PendingCheckpoint, PendingCommit, PreparedCommit, RetentionId, StagedObject, StagingDomain,
-    StorageId, TransactionId, ValidatedBackend, View,
+    StorageId, TransactionId, ValidatedBackend, View, invalid,
 };
 
 const MAX_CONCURRENT_READS: usize = 32;
@@ -496,7 +496,7 @@ impl Log {
             .store
             .read(StoreKey::Head, self.options.max_head_bytes)
             .await?
-            .ok_or_else(|| Error::InvalidFormat("the opened log has no durable head".to_owned()))?;
+            .ok_or_else(|| invalid("the opened log has no durable head"))?;
         self.view_from_stored(stored)
     }
 
@@ -519,9 +519,7 @@ impl Log {
         {
             ConditionalRead::NotModified => Ok(None),
             ConditionalRead::Modified(stored) => Ok(Some(self.view_from_stored(stored)?)),
-            ConditionalRead::Missing => Err(Error::InvalidFormat(
-                "the opened log has no durable head".to_owned(),
-            )),
+            ConditionalRead::Missing => Err(invalid("the opened log has no durable head")),
         }
     }
 
@@ -636,8 +634,8 @@ impl Log {
                         && attempt + 1 < MAX_HEAD_PUBLICATION_ATTEMPTS
                     {
                         if next.generation() <= current.generation() {
-                            return Err(Error::InvalidFormat(
-                                "head version changed without a monotonic head change".to_owned(),
+                            return Err(invalid(
+                                "head version changed without a monotonic head change",
                             ));
                         }
                         current = next;
@@ -887,8 +885,8 @@ impl Log {
                         Some(_) => {}
                     }
                     if reloaded.generation() <= current.generation() {
-                        return Err(Error::InvalidFormat(
-                            "head version changed without a monotonic head change".to_owned(),
+                        return Err(invalid(
+                            "head version changed without a monotonic head change",
                         ));
                     }
                     if attempt + 1 == MAX_HEAD_PUBLICATION_ATTEMPTS {
@@ -1021,9 +1019,7 @@ impl Log {
     pub async fn read_object(&self, view: &View, object: &ObjectRef) -> Result<Bytes, Error> {
         self.validate_view(view)?;
         if object.kind != ObjectKind::Blob {
-            return Err(Error::InvalidFormat(
-                "a payload read requires a blob reference".to_owned(),
-            ));
+            return Err(invalid("a payload read requires a blob reference"));
         }
         self.read_immutable_for_view(view, object).await
     }
@@ -1040,9 +1036,7 @@ impl Log {
     pub async fn read_node(&self, view: &View, object: &ObjectRef) -> Result<ReferenceNode, Error> {
         self.validate_view(view)?;
         if object.kind != ObjectKind::Node {
-            return Err(Error::InvalidFormat(
-                "a node read requires a reference-node object".to_owned(),
-            ));
+            return Err(invalid("a node read requires a reference-node object"));
         }
         let bytes = self.read_immutable_for_view(view, object).await?;
         let node = self.decode_node_reference(object, &bytes)?;
@@ -1127,7 +1121,7 @@ impl Log {
     async fn read_immutable(&self, object: &ObjectRef) -> Result<Bytes, Error> {
         self.read_immutable_optional(object)
             .await?
-            .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))
+            .ok_or_else(|| invalid("a referenced object is missing"))
     }
 
     /// Checks whether a transaction can be prepared against an observed view.
@@ -1239,8 +1233,8 @@ impl Log {
                     Resolution::Committed(view) => Ok(CommitStatus::Committed(view)),
                     Resolution::NotCommitted(view) => Ok(CommitStatus::Conflict(view)),
                     Resolution::Expired(_) => Ok(CommitStatus::Pending(pending)),
-                    Resolution::StillPending(_) => Err(Error::InvalidFormat(
-                        "an in-memory classification returned pending evidence".to_owned(),
+                    Resolution::StillPending(_) => Err(invalid(
+                        "an in-memory classification returned pending evidence",
                     )),
                 }
             }
@@ -1263,9 +1257,10 @@ impl Log {
             return Box::pin(self.resume(&pending.recovery_token()?)).await;
         }
         self.validate_pending(&pending)?;
-        let prepared = pending.prepared.as_ref().ok_or_else(|| {
-            Error::InvalidFormat("pending commit has no prepared candidate".into())
-        })?;
+        let prepared = pending
+            .prepared
+            .as_ref()
+            .ok_or_else(|| invalid("pending commit has no prepared candidate"))?;
         let Some(current) = publication_evidence(self.load().await)? else {
             return Ok(Resolution::StillPending(pending));
         };
@@ -1310,7 +1305,7 @@ impl Log {
         pending
             .prepared
             .as_mut()
-            .ok_or_else(|| Error::InvalidFormat("pending commit has no prepared candidate".into()))?
+            .ok_or_else(|| invalid("pending commit has no prepared candidate"))?
             .staging_domain = Arc::clone(&self.staging_domain);
         match self
             .publish_head(&publication_view, |view| {
@@ -1361,9 +1356,7 @@ impl Log {
             if current.head().next_sequence != recovered.next_sequence
                 || current.head().tip() != recovered.tip
             {
-                return Err(Error::InvalidFormat(
-                    "recovery token source fields disagree".into(),
-                ));
+                return Err(invalid("recovery token source fields disagree"));
             }
             let prepared = PreparedCommit {
                 view: current,
@@ -1376,9 +1369,7 @@ impl Log {
             };
             let (recomputed, _) = self.encode_prepared(&prepared)?;
             if recomputed != commit_ref {
-                return Err(Error::InvalidFormat(
-                    "recovery token candidate disagrees with source".into(),
-                ));
+                return Err(invalid("recovery token candidate disagrees with source"));
             }
             let resolution = self
                 .resolve(PendingCommit {
@@ -1393,8 +1384,8 @@ impl Log {
             });
         }
         if retention_only && current.generation() <= recovered.generation {
-            return Err(Error::InvalidFormat(
-                "head version changed without a monotonic head change".into(),
+            return Err(invalid(
+                "head version changed without a monotonic head change",
             ));
         }
         let resolution = Self::classify_resolution(&commit_ref, current)?;
@@ -1409,14 +1400,10 @@ impl Log {
 
     fn recovered_commit_ref(&self, recovered: &format::RecoveryToken) -> Result<CommitRef, Error> {
         if recovered.log_id != *self.store.log_id() {
-            return Err(Error::InvalidFormat(
-                "the view belongs to another log".into(),
-            ));
+            return Err(invalid("the view belongs to another log"));
         }
         if recovered.incarnation != self.incarnation {
-            return Err(Error::InvalidFormat(
-                "the view belongs to another log incarnation".into(),
-            ));
+            return Err(invalid("the view belongs to another log incarnation"));
         }
         if recovered.options_digest != format::options_digest(self.options)? {
             return Err(Error::ConfigurationMismatch("options"));
@@ -1479,9 +1466,11 @@ impl Log {
         index: usize,
     ) -> Result<Option<CommitRecord>, Error> {
         self.validate_view(view)?;
-        let reference = view.tail().get(index).cloned().ok_or_else(|| {
-            Error::InvalidFormat("history cursor exceeds the active tail".to_owned())
-        })?;
+        let reference = view
+            .tail()
+            .get(index)
+            .cloned()
+            .ok_or_else(|| invalid("history cursor exceeds the active tail"))?;
         let expected_tip = if index == 0 {
             view.checkpoint()
                 .map(|checkpoint| checkpoint.through_commit)
@@ -1492,9 +1481,7 @@ impl Log {
             return Ok(None);
         };
         if record.expected_tip != expected_tip {
-            return Err(Error::InvalidFormat(
-                "the commit tail has a broken parent chain".to_owned(),
-            ));
+            return Err(invalid("the commit tail has a broken parent chain"));
         }
         Ok(Some(record))
     }
@@ -1549,9 +1536,7 @@ impl Log {
             .map(move |record| {
                 let record = record?;
                 if record.expected_tip != expected_tip {
-                    return Err(Error::InvalidFormat(
-                        "the commit tail has a broken parent chain".to_owned(),
-                    ));
+                    return Err(invalid("the commit tail has a broken parent chain"));
                 }
                 expected_tip = Some(record.reference.digest);
                 Ok(record)
@@ -1682,8 +1667,8 @@ impl Log {
             pending.checkpoint.object.clone(),
         )?;
         if original_candidate.checkpoint.as_ref() != Some(&pending.checkpoint) {
-            return Err(Error::InvalidFormat(
-                "pending checkpoint evidence does not match its candidate".to_owned(),
+            return Err(invalid(
+                "pending checkpoint evidence does not match its candidate",
             ));
         }
 
@@ -1834,9 +1819,7 @@ impl Log {
             || checkpoint.through_sequence != reference.through_sequence
             || checkpoint.through_commit != reference.through_commit
         {
-            return Err(Error::InvalidFormat(
-                "a checkpoint does not match its index reference".to_owned(),
-            ));
+            return Err(invalid("a checkpoint does not match its index reference"));
         }
         Ok(checkpoint)
     }
@@ -1846,8 +1829,8 @@ impl Log {
         match current.collection_epoch().cmp(&view.collection_epoch()) {
             std::cmp::Ordering::Greater => Ok(Error::ViewExpired),
             std::cmp::Ordering::Equal => Ok(Error::CorruptObject),
-            std::cmp::Ordering::Less => Err(Error::InvalidFormat(
-                "the durable collection epoch precedes the supplied view".to_owned(),
+            std::cmp::Ordering::Less => Err(invalid(
+                "the durable collection epoch precedes the supplied view",
             )),
         }
     }
@@ -1855,13 +1838,11 @@ impl Log {
     fn view_from_stored(&self, stored: crate::store::StoredObject) -> Result<View, Error> {
         let head = format::decode_head(&stored.bytes)?;
         if head.log_id != *self.store.log_id() {
-            return Err(Error::InvalidFormat(
-                "the durable head belongs to another log".to_owned(),
-            ));
+            return Err(invalid("the durable head belongs to another log"));
         }
         if head.incarnation != self.incarnation {
-            return Err(Error::InvalidFormat(
-                "the durable head belongs to another log incarnation".to_owned(),
+            return Err(invalid(
+                "the durable head belongs to another log incarnation",
             ));
         }
         if head.options != self.options {
@@ -1884,14 +1865,10 @@ impl Log {
 
     pub(crate) fn validate_view(&self, view: &View) -> Result<(), Error> {
         if view.head().log_id != *self.store.log_id() {
-            return Err(Error::InvalidFormat(
-                "the view belongs to another log".to_owned(),
-            ));
+            return Err(invalid("the view belongs to another log"));
         }
         if view.head().incarnation != self.incarnation {
-            return Err(Error::InvalidFormat(
-                "the view belongs to another log incarnation".to_owned(),
-            ));
+            return Err(invalid("the view belongs to another log incarnation"));
         }
         if view.head().options != self.options {
             return Err(Error::ConfigurationMismatch("options"));
@@ -1922,9 +1899,7 @@ impl Log {
             .iter()
             .any(|object| object.kind == ObjectKind::Checkpoint)
         {
-            return Err(Error::InvalidFormat(
-                "application dependencies cannot name a checkpoint".to_owned(),
-            ));
+            return Err(invalid("application dependencies cannot name a checkpoint"));
         }
         self.publication_objects(objects)?;
         Ok(())
@@ -2025,9 +2000,7 @@ impl Log {
             .chain(&view.head().recent_outcomes)
             .any(|entry| entry.transaction_id == transaction_id)
         {
-            return Err(Error::InvalidFormat(
-                "the transaction ID is already committed".to_owned(),
-            ));
+            return Err(invalid("the transaction ID is already committed"));
         }
         Ok(())
     }
@@ -2103,8 +2076,8 @@ impl Log {
                         return Ok(HeadPublication::Pending);
                     }
                     if current.generation() <= view.generation() {
-                        return Err(Error::InvalidFormat(
-                            "head version changed without a monotonic head change".to_owned(),
+                        return Err(invalid(
+                            "head version changed without a monotonic head change",
                         ));
                     }
                     if attempt + 1 == MAX_HEAD_PUBLICATION_ATTEMPTS {
@@ -2140,8 +2113,8 @@ impl Log {
             return Ok(None);
         }
         if current.generation() <= source.generation() {
-            return Err(Error::InvalidFormat(
-                "head version changed without a monotonic head change".to_owned(),
+            return Err(invalid(
+                "head version changed without a monotonic head change",
             ));
         }
         Ok(Some(current.clone()))
@@ -2164,9 +2137,7 @@ impl Log {
             .tail
             .iter()
             .position(|entry| entry == through)
-            .ok_or_else(|| {
-                Error::InvalidFormat("the checkpoint entry is not in the active tail".to_owned())
-            })?;
+            .ok_or_else(|| invalid("the checkpoint entry is not in the active tail"))?;
         head.recent_outcomes
             .extend(head.tail.drain(..=through_index));
         let resolution_window = head.options.resolution_window;
@@ -2201,9 +2172,7 @@ impl Log {
             return Ok(Resolution::Expired(current));
         }
         if head.next_sequence < target.sequence {
-            return Err(Error::InvalidFormat(
-                "the head precedes the pending commit position".to_owned(),
-            ));
+            return Err(invalid("the head precedes the pending commit position"));
         }
 
         Ok(Resolution::NotCommitted(current))
@@ -2233,18 +2202,19 @@ impl Log {
             .checked_add(1)
             .ok_or(Error::LimitExceeded("head generation"))?;
         match current.generation().cmp(&next_generation) {
-            std::cmp::Ordering::Less => Err(Error::InvalidFormat(
-                "the head precedes pending checkpoint evidence".to_owned(),
-            )),
+            std::cmp::Ordering::Less => {
+                Err(invalid("the head precedes pending checkpoint evidence"))
+            }
             std::cmp::Ordering::Equal => Ok(CheckpointEvidence::NotPublished(current)),
             std::cmp::Ordering::Greater => Ok(CheckpointEvidence::Expired(current)),
         }
     }
 
     fn validate_pending(&self, pending: &PendingCommit) -> Result<(), Error> {
-        let prepared = pending.prepared.as_ref().ok_or_else(|| {
-            Error::InvalidFormat("pending commit has no prepared candidate".into())
-        })?;
+        let prepared = pending
+            .prepared
+            .as_ref()
+            .ok_or_else(|| invalid("pending commit has no prepared candidate"))?;
         self.validate_view(&prepared.view)?;
         self.validate_prepared_sizes(&prepared.operation, &prepared.result)?;
         self.validate_dependencies(&prepared.objects)?;
@@ -2253,8 +2223,8 @@ impl Log {
         }
         let (expected_ref, _) = self.encode_prepared(prepared)?;
         if expected_ref != pending.commit_ref {
-            return Err(Error::InvalidFormat(
-                "pending commit evidence does not match its candidate".to_owned(),
+            return Err(invalid(
+                "pending commit evidence does not match its candidate",
             ));
         }
         Ok(())
@@ -2263,7 +2233,7 @@ impl Log {
     async fn read_commit(&self, reference: &CommitRef) -> Result<CommitRecord, Error> {
         self.read_commit_optional(reference.clone())
             .await?
-            .ok_or_else(|| Error::InvalidFormat("a referenced commit is missing".to_owned()))
+            .ok_or_else(|| invalid("a referenced commit is missing"))
     }
 
     async fn read_commit_optional(
@@ -2301,9 +2271,7 @@ impl Log {
             || commit.incarnation != self.incarnation
             || commit.transaction_id != reference.transaction_id
         {
-            return Err(Error::InvalidFormat(
-                "a commit does not match its head reference".to_owned(),
-            ));
+            return Err(invalid("a commit does not match its head reference"));
         }
         Ok(Some(CommitRecord {
             reference,
@@ -2342,14 +2310,11 @@ impl Log {
         view: &'a View,
         objects: &[ObjectRef],
     ) -> Result<Option<&'a [CollectionCandidate]>, Error> {
-        let Some(blocked) = self.active_collection_candidates(view).await? else {
-            self.verify_object_graph(objects).await?;
-            return Ok(None);
-        };
+        let blocked = self.active_collection_candidates(view).await?;
         let mut visited = HashMap::with_capacity(objects.len());
-        self.mark_object_graph(objects, &mut visited, Some(blocked), GraphWalk::VerifyBlobs)
+        self.mark_object_graph(objects, &mut visited, blocked, GraphWalk::VerifyBlobs)
             .await?;
-        Ok(Some(blocked))
+        Ok(blocked)
     }
 
     async fn verify_object_graph(&self, objects: &[ObjectRef]) -> Result<(), Error> {
@@ -2478,9 +2443,7 @@ impl Log {
         pending: &mut VecDeque<ObjectRef>,
     ) -> Result<(), Error> {
         if object.kind == ObjectKind::Checkpoint {
-            return Err(Error::InvalidFormat(
-                "application dependencies cannot name a checkpoint".to_owned(),
-            ));
+            return Err(invalid("application dependencies cannot name a checkpoint"));
         }
         object.validate_count()?;
         let key = self.object_immutable_key(object);
@@ -2542,9 +2505,9 @@ impl Log {
                 let node = self.decode_node_reference(object, &bytes)?;
                 Ok(node.children)
             }
-            ObjectKind::Checkpoint => Err(Error::InvalidFormat(
-                "application dependencies cannot name a checkpoint".to_owned(),
-            )),
+            ObjectKind::Checkpoint => {
+                Err(invalid("application dependencies cannot name a checkpoint"))
+            }
         }
     }
 
@@ -2606,31 +2569,25 @@ impl Log {
             {
                 return Err(Error::ViewExpired);
             }
-            return Err(Error::InvalidFormat(
-                "the active collection plan is missing".into(),
-            ));
+            return Err(invalid("the active collection plan is missing"));
         };
         if stored.bytes.len() != declared_len || Digest::of(&stored.bytes) != reference.digest {
             return Err(Error::CorruptObject);
         }
         let plan = format::decode_collection_plan(&stored.bytes, self.options)?;
         if plan.log_id != *self.store.log_id() || plan.collection_epoch != head.collection_epoch {
-            return Err(Error::InvalidFormat(
-                "the collection plan does not match its head fence".into(),
-            ));
+            return Err(invalid("the collection plan does not match its head fence"));
         }
         Ok(plan)
     }
 
     async fn cleanup_collection_plan(&self, key: ImmutableKey) -> Result<(), Error> {
-        match self
-            .store
-            .delete_immutable_batch(std::iter::once(key))
-            .await
-        {
-            Ok(()) | Err(Error::Store(_) | Error::RequestDenied) => Ok(()),
-            Err(error) => Err(error),
-        }
+        publication_evidence(
+            self.store
+                .delete_immutable_batch(std::iter::once(key))
+                .await,
+        )?;
+        Ok(())
     }
 
     async fn verify_object_durable(&self, object: &ObjectRef) -> Result<(), Error> {
@@ -2643,7 +2600,7 @@ impl Log {
             .store
             .read_integrity(self.object_key(object), declared_len)
             .await?
-            .ok_or_else(|| Error::InvalidFormat("a referenced object is missing".to_owned()))?;
+            .ok_or_else(|| invalid("a referenced object is missing"))?;
         if digest != object.digest || len != object.len {
             return Err(Error::CorruptObject);
         }
@@ -2659,9 +2616,7 @@ impl Log {
         match self.store.read(key, bytes.len()).await? {
             Some(stored) if stored.bytes == bytes => Ok(()),
             Some(_) => Err(Error::CorruptObject),
-            None => Err(create_error.unwrap_or_else(|| {
-                Error::InvalidFormat("an immutable object is missing".to_owned())
-            })),
+            None => Err(create_error.unwrap_or_else(|| invalid("an immutable object is missing"))),
         }
     }
 
@@ -2764,9 +2719,7 @@ impl Log {
     ) -> Result<uuid::Uuid, Error> {
         let head = format::decode_head(&stored.bytes)?;
         if head.log_id != *store.log_id() {
-            return Err(Error::InvalidFormat(
-                "the durable head belongs to another log".to_owned(),
-            ));
+            return Err(invalid("the durable head belongs to another log"));
         }
         if head.options != options {
             return Err(Error::ConfigurationMismatch("options"));
