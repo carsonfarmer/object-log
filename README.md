@@ -157,8 +157,9 @@ library cannot prove whether
 the candidate committed, so the application must not replay it.
 
 Large values can be written through `ByteWriter` and read with authenticated,
-bounded `read_at` calls. Reference nodes form application-defined trees without
-exposing storage paths. `history` returns a bounded cursor over an authenticated checkpoint and
+bounded `read_at` calls. Each reader caches at most two storage chunks, up to
+4 MiB; caller-held byte slices can keep evicted chunks alive. Reference nodes
+form application-defined trees without exposing storage paths. `history` returns a bounded cursor over an authenticated checkpoint and
 ordered commits, including transaction IDs and recorded results, for bindings
 or consumers that rebuild application state. Each item includes process-local
 publication proofs for its object references. The cursor returns one record at

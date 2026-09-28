@@ -1,5 +1,5 @@
 use super::*;
-use crate::sim::{FailurePhase, FaultStore, Operation};
+use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
 use crate::{
     CheckpointStatus, CollectionFinish, CollectionStart, CommitStatus, LogId, Options,
     TransactionId, ValidatedBackend,
@@ -89,7 +89,7 @@ async fn geometry_capacity_and_tiny_limits() -> TestResult {
 }
 
 #[tokio::test]
-async fn reads_are_short_authenticated_and_cache_one_chunk() -> TestResult {
+async fn reads_are_short_authenticated_and_cache_two_chunks() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let (log, view) = setup(Arc::new(faults.clone()), small()).await?;
     let payload: Vec<u8> = (0_u8..251).cycle().take(400).collect();
@@ -114,7 +114,7 @@ async fn reads_are_short_authenticated_and_cache_one_chunk() -> TestResult {
     assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
     assert_eq!(reader.read_at(399, 100).await?.as_ref(), &payload[399..]);
     assert_eq!(reader.read_at(0, 1).await?.as_ref(), &payload[..1]);
-    assert_eq!(faults.metrics().operation(Operation::Get).requests, 3);
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 2);
     let mut actual = Vec::new();
     while actual.len() < payload.len() {
         actual.extend_from_slice(&reader.read_at(actual.len() as u64, 19).await?);
@@ -319,6 +319,132 @@ async fn offset_read_verifies_the_entire_chunk() -> TestResult {
     assert!(matches!(
         reader.read_at(0, 1).await,
         Err(Error::CorruptObject)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn seek_cache_is_lazy_bounded_and_evicts_the_oldest_chunk() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let (log, view) = setup(
+        Arc::new(faults.clone()),
+        Options {
+            max_object_bytes: 512,
+            max_object_refs: 16,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let payload: Vec<u8> = (0_u8..251).cycle().take(1536).collect();
+    let mut writer = log.byte_writer(&view)?;
+    writer.write(&payload).await?;
+    let root = writer.finish().await?;
+    let mut reader = log.open_bytes(&view, root.reference()).await?;
+    faults.reset();
+    for (offset, requests) in [(0_usize, 1), (512, 2), (0, 2), (1024, 3), (0, 3), (512, 4)] {
+        assert_eq!(
+            reader.read_at(u64::try_from(offset)?, 1).await?.as_ref(),
+            &payload[offset..=offset]
+        );
+        assert_eq!(
+            faults.metrics().operation(Operation::Get).requests,
+            requests
+        );
+        assert!(
+            reader
+                .cached
+                .iter()
+                .flatten()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>()
+                <= 1024
+        );
+    }
+    // A rejected miss cannot populate the cache or refund its storage request.
+    for occurrence in 5..=7 {
+        faults.schedule(Failure {
+            operation: Operation::Get,
+            phase: FailurePhase::Before,
+            occurrence,
+        });
+    }
+    assert!(matches!(
+        reader.read_at(1024, 1).await,
+        Err(Error::Store(_))
+    ));
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 7);
+    assert_eq!(reader.read_at(512, 1).await?.as_ref(), &payload[512..513]);
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 7);
+    assert_eq!(
+        reader.read_at(1024, 1).await?.as_ref(),
+        &payload[1024..1025]
+    );
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 8);
+    let mut pause = faults.pause_next_get(FailurePhase::After);
+    let mut read = Box::pin(reader.read_at(0, 1));
+    tokio::select! {
+        result = &mut read => return Err(format!("read did not pause: {result:?}").into()),
+        entered = pause.wait_until_entered() => assert!(entered),
+    }
+    drop(read);
+    assert!(!pause.release());
+    // Cancellation after eviction preserves the authenticated MRU chunk only.
+    let (index, bytes) = reader.cached[0].as_ref().ok_or("missing cached chunk")?;
+    assert_eq!(*index, 2);
+    assert_eq!(bytes.as_ref(), &payload[1024..1536]);
+    assert!(reader.cached[1].is_none());
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 9);
+    assert_eq!(
+        reader.read_at(1024, 1).await?.as_ref(),
+        &payload[1024..1025]
+    );
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 9);
+    assert_eq!(reader.read_at(0, 1).await?.as_ref(), &payload[..1]);
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 10);
+    Ok(())
+}
+
+#[tokio::test]
+async fn large_stream_seeks_keep_sparse_reads_and_the_original_view() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let (log, view) = setup(Arc::new(faults.clone()), Options::default()).await?;
+    let payload: Vec<u8> = (0_u8..251).cycle().take(2 * MAX_CHUNK_BYTES + 17).collect();
+    let mut writer = log.byte_writer(&view)?;
+    writer.write(&payload).await?;
+    let root = writer.finish().await?;
+    let mut reader = log.open_bytes(&view, root.reference()).await?;
+    faults.reset();
+    let held = reader.read_at(0, 1).await?;
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+    assert_eq!(
+        faults.metrics().operation(Operation::Get).downloaded_bytes,
+        MAX_CHUNK_BYTES as u64
+    );
+    let tail = (2 * MAX_CHUNK_BYTES) as u64;
+    assert_eq!(
+        reader.read_at(tail, usize::MAX).await?.as_ref(),
+        &payload[2 * MAX_CHUNK_BYTES..]
+    );
+    assert_eq!(
+        reader.read_at(MAX_CHUNK_BYTES as u64, 1).await?.as_ref(),
+        &payload[MAX_CHUNK_BYTES..=MAX_CHUNK_BYTES]
+    );
+    assert_eq!(held.as_ref(), &payload[..1]);
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 3);
+    assert!(
+        reader
+            .cached
+            .iter()
+            .flatten()
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>()
+            <= 2 * MAX_CHUNK_BYTES
+    );
+    // Unpublished chunks are collectible; a later miss retains the original epoch.
+    collect(&log).await?;
+    assert!(matches!(
+        reader.read_at(0, 1).await,
+        Err(Error::ViewExpired)
     ));
     Ok(())
 }
