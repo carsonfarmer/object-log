@@ -41,11 +41,10 @@ function CommitLink({ commit, branch }: { commit: Commit; branch: string }) {
 }
 
 function History({ view }: { view: Snapshot }) {
+  const { query } = useLocation();
   return (
-    <section aria-label="Recent commits">
-      <p class="muted">
-        Recent commits · first parent · select a commit to explore earlier history
-      </p>
+    <section aria-label="Commits">
+      <p class="muted">First-parent history</p>
       <div class="panel">
         {view.history.map((commit) => (
           <article key={commit.id}>
@@ -57,6 +56,11 @@ function History({ view }: { view: Snapshot }) {
           </article>
         ))}
         {!view.history.length && <p class="empty">No commits yet.</p>}
+        {view.next && (
+          <article>
+            <a href={href({ ...query, commit: view.next })}>Earlier commits</a>
+          </article>
+        )}
       </div>
     </section>
   );
@@ -143,7 +147,7 @@ function App() {
   const { url, query, route } = useLocation();
   const [authorization, setAuthorization] = useState({ header: "" });
   const [result, setResult] = useState<{ view?: Snapshot; error?: string; status?: number }>({});
-  const [tab, setTab] = useState("code");
+  const tab = query.view === "commits" ? "commits" : "code";
   const [copied, setCopied] = useState(false);
   const cloneInput = useRef<HTMLInputElement>(null);
   const repository = query.repo ?? "";
@@ -262,9 +266,9 @@ function App() {
                   type="button"
                   key={name}
                   aria-pressed={tab === name}
-                  onClick={() => setTab(name)}
+                  onClick={() => route(href({ ...query, view: name }))}
                 >
-                  {name === "code" ? "Code" : `Commits ${view.history.length}`}
+                  {name === "code" ? "Code" : "Commits"}
                 </button>
               ))}
             </nav>
@@ -275,7 +279,7 @@ function App() {
                   value={view.branch}
                   disabled={!view.branches.length}
                   onChange={(event) =>
-                    route(href({ repo: repository, ref: event.currentTarget.value }))
+                    route(href({ repo: repository, ref: event.currentTarget.value, view: tab }))
                   }
                 >
                   {view.branches.map((ref) => (
@@ -289,7 +293,7 @@ function App() {
                 {view.branches.length} {view.branches.length === 1 ? "branch" : "branches"}
               </span>
               {"commit" in query && (
-                <a href={href({ repo: repository, ref: view.branch })}>Branch tip</a>
+                <a href={href({ repo: repository, ref: view.branch, view: tab })}>Branch tip</a>
               )}
               <details>
                 <summary class="row">

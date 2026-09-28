@@ -5,7 +5,7 @@ It shows branches, directories, file previews and recent commits for authorized
 repositories. The API and UI live in a separate component; the WAL is unchanged.
 
 The API checks access through ordinary Git discovery, then reads the repository's
-existing WAL catalog directly. Reads follow only the selected history and paths;
+existing WAL catalog directly. Code reads follow only the selected commit and path;
 opening a large file summary does not download the file. SHA-1 and SHA-256 both
 work. Storage settings come from the same Spin variables as the Git example.
 
@@ -47,7 +47,8 @@ For an existing backend, use `bun run build`, then follow the
 
 Hosted proxies must forward `/`, `/_viewer/api`, `/_viewer/client.js` and
 `/_viewer/style.css` to Spin. `GET /_viewer/api` takes `repo` and optional
-`ref`, `commit` (full SHA-1 or SHA-256 hash) and `path` query parameters. Git traffic
+`ref`, `commit` (full SHA-1 or SHA-256 hash), `path` and `view=code|commits` query
+parameters. Code is the default view. Git traffic
 goes directly to the Git component; the viewer has no repository-creation endpoint.
 
 ## Build and checks
@@ -69,8 +70,9 @@ is listed in [THIRD_PARTY.md](../../../THIRD_PARTY.md).
 ## Scope
 
 Branch tips and commits in the authorized repository catalog are selectable.
-Commit links retain branch context and load that commit's tree and eight first-parent
-summaries; selecting an older entry continues history without scanning from the tip.
+Commit links retain branch context and open that commit's code. The Commits tab
+reads 20 first-parent summaries at a time, without loading trees or files. Earlier
+commits continues from the next parent, without rescanning from the branch tip.
 The UI shows 500 entries per directory and UTF-8 text previews up to 256 KiB. Binary and
 larger files show a summary. Symlinks show their stored target; submodules show
 their commit ID. Non-UTF-8 filenames appear as byte escapes without a browse link; valid sibling
