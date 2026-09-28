@@ -162,7 +162,7 @@ export class Catalog {
             offset += chunk.length;
           }
         }
-        if (compressed.length !== item.StoredSize || (item.Inline && compressed.length > 512))
+        if (compressed.length !== item.StoredSize || (item.Inline && compressed.length > 2048))
           throw new Error("Invalid stored object length");
         const names: Record<number, string> = { 1: "commit", 2: "tree", 3: "blob" };
         const header = new TextEncoder().encode(`${names[kind]} ${item.Size}\0`);

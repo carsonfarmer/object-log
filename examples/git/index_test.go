@@ -32,7 +32,7 @@ func TestSamePrefixSplitsAndPreservesOldRoot(t *testing.T) {
 			db := testIndex{nodes: map[int]radixNode[int, int]{}}
 			values := map[string]int{}
 			key := func(i int) string { return "aa" + fmt.Sprintf("%0*x", width-2, i) }
-			for i := 0; i < indexLeafSize; i++ {
+			for i := 0; i < indexLeafTarget; i++ {
 				values[key(i)] = i
 			}
 			original, err := updateRadix("aa", radixNode[int, int]{}, values, db.load, db.save)
@@ -43,7 +43,7 @@ func TestSamePrefixSplitsAndPreservesOldRoot(t *testing.T) {
 				t.Fatal("unnecessary branch before leaf limit")
 			}
 			updates := map[string]int{}
-			for i := indexLeafSize; i < 2300; i++ {
+			for i := indexLeafTarget; i < 2300; i++ {
 				updates[key(i)] = i
 			}
 			root, err := updateRadix("aa", db.nodes[original], updates, db.load, db.save)
@@ -51,7 +51,7 @@ func TestSamePrefixSplitsAndPreservesOldRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, node := range db.nodes {
-				if len(node.Items) > indexLeafSize || len(node.Children) > 16 {
+				if len(node.Items) > indexLeafTarget || len(node.Children) > 16 {
 					t.Fatal("unbounded node")
 				}
 			}
@@ -61,7 +61,7 @@ func TestSamePrefixSplitsAndPreservesOldRoot(t *testing.T) {
 					t.Fatalf("lookup %d: %d %v %v", i, got, ok, err)
 				}
 			}
-			_, found, err := lookupRadix(key(indexLeafSize), "aa", original, db.load)
+			_, found, err := lookupRadix(key(indexLeafTarget), "aa", original, db.load)
 			if found || err != nil {
 				t.Fatal("old root changed")
 			}
@@ -81,6 +81,38 @@ func TestSamePrefixSplitsAndPreservesOldRoot(t *testing.T) {
 				t.Fatal("walk differs from inserted objects")
 			}
 		})
+	}
+}
+
+func TestLegalLargeLeafCanBeReadUpdatedAndPruned(t *testing.T) {
+	db := testIndex{nodes: map[int]radixNode[int, int]{}}
+	items := map[string]int{}
+	for i := range indexLeafSize {
+		items[fmt.Sprintf("aa%038x", i)] = i
+	}
+	root, _ := db.save(radixNode[int, int]{Items: items})
+	key := fmt.Sprintf("aa%038x", indexLeafSize-1)
+	if got, found, err := lookupRadix(key, "aa", root, db.load); err != nil || !found || got != indexLeafSize-1 {
+		t.Fatalf("legal reader leaf: %d %v %v", got, found, err)
+	}
+	updated, err := updateRadix("aa", db.nodes[root], map[string]int{key: -1}, db.load, db.save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, node := range db.nodes {
+		if id != root && len(node.Items) > indexLeafTarget {
+			t.Fatal("updated leaf exceeds packing target")
+		}
+	}
+	if got, _, err := lookupRadix(key, "aa", updated, db.load); err != nil || got != -1 {
+		t.Fatal("updated object lost", err)
+	}
+	pruned, present, err := filterRadix("aa", root, func(id string) bool { return id != key }, db.load, db.save)
+	if err != nil || !present || len(db.nodes[pruned].Items) != indexLeafSize-1 {
+		t.Fatalf("legal leaf prune: %v %v", present, err)
+	}
+	if got, found, err := lookupRadix(key, "aa", root, db.load); err != nil || !found || got != indexLeafSize-1 || len(db.nodes[root].Items) != indexLeafSize {
+		t.Fatal("original large leaf changed")
 	}
 }
 
@@ -147,7 +179,7 @@ func TestPruneCatalogKeepsOnlyReachableObjectsAndPreservesOldRoot(t *testing.T) 
 	db := testIndex{nodes: map[int]radixNode[int, int]{}}
 	items := map[string]int{}
 	keep := func(id string) bool { return id[:3] == "aa0" && id != "aa0"+fmt.Sprintf("%037x", 0) }
-	for i := 0; i < 700; i++ {
+	for i := 0; i < indexLeafTarget; i++ {
 		for _, prefix := range []string{"aa0", "aaf"} {
 			items[prefix+fmt.Sprintf("%037x", i)] = i
 		}

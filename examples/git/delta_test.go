@@ -133,15 +133,16 @@ func TestDeltaCatalogBound(t *testing.T) {
 		for _, mixInline := range []bool{false, true} {
 			t.Run(fmt.Sprintf("bytes=%d/mixed=%t", size, mixInline), func(t *testing.T) {
 				meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: math.MaxInt64, Delta: &deltaMeta{Base: strings.Repeat("f", 64), Size: math.MaxInt64, Data: make([]byte, size)}}
-				leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafSize)}
+				leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafTarget)}
 				for i := range leaf.Items {
 					leaf.Items[i] = meta
 					if mixInline && i%2 == 0 {
-						leaf.Items[i].Delta = nil
 						leaf.Items[i].Inline = make([]byte, inlineObjectLimit)
 					}
 				}
-				limitDeltas(leaf.Items)
+				if err := limitDeltas(leaf.Items); err != nil {
+					t.Fatal(err)
+				}
 				total := 0
 				for _, item := range leaf.Items {
 					total += len(item.Inline)
@@ -149,7 +150,7 @@ func TestDeltaCatalogBound(t *testing.T) {
 						total += len(item.Delta.Data)
 					}
 				}
-				if total > indexLeafSize*inlineObjectLimit {
+				if total > inlineLeafBytes {
 					t.Fatal("exceeded shared inline allowance")
 				}
 				data, err := json.Marshal(leaf)
@@ -161,6 +162,37 @@ func TestDeltaCatalogBound(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLegalLeafPayloadBound(t *testing.T) {
+	items := make([]objectMeta, indexLeafSize)
+	for i := range items {
+		items[i] = objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: 512, Inline: make([]byte, 512)}
+	}
+	if err := limitDeltas(items); err != nil {
+		t.Fatal("legal full leaf rejected", err)
+	}
+	data, err := json.Marshal(struct{ Items []objectMeta }{items})
+	if err != nil || len(data) >= 1<<20 {
+		t.Fatalf("legal full leaf page: bytes=%d err=%v", len(data), err)
+	}
+	items[0].Inline = append(items[0].Inline, 0)
+	items[0].StoredSize++
+	if err := limitDeltas(items); err == nil {
+		t.Fatal("over-pool full objects accepted")
+	}
+	for i := range items {
+		items[i].Inline = nil
+		items[i].StoredSize = math.MaxInt64
+		items[i].Delta = &deltaMeta{Base: strings.Repeat("e", 64), Size: math.MaxInt64, Data: make([]byte, inlineLeafBytes/indexLeafSize)}
+	}
+	if err := limitDeltas(items); err != nil {
+		t.Fatal("legal external-object leaf rejected", err)
+	}
+	data, err = json.Marshal(struct{ Items []objectMeta }{items})
+	if err != nil || len(data) >= 1<<20 {
+		t.Fatalf("legal external-object/delta page: bytes=%d refs=%d err=%v", len(data), len(items), err)
 	}
 }
 

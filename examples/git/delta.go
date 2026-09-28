@@ -157,11 +157,16 @@ func (p packOffsets) deltas(source io.ReadSeeker, size int64, retain func(plumbi
 	return nil
 }
 
+const inlineLeafBytes = 512 << 10
+
 // Inline deltas share the leaf's allowance. External deltas live below the
 // object's root and do not enlarge unrelated catalog reads.
-func limitDeltas(items []objectMeta) {
-	remaining := indexLeafSize * inlineObjectLimit
+func limitDeltas(items []objectMeta) error {
+	remaining := inlineLeafBytes
 	for _, item := range items {
+		if len(item.Inline) > remaining {
+			return fmt.Errorf("inline objects exceed catalog leaf allowance")
+		}
 		remaining -= len(item.Inline)
 	}
 	for i := range items {
@@ -176,4 +181,5 @@ func limitDeltas(items []objectMeta) {
 			}
 		}
 	}
+	return nil
 }
