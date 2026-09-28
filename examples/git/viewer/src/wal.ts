@@ -1,10 +1,3 @@
-import type {
-  Config,
-  Entry,
-  Recovery,
-  Session,
-  Object as WalObject,
-} from "object-log:storage/wal@0.1.0";
 import * as wal from "object-log:storage/wal@0.1.0";
 import { sha1 } from "@noble/hashes/legacy.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -26,17 +19,16 @@ export interface Repository {
 export const automaticLogId = (name: string) =>
   `auto-${hex(sha256(new TextEncoder().encode(name)))}`;
 export class MissingObject extends Error {}
-interface Item {
-  ID: string;
-  Kind: number;
-  Size: number;
-  StoredSize: number;
-  Encoding: string;
-  Inline?: string;
-  Delta?: { StoredSize: number };
-}
 interface Bucket {
-  Items?: Item[];
+  Items?: {
+    ID: string;
+    Kind: number;
+    Size: number;
+    StoredSize: number;
+    Encoding: string;
+    Inline?: string;
+    Delta?: { StoredSize: number };
+  }[];
   Prefixes?: string[];
 }
 export interface Root {
@@ -47,7 +39,7 @@ export interface Root {
   Buckets: string[];
 }
 
-export function settings(repository: Repository): Config {
+export function settings(repository: Repository): wal.Config {
   return {
     endpoint: variable("wal_endpoint"),
     bucket: variable("wal_bucket"),
@@ -79,27 +71,25 @@ export function settings(repository: Repository): Config {
 
 // Own one exact recovered view; no cache or local repository becomes authority.
 export class Catalog {
-  readonly recovery: Recovery;
+  readonly recovery: wal.Recovery;
   readonly root: Root;
-  private owned: WalObject[] = [];
-  private buckets = new Map<string, WalObject>();
-  private nodes = new Map<WalObject, Entry>();
+  private owned: wal.Object[] = [];
+  private readonly buckets: Map<string, wal.Object>;
+  private nodes = new Map<wal.Object, wal.Entry>();
 
   constructor(
-    session: Session,
+    session: wal.Session,
     format: string | undefined,
     private budget: { bytes: number },
   ) {
     this.recovery = session.recover();
     try {
-      let roots: WalObject[] = [];
       for (let record = this.recovery.next(); record; record = this.recovery.next()) {
-        for (const root of roots) drop(root);
-        roots = record.val.objects;
-        this.owned = roots;
+        for (const root of this.owned) drop(root);
+        this.owned = record.val.objects;
       }
-      if (roots.length !== 1) throw new Error("Repository has no published root");
-      const node = this.node(roots[0]);
+      if (this.owned.length !== 1) throw new Error("Repository has no published root");
+      const node = this.node(this.owned[0]);
       this.root = json<Root>(node.data);
       if (
         !this.root.Validated ||
@@ -110,16 +100,14 @@ export class Catalog {
         this.root.Buckets.length !== node.objects.length
       )
         throw new Error("Invalid repository catalog");
-      this.root.Buckets.forEach((prefix, i) => {
-        this.buckets.set(prefix, node.objects[i]);
-      });
+      this.buckets = new Map(this.root.Buckets.map((prefix, i) => [prefix, node.objects[i]]));
     } catch (error) {
       this[Symbol.dispose]();
       throw error;
     }
   }
 
-  private node(root: WalObject): Entry {
+  private node(root: wal.Object): wal.Entry {
     const cached = this.nodes.get(root);
     if (cached) return cached;
     const entry = this.recovery.readNode(root);
@@ -131,8 +119,8 @@ export class Catalog {
   }
 
   object(id: string, kind: number, maxBytes: number): { size: number; bytes?: Uint8Array } {
-    const hashBytes = this.root.Format === "sha256" ? 32 : 20;
-    if (!new RegExp(`^[0-9a-f]{${hashBytes * 2}}$`).test(id))
+    const hash = this.root.Format === "sha256" ? sha256 : sha1;
+    if (!new RegExp(`^[0-9a-f]{${hash.outputLen * 2}}$`).test(id))
       throw new Error("Invalid Git object ID");
     let prefix = id.slice(0, 2),
       root = this.buckets.get(prefix);
@@ -145,9 +133,8 @@ export class Catalog {
         root = node.objects[bucket.Prefixes.indexOf(prefix)];
         continue;
       }
-      const items = bucket.Items ?? [];
       let child = 0;
-      for (const item of items) {
+      for (const item of bucket.Items ?? []) {
         const value = item.Inline ? undefined : node.objects[child++];
         if (item.ID !== id) continue;
         if (item.Kind !== kind) throw new MissingObject("Git object has a different kind");
@@ -180,12 +167,10 @@ export class Catalog {
         const names: Record<number, string> = { 1: "commit", 2: "tree", 3: "blob" };
         const header = new TextEncoder().encode(`${names[kind]} ${item.Size}\0`);
         const expected = header.length + item.Size;
-        const output = new Uint8Array(expected + 1);
-        const content = unzlibSync(compressed, { out: output });
-        const hash = this.root.Format === "sha256" ? sha256(content) : sha1(content);
+        const content = unzlibSync(compressed, { out: new Uint8Array(expected + 1) });
         if (
           content.length !== expected ||
-          hex(hash) !== id ||
+          hex(hash(content)) !== id ||
           !header.every((byte, i) => content[i] === byte)
         )
           throw new Error("Git object differs from its catalog");

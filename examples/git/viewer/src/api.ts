@@ -1,14 +1,6 @@
 import { canonicalName, repositoryName } from "./names";
 import { NotFound, snapshot } from "./repository";
-import {
-  automaticLogId,
-  Catalog,
-  drop,
-  openExisting,
-  type Repository,
-  settings,
-  variable,
-} from "./wal";
+import * as wal from "./wal";
 
 export async function browse(request: Request): Promise<Response> {
   const query = new URL(request.url).searchParams;
@@ -26,17 +18,16 @@ export async function browse(request: Request): Promise<Response> {
     parts.some((part) => !part || part === "." || part === ".." || part.includes("\0"))
   )
     return new Response("Invalid browse query", { status: 400 });
-  const input = query.get("repo") ?? "",
-    name = repositoryName(input, request.url);
+  const name = repositoryName(query.get("repo") ?? "", request.url);
   if (!name) return new Response("Repository not found", { status: 404 });
-  const repositories: Record<string, Partial<Repository>> = JSON.parse(
-    variable("git_repositories"),
+  const repositories: Record<string, Partial<wal.Repository>> = JSON.parse(
+    wal.variable("git_repositories"),
   );
   const policy =
     Object.entries(repositories).find(([key]) => key !== "*" && canonicalName(key) === name)?.[1] ??
     repositories["*"];
   if (!policy) return new Response("Repository not found", { status: 404 });
-  const repository = { ...policy, log_id: policy.log_id || automaticLogId(name) };
+  const repository = { ...policy, log_id: policy.log_id || wal.automaticLogId(name) };
   // Standard Git discovery enforces the unchanged service's repository permissions.
   const authorized = await fetch(
     `http://git.spin.internal/${name}/info/refs?service=git-upload-pack`,
@@ -64,13 +55,13 @@ export async function browse(request: Request): Promise<Response> {
   if (!type.startsWith("application/x-git-upload-pack-advertisement"))
     return new Response("Invalid Git discovery response", { status: 502 });
   // Successful discovery has validated this same declaratively configured backend.
-  let session = openExisting(settings(repository));
+  let session = wal.openExisting(wal.settings(repository));
   const budget = { bytes: 0 };
   try {
     for (let attempt = 0; ; attempt++) {
-      let catalog: Catalog | undefined;
+      let catalog: wal.Catalog | undefined;
       try {
-        catalog = new Catalog(session, repository.format, budget);
+        catalog = new wal.Catalog(session, repository.format, budget);
         const view = snapshot(catalog, query),
           usage = session.usage();
         return Response.json(view, {
@@ -85,7 +76,7 @@ export async function browse(request: Request): Promise<Response> {
           return new Response("Branch, commit or path not found", { status: 404 });
         if (attempt === 0 && (error as { payload?: { tag: string } }).payload?.tag === "expired") {
           const fresh = session.refresh();
-          drop(session);
+          wal.drop(session);
           session = fresh;
         } else throw error;
       } finally {
@@ -93,6 +84,6 @@ export async function browse(request: Request): Promise<Response> {
       }
     }
   } finally {
-    drop(session);
+    wal.drop(session);
   }
 }

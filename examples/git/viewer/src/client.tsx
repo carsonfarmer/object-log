@@ -93,13 +93,19 @@ function Code({ view }: { view: Snapshot }) {
             <CommitLink commit={view.history[0]} branch={view.branch} />
           </article>
         )}
-        {file && (
-          <article class="row tip">
-            <span>{file.size.toLocaleString()} bytes</span>
-            <code>{file.id.slice(0, 12)}</code>
-          </article>
-        )}
-        {!file && (
+        {file ? (
+          <>
+            <article class="row tip">
+              <span>{file.size.toLocaleString()} bytes</span>
+              <code>{file.id.slice(0, 12)}</code>
+            </article>
+            {file.state === "text" ? (
+              <pre>{file.text}</pre>
+            ) : (
+              <p class="empty">{previewMessages[file.state] ?? `Submodule · ${file.id}`}</p>
+            )}
+          </>
+        ) : (
           <>
             {view.path && (
               <article class="row">
@@ -128,12 +134,6 @@ function Code({ view }: { view: Snapshot }) {
             {view.more && <p class="empty">Showing the first 500 entries.</p>}
           </>
         )}
-        {file &&
-          (file.state === "text" ? (
-            <pre>{file.text}</pre>
-          ) : (
-            <p class="empty">{previewMessages[file.state] ?? `Submodule · ${file.id}`}</p>
-          ))}
       </div>
     </section>
   );
@@ -324,11 +324,9 @@ function App() {
   );
 }
 
-const root = document.getElementById("app");
-if (!root) throw new Error("Missing app root");
 render(
   <LocationProvider scope="/?">
     <App />
   </LocationProvider>,
-  root,
+  document.body,
 );
