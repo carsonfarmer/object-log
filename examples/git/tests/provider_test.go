@@ -27,6 +27,9 @@ func TestWALGit(t *testing.T) {
 	if endpoint == "" {
 		t.Skip("set GIT_PROBE_URL to an isolated local Spin/MinIO instance")
 	}
+	if os.Getenv("GIT_PROBE_CREATE") == "1" {
+		endpoint = strings.TrimRight(endpoint, "/") + "/workflow"
+	}
 	branch := os.Getenv("GIT_PROBE_BRANCH")
 	if branch == "" {
 		branch = "main"

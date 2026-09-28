@@ -21,7 +21,7 @@ const manifest = await Bun.file("../spin.toml").text();
 const variables = [...manifest.matchAll(/^(wal_\w+|git_repositories) = "\{\{ (\w+) \}\}"$/gm)]
   .map((match) => `${match[1]} = "{{ ${match[2]} }}"\n`)
   .join("");
-const routes = ["/browse", "/browse/assets/client.js", "/browse/assets/style.css", "/browse/api"];
+const routes = ["/", "/_viewer/api", "/_viewer/client.js", "/_viewer/style.css"];
 await Bun.write(
   "../spin.viewer.toml",
   manifest +

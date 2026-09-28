@@ -29,8 +29,8 @@ var (
 	repositoryLogID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
 
-// A map entry provisions a name. Opening or creating storage remains the caller's
-// responsibility, after checking the route's action against repositoryAccess.
+// A map entry permits a name. Opening storage remains the caller's responsibility,
+// after checking the route's action against repositoryAccess.
 type repositoryConfig struct {
 	LogID         string              `json:"log_id"`
 	Format        config.ObjectFormat `json:"format"`
@@ -131,43 +131,6 @@ func parseRepository(encoded []byte) (repositoryConfig, error) {
 	return repository, nil
 }
 
-func repositoryCreation(body io.Reader, policy repositoryConfig) (repositoryConfig, error) {
-	data, err := io.ReadAll(io.LimitReader(body, 4097))
-	if err != nil {
-		return policy, err
-	}
-	if len(data) > 4096 {
-		return policy, errObjectLimit
-	}
-	fields, err := uniqueRepositoryObject(data)
-	if err != nil {
-		return policy, err
-	}
-	for name := range fields {
-		if name != "format" && name != "default_branch" {
-			return policy, fmt.Errorf("unknown creation field %q", name)
-		}
-	}
-	creation, err := parseRepository(data)
-	if err != nil {
-		return policy, err
-	}
-	if creation.Format == "" {
-		creation.Format = policy.Format
-	}
-	if creation.Format == "" {
-		creation.Format = config.SHA1
-	}
-	if policy.Format != "" && policy.Format != creation.Format {
-		return policy, config.ErrInvalidObjectFormat
-	}
-	policy.Format = creation.Format
-	if creation.DefaultBranch != "" {
-		policy.DefaultBranch = creation.DefaultBranch
-	}
-	return policy, nil
-}
-
 // Decode only an object, rejecting duplicate keys before normal JSON decoding
 // could silently overwrite them. Both repository names and fields use this path.
 func uniqueRepositoryObject(encoded []byte) (map[string]json.RawMessage, error) {
@@ -240,7 +203,7 @@ type repositoryRoute struct {
 	Action     gitAction
 }
 
-// Resolve exact provisioned names and endpoint suffixes without cleaning or
+// Resolve exact permitted names and endpoint suffixes without cleaning or
 // decoding path aliases. The caller must authorize Action before opening a WAL.
 // A method error preserves Method so the caller can send an Allow header.
 func resolveRepository(repositories map[string]repositoryConfig, r *http.Request) (repositoryRoute, error) {
@@ -253,7 +216,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	for _, service := range []string{
 		"info/refs", transport.UploadPackService, transport.ReceivePackService,
-		"create", "maintenance", "collect", "recover-retentions-after-drain",
+		"maintenance", "collect", "recover-retentions-after-drain",
 	} {
 		suffix := "/" + service
 		if strings.HasSuffix(r.URL.Path, suffix) {
@@ -293,7 +256,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	switch route.Service {
 	case transport.UploadPackService:
 		route.Action = gitRead
-	case transport.ReceivePackService, "create":
+	case transport.ReceivePackService:
 		route.Action = gitWrite
 	default:
 		route.Action = gitAdmin

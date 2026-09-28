@@ -40,7 +40,7 @@ func sessionRetention(session *wal.Session) (retentionCall, retentionCall) {
 		}
 }
 
-func advertise(w io.Writer, s *store) error {
+func advertise(w io.Writer, s *store, unknownFormat bool) error {
 	if err := (&packp.SmartReply{Service: transport.ReceivePackService}).Encode(w); err != nil {
 		return err
 	}
@@ -49,6 +49,9 @@ func advertise(w io.Writer, s *store) error {
 		adv.Capabilities.Add(feature)
 	}
 	adv.Capabilities.Set(capability.ObjectFormat, s.meta.Format.String())
+	if unknownFormat {
+		adv.Capabilities.Set(capability.ObjectFormat, "sha1", "sha256")
+	}
 	for _, name := range slices.Sorted(maps.Keys(s.meta.Refs)) {
 		id := s.meta.Refs[name]
 		adv.References = append(adv.References, plumbing.NewHashReference(plumbing.ReferenceName(name), plumbing.NewHash(id)))
@@ -133,7 +136,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	service, method := route.Service, route.Method
-	creating := service == "create"
 	maintenance := service == "maintenance"
 	collect := service == "collect"
 	recoverRetentions := service == "recover-retentions-after-drain"
@@ -164,16 +166,27 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
-	if creating {
-		route.Repository, e = repositoryCreation(r.Body, route.Repository)
-		if e != nil {
-			status := operationStatus(e)
+	if service == transport.ReceivePackService && method == http.MethodPost {
+		format, body, err := receiveFormat(r.Body, limits.negotiationBytes)
+		if err == nil && format != "" && route.Repository.Format != "" && route.Repository.Format != format {
+			err = config.ErrInvalidObjectFormat
+		}
+		if err != nil {
+			status := operationStatus(err)
 			if status == http.StatusInternalServerError {
 				status = http.StatusBadRequest
 			}
-			http.Error(response, e.Error(), status)
+			http.Error(response, "invalid push format", status)
 			return
 		}
+		if format == "" {
+			response.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+			log.Printf("wal %s %s id=%s calls=0 bytes=0", r.Method, r.URL.Path, requestID)
+			response.WriteHeader(http.StatusOK)
+			return
+		}
+		route.Repository.Format = format
+		r.Body = gitio.NewReadCloser(body, r.Body)
 	}
 
 	settings, e := walSettings(getConfig, route.Repository.LogID, limits)
@@ -182,11 +195,22 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
-		if creating {
+		if service == transport.ReceivePackService && method == http.MethodPost {
 			return wal.Open(settings)
 		}
 		return wal.OpenExisting(settings)
 	})
+	if errors.Is(e, errLogMissing) && service == transport.ReceivePackService && method == http.MethodGet {
+		response.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
+		format := route.Repository.Format
+		if format == "" {
+			format = config.SHA1
+		}
+		if err := advertise(response, &store{meta: rootMeta{Format: format}}, route.Repository.Format == ""); err != nil {
+			log.Printf("git discovery failed: %v", err)
+		}
+		return
+	}
 	if e != nil {
 		http.Error(response, e.Error(), operationStatus(e))
 		return
@@ -285,8 +309,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		log.Printf("git request setup failed stage=open-store: %v", e)
 		status := operationStatus(e)
-		if creating && errors.Is(e, config.ErrInvalidObjectFormat) {
-			status = http.StatusConflict
+		if errors.Is(e, config.ErrInvalidObjectFormat) {
+			status = http.StatusBadRequest
 		}
 		http.Error(w, "Git storage unavailable", status)
 		return
@@ -296,32 +320,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			s.Close()
 		}
 	}()
-	if creating {
-		if s.stateRoot != nil {
-			http.Error(w, "repository already exists", http.StatusConflict)
-			return
-		}
-		if err := s.publish(s.meta.Refs); err != nil {
-			var pending *pendingError
-			if errors.As(err, &pending) {
-				http.Error(w, "repository creation pending; check the repository before retrying", http.StatusServiceUnavailable)
-				return
-			}
-			status := operationStatus(err)
-			if errors.Is(err, errPublicationConflict) {
-				status = http.StatusConflict
-			}
-			http.Error(w, "repository creation was not confirmed", status)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(struct {
-			Repository string `json:"repository"`
-		}{route.Name})
-		return
-	}
-	if s.stateRoot == nil {
+	if s.stateRoot == nil && service != transport.ReceivePackService {
 		http.NotFound(w, r)
 		return
 	}
@@ -350,7 +349,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	} else if service == transport.ReceivePackService && method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
-		e = advertise(w, s)
+		e = advertise(w, s, s.stateRoot == nil && route.Repository.Format == "")
 	} else if service == transport.ReceivePackService {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 		commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
@@ -362,6 +361,14 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			refs, e := validate(s, info.Commands)
 			if e != nil {
 				return e
+			}
+			if s.stateRoot == nil && route.Repository.DefaultBranch == "" {
+				for _, command := range info.Commands {
+					if command.Action() != packp.Delete && command.Name.IsBranch() {
+						s.meta.Head = command.Name.String()
+						break
+					}
+				}
 			}
 			e = s.publish(refs)
 			return e

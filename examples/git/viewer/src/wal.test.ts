@@ -98,7 +98,7 @@ test("wildcard repositories recover their stored format and canonical WAL identi
         return emptySession(format);
       };
       expect(
-        (await browse(new Request(`https://viewer.test/browse/api?repo=${name}`))).status,
+        (await browse(new Request(`https://viewer.test/_viewer/api?repo=${name}`))).status,
       ).toBe(200);
     }
   }
@@ -117,111 +117,19 @@ test("exact aliases override the whole wildcard policy and enforce pinned format
     };
     for (const name of ["team/project", "team/project.git"])
       expect(
-        (await browse(new Request(`https://viewer.test/browse/api?repo=${name}`))).status,
+        (await browse(new Request(`https://viewer.test/_viewer/api?repo=${name}`))).status,
       ).toBe(200);
   }
   policies = '{"*":{"format":"sha256"}}';
   openSession = () => emptySession("sha1");
   await expect(
-    browse(new Request("https://viewer.test/browse/api?repo=team/project")),
+    browse(new Request("https://viewer.test/_viewer/api?repo=team/project")),
   ).rejects.toThrow("Invalid repository catalog");
   policies = '{"*":{}}';
   openSession = () => emptySession("md5");
   await expect(
-    browse(new Request("https://viewer.test/browse/api?repo=team/project")),
+    browse(new Request("https://viewer.test/_viewer/api?repo=team/project")),
   ).rejects.toThrow("Invalid repository catalog");
-});
-
-test("creation forwards raw JSON and credentials and preserves outcomes without WAL access", async () => {
-  policies = '{"*":{}}';
-  const baseline = opened;
-  for (const status of [201, 400, 401, 403, 408, 409, 413, 503]) {
-    const body =
-      status === 400
-        ? '{"format":"sha1","format":"sha256"}'
-        : ' { "format": "sha256", "default_branch": "main" }\n';
-    const responseBody =
-      status === 503 ? "Publication pending; recover before retrying" : "Creation denied";
-    globalThis.fetch = mock(async (url: RequestInfo | URL, options?: RequestInit) => {
-      expect(String(url)).toBe("http://git.spin.internal/team/project.git/create");
-      expect(options?.method).toBe("POST");
-      expect(options?.headers).toEqual({
-        Authorization: "Bearer write-token",
-        "Content-Type": "application/json",
-      });
-      expect(options?.redirect).toBe("manual");
-      expect(options?.body).toBe(body);
-      return status === 201
-        ? Response.json({ created: true }, { status })
-        : new Response(responseBody, { status });
-    }) as unknown as typeof fetch;
-    const response = await browse(
-      new Request("https://viewer.test/browse/api?repo=team/project", {
-        method: "POST",
-        headers: { Authorization: "Bearer write-token" },
-        body,
-      }),
-    );
-    expect(response.status).toBe(status);
-    if (status === 201) expect(await response.json()).toEqual({ created: true });
-    else expect(await response.text()).toBe(responseBody);
-    expect(opened).toBe(baseline);
-  }
-});
-
-test("creation bounds HTTP bodies and rejects invalid names before forwarding", async () => {
-  policies = '{"*":{}}';
-  const forwarded = mock(async () => {
-    throw new Error("Unexpected HTTP call");
-  });
-  globalThis.fetch = forwarded as unknown as typeof fetch;
-  for (const [body, status] of [
-    ["x".repeat(4097), 413],
-    [Uint8Array.of(255), 400],
-  ] as const)
-    expect(
-      (
-        await browse(
-          new Request("https://viewer.test/browse/api?repo=team/project", { method: "POST", body }),
-        )
-      ).status,
-    ).toBe(status);
-  for (const name of ["*", "", "../project", "team//project", "project%3Fother"])
-    expect(
-      (
-        await browse(
-          new Request(`https://viewer.test/browse/api?repo=${name}`, {
-            method: "POST",
-            body: "{}",
-          }),
-        )
-      ).status,
-    ).toBe(404);
-  expect(forwarded).not.toHaveBeenCalled();
-  globalThis.fetch = mock(
-    async () => new Response("unexpected response", { status: 201 }),
-  ) as unknown as typeof fetch;
-  expect(
-    (
-      await browse(
-        new Request("https://viewer.test/browse/api?repo=team/project", {
-          method: "POST",
-          body: "{}",
-        }),
-      )
-    ).status,
-  ).toBe(502);
-  globalThis.fetch = mock(async () =>
-    Response.json({ data: "x".repeat(65536) }, { status: 201 }),
-  ) as unknown as typeof fetch;
-  await expect(
-    browse(
-      new Request("https://viewer.test/browse/api?repo=team/project", {
-        method: "POST",
-        body: "{}",
-      }),
-    ),
-  ).rejects.toThrow("HTTP body exceeds limit");
 });
 
 function fixture(
@@ -365,7 +273,7 @@ test("Git authorization completes before viewer storage is opened", async () => 
     return new Response("Denied", { status: 403 });
   }) as unknown as typeof fetch;
   const response = await browse(
-    new Request("https://viewer.test/browse/api?repo=team/demo.git", {
+    new Request("https://viewer.test/_viewer/api?repo=team/demo.git", {
       headers: { Authorization: "Bearer test-token" },
     }),
   );
@@ -375,10 +283,11 @@ test("Git authorization completes before viewer storage is opened", async () => 
     throw new Error("Unexpected HTTP call");
   }) as unknown as typeof fetch;
   expect(
-    (await browse(new Request("https://viewer.test/browse/api?repo=missing.git"))).status,
+    (await browse(new Request("https://viewer.test/_viewer/api?repo=missing.git"))).status,
   ).toBe(404);
   expect(
-    (await browse(new Request("https://viewer.test/browse/api?repo=team/demo.git&path=.."))).status,
+    (await browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git&path=..")))
+      .status,
   ).toBe(400);
   expect(opened).toBe(baseline);
 });
@@ -493,7 +402,7 @@ test("expired reads refresh once, close both views, and retain cumulative usage"
         headers: { "Content-Type": "application/x-git-upload-pack-advertisement" },
       }),
   ) as unknown as typeof fetch;
-  const response = await browse(new Request("https://viewer.test/browse/api?repo=team/demo.git"));
+  const response = await browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git"));
   expect(response.status).toBe(200);
   expect((await response.json()).history).toEqual([]);
   expect(refreshes).toBe(1);

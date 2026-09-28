@@ -181,7 +181,6 @@ func TestResolveRepositorySelectsServiceAndAction(t *testing.T) {
 			service: transport.ReceivePackService, action: gitWrite},
 		{name: "read RPC", method: http.MethodPost, path: "git-upload-pack",
 			service: transport.UploadPackService, action: gitRead},
-		{name: "creation", method: http.MethodPost, path: "create", service: "create", action: gitWrite},
 		{name: "write RPC", method: http.MethodPost, path: "git-receive-pack",
 			service: transport.ReceivePackService, action: gitWrite},
 		{name: "logical maintenance", method: http.MethodPost, path: "maintenance", service: "maintenance", action: gitAdmin},
@@ -211,7 +210,7 @@ func TestResolveRepositoryRejectsAliasesAndUnknownRoutes(t *testing.T) {
 	repositories := repositoriesForTest(t)
 	for _, path := range []string{
 		"/missing.git/git-upload-pack", "/sha1.git/git-upload-pack", "/team/alpha.git",
-		"/team/alpha.git/unknown", "/team/alpha.git/git-upload-pack/", "/team/alpha.git//git-upload-pack",
+		"/team/alpha.git/unknown", "/team/alpha.git/create", "/team/alpha.git/git-upload-pack/", "/team/alpha.git//git-upload-pack",
 		"//team/alpha.git/git-upload-pack", "/team/./alpha.git/git-upload-pack",
 		"/team/other/../alpha.git/git-upload-pack", "/team%2falpha.git/git-upload-pack",
 		"/team/%61lpha.git/git-upload-pack", "/team/alpha%2egit/git-upload-pack",
@@ -294,7 +293,7 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 	}
 	var first repositoryRoute
 	for _, name := range []string{"team/project", "team/project.git"} {
-		route, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/create", nil))
+		route, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/git-receive-pack", nil))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -310,7 +309,7 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 	if !principal.Allows(first.Repository.repositoryAccess, gitWrite) || principal.Allows(first.Repository.repositoryAccess, gitRead) {
 		t.Fatal("automatic policy lost independent permissions")
 	}
-	private, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/team/private.git/create", nil))
+	private, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/team/private.git/git-receive-pack", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +317,7 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		t.Fatal("exact denial or repository isolation lost")
 	}
 	for _, name := range []string{"*", "team/../project", "team//project", "%70roject"} {
-		if _, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/create", nil)); err == nil {
+		if _, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/git-receive-pack", nil)); err == nil {
 			t.Fatalf("wildcard accepted invalid name %q", name)
 		}
 	}
@@ -335,37 +334,5 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		if _, err := repositoriesFromText(text); err == nil {
 			t.Fatalf("accepted ambiguous policy: %s", text)
 		}
-	}
-}
-
-func TestRepositoryCreationSettings(t *testing.T) {
-	policy := repositoryConfig{LogID: "isolated", DefaultBranch: "release", repositoryAccess: repositoryAccess{WriteGroups: []string{"writers"}}}
-	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
-		created, err := repositoryCreation(strings.NewReader(`{"format":"`+string(format)+`","default_branch":"main"}`), policy)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if created.Format != format || created.LogID != policy.LogID || created.DefaultBranch != "main" ||
-			len(created.WriteGroups) != 1 || created.WriteGroups[0] != "writers" {
-			t.Fatalf("creation changed policy: %+v", created)
-		}
-	}
-	created, err := repositoryCreation(strings.NewReader(`{}`), policy)
-	if err != nil || created.Format != config.SHA1 || created.DefaultBranch != "release" {
-		t.Fatal("creation defaults lost")
-	}
-	for _, text := range []string{
-		`{"format":"sha512"}`, `{"format":null}`, `{"format":"sha1","format":"sha256"}`,
-		`{"default_branch":"../main"}`, `{"write_groups":["everyone"]}`, `{"log_id":"other"}`,
-		`{"default_branch":"\u200c./review-probe"}`,
-		`{} {}`, strings.Repeat(" ", 4097),
-	} {
-		if _, err := repositoryCreation(strings.NewReader(text), policy); err == nil {
-			t.Fatalf("invalid creation accepted: %s", text)
-		}
-	}
-	policy.Format = config.SHA256
-	if _, err := repositoryCreation(strings.NewReader(`{"format":"sha1"}`), policy); err == nil {
-		t.Fatal("creation bypassed configured format")
 	}
 }

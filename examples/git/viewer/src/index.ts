@@ -6,9 +6,9 @@ declare const PAGE: string;
 
 async function handle(request: Request): Promise<Response> {
   const path = new URL(request.url).pathname;
-  if (path === "/browse/api") {
-    if (request.method !== "GET" && request.method !== "POST")
-      return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
+  if (path === "/_viewer/api") {
+    if (request.method !== "GET" && request.method !== "HEAD")
+      return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
     return browse(request);
   }
   if (request.method !== "GET" && request.method !== "HEAD") {
@@ -17,16 +17,12 @@ async function handle(request: Request): Promise<Response> {
       headers: { Allow: "GET, HEAD" },
     });
   }
-  if (
-    path !== "/browse" &&
-    path !== "/browse/assets/client.js" &&
-    path !== "/browse/assets/style.css"
-  ) {
+  if (path !== "/" && path !== "/_viewer/client.js" && path !== "/_viewer/style.css") {
     return new Response("Not found", { status: 404 });
   }
   const assets: Record<string, [string, string]> = {
-    "/browse/assets/client.js": [CLIENT_SCRIPT, "text/javascript; charset=utf-8"],
-    "/browse/assets/style.css": [STYLES, "text/css; charset=utf-8"],
+    "/_viewer/client.js": [CLIENT_SCRIPT, "text/javascript; charset=utf-8"],
+    "/_viewer/style.css": [STYLES, "text/css; charset=utf-8"],
   };
   const [body, type] = assets[path] ?? [PAGE, "text/html; charset=utf-8"];
   return new Response(request.method === "HEAD" ? null : body, {

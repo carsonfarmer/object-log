@@ -12,7 +12,7 @@ rules remain outside the Rust core.
   fast-forward policy, connectivity validation, and malformed-input rejection.
 - Atomic publication of refs and the sparse object catalog.
 - Arbitrary repository paths with isolated WAL identities and an explicit
-  SHA-1 or SHA-256 format. Authorized API creation requires no per-repository
+  SHA-1 or SHA-256 format. First-push creation requires no per-repository
   configuration or restart; named access policies remain optional overrides.
 - Per-repository reader, writer, and administrator permissions; read-only mode;
   a persisted default branch; and recovery without a local repository cache.
@@ -102,10 +102,10 @@ in #39.
 The declarative repository map supplies canonical nested paths, stable WAL
 identities, immutable object formats, default branches and independent
 read/write/admin groups. Duplicate identities, aliases and malformed paths are
-rejected. A wildcard policy admits authenticated API creation of new names;
-missing repositories remain absent on reads, administration and wildcard push.
-All names require authorized API creation before the first Git push.
-The format and default branch are published through the existing repository WAL.
+rejected. A wildcard policy admits authorized first pushes to new names.
+Missing repositories remain absent on reads; discovery for a first push advertises
+both formats without initializing storage. The first successful push publishes
+format, default branch, refs and catalog through the existing repository WAL.
 Scheduled maintenance currently requires named entries; dynamic discovery is
 separate work.
 

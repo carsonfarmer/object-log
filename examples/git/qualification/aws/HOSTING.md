@@ -32,8 +32,8 @@ SHA-256 formats, default branches, and independent read/write/admin groups.
 Declare all referenced groups in `host_groups`. Users and membership are managed
 in Cognito outside Terraform; self-registration is disabled. Named policies
 require a configuration change to admit new paths; a wildcard policy admits
-new names without one. An authorized writer creates a repository with
-`POST /<repository>/create`. Do not change a stored repository's format or
+new names without one. The first successful authorized push creates the
+repository. Do not change a stored repository's format or
 identity to migrate it.
 
 The artifact is staged under this run's `artifacts/` prefix and SHA-256 checked
@@ -134,9 +134,10 @@ git config --global --add credential.https://git.example.com.helper oauth
 git clone https://git.example.com/team/project.git
 ```
 
-A fresh configured repository returns 404 until an authorized writer calls
-`POST /<repository>/create` with its format and initial branch. Then push from a
-local repository with that object format before trying to clone it.
+A fresh repository returns 404 on reads until an authorized writer pushes its
+first branch. That push records the Git format and refs together. An optional
+policy format must match the local repository; use a matching repository before
+trying to clone it.
 
 The helper uses authorization-code S256 PKCE and sends the access token as an
 ordinary Basic password. Its fixed `http://localhost:53119` callback matches the
