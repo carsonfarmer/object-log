@@ -98,6 +98,11 @@ The optional repository viewer has its own TypeScript Spin API and reads the
 existing WAL catalog; it adds no routes or code to the Go Git service. Its
 compiler temporarily uses the focused opaque-resource fix in ComponentizeJS
 PR #357, with exact provenance in `THIRD_PARTY.md`.
+History navigation reads 20 first-parent commits per page and uses bounded
+tab-local anchors for the reverse links. Its fixed-size origin selector keeps
+shared older histories distinct; it is removed before the API request. Browser
+navigation stays on the displayed commit after a push, and never scans from the
+branch tip to reconstruct a missing newer page.
 
 Spin 4.1's affected OpenTelemetry SDK remains pinned pending its coordinated
 upstream upgrade. The optional Caddy host rejects oversized or overlong W3C

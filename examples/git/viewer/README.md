@@ -71,8 +71,12 @@ is listed in [THIRD_PARTY.md](../../../THIRD_PARTY.md).
 
 Branch tips and commits in the authorized repository catalog are selectable.
 Commit links retain branch context and open that commit's code. The Commits tab
-reads 20 first-parent summaries at a time, without loading trees or files. Earlier
-commits continues from the next parent, without rescanning from the branch tip.
+reads 20 first-parent summaries at a time, without loading trees or files. Older
+and newer links revisit those pages without rescanning from the branch tip. Paging
+stays on the displayed commits if the branch advances. The browser retains up to
+256 page anchors for the tab, including across reloads; it stores no credentials
+or file content. A direct link without a retained newer anchor can return to the
+branch tip instead.
 The UI shows 500 entries per directory and UTF-8 text previews up to 256 KiB. Binary and
 larger files show a summary. Symlinks show their stored target; submodules show
 their commit ID. Non-UTF-8 filenames appear as byte escapes without a browse link; valid sibling

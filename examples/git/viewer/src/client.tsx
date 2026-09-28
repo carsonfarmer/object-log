@@ -2,6 +2,7 @@ import { render } from "preact";
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
 import { LocationProvider, useLocation } from "preact-iso/router";
 
+import { HistoryPages } from "./history";
 import { repositoryName } from "./names";
 import type { Commit, Snapshot } from "./repository";
 
@@ -40,8 +41,17 @@ function CommitLink({ commit, branch }: { commit: Commit; branch: string }) {
   );
 }
 
-function History({ view }: { view: Snapshot }) {
+function History({ view, pages }: { view: Snapshot; pages: HistoryPages }) {
   const { query } = useLocation();
+  const first = view.history[0]?.id;
+  const origin =
+    query.origin?.length === first?.length && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(query.origin)
+      ? query.origin
+      : first;
+  const prefix = JSON.stringify([query.repo.replace(/\.git$/, ""), view.branch, origin]);
+  const previous = first ? pages.previous(prefix + first) : undefined;
+  const current = { ...query, ref: view.branch, commit: first ?? "", origin: origin ?? "" };
+  if (first && view.next) pages.remember(prefix + view.next, first);
   return (
     <section aria-label="Commits">
       <p class="muted">First-parent history</p>
@@ -56,9 +66,30 @@ function History({ view }: { view: Snapshot }) {
           </article>
         ))}
         {!view.history.length && <p class="empty">No commits yet.</p>}
-        {view.next && (
-          <article>
-            <a href={href({ ...query, commit: view.next })}>Earlier commits</a>
+        {(previous || view.next) && (
+          <article class="row tip pager">
+            {previous ? (
+              <a href={href({ ...current, commit: previous })}>← Newer commits</a>
+            ) : (
+              <span />
+            )}
+            {view.next && (
+              <a
+                href={href({ ...current, commit: view.next })}
+                onClick={(event) => {
+                  if (
+                    event.button === 0 &&
+                    !event.ctrlKey &&
+                    !event.metaKey &&
+                    !event.altKey &&
+                    !event.shiftKey
+                  )
+                    history.replaceState(null, "", href(current));
+                }}
+              >
+                Older commits →
+              </a>
+            )}
           </article>
         )}
       </div>
@@ -146,13 +177,19 @@ function Code({ view }: { view: Snapshot }) {
 function App() {
   const { url, query, route } = useLocation();
   const [authorization, setAuthorization] = useState({ header: "" });
-  const [result, setResult] = useState<{ view?: Snapshot; error?: string; status?: number }>({});
+  const [result, setResult] = useState<{
+    url?: string;
+    view?: Snapshot;
+    error?: string;
+    status?: number;
+  }>({});
   const tab = query.view === "commits" ? "commits" : "code";
   const [copied, setCopied] = useState(false);
+  const [pages] = useState(() => new HistoryPages());
   const cloneInput = useRef<HTMLInputElement>(null);
   const repository = query.repo ?? "";
   const valid = !!repositoryName(repository, location.origin);
-  const view = result.view;
+  const view = result.url === url ? result.view : undefined;
   const cloneURL = `${location.origin}/${repository}`;
 
   useLayoutEffect(() => {
@@ -162,14 +199,16 @@ function App() {
     const request = new AbortController();
     void (async () => {
       try {
-        const response = await fetch(`/_viewer/api${new URL(url, location.origin).search}`, {
+        const selectors = new URL(url, location.origin).searchParams;
+        selectors.delete("origin");
+        const response = await fetch(`/_viewer/api?${selectors}`, {
           headers: authorization.header ? { Authorization: authorization.header } : {},
           credentials: "omit",
           cache: "no-store",
           signal: request.signal,
         });
         const next = response.ok
-          ? { view: (await response.json()) as Snapshot }
+          ? { url, view: (await response.json()) as Snapshot }
           : {
               error: messages[response.status] ?? "Repository unavailable. Try again.",
               status: response.status,
@@ -320,7 +359,7 @@ function App() {
                 </div>
               </details>
             </div>
-            {tab === "commits" ? <History view={view} /> : <Code view={view} />}
+            {tab === "commits" ? <History view={view} pages={pages} /> : <Code view={view} />}
           </>
         )}
       </main>

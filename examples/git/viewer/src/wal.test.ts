@@ -406,11 +406,11 @@ for (const format of ["sha1", "sha256"] as const) {
       id = (n: number) => n.toString(16).padStart(width * 2, "0"),
       encode = (value: string) => new TextEncoder().encode(value);
     const objects = new Map<string, { kind: number; bytes: Uint8Array }>();
-    for (let i = 1; i <= 30; i++)
+    for (let i = 1; i <= 100; i++)
       objects.set(id(i), {
         kind: 1,
         bytes: encode(
-          `tree ${id(40)}\n${i > 1 ? `parent ${id(i - 1)}\n` : ""}author A <a@b> 1700000000 +0000\n\nCommit ${i}\n`,
+          `tree ${id(101)}\n${i > 1 ? `parent ${id(i - 1)}\n` : ""}author A <a@b> 1700000000 +0000\n\nCommit ${i}\n`,
         ),
       });
     const tree = (mode: string, name: string, target: number) => {
@@ -420,12 +420,12 @@ for (const format of ["sha1", "sha256"] as const) {
       bytes[bytes.length - 1] = target;
       return bytes;
     };
-    objects.set(id(40), { kind: 2, bytes: tree("40000", "src", 41) });
-    objects.set(id(41), { kind: 2, bytes: tree("100644", "README", 42) });
-    objects.set(id(42), { kind: 3, bytes: encode("selected content") });
+    objects.set(id(101), { kind: 2, bytes: tree("40000", "src", 102) });
+    objects.set(id(102), { kind: 2, bytes: tree("100644", "README", 103) });
+    objects.set(id(103), { kind: 3, bytes: encode("selected content") });
     const reads: string[] = [];
     const catalog = {
-      root: { Format: format, Head: "refs/heads/main", Refs: { "refs/heads/main": id(30) } },
+      root: { Format: format, Head: "refs/heads/main", Refs: { "refs/heads/main": id(100) } },
       object(key: string, kind: number) {
         reads.push(key);
         const object = objects.get(key);
@@ -437,7 +437,7 @@ for (const format of ["sha1", "sha256"] as const) {
     expect(view.branch).toBe("refs/heads/main");
     expect(view.history.map((commit) => commit.title)).toEqual(["Commit 25"]);
     expect(view.file?.text).toBe("selected content");
-    expect(reads).toEqual([id(25), id(40), id(41), id(42)]);
+    expect(reads).toEqual([id(25), id(101), id(102), id(103)]);
     reads.length = 0;
     const page = snapshot(
       catalog,
@@ -459,12 +459,30 @@ for (const format of ["sha1", "sha256"] as const) {
     expect(
       snapshot(catalog, new URLSearchParams({ commit: id(2), path: "src" })).entries[0]?.name,
     ).toBe("README");
-    expect(reads).toEqual([id(2), id(40), id(41)]);
-    for (const commit of [id(99), id(42)])
+    expect(reads).toEqual([id(2), id(101), id(102)]);
+    for (const commit of [id(104), id(103)])
       expect(() => snapshot(catalog, new URLSearchParams({ commit }))).toThrow(NotFound);
     expect(() =>
       snapshot(catalog, new URLSearchParams({ ref: "refs/heads/missing", commit: id(25) })),
     ).toThrow(NotFound);
+    const starts: string[] = [];
+    let start = id(100);
+    while (start) {
+      starts.push(start);
+      reads.length = 0;
+      const page = snapshot(catalog, new URLSearchParams({ commit: start, view: "commits" }));
+      expect(reads).toEqual(page.history.map((commit) => commit.id));
+      expect(reads).toHaveLength(20);
+      start = page.next;
+    }
+    expect(starts).toEqual([100, 80, 60, 40, 20].map(id));
+    for (const start of [...starts].reverse()) {
+      reads.length = 0;
+      const page = snapshot(catalog, new URLSearchParams({ commit: start, view: "commits" }));
+      expect(reads).toEqual(page.history.map((commit) => commit.id));
+      expect(reads).toHaveLength(20);
+      expect(page.history[0].id).toBe(start);
+    }
   });
 }
 

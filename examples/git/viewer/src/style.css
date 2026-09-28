@@ -182,6 +182,9 @@ article > a {
   background: #f6f8fa;
   justify-content: space-between;
 }
+.pager > a {
+  flex: none;
+}
 .commit-title {
   overflow: hidden;
   text-overflow: ellipsis;
