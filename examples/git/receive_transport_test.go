@@ -98,7 +98,7 @@ func TestReceiveFormat(t *testing.T) {
 			packet := bytes.Clone(prefix.Bytes())
 			input := append(bytes.Clone(packet), []byte("0000PACKpayload")...)
 			body := bytes.NewBuffer(input)
-			format, replay, err := receiveFormat(body, int64(len(packet)))
+			format, caps, replay, err := receiveFormat(body, int64(len(packet)))
 			if tc.want == "" {
 				if err == nil {
 					t.Fatal("invalid format accepted")
@@ -108,18 +108,21 @@ func TestReceiveFormat(t *testing.T) {
 			if err != nil || format != tc.want || body.Len() != len("0000PACKpayload") {
 				t.Fatalf("format=%s error=%v unread=%d", format, err, body.Len())
 			}
+			if caps.String() != tc.caps {
+				t.Fatalf("capabilities changed: %s", caps.String())
+			}
 			data, err := io.ReadAll(replay)
 			if err != nil || !bytes.Equal(data, input) {
 				t.Fatalf("push body was changed: %v", err)
 			}
-			if _, _, err := receiveFormat(bytes.NewReader(input), int64(len(packet)-1)); !errors.Is(err, errObjectLimit) {
+			if _, _, _, err := receiveFormat(bytes.NewReader(input), int64(len(packet)-1)); !errors.Is(err, errObjectLimit) {
 				t.Fatalf("negotiation limit: %v", err)
 			}
 		})
 	}
 	for _, input := range []string{"0000", string(packetForTest("shallow "+strings.Repeat("1", 40)+"\n")) + "0000"} {
-		format, replay, err := receiveFormat(strings.NewReader(input), int64(len(input)))
-		if err != nil || format != "" {
+		format, caps, replay, err := receiveFormat(strings.NewReader(input), int64(len(input)))
+		if err != nil || format != "" || caps != nil {
 			t.Fatalf("no-op push: format=%s error=%v", format, err)
 		}
 		data, err := io.ReadAll(replay)

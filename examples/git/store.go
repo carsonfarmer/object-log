@@ -31,6 +31,7 @@ type store struct {
 	writers []*byteWriter
 	storage.Storer
 	failure     error
+	progress    *receiveProgress
 	tailEntries uint64
 	session     *wal.Session
 	recovery    *wal.Recovery

@@ -46,6 +46,9 @@ func (p *incomingPack) Close() (err error) {
 	if p.err != nil {
 		return p.err
 	}
+	if err := p.s.progress.message("Checking received pack...\n"); err != nil {
+		return err
+	}
 	root, err := p.finish()
 	if err != nil {
 		return err
@@ -58,7 +61,10 @@ func (p *incomingPack) Close() (err error) {
 	}
 	defer reader.Close()
 	offsets := packOffsets{}
-	if err := importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits, offsets); err != nil {
+	if err := importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits, offsets, p.s.progress); err != nil {
+		return err
+	}
+	if err := p.s.progress.message("Indexing deltas...\n"); err != nil {
 		return err
 	}
 	remaining := p.s.limits.catalogBytes
