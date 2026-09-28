@@ -45,7 +45,10 @@ func advertise(w io.Writer, s *store, unknownFormat bool) error {
 		return err
 	}
 	adv := &packp.AdvRefs{}
-	for _, feature := range []string{capability.ReportStatus, capability.DeleteRefs, capability.OFSDelta, capability.Atomic, capability.NoThin} {
+	for _, feature := range []string{
+		capability.ReportStatus, capability.DeleteRefs, capability.OFSDelta,
+		capability.Atomic, capability.NoThin, capability.Sideband64k, capability.Quiet,
+	} {
 		adv.Capabilities.Add(feature)
 	}
 	adv.Capabilities.Set(capability.ObjectFormat, s.meta.Format.String())
@@ -166,8 +169,9 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
+	var pushCapabilities *capability.List
 	if service == transport.ReceivePackService && method == http.MethodPost {
-		format, body, err := receiveFormat(r.Body, limits.negotiationBytes)
+		format, capabilities, body, err := receiveFormat(r.Body, limits.negotiationBytes)
 		if err == nil && format != "" && route.Repository.Format != "" && route.Repository.Format != format {
 			err = config.ErrInvalidObjectFormat
 		}
@@ -186,6 +190,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			return
 		}
 		route.Repository.Format = format
+		pushCapabilities = capabilities
 		r.Body = gitio.NewReadCloser(body, r.Body)
 	}
 
@@ -352,11 +357,18 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		e = advertise(w, s, s.stateRoot == nil && route.Repository.Format == "")
 	} else if service == transport.ReceivePackService {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+		s.progress = newReceiveProgress(w, pushCapabilities, cancel)
 		commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
 		push := &receiveStore{Storer: s, commands: commands}
 		e = transport.ReceivePack(r.Context(), push, gitio.NewReadCloser(commands, r.Body), gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
 			if len(info.Commands) == 0 {
 				return nil
+			}
+			if s.progress != nil {
+				s.progress.writer = info.Progress
+			}
+			if err := s.progress.message("Validating update...\n"); err != nil {
+				return err
 			}
 			refs, e := validate(s, info.Commands)
 			if e != nil {
@@ -369,6 +381,9 @@ func serve(response http.ResponseWriter, r *http.Request) {
 						break
 					}
 				}
+			}
+			if err := s.progress.message("Publishing update...\n"); err != nil {
+				return err
 			}
 			e = s.publish(refs)
 			return e

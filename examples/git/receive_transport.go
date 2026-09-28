@@ -17,7 +17,7 @@ import (
 
 // Decode the first command with go-git, then replay its bounded prefix so the
 // ordinary receive-pack path still validates every command and the entire pack.
-func receiveFormat(body io.Reader, limit int64) (config.ObjectFormat, io.Reader, error) {
+func receiveFormat(body io.Reader, limit int64) (config.ObjectFormat, *capability.List, io.Reader, error) {
 	var prefix bytes.Buffer
 	scanner := pktline.NewScanner(&commandReader{io.LimitedReader{R: io.TeeReader(body, &prefix), N: limit}})
 	for scanner.Scan() {
@@ -26,35 +26,35 @@ func receiveFormat(body io.Reader, limit int64) (config.ObjectFormat, io.Reader,
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	replay := io.MultiReader(bytes.NewReader(prefix.Bytes()), body)
 	if prefix.Len() == 4 && scanner.Len() == pktline.Flush {
-		return "", replay, nil
+		return "", nil, replay, nil
 	}
 	request := &packp.UpdateRequests{}
 	if err := request.Decode(io.MultiReader(bytes.NewReader(prefix.Bytes()), strings.NewReader("0000"))); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if len(request.Commands) == 0 {
-		return "", replay, nil
+		return "", nil, replay, nil
 	}
 	formats := request.Capabilities.Get(capability.ObjectFormat)
 	format := config.SHA1
 	if request.Capabilities.Supports(capability.ObjectFormat) && len(formats) != 1 {
-		return "", nil, config.ErrInvalidObjectFormat
+		return "", nil, nil, config.ErrInvalidObjectFormat
 	}
 	if len(formats) == 1 {
 		format = config.ObjectFormat(formats[0])
 	}
 	if format != config.SHA1 && format != config.SHA256 {
-		return "", nil, config.ErrInvalidObjectFormat
+		return "", nil, nil, config.ErrInvalidObjectFormat
 	}
 	command := request.Commands[0]
 	if command.Old.HexSize() != format.HexSize() || command.New.HexSize() != format.HexSize() {
-		return "", nil, config.ErrInvalidObjectFormat
+		return "", nil, nil, config.ErrInvalidObjectFormat
 	}
-	return format, replay, nil
+	return format, &request.Capabilities, replay, nil
 }
 
 // ReceivePack opens the pack writer after decoding commands and push options.

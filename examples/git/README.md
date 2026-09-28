@@ -66,6 +66,12 @@ git clone http://127.0.0.1:19100/team/demo.git cloned-demo
 Git defaults to SHA-1. To use SHA-256, initialize the local repository with
 `git init --object-format=sha256`; its first push selects the remote format.
 
+Push progress shows pack checks, imported-object counts, delta indexing,
+validation, and publication. Import counts update about once a second as objects
+finish; final push status follows durable publication. Use `git push --progress`
+to request feedback when stderr is redirected. `-q` and `--no-progress` suppress
+these messages.
+
 Press Ctrl-C in the service terminal to stop Spin and MinIO and remove all demo
 data. Set `OBJECT_LOG_GIT_LOCAL_PORT` to choose another loopback port.
 To keep data or use an existing backend, build with `make git-build`, configure
