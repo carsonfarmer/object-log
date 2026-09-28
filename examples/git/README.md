@@ -23,84 +23,40 @@ service over HTTPS. Run the provider suite for your intended workload and host
 capacity before deployment. It is pre-release: use a fresh object-store prefix
 when changing incompatible revisions.
 
-## Build
+## Setup
 
 Install Go 1.27.1, the repository's pinned Rust toolchain, Spin CLI v4.1.0,
-`wac` v0.11.0, MinIO,
-and the AWS CLI. For a pinned MinIO container or a native source build, see
+`wac` v0.11.0, the AWS CLI, and either MinIO or Docker.
+For a pinned MinIO container or a native source build, see
 [the contributor setup](../../CONTRIBUTING.md). Then run from the repository root:
 
 ```sh
 rustup target add wasm32-wasip2
-make git-check
-make git-build
 ```
 
-`git-build` creates the Go component, builds the Rust WAL component, and composes
-both into `examples/git/git.wasm`. Spin loads that final file.
-The first build also compiles the pinned component build tool; later builds use
-the cached binary.
+The first build compiles the pinned component build tool; later builds use
+the cached binary. `make git-build` builds and composes the Go and Rust WAL
+components into `examples/git/git.wasm` without starting the service.
 
 ## Run locally
 
-Start an isolated MinIO instance in one terminal using the native binary from
-the contributor setup. The command prints its unique data directory; remove
-that directory after stopping MinIO:
+With the tools above installed, run from the repository root:
 
 ```sh
-minio_data="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-minio.XXXXXX")"
-echo "MinIO data: $minio_data"
-minio_binary="${OBJECT_LOG_MINIO_BINARY:-$(go env GOPATH)/bin/minio}"
-MINIO_ROOT_USER=objectlog MINIO_ROOT_PASSWORD=local-test-secret \
-  "$minio_binary" server "$minio_data" --address 127.0.0.1:19090
+make git-local
 ```
 
-In another terminal, create the bucket and a protected Spin variables file.
-Each run gets a new WAL prefix:
-
-```sh
-local_config="$(mktemp -d "${TMPDIR:-/tmp}/object-log-git-config.XXXXXX")"
-AWS_ACCESS_KEY_ID=objectlog AWS_SECRET_ACCESS_KEY=local-test-secret \
-  AWS_DEFAULT_REGION=us-east-1 aws --endpoint-url http://127.0.0.1:19090 \
-  s3api create-bucket --bucket wal-proof
-test_id="local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-(
-  umask 077
-  cat >"$local_config/variables.toml" <<EOF_VARS
-wal_prefix = "$test_id"
-wal_access_key = "objectlog"
-wal_secret_key = "local-test-secret"
-git_boot_id = "$test_id"
-git_auth_mode = "password"
-git_password = "local-git-password"
-EOF_VARS
-)
-```
-
-Start the service:
-
-```sh
-cd examples/git
-spin up --listen 127.0.0.1:19100 \
-  --variable "@$local_config/variables.toml" 2>&1 | tee /tmp/object-log-git-spin.log
-```
-
-Before sending Git traffic, validate the same MinIO settings from another
-terminal. A failed probe returns HTTP 503; fix the backend before serving:
-
-```sh
-curl --fail-with-body -u git:local-git-password \
-  -X POST http://127.0.0.1:19100/_validate_backend
-```
-
-The repositories are available at:
+This builds the service, starts isolated MinIO and Spin instances, creates the
+bucket, and validates storage before printing the Git URLs. It uses a native
+MinIO binary when available, otherwise the pinned Docker image. No AWS account
+is involved. The default URLs are:
 
 ```text
 http://127.0.0.1:19100/sha1.git
 http://127.0.0.1:19100/sha256.git
 ```
 
-Initialize a repository with its first push. Enter `git` and the local password
+Initialize a repository with its first push. Enter `git` and `local-git-password`
 when Git prompts. Reads never create repositories:
 
 ```sh
@@ -114,8 +70,11 @@ cd ..
 git clone http://127.0.0.1:19100/sha256.git cloned-demo
 ```
 
-When finished, stop Spin and MinIO, then remove `"$local_config"` and the
-printed MinIO data directory.
+Press Ctrl-C in the service terminal to stop Spin and MinIO and remove all demo
+data. Set `OBJECT_LOG_GIT_LOCAL_PORT` to choose another loopback port.
+To keep data or use an existing backend, build with `make git-build`, configure
+the variables below, and run Spin directly. Call `POST /_validate_backend` with
+administrator credentials before serving traffic.
 
 The local `password` mode uses HTTP Basic authentication; the username is
 ignored. An empty password is a configuration error. Anonymous access requires
@@ -126,7 +85,8 @@ rewrite branches.
 
 ## Configuration
 
-All values are Spin variables. The defaults target the local MinIO setup above.
+All values are Spin variables. The local helper fills the endpoint and
+credentials for its disposable MinIO instance.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -248,11 +208,12 @@ and restart it before the first suite run or a rerun:
 ```sh
 GIT_PROBE_URL=http://127.0.0.1:19100 \
 GIT_PROBE_PASSWORD=local-git-password \
-GIT_PROBE_LOG=/tmp/object-log-git-spin.log make git-provider-test
+GIT_PROBE_LOG=/path/to/printed/spin.log make git-provider-test
 ```
 
 Set `GIT_PROBE_PASSWORD` and `GIT_PROBE_BRANCH` when those values are configured.
-`GIT_PROBE_LOG` supplies per-request storage counters when Spin omits HTTP trailers.
+Use the Spin log path printed by `make git-local` for `GIT_PROBE_LOG`; it supplies
+per-request storage counters when Spin omits HTTP trailers.
 The provider suite uses installed Git as an independent protocol and integrity
 oracle. Larger opt-in cases are controlled by these environment variables:
 
