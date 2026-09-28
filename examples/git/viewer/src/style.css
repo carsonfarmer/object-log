@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light;
   font:
     14px / 1.5 system-ui,
     sans-serif;
@@ -7,6 +8,9 @@
 }
 * {
   box-sizing: border-box;
+}
+svg {
+  flex-shrink: 0;
 }
 body {
   margin: 0;
@@ -90,6 +94,14 @@ h2 {
   border-radius: 6px;
   overflow: hidden;
 }
+p.panel {
+  padding: 16px 24px;
+  overflow-wrap: anywhere;
+}
+.panel + .panel,
+p[role="status"] + .panel {
+  margin-top: 16px;
+}
 form.panel {
   display: grid;
   gap: 12px;
@@ -143,6 +155,34 @@ p {
 .toolbar select {
   max-width: 220px;
 }
+.select-control {
+  position: relative;
+  display: inline-flex;
+}
+.select-control select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 32px;
+}
+.select-control svg {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+}
+summary::-webkit-details-marker {
+  display: none;
+}
+summary svg:last-child {
+  margin-left: 8px;
+}
 details {
   position: relative;
   margin-left: auto;
@@ -185,11 +225,26 @@ article > strong {
   background: #f6f8fa;
   justify-content: space-between;
 }
+.commit-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.commit-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
 code,
 pre {
   font:
     12px / 1.65 ui-monospace,
     monospace;
+}
+.commit-link code {
+  flex-shrink: 0;
 }
 pre {
   margin: 0;
@@ -218,7 +273,7 @@ pre {
   .toolbar {
     gap: 8px;
   }
-  article code {
+  article > code {
     display: none;
   }
 }

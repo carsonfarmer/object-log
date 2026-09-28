@@ -4,11 +4,25 @@ import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { Commit, Snapshot } from "./repository";
 
 const messages: Record<number, string> = {
-  400: "Invalid repository, branch or path.",
+  400: "Invalid repository, branch, commit or path.",
   401: "Authentication required.",
   403: "This credential cannot read this repository.",
-  404: "Repository or path not found.",
+  404: "Repository, commit or path not found.",
 };
+
+function Icon({ kind }: { kind: "folder" | "file" | "code" | "chevron" }) {
+  const paths = {
+    folder: "M2 4h5l2 2h5v7H2z",
+    file: "M4 2h5l3 3v9H4zM9 2v4h3",
+    code: "M6 4 2 8l4 4m4-8 4 4-4 4",
+    chevron: "m4 6 4 4 4-4",
+  };
+  return (
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <path d={paths[kind]} stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 function validRepository(name: string): boolean {
   return (
@@ -21,22 +35,23 @@ function validRepository(name: string): boolean {
   );
 }
 
-function History({ commits }: { commits: Commit[] }) {
+function History({ commits, link }: { commits: Commit[]; link: (commit: Commit) => VNode }) {
   return (
     <section aria-label="Recent commits">
-      <p class="muted">Recent commits on this branch · first parent</p>
+      <p class="muted">
+        Recent commits · first parent · select a commit to explore earlier history
+      </p>
       <div class="panel">
         {commits.length ? (
           commits.map((commit) => (
             <article key={commit.id}>
               <div>
-                <strong>{commit.title || "Untitled commit"}</strong>
+                {link(commit)}
                 <p class="muted">
                   {commit.author || "Unknown author"} committed on{" "}
                   <time dateTime={commit.date}>{new Date(commit.date).toLocaleDateString()}</time>
                 </p>
               </div>
-              <code>{commit.id.slice(0, 7)}</code>
             </article>
           ))
         ) : (
@@ -51,10 +66,12 @@ function Code({
   view,
   repository,
   link,
+  commitLink,
 }: {
   view: Snapshot;
   repository: string;
   link: (label: string, path: string) => VNode;
+  commitLink: (commit: Commit) => VNode;
 }) {
   return (
     <section aria-label="Code">
@@ -68,12 +85,7 @@ function Code({
         ))}
       </nav>
       <div class="panel">
-        {view.history[0] && (
-          <article class="tip">
-            <strong>{view.history[0].title || "Untitled commit"}</strong>
-            <code>{view.history[0].id.slice(0, 7)}</code>
-          </article>
-        )}
+        {view.history[0] && <article class="tip">{commitLink(view.history[0])}</article>}
         {view.file ? (
           <>
             <article class="tip">
@@ -96,6 +108,12 @@ function Code({
           <p class="empty">This repository is empty. Push a branch to start exploring.</p>
         ) : (
           <>
+            {view.path && (
+              <article>
+                <Icon kind="folder" />
+                {link("..", view.path.split("/").slice(0, -1).join("/"))}
+              </article>
+            )}
             {[...view.entries]
               .sort(
                 (a, b) =>
@@ -104,7 +122,7 @@ function Code({
               )
               .map((entry) => (
                 <article key={`${entry.unavailable ? "bytes" : "text"}:${entry.name}`}>
-                  <span aria-hidden="true">{entry.kind === "directory" ? "▸" : "·"}</span>
+                  <Icon kind={entry.kind === "directory" ? "folder" : "file"} />
                   {entry.unavailable ? (
                     <span title="This filename is not UTF-8">{entry.name}</span>
                   ) : (
@@ -177,11 +195,10 @@ function App() {
     history.pushState(null, "", `?${params}`);
     setSearch(location.search);
   }
-  function pathLink(label: string, path: string) {
-    const params = new URLSearchParams(search);
-    params.set("path", path);
+  function link(params: URLSearchParams, label: string | VNode, className?: string) {
     return (
       <a
+        class={className}
         href={`?${params}`}
         onClick={(event) => {
           if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)
@@ -192,6 +209,23 @@ function App() {
       >
         {label}
       </a>
+    );
+  }
+  function pathLink(label: string, path: string) {
+    const params = new URLSearchParams(search);
+    params.set("path", path);
+    return link(params, label);
+  }
+  function commitLink(commit: Commit) {
+    return link(
+      new URLSearchParams({ repo: repository, ref: view?.branch ?? "", commit: commit.id }),
+      <>
+        <code>{commit.id.slice(0, 7)}</code>
+        <span class="commit-title" title={commit.title}>
+          {commit.title || "Untitled commit"}
+        </span>
+      </>,
+      "commit-link",
     );
   }
 
@@ -224,13 +258,16 @@ function App() {
         ) : !view ? (
           <>
             <p role="status">{result.error ?? "Loading repository…"}</p>
-            {result.status === 404 && !query.get("ref") && !query.get("path") && (
-              <p class="panel">
-                Push your first branch to create this repository:
-                <br />
-                <code>git push {cloneURL} HEAD</code>
-              </p>
-            )}
+            {result.status === 404 &&
+              !query.get("ref") &&
+              !query.get("commit") &&
+              !query.get("path") && (
+                <p class="panel">
+                  Push your first branch to create this repository:
+                  <br />
+                  <code>git push {cloneURL} HEAD</code>
+                </p>
+              )}
             {result.error && (
               <form
                 class="panel"
@@ -290,27 +327,34 @@ function App() {
             <div class="toolbar">
               <label>
                 Branch
-                <select
-                  value={view.branch}
-                  disabled={!view.branches.length}
-                  onChange={(event) =>
-                    navigate(
-                      new URLSearchParams({ repo: repository, ref: event.currentTarget.value }),
-                    )
-                  }
-                >
-                  {view.branches.map((ref) => (
-                    <option key={ref} value={ref}>
-                      {ref.replace(/^refs\/heads\//, "")}
-                    </option>
-                  ))}
-                </select>
+                <span class="select-control">
+                  <select
+                    value={view.branch}
+                    disabled={!view.branches.length}
+                    onChange={(event) =>
+                      navigate(
+                        new URLSearchParams({ repo: repository, ref: event.currentTarget.value }),
+                      )
+                    }
+                  >
+                    {view.branches.map((ref) => (
+                      <option key={ref} value={ref}>
+                        {ref.replace(/^refs\/heads\//, "")}
+                      </option>
+                    ))}
+                  </select>
+                  <Icon kind="chevron" />
+                </span>
               </label>
               <span class="muted">
                 {view.branches.length} {view.branches.length === 1 ? "branch" : "branches"}
               </span>
+              {query.has("commit") &&
+                link(new URLSearchParams({ repo: repository, ref: view.branch }), "Branch tip")}
               <details>
-                <summary>Clone</summary>
+                <summary>
+                  <Icon kind="code" /> Code <Icon kind="chevron" />
+                </summary>
                 <div class="clone-box">
                   <label>
                     Clone URL
@@ -333,9 +377,9 @@ function App() {
               </details>
             </div>
             {tab === "commits" ? (
-              <History commits={view.history} />
+              <History commits={view.history} link={commitLink} />
             ) : (
-              <Code view={view} repository={repository} link={pathLink} />
+              <Code view={view} repository={repository} link={pathLink} commitLink={commitLink} />
             )}
           </>
         )}

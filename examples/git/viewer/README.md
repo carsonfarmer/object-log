@@ -37,7 +37,7 @@ TOML or restarting. Browsing a missing repository creates nothing. Bare names
 and their `.git` URLs select the same repository. Exact policies may override
 permissions or pin a WAL identity, format or default branch.
 
-Credentials stay in page memory and clear on reload. Branch and path selections
+Credentials stay in page memory and clear on reload. Branch, commit and path selections
 stay in the URL. Press Ctrl-C in the startup terminal to stop both services and
 remove their disposable data. Each restart begins with empty storage.
 
@@ -47,8 +47,8 @@ For an existing backend, use `bun run build`, then follow the
 
 Hosted proxies must forward `/`, `/_viewer/api`, `/_viewer/client.js` and
 `/_viewer/style.css` to Spin. `GET /_viewer/api` takes `repo` and optional
-`ref` and `path` query parameters. Git traffic goes directly to the Git component;
-the viewer has no repository-creation endpoint.
+`ref`, `commit` (full SHA-1 or SHA-256 hash) and `path` query parameters. Git traffic
+goes directly to the Git component; the viewer has no repository-creation endpoint.
 
 ## Build and checks
 
@@ -68,8 +68,10 @@ is listed in [THIRD_PARTY.md](../../../THIRD_PARTY.md).
 
 ## Scope
 
-Only branch tips are selectable. The UI shows eight first-parent commits,
-500 entries per directory and UTF-8 text previews up to 256 KiB. Binary and
+Branch tips and commits in the authorized repository catalog are selectable.
+Commit links retain branch context and load that commit's tree and eight first-parent
+summaries; selecting an older entry continues history without scanning from the tip.
+The UI shows 500 entries per directory and UTF-8 text previews up to 256 KiB. Binary and
 larger files show a summary. Symlinks show their stored target; submodules show
 their commit ID. Non-UTF-8 filenames appear as byte escapes without a browse link; valid sibling
 files remain browsable. Names and file content render as text. Git metadata reads are

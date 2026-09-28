@@ -17,9 +17,9 @@ mock.module("object-log:storage/wal@0.1.0", () => ({
 mock.module("@spinframework/spin-variables", () => ({
   get: (name: string) => (name === "git_repositories" ? policies : ""),
 }));
-const { Catalog } = await import("./wal");
+const { Catalog, MissingObject } = await import("./wal");
 const { browse } = await import("./api");
-const { snapshot } = await import("./repository");
+const { NotFound, snapshot } = await import("./repository");
 const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -262,6 +262,20 @@ test("large preview reads only metadata", () => {
   expect(sample.counts().reads).toBe(0);
 });
 
+test("a catalogued blob cannot be selected as a commit", () => {
+  const raw = new TextEncoder().encode("blob 3\0abc"),
+    sample = fixture("sha256", raw, zlibSync(raw));
+  sample.catalog.root.Refs["refs/heads/main"] = "22".repeat(32);
+  try {
+    expect(() => snapshot(sample.catalog, new URLSearchParams({ commit: sample.id }))).toThrow(
+      NotFound,
+    );
+  } finally {
+    sample.catalog.close();
+  }
+  expect(sample.counts()).toEqual({ reads: 0, drops: 3 });
+});
+
 test("Git authorization completes before viewer storage is opened", async () => {
   const baseline = opened;
   globalThis.fetch = mock(async (input: RequestInfo | URL, options?: RequestInit) => {
@@ -273,7 +287,7 @@ test("Git authorization completes before viewer storage is opened", async () => 
     return new Response("Denied", { status: 403 });
   }) as unknown as typeof fetch;
   const response = await browse(
-    new Request("https://viewer.test/_viewer/api?repo=team/demo.git", {
+    new Request(`https://viewer.test/_viewer/api?repo=team/demo.git&commit=${"11".repeat(32)}`, {
       headers: { Authorization: "Bearer test-token" },
     }),
   );
@@ -291,6 +305,98 @@ test("Git authorization completes before viewer storage is opened", async () => 
   ).toBe(400);
   expect(opened).toBe(baseline);
 });
+
+test("commit queries reject malformed selectors before authorization and return 404 for missing IDs", async () => {
+  const baseline = opened;
+  globalThis.fetch = mock(async () => {
+    throw new Error("Unexpected discovery");
+  }) as unknown as typeof fetch;
+  for (const selector of [
+    "",
+    "1234567",
+    "AA".repeat(20),
+    "11".repeat(21),
+    `${"11".repeat(20)}&commit=${"22".repeat(20)}`,
+  ])
+    expect(
+      (
+        await browse(
+          new Request(`https://viewer.test/_viewer/api?repo=team/demo.git&commit=${selector}`),
+        )
+      ).status,
+    ).toBe(400);
+  expect(opened).toBe(baseline);
+  globalThis.fetch = mock(async () => discovery()) as unknown as typeof fetch;
+  openSession = () => emptySession("sha256", { Refs: { "refs/heads/main": "22".repeat(32) } });
+  for (const selector of ["11".repeat(32), "11".repeat(20)])
+    expect(
+      (
+        await browse(
+          new Request(`https://viewer.test/_viewer/api?repo=team/demo.git&commit=${selector}`),
+        )
+      ).status,
+    ).toBe(404);
+});
+
+for (const format of ["sha1", "sha256"] as const) {
+  test(`${format}: commit selection lazily reads its history and requested path without scanning the branch tip`, () => {
+    const width = format === "sha1" ? 20 : 32,
+      id = (n: number) => n.toString(16).padStart(width * 2, "0"),
+      encode = (value: string) => new TextEncoder().encode(value);
+    const objects = new Map<string, { kind: number; bytes: Uint8Array }>();
+    for (let i = 1; i <= 12; i++)
+      objects.set(id(i), {
+        kind: 1,
+        bytes: encode(
+          `tree ${id(20)}\n${i > 1 ? `parent ${id(i - 1)}\n` : ""}author A <a@b> 1700000000 +0000\n\nCommit ${i}\n`,
+        ),
+      });
+    const tree = (mode: string, name: string, target: number) => {
+      const header = encode(`${mode} ${name}\0`),
+        bytes = new Uint8Array(header.length + width);
+      bytes.set(header);
+      bytes[bytes.length - 1] = target;
+      return bytes;
+    };
+    objects.set(id(20), { kind: 2, bytes: tree("40000", "src", 21) });
+    objects.set(id(21), { kind: 2, bytes: tree("100644", "README", 22) });
+    objects.set(id(22), { kind: 3, bytes: encode("selected content") });
+    const reads: string[] = [];
+    const catalog = {
+      root: { Format: format, Head: "refs/heads/main", Refs: { "refs/heads/main": id(12) } },
+      object(key: string, kind: number) {
+        reads.push(key);
+        const object = objects.get(key);
+        if (!object || object.kind !== kind) throw new MissingObject();
+        return { size: object.bytes.length, bytes: object.bytes };
+      },
+    } as unknown as InstanceType<typeof Catalog>;
+    const view = snapshot(catalog, new URLSearchParams({ commit: id(9), path: "src/README" }));
+    expect(view.branch).toBe("refs/heads/main");
+    expect(view.history.map((commit) => commit.title)).toEqual(
+      Array.from({ length: 8 }, (_, i) => `Commit ${9 - i}`),
+    );
+    expect(view.file?.text).toBe("selected content");
+    expect(reads).toEqual([
+      ...Array.from({ length: 8 }, (_, i) => id(9 - i)),
+      id(20),
+      id(21),
+      id(22),
+    ]);
+    reads.length = 0;
+    expect(
+      snapshot(catalog, new URLSearchParams({ commit: id(2), path: "src" })).history.map(
+        (commit) => commit.id,
+      ),
+    ).toEqual([id(2), id(1)]);
+    expect(reads).toEqual([id(2), id(1), id(20), id(21)]);
+    for (const commit of [id(99), id(22)])
+      expect(() => snapshot(catalog, new URLSearchParams({ commit }))).toThrow(NotFound);
+    expect(() =>
+      snapshot(catalog, new URLSearchParams({ ref: "refs/heads/missing", commit: id(9) })),
+    ).toThrow(NotFound);
+  });
+}
 
 test("unusual filenames remain listed without hiding valid siblings", () => {
   const encode = (value: string) => new TextEncoder().encode(value);
