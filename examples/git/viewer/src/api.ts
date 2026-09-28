@@ -9,10 +9,11 @@ export async function browse(request: Request): Promise<Response> {
   if (
     [...query].some(
       ([key, value]) =>
-        !["repo", "ref", "commit", "path"].includes(key) ||
+        !["repo", "ref", "commit", "path", "view"].includes(key) ||
         query.getAll(key).length !== 1 ||
         value.length > 4096,
     ) ||
+    (query.has("view") && !["code", "commits"].includes(query.get("view") ?? "")) ||
     (query.has("commit") && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(query.get("commit") ?? "")) ||
     parts.length > 64 ||
     parts.some((part) => !part || part === "." || part === ".." || part.includes("\0"))
@@ -32,7 +33,10 @@ export async function browse(request: Request): Promise<Response> {
   const authorized = await fetch(
     `http://git.spin.internal/${name}/info/refs?service=git-upload-pack`,
     {
-      headers: { Authorization: request.headers.get("Authorization") ?? "" },
+      headers: {
+        Authorization: request.headers.get("Authorization") ?? "",
+        "Git-Protocol": "version=2",
+      },
       redirect: "manual",
     },
   );

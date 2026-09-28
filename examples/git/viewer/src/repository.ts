@@ -74,6 +74,7 @@ function tree(catalog: Catalog, id: string) {
 }
 
 export function snapshot(catalog: Catalog, query: URLSearchParams) {
+  const history = query.get("view") === "commits";
   const branches = Object.keys(catalog.root.Refs)
     .filter((ref) => ref.startsWith("refs/heads/"))
     .sort();
@@ -86,6 +87,7 @@ export function snapshot(catalog: Catalog, query: URLSearchParams) {
     branches,
     path: query.get("path") ?? "",
     history: [] as Commit[],
+    next: "",
     entries: [] as TreeEntry[],
     more: false,
     file: undefined as FilePreview | undefined,
@@ -98,7 +100,7 @@ export function snapshot(catalog: Catalog, query: URLSearchParams) {
   let id = selected || catalog.root.Refs[branch],
     tip = "";
   try {
-    for (let i = 0; id && i < 8; i++) {
+    for (let i = 0; id && i < (history ? 20 : 1); i++) {
       const current = commit(catalog, id);
       if (i === 0) tip = current.tree;
       view.history.push(current.summary);
@@ -107,6 +109,10 @@ export function snapshot(catalog: Catalog, query: URLSearchParams) {
   } catch (error) {
     if (!view.history.length && selected && error instanceof MissingObject) throw new NotFound();
     throw error;
+  }
+  if (history) {
+    view.next = id;
+    return view;
   }
   let entries = tree(catalog, tip);
   const parts = view.path ? view.path.split("/") : [];

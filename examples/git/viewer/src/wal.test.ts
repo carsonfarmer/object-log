@@ -315,7 +315,10 @@ test("Git authorization completes before viewer storage is opened", async () => 
     expect(String(input)).toBe(
       "http://git.spin.internal/team/demo.git/info/refs?service=git-upload-pack",
     );
-    expect(options?.headers).toEqual({ Authorization: "Bearer test-token" });
+    expect(options?.headers).toEqual({
+      Authorization: "Bearer test-token",
+      "Git-Protocol": "version=2",
+    });
     expect(options?.redirect).toBe("manual");
     return new Response("Denied", { status: 403 });
   }) as unknown as typeof fetch;
@@ -336,6 +339,11 @@ test("Git authorization completes before viewer storage is opened", async () => 
     (await browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git&path=..")))
       .status,
   ).toBe(400);
+  for (const view of ["", "unknown", "commits&view=code"])
+    expect(
+      (await browse(new Request(`https://viewer.test/_viewer/api?repo=team/demo.git&view=${view}`)))
+        .status,
+    ).toBe(400);
   expect(opened).toBe(baseline);
 });
 
@@ -393,16 +401,16 @@ test("commit queries reject malformed selectors before authorization and return 
 });
 
 for (const format of ["sha1", "sha256"] as const) {
-  test(`${format}: commit selection lazily reads its history and requested path without scanning the branch tip`, () => {
+  test(`${format}: Code reads the selected path and Commits reads only its history page`, () => {
     const width = format === "sha1" ? 20 : 32,
       id = (n: number) => n.toString(16).padStart(width * 2, "0"),
       encode = (value: string) => new TextEncoder().encode(value);
     const objects = new Map<string, { kind: number; bytes: Uint8Array }>();
-    for (let i = 1; i <= 12; i++)
+    for (let i = 1; i <= 30; i++)
       objects.set(id(i), {
         kind: 1,
         bytes: encode(
-          `tree ${id(20)}\n${i > 1 ? `parent ${id(i - 1)}\n` : ""}author A <a@b> 1700000000 +0000\n\nCommit ${i}\n`,
+          `tree ${id(40)}\n${i > 1 ? `parent ${id(i - 1)}\n` : ""}author A <a@b> 1700000000 +0000\n\nCommit ${i}\n`,
         ),
       });
     const tree = (mode: string, name: string, target: number) => {
@@ -412,12 +420,12 @@ for (const format of ["sha1", "sha256"] as const) {
       bytes[bytes.length - 1] = target;
       return bytes;
     };
-    objects.set(id(20), { kind: 2, bytes: tree("40000", "src", 21) });
-    objects.set(id(21), { kind: 2, bytes: tree("100644", "README", 22) });
-    objects.set(id(22), { kind: 3, bytes: encode("selected content") });
+    objects.set(id(40), { kind: 2, bytes: tree("40000", "src", 41) });
+    objects.set(id(41), { kind: 2, bytes: tree("100644", "README", 42) });
+    objects.set(id(42), { kind: 3, bytes: encode("selected content") });
     const reads: string[] = [];
     const catalog = {
-      root: { Format: format, Head: "refs/heads/main", Refs: { "refs/heads/main": id(12) } },
+      root: { Format: format, Head: "refs/heads/main", Refs: { "refs/heads/main": id(30) } },
       object(key: string, kind: number) {
         reads.push(key);
         const object = objects.get(key);
@@ -425,29 +433,37 @@ for (const format of ["sha1", "sha256"] as const) {
         return { size: object.bytes.length, bytes: object.bytes };
       },
     } as unknown as InstanceType<typeof Catalog>;
-    const view = snapshot(catalog, new URLSearchParams({ commit: id(9), path: "src/README" }));
+    const view = snapshot(catalog, new URLSearchParams({ commit: id(25), path: "src/README" }));
     expect(view.branch).toBe("refs/heads/main");
-    expect(view.history.map((commit) => commit.title)).toEqual(
-      Array.from({ length: 8 }, (_, i) => `Commit ${9 - i}`),
-    );
+    expect(view.history.map((commit) => commit.title)).toEqual(["Commit 25"]);
     expect(view.file?.text).toBe("selected content");
-    expect(reads).toEqual([
-      ...Array.from({ length: 8 }, (_, i) => id(9 - i)),
-      id(20),
-      id(21),
-      id(22),
-    ]);
+    expect(reads).toEqual([id(25), id(40), id(41), id(42)]);
+    reads.length = 0;
+    const page = snapshot(
+      catalog,
+      new URLSearchParams({ commit: id(25), path: "src/README", view: "commits" }),
+    );
+    expect(page.history.map((commit) => commit.id)).toEqual(
+      Array.from({ length: 20 }, (_, i) => id(25 - i)),
+    );
+    expect(page.file).toBeUndefined();
+    expect(page.entries).toEqual([]);
+    expect(page.next).toBe(id(5));
+    expect(reads).toEqual(page.history.map((commit) => commit.id));
+    reads.length = 0;
+    const older = snapshot(catalog, new URLSearchParams({ commit: page.next, view: "commits" }));
+    expect(older.history.map((commit) => commit.id)).toEqual([5, 4, 3, 2, 1].map(id));
+    expect(older.next).toBe("");
+    expect(reads).toEqual(older.history.map((commit) => commit.id));
     reads.length = 0;
     expect(
-      snapshot(catalog, new URLSearchParams({ commit: id(2), path: "src" })).history.map(
-        (commit) => commit.id,
-      ),
-    ).toEqual([id(2), id(1)]);
-    expect(reads).toEqual([id(2), id(1), id(20), id(21)]);
-    for (const commit of [id(99), id(22)])
+      snapshot(catalog, new URLSearchParams({ commit: id(2), path: "src" })).entries[0]?.name,
+    ).toBe("README");
+    expect(reads).toEqual([id(2), id(40), id(41)]);
+    for (const commit of [id(99), id(42)])
       expect(() => snapshot(catalog, new URLSearchParams({ commit }))).toThrow(NotFound);
     expect(() =>
-      snapshot(catalog, new URLSearchParams({ ref: "refs/heads/missing", commit: id(9) })),
+      snapshot(catalog, new URLSearchParams({ ref: "refs/heads/missing", commit: id(25) })),
     ).toThrow(NotFound);
   });
 }
