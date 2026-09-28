@@ -142,6 +142,23 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             assert_eq!(stable.usage().calls, before.calls + 1);
             assert_eq!(stable.usage().bytes, before.bytes);
         }
+        "/checkpoint" => {
+            let session = wal::open_existing(&settings)?;
+            let recovery = session.recover()?;
+            while recovery.next()?.is_some() {}
+            assert!(matches!(
+                recovery.checkpoint(b"snapshot", &[])?,
+                wal::CheckpointOutcome::Published
+            ));
+            let current = session.refresh()?;
+            let recovery = current.recover()?;
+            let Some(wal::HistoryItem::Checkpoint(entry)) = recovery.next()? else {
+                panic!("missing recovered checkpoint")
+            };
+            assert_eq!(entry.data, b"snapshot");
+            assert!(entry.objects.is_empty());
+            assert!(recovery.next()?.is_none());
+        }
         "/missing" => {
             assert!(matches!(
                 wal::open_existing(&settings),

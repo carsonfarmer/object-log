@@ -62,7 +62,13 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
         .unwrap();
     append(&mut s, vec![live.clone(), old.clone()]).await;
     assert!(matches!(
-        maintenance::checkpoint(&s.log, &s.current_view(), vec![], vec![live.clone()])
+        s.log
+            .publish_checkpoint(
+                &s.current_view(),
+                s.current_view().tail().last().unwrap(),
+                Bytes::from(vec![]),
+                vec![live.clone()]
+            )
             .await
             .unwrap(),
         CheckpointStatus::Published(_)
@@ -175,10 +181,16 @@ async fn recovered_view_checkpoints_prefix_and_preserves_concurrent_append() {
     while recovery.next().await.unwrap().is_some() {}
     append(&mut s, vec![]).await;
     let current = s.current_view();
-    let CheckpointStatus::Published(checkpointed) =
-        maintenance::checkpoint(&s.log, recovery.view(), vec![], vec![])
-            .await
-            .unwrap()
+    let CheckpointStatus::Published(checkpointed) = s
+        .log
+        .publish_checkpoint(
+            recovery.view(),
+            recovery.view().tail().last().unwrap(),
+            Bytes::from(vec![]),
+            vec![],
+        )
+        .await
+        .unwrap()
     else {
         panic!("checkpoint did not preserve the appended suffix");
     };
@@ -207,16 +219,22 @@ async fn pending_checkpoint_keeps_exact_evidence_until_resolution() {
         occurrence: 2,
         phase: FailurePhase::After,
     });
-    let CheckpointStatus::Pending(pending) =
-        maintenance::checkpoint(&s.log, &view, b"snapshot".to_vec(), Vec::new())
-            .await
-            .unwrap()
+    let CheckpointStatus::Pending(pending) = s
+        .log
+        .publish_checkpoint(
+            &view,
+            view.tail().last().unwrap(),
+            Bytes::from(b"snapshot".to_vec()),
+            Vec::new(),
+        )
+        .await
+        .unwrap()
     else {
         panic!("checkpoint outcome was not uncertain")
     };
     let pending = PendingCheckpointState {
         log: s.log.clone(),
-        pending: RefCell::new(Some(pending)),
+        value: RefCell::new(Some(pending)),
     };
 
     faults.reset();
@@ -231,14 +249,14 @@ async fn pending_checkpoint_keeps_exact_evidence_until_resolution() {
         GuestPendingCheckpoint::resolve(&pending).unwrap(),
         CheckpointResolution::StillPending
     );
-    assert!(pending.pending.borrow().is_some());
+    assert!(pending.value.borrow().is_some());
 
     faults.reset();
     assert_eq!(
         GuestPendingCheckpoint::resolve(&pending).unwrap(),
         CheckpointResolution::Published
     );
-    assert!(pending.pending.borrow().is_none());
+    assert!(pending.value.borrow().is_none());
 }
 
 #[tokio::test]
@@ -291,7 +309,7 @@ async fn candidate_token_precedes_single_use_publication_and_resumes() {
         .unwrap();
     let candidate = CandidateState {
         log: s.log.clone(),
-        prepared: RefCell::new(Some(prepared)),
+        value: RefCell::new(Some(prepared)),
     };
     let token = GuestCandidate::recovery_token(&candidate).unwrap();
     assert!(matches!(
@@ -317,10 +335,19 @@ async fn candidate_token_precedes_single_use_publication_and_resumes() {
 #[tokio::test]
 async fn recovery_requires_the_end_of_history_before_writing() {
     let mut s = session().await;
+    let empty = RecoveryState {
+        log: s.log.clone(),
+        value: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
+    };
+    assert!(GuestRecovery::next(&empty).unwrap().is_none());
+    assert!(matches!(
+        GuestRecovery::checkpoint(&empty, vec![], vec![]),
+        Err(Failure::Other(message)) if message == "checkpoint requires an active tail"
+    ));
     append(&mut s, vec![]).await;
     let recovery = RecoveryState {
         log: s.log.clone(),
-        cursor: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
+        value: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
     };
     let transaction = uuid::Uuid::from_u128(42).as_bytes().to_vec();
     assert!(matches!(
@@ -332,7 +359,7 @@ async fn recovery_requires_the_end_of_history_before_writing() {
         Err(Failure::Other(message)) if message.contains("history must be consumed")
     ));
     while GuestRecovery::next(&recovery).unwrap().is_some() {}
-    assert!(recovery.require_complete().is_ok());
+    assert!(recovery.recovered_view().is_ok());
 }
 
 #[tokio::test]
@@ -411,29 +438,41 @@ async fn pending_checkpoint_reports_a_definite_loser_once() {
         occurrence: 2,
         phase: FailurePhase::Before,
     });
-    let CheckpointStatus::Pending(pending) =
-        maintenance::checkpoint(&s.log, &view, b"loser".to_vec(), vec![])
-            .await
-            .unwrap()
+    let CheckpointStatus::Pending(pending) = s
+        .log
+        .publish_checkpoint(
+            &view,
+            view.tail().last().unwrap(),
+            Bytes::from(b"loser".to_vec()),
+            vec![],
+        )
+        .await
+        .unwrap()
     else {
         panic!("lost checkpoint response did not remain pending")
     };
     faults.reset();
     assert!(matches!(
-        maintenance::checkpoint(&s.log, &view, b"winner".to_vec(), vec![])
+        s.log
+            .publish_checkpoint(
+                &view,
+                view.tail().last().unwrap(),
+                Bytes::from(b"winner".to_vec()),
+                vec![]
+            )
             .await
             .unwrap(),
         CheckpointStatus::Published(_)
     ));
     let pending = PendingCheckpointState {
         log: s.log.clone(),
-        pending: RefCell::new(Some(pending)),
+        value: RefCell::new(Some(pending)),
     };
     assert_eq!(
         GuestPendingCheckpoint::resolve(&pending).unwrap(),
         CheckpointResolution::NotPublished
     );
-    assert!(pending.pending.borrow().is_none());
+    assert!(pending.value.borrow().is_none());
     assert!(GuestPendingCheckpoint::resolve(&pending).is_err());
 }
 
@@ -462,7 +501,13 @@ async fn resume_reports_expired_after_checkpoint_discards_commit_evidence() {
         panic!("commit did not publish")
     };
     assert!(matches!(
-        maintenance::checkpoint(&s.log, &committed, b"snapshot".to_vec(), vec![])
+        s.log
+            .publish_checkpoint(
+                &committed,
+                committed.tail().last().unwrap(),
+                Bytes::from(b"snapshot".to_vec()),
+                vec![]
+            )
             .await
             .unwrap(),
         CheckpointStatus::Published(_)
@@ -490,16 +535,28 @@ async fn pending_checkpoint_reports_expired_after_head_advances_again() {
         occurrence: 2,
         phase: FailurePhase::Before,
     });
-    let CheckpointStatus::Pending(pending) =
-        maintenance::checkpoint(&s.log, &view, b"old snapshot".to_vec(), vec![])
-            .await
-            .unwrap()
+    let CheckpointStatus::Pending(pending) = s
+        .log
+        .publish_checkpoint(
+            &view,
+            view.tail().last().unwrap(),
+            Bytes::from(b"old snapshot".to_vec()),
+            vec![],
+        )
+        .await
+        .unwrap()
     else {
         panic!("checkpoint did not retain pending evidence")
     };
     faults.reset();
     assert!(matches!(
-        maintenance::checkpoint(&s.log, &view, b"replacement".to_vec(), vec![])
+        s.log
+            .publish_checkpoint(
+                &view,
+                view.tail().last().unwrap(),
+                Bytes::from(b"replacement".to_vec()),
+                vec![]
+            )
             .await
             .unwrap(),
         CheckpointStatus::Published(_)
@@ -509,13 +566,13 @@ async fn pending_checkpoint_reports_expired_after_head_advances_again() {
 
     let pending = PendingCheckpointState {
         log: s.log.clone(),
-        pending: RefCell::new(Some(pending)),
+        value: RefCell::new(Some(pending)),
     };
     assert_eq!(
         GuestPendingCheckpoint::resolve(&pending).unwrap(),
         CheckpointResolution::Expired
     );
-    assert!(pending.pending.borrow().is_none());
+    assert!(pending.value.borrow().is_none());
     assert!(GuestPendingCheckpoint::resolve(&pending).is_err());
 }
 
@@ -527,14 +584,15 @@ async fn recovery_does_not_skip_corrupt_older_commit_or_checkpoint() {
         append(&mut s, vec![]).await;
         if checkpoint {
             assert!(matches!(
-                maintenance::checkpoint(
-                    &s.log,
-                    &s.current_view(),
-                    b"old checkpoint".to_vec(),
-                    vec![],
-                )
-                .await
-                .unwrap(),
+                s.log
+                    .publish_checkpoint(
+                        &s.current_view(),
+                        s.current_view().tail().last().unwrap(),
+                        Bytes::from(b"old checkpoint".to_vec()),
+                        vec![]
+                    )
+                    .await
+                    .unwrap(),
                 CheckpointStatus::Published(_)
             ));
             s.view.replace(s.log.load().await.unwrap());
