@@ -1,8 +1,8 @@
+import { canonicalName, repositoryName } from "./names";
 import { NotFound, snapshot } from "./repository";
 import {
   automaticLogId,
   Catalog,
-  canonicalName,
   drop,
   openExisting,
   type Repository,
@@ -13,33 +13,22 @@ import {
 export async function browse(request: Request): Promise<Response> {
   const query = new URL(request.url).searchParams;
   const path = query.get("path") ?? "";
+  const parts = path ? path.split("/") : [];
   if (
-    [...query.keys()].some(
-      (key) =>
+    [...query].some(
+      ([key, value]) =>
         !["repo", "ref", "commit", "path"].includes(key) ||
         query.getAll(key).length !== 1 ||
-        (query.get(key)?.length ?? 0) > 4096,
+        value.length > 4096,
     ) ||
     (query.has("commit") && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(query.get("commit") ?? "")) ||
-    (path &&
-      (path.split("/").length > 64 ||
-        path
-          .split("/")
-          .some((part) => !part || part === "." || part === ".." || part.includes("\0"))))
+    parts.length > 64 ||
+    parts.some((part) => !part || part === "." || part === ".." || part.includes("\0"))
   )
     return new Response("Invalid browse query", { status: 400 });
   const input = query.get("repo") ?? "",
-    name = canonicalName(input);
-  if (
-    !input ||
-    input === "*" ||
-    name === ".git" ||
-    name.length > 4096 ||
-    /[\s%?#\\]/.test(input) ||
-    input.split("/").some((part) => !part || part === "." || part === "..") ||
-    new URL(`/${name}`, request.url).pathname !== `/${name}`
-  )
-    return new Response("Repository not found", { status: 404 });
+    name = repositoryName(input, request.url);
+  if (!name) return new Response("Repository not found", { status: 404 });
   const repositories: Record<string, Partial<Repository>> = JSON.parse(
     variable("git_repositories"),
   );
@@ -71,11 +60,8 @@ export async function browse(request: Request): Promise<Response> {
     return new Response("Repository access denied", {
       status: [401, 403, 404, 503].includes(authorized.status) ? authorized.status : 502,
     });
-  if (
-    !authorized.headers
-      .get("Content-Type")
-      ?.startsWith("application/x-git-upload-pack-advertisement")
-  )
+  const type = authorized.headers.get("Content-Type") ?? "";
+  if (!type.startsWith("application/x-git-upload-pack-advertisement"))
     return new Response("Invalid Git discovery response", { status: 502 });
   // Successful discovery has validated this same declaratively configured backend.
   let session = openExisting(settings(repository));
@@ -103,7 +89,7 @@ export async function browse(request: Request): Promise<Response> {
           session = fresh;
         } else throw error;
       } finally {
-        catalog?.close();
+        catalog?.[Symbol.dispose]();
       }
     }
   } finally {

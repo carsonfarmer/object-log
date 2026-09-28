@@ -1,25 +1,13 @@
 import { type Catalog, hex, MissingObject } from "./wal";
 
-export interface Commit {
+export type Commit = ReturnType<typeof commit>["summary"];
+export type Snapshot = ReturnType<typeof snapshot>;
+type TreeEntry = ReturnType<typeof tree>[number];
+interface FilePreview {
   id: string;
-  title: string;
-  author: string;
-  date: string;
-}
-interface TreeEntry {
-  name: string;
-  kind: string;
-  id: string;
-  unavailable?: true;
-}
-export interface Snapshot {
-  branch: string;
-  branches: string[];
-  path: string;
-  history: Commit[];
-  entries: TreeEntry[];
-  more: boolean;
-  file?: { id: string; size: number; state: string; text?: string };
+  size: number;
+  state: string;
+  text?: string;
 }
 const text = new TextDecoder();
 const strictText = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -52,11 +40,11 @@ function commit(catalog: Catalog, id: string) {
   };
 }
 
-function tree(catalog: Catalog, id: string): TreeEntry[] {
+function tree(catalog: Catalog, id: string) {
   const bytes = catalog.object(id, 2, metadataBytes).bytes;
   if (!bytes) throw new Error("Tree exceeds metadata limit");
   const width = catalog.root.Format === "sha256" ? 32 : 20,
-    result: TreeEntry[] = [];
+    result = [];
   for (let offset = 0; offset < bytes.length; ) {
     const space = bytes.indexOf(32, offset),
       nul = bytes.indexOf(0, space + 1);
@@ -85,7 +73,7 @@ function tree(catalog: Catalog, id: string): TreeEntry[] {
   return result;
 }
 
-export function snapshot(catalog: Catalog, query: URLSearchParams): Snapshot {
+export function snapshot(catalog: Catalog, query: URLSearchParams) {
   const branches = Object.keys(catalog.root.Refs)
     .filter((ref) => ref.startsWith("refs/heads/"))
     .sort();
@@ -93,13 +81,14 @@ export function snapshot(catalog: Catalog, query: URLSearchParams): Snapshot {
     query.get("ref") ||
     (branches.includes(catalog.root.Head) ? catalog.root.Head : branches[0]) ||
     "";
-  const view: Snapshot = {
+  const view = {
     branch,
     branches,
     path: query.get("path") ?? "",
-    history: [],
-    entries: [],
+    history: [] as Commit[],
+    entries: [] as TreeEntry[],
     more: false,
+    file: undefined as FilePreview | undefined,
   };
   const selected = query.get("commit");
   if (!branches.length && !query.get("ref") && !selected && !view.path) return view;

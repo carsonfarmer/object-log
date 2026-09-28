@@ -1,6 +1,8 @@
-import { render, type VNode } from "preact";
-import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { render } from "preact";
+import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { LocationProvider, useLocation } from "preact-iso/router";
 
+import { repositoryName } from "./names";
 import type { Commit, Snapshot } from "./repository";
 
 const messages: Record<number, string> = {
@@ -24,59 +26,60 @@ function Icon({ kind }: { kind: "folder" | "file" | "code" | "chevron" }) {
   );
 }
 
-function validRepository(name: string): boolean {
+const href = (query: Record<string, string>) => `/?${new URLSearchParams(query)}`;
+
+function CommitLink({ commit, branch }: { commit: Commit; branch: string }) {
+  const { query } = useLocation();
   return (
-    name !== "" &&
-    name !== "*" &&
-    name !== ".git" &&
-    !/[\s%?#\\]/.test(name) &&
-    name.split("/").every((part) => part !== "" && part !== "." && part !== "..") &&
-    new URL(`/${name}`, location.origin).pathname === `/${name}`
+    <a class="row" href={href({ repo: query.repo, ref: branch, commit: commit.id })}>
+      <code>{commit.id.slice(0, 7)}</code>
+      <span class="commit-title" title={commit.title}>
+        {commit.title || "Untitled commit"}
+      </span>
+    </a>
   );
 }
 
-function History({ commits, link }: { commits: Commit[]; link: (commit: Commit) => VNode }) {
+function History({ view }: { view: Snapshot }) {
   return (
     <section aria-label="Recent commits">
       <p class="muted">
         Recent commits · first parent · select a commit to explore earlier history
       </p>
       <div class="panel">
-        {commits.length ? (
-          commits.map((commit) => (
-            <article key={commit.id}>
-              <div>
-                {link(commit)}
-                <p class="muted">
-                  {commit.author || "Unknown author"} committed on{" "}
-                  <time dateTime={commit.date}>{new Date(commit.date).toLocaleDateString()}</time>
-                </p>
-              </div>
-            </article>
-          ))
-        ) : (
-          <p>No commits yet.</p>
-        )}
+        {view.history.map((commit) => (
+          <article key={commit.id}>
+            <CommitLink commit={commit} branch={view.branch} />
+            <p class="muted">
+              {commit.author || "Unknown author"} committed on{" "}
+              <time dateTime={commit.date}>{new Date(commit.date).toLocaleDateString()}</time>
+            </p>
+          </article>
+        ))}
+        {!view.history.length && <p class="empty">No commits yet.</p>}
       </div>
     </section>
   );
 }
 
-function Code({
-  view,
-  repository,
-  link,
-  commitLink,
-}: {
-  view: Snapshot;
-  repository: string;
-  link: (label: string, path: string) => VNode;
-  commitLink: (commit: Commit) => VNode;
-}) {
+const previewMessages: Record<string, string> = {
+  binary: "Binary file · preview unavailable",
+  large: "This file exceeds the 256 KiB preview limit.",
+};
+
+function Code({ view }: { view: Snapshot }) {
+  const { query } = useLocation();
+  const link = (label: string, path: string) => <a href={href({ ...query, path })}>{label}</a>;
+  const file = view.file;
+  const entries = [...view.entries].sort(
+    (a, b) =>
+      Number(b.kind === "directory") - Number(a.kind === "directory") ||
+      a.name.localeCompare(b.name),
+  );
   return (
     <section aria-label="Code">
       <nav class="breadcrumbs" aria-label="File path">
-        {link(repository.replace(/\.git$/, ""), "")}
+        {link(query.repo.replace(/\.git$/, ""), "")}
         {(view.path ? view.path.split("/") : []).map((part, i, parts) => (
           <span key={parts.slice(0, i + 1).join("/")}>
             {" "}
@@ -85,208 +88,141 @@ function Code({
         ))}
       </nav>
       <div class="panel">
-        {view.history[0] && <article class="tip">{commitLink(view.history[0])}</article>}
-        {view.file ? (
-          <>
-            <article class="tip">
-              <span>{view.file.size.toLocaleString()} bytes</span>
-              <code>{view.file.id.slice(0, 12)}</code>
-            </article>
-            {view.file.state === "text" ? (
-              <pre>{view.file.text}</pre>
-            ) : (
-              <p class="empty">
-                {view.file.state === "binary"
-                  ? "Binary file · preview unavailable"
-                  : view.file.state === "large"
-                    ? "This file exceeds the 256 KiB preview limit."
-                    : `Submodule · ${view.file.id}`}
-              </p>
-            )}
-          </>
-        ) : !view.history.length ? (
-          <p class="empty">This repository is empty. Push a branch to start exploring.</p>
-        ) : (
+        {view.history[0] && (
+          <article class="row tip">
+            <CommitLink commit={view.history[0]} branch={view.branch} />
+          </article>
+        )}
+        {file && (
+          <article class="row tip">
+            <span>{file.size.toLocaleString()} bytes</span>
+            <code>{file.id.slice(0, 12)}</code>
+          </article>
+        )}
+        {!file && (
           <>
             {view.path && (
-              <article>
+              <article class="row">
                 <Icon kind="folder" />
                 {link("..", view.path.split("/").slice(0, -1).join("/"))}
               </article>
             )}
-            {[...view.entries]
-              .sort(
-                (a, b) =>
-                  Number(b.kind === "directory") - Number(a.kind === "directory") ||
-                  a.name.localeCompare(b.name),
-              )
-              .map((entry) => (
-                <article key={`${entry.unavailable ? "bytes" : "text"}:${entry.name}`}>
-                  <Icon kind={entry.kind === "directory" ? "folder" : "file"} />
-                  {entry.unavailable ? (
-                    <span title="This filename is not UTF-8">{entry.name}</span>
-                  ) : (
-                    link(entry.name, [view.path, entry.name].filter(Boolean).join("/"))
-                  )}
-                  <code>{entry.id.slice(0, 7)}</code>
-                </article>
-              ))}
-            {!view.entries.length && <p class="empty">This directory is empty.</p>}
+            {entries.map((entry) => (
+              <article class="row" key={`${entry.unavailable ? "bytes" : "text"}:${entry.name}`}>
+                <Icon kind={entry.kind === "directory" ? "folder" : "file"} />
+                {entry.unavailable ? (
+                  <span title="This filename is not UTF-8">{entry.name}</span>
+                ) : (
+                  link(entry.name, [view.path, entry.name].filter(Boolean).join("/"))
+                )}
+                <code>{entry.id.slice(0, 7)}</code>
+              </article>
+            ))}
+            {!entries.length && (
+              <p class="empty">
+                {view.history.length
+                  ? "This directory is empty."
+                  : "This repository is empty. Push a branch to start exploring."}
+              </p>
+            )}
             {view.more && <p class="empty">Showing the first 500 entries.</p>}
           </>
         )}
+        {file &&
+          (file.state === "text" ? (
+            <pre>{file.text}</pre>
+          ) : (
+            <p class="empty">{previewMessages[file.state] ?? `Submodule · ${file.id}`}</p>
+          ))}
       </div>
     </section>
   );
 }
 
 function App() {
-  const [search, setSearch] = useState(location.search);
+  const { url, query, route } = useLocation();
   const [authorization, setAuthorization] = useState({ header: "" });
   const [result, setResult] = useState<{ view?: Snapshot; error?: string; status?: number }>({});
   const [tab, setTab] = useState("code");
   const [copied, setCopied] = useState(false);
   const cloneInput = useRef<HTMLInputElement>(null);
-  const query = new URLSearchParams(search);
-  const repository = query.get("repo") ?? "";
-  const valid = validRepository(repository);
+  const repository = query.repo ?? "";
+  const valid = !!repositoryName(repository, location.origin);
   const view = result.view;
   const cloneURL = `${location.origin}/${repository}`;
 
-  useEffect(() => {
-    const update = () => setSearch(location.search);
-    addEventListener("popstate", update);
-    return () => removeEventListener("popstate", update);
-  }, []);
-
   useLayoutEffect(() => {
     document.title = repository ? `${repository} · object-log` : "Repository · object-log";
+    setResult({});
     if (!valid) return;
     const request = new AbortController();
-    setResult({});
     void (async () => {
       try {
-        const params = new URLSearchParams(search);
-        const response = await fetch(`/_viewer/api?${params}`, {
+        const response = await fetch(`/_viewer/api${new URL(url, location.origin).search}`, {
           headers: authorization.header ? { Authorization: authorization.header } : {},
           credentials: "omit",
           cache: "no-store",
           signal: request.signal,
         });
-        if (!response.ok) {
-          if (!request.signal.aborted)
-            setResult({
+        const next = response.ok
+          ? { view: (await response.json()) as Snapshot }
+          : {
               error: messages[response.status] ?? "Repository unavailable. Try again.",
               status: response.status,
-            });
-          return;
-        }
-        const snapshot: Snapshot = await response.json();
-        if (!request.signal.aborted) setResult({ view: snapshot });
+            };
+        if (!request.signal.aborted) setResult(next);
       } catch (error) {
         if (!request.signal.aborted)
           setResult({ error: error instanceof Error ? error.message : "Repository unavailable." });
       }
     })();
     return () => request.abort();
-  }, [search, repository, valid, authorization]);
-
-  function navigate(params: URLSearchParams) {
-    history.pushState(null, "", `?${params}`);
-    setSearch(location.search);
-  }
-  function link(params: URLSearchParams, label: string | VNode, className?: string) {
-    return (
-      <a
-        class={className}
-        href={`?${params}`}
-        onClick={(event) => {
-          if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)
-            return;
-          event.preventDefault();
-          navigate(params);
-        }}
-      >
-        {label}
-      </a>
-    );
-  }
-  function pathLink(label: string, path: string) {
-    const params = new URLSearchParams(search);
-    params.set("path", path);
-    return link(params, label);
-  }
-  function commitLink(commit: Commit) {
-    return link(
-      new URLSearchParams({ repo: repository, ref: view?.branch ?? "", commit: commit.id }),
-      <>
-        <code>{commit.id.slice(0, 7)}</code>
-        <span class="commit-title" title={commit.title}>
-          {commit.title || "Untitled commit"}
-        </span>
-      </>,
-      "commit-link",
-    );
-  }
+  }, [url, repository, valid, authorization]);
 
   return (
     <>
-      <header>
+      <header class="row site-header">
         <a href="/">◈ object-log</a>
         <span>Repository explorer</span>
       </header>
       <main>
         <h1>{repository.replace(/\.git$/, "") || "Repositories"}</h1>
-        {!valid ? (
+        {valid && !view && (
+          <>
+            <p role="status">{result.error ?? "Loading repository…"}</p>
+            {result.status === 404 && !query.ref && !query.commit && !query.path && (
+              <p class="panel">
+                Push your first branch to create this repository:
+                <br />
+                <code>git push {cloneURL} HEAD</code>
+              </p>
+            )}
+          </>
+        )}
+        {(!valid || (!view && result.error)) && (
           <form
             class="panel"
             onSubmit={(event) => {
               event.preventDefault();
-              const name = String(new FormData(event.currentTarget).get("repo")).trim();
-              if (validRepository(name)) navigate(new URLSearchParams({ repo: name }));
-              else setResult({ error: "Enter a repository path such as team/project.git." });
+              const data = new FormData(event.currentTarget);
+              if (!valid) {
+                const name = String(data.get("repo")).trim();
+                if (repositoryName(name, location.origin)) route(href({ repo: name }));
+                else setResult({ error: "Enter a repository path such as team/project.git." });
+                return;
+              }
+              const credential = String(data.get("credential"));
+              event.currentTarget.reset();
+              const encoded = btoa(
+                String.fromCharCode(...new TextEncoder().encode(`git:${credential}`)),
+              );
+              setAuthorization({
+                header: data.get("mode") === "bearer" ? `Bearer ${credential}` : `Basic ${encoded}`,
+              });
             }}
           >
-            <label>
-              Repository name
-              <input name="repo" placeholder="team/project" required />
-            </label>
-            <button type="submit">Open repository</button>
-            <p class="muted">Open a repository. A first push creates it at the same Git URL.</p>
-            <p role="status">{result.error}</p>
-          </form>
-        ) : !view ? (
-          <>
-            <p role="status">{result.error ?? "Loading repository…"}</p>
-            {result.status === 404 &&
-              !query.get("ref") &&
-              !query.get("commit") &&
-              !query.get("path") && (
-                <p class="panel">
-                  Push your first branch to create this repository:
-                  <br />
-                  <code>git push {cloneURL} HEAD</code>
-                </p>
-              )}
-            {result.error && (
-              <form
-                class="panel"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const data = new FormData(event.currentTarget);
-                  const credential = String(data.get("credential"));
-                  event.currentTarget.reset();
-                  const encoded = btoa(
-                    Array.from(new TextEncoder().encode(`git:${credential}`), (byte) =>
-                      String.fromCharCode(byte),
-                    ).join(""),
-                  );
-                  setAuthorization({
-                    header:
-                      data.get("mode") === "bearer" ? `Bearer ${credential}` : `Basic ${encoded}`,
-                  });
-                }}
-              >
+            {valid && (
+              <>
                 <h2>Sign in to read this repository</h2>
                 <label>
                   Credential
@@ -295,24 +231,32 @@ function App() {
                     <option value="bearer">Cognito access token</option>
                   </select>
                 </label>
-                <label>
-                  Password or token
-                  <input
-                    name="credential"
-                    type="password"
-                    autoComplete="off"
-                    maxLength={8192}
-                    required
-                  />
-                </label>
-                <button type="submit">Sign in</button>
-                <p class="muted">Used for this page only.</p>
-              </form>
+              </>
             )}
-          </>
-        ) : (
+            <label>
+              {valid ? "Password or token" : "Repository name"}
+              <input
+                key={valid ? "credential" : "repo"}
+                name={valid ? "credential" : "repo"}
+                type={valid ? "password" : "text"}
+                autoComplete="off"
+                maxLength={valid ? 8192 : 4096}
+                placeholder={valid ? "" : "team/project"}
+                required
+              />
+            </label>
+            <button type="submit">{valid ? "Sign in" : "Open repository"}</button>
+            <p class="muted">
+              {valid
+                ? "Used for this page only."
+                : "Open a repository. A first push creates it at the same Git URL."}
+            </p>
+            {!valid && <p role="status">{result.error}</p>}
+          </form>
+        )}
+        {valid && view && (
           <>
-            <nav class="tabs" aria-label="Repository views">
+            <nav class="row tabs" aria-label="Repository views">
               {["code", "commits"].map((name) => (
                 <button
                   type="button"
@@ -324,38 +268,34 @@ function App() {
                 </button>
               ))}
             </nav>
-            <div class="toolbar">
-              <label>
+            <div class="row toolbar">
+              <label class="row">
                 Branch
-                <span class="select-control">
-                  <select
-                    value={view.branch}
-                    disabled={!view.branches.length}
-                    onChange={(event) =>
-                      navigate(
-                        new URLSearchParams({ repo: repository, ref: event.currentTarget.value }),
-                      )
-                    }
-                  >
-                    {view.branches.map((ref) => (
-                      <option key={ref} value={ref}>
-                        {ref.replace(/^refs\/heads\//, "")}
-                      </option>
-                    ))}
-                  </select>
-                  <Icon kind="chevron" />
-                </span>
+                <select
+                  value={view.branch}
+                  disabled={!view.branches.length}
+                  onChange={(event) =>
+                    route(href({ repo: repository, ref: event.currentTarget.value }))
+                  }
+                >
+                  {view.branches.map((ref) => (
+                    <option key={ref} value={ref}>
+                      {ref.replace(/^refs\/heads\//, "")}
+                    </option>
+                  ))}
+                </select>
               </label>
               <span class="muted">
                 {view.branches.length} {view.branches.length === 1 ? "branch" : "branches"}
               </span>
-              {query.has("commit") &&
-                link(new URLSearchParams({ repo: repository, ref: view.branch }), "Branch tip")}
+              {"commit" in query && (
+                <a href={href({ repo: repository, ref: view.branch })}>Branch tip</a>
+              )}
               <details>
-                <summary>
+                <summary class="row">
                   <Icon kind="code" /> Code <Icon kind="chevron" />
                 </summary>
-                <div class="clone-box">
+                <div class="panel clone-box">
                   <label>
                     Clone URL
                     <input ref={cloneInput} value={cloneURL} readOnly />
@@ -376,11 +316,7 @@ function App() {
                 </div>
               </details>
             </div>
-            {tab === "commits" ? (
-              <History commits={view.history} link={commitLink} />
-            ) : (
-              <Code view={view} repository={repository} link={pathLink} commitLink={commitLink} />
-            )}
+            {tab === "commits" ? <History view={view} /> : <Code view={view} />}
           </>
         )}
       </main>
@@ -390,4 +326,9 @@ function App() {
 
 const root = document.getElementById("app");
 if (!root) throw new Error("Missing app root");
-render(<App />, root);
+render(
+  <LocationProvider scope="/?">
+    <App />
+  </LocationProvider>,
+  root,
+);

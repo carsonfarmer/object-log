@@ -12,7 +12,8 @@ import { get } from "@spinframework/spin-variables";
 import { unzlibSync } from "fflate";
 
 export const variable = (name: string) => get(name) ?? "";
-export const drop = (resource: unknown) => (resource as Disposable)[Symbol.dispose]();
+export const disposable = <T>(resource: T) => resource as T & Disposable;
+export const drop = (resource: unknown) => disposable(resource)[Symbol.dispose]();
 const decode = new TextDecoder("utf-8", { fatal: true });
 export const json = <T>(data: Uint8Array): T => JSON.parse(decode.decode(data));
 export const hex = (bytes: Uint8Array) =>
@@ -22,7 +23,6 @@ export interface Repository {
   log_id: string;
   format?: "sha1" | "sha256" | "";
 }
-export const canonicalName = (name: string) => (name.endsWith(".git") ? name : `${name}.git`);
 export const automaticLogId = (name: string) =>
   `auto-${hex(sha256(new TextEncoder().encode(name)))}`;
 export class MissingObject extends Error {}
@@ -114,7 +114,7 @@ export class Catalog {
         this.buckets.set(prefix, node.objects[i]);
       });
     } catch (error) {
-      this.close();
+      this[Symbol.dispose]();
       throw error;
     }
   }
@@ -163,20 +163,16 @@ export class Catalog {
         else {
           if (!value) throw new Error("Missing object reference");
           const full = item.Delta?.StoredSize ? this.node(value).objects[0] : value;
-          const reader = this.recovery.openBytes(full);
-          try {
-            if (reader.length() !== BigInt(item.StoredSize) || item.StoredSize > maxBytes + 65536)
-              throw new Error("Invalid stored object length");
-            compressed = new Uint8Array(item.StoredSize);
-            for (let offset = 0; offset < compressed.length; ) {
-              const chunk = reader.readAt(BigInt(offset), compressed.length - offset);
-              if (!chunk.length || chunk.length > compressed.length - offset)
-                throw new Error("Invalid object read length");
-              compressed.set(chunk, offset);
-              offset += chunk.length;
-            }
-          } finally {
-            drop(reader);
+          using reader = disposable(this.recovery.openBytes(full));
+          if (reader.length() !== BigInt(item.StoredSize) || item.StoredSize > maxBytes + 65536)
+            throw new Error("Invalid stored object length");
+          compressed = new Uint8Array(item.StoredSize);
+          for (let offset = 0; offset < compressed.length; ) {
+            const chunk = reader.readAt(BigInt(offset), compressed.length - offset);
+            if (!chunk.length || chunk.length > compressed.length - offset)
+              throw new Error("Invalid object read length");
+            compressed.set(chunk, offset);
+            offset += chunk.length;
           }
         }
         if (compressed.length !== item.StoredSize || (item.Inline && compressed.length > 512))
@@ -200,7 +196,7 @@ export class Catalog {
     throw new MissingObject("Git object not found");
   }
 
-  close() {
+  [Symbol.dispose]() {
     for (const resource of this.owned.reverse()) drop(resource);
     drop(this.recovery);
   }
