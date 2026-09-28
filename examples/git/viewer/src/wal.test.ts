@@ -136,7 +136,8 @@ function fixture(
   format: "sha1" | "sha256",
   raw: Uint8Array,
   encoded: Uint8Array,
-  storage: "inline" | "full" | "delta" = "inline",
+  storage: "inline" | "inline-delta" | "full" | "delta" = "inline",
+  size = 3,
 ) {
   const id = new Bun.CryptoHasher(format).update(raw).digest("hex");
   let drops = 0,
@@ -154,11 +155,14 @@ function fixture(
   const item = {
     ID: id,
     Kind: 3,
-    Size: 3,
+    Size: size,
     StoredSize: encoded.length,
     Encoding: "zlib",
-    ...(storage === "inline"
-      ? { Inline: btoa(String.fromCharCode(...encoded)) }
+    ...(storage.startsWith("inline")
+      ? {
+          Inline: btoa(String.fromCharCode(...encoded)),
+          ...(storage === "inline-delta" ? { Delta: { Data: "AA==" } } : {}),
+        }
       : storage === "delta"
         ? { Delta: { StoredSize: 12 } }
         : {}),
@@ -189,7 +193,7 @@ function fixture(
       if (value === leaf)
         return entry(
           { Items: [item] },
-          storage === "inline" ? [] : storage === "full" ? [full] : [wrapper],
+          storage.startsWith("inline") ? [] : storage === "full" ? [full] : [wrapper],
         );
       return { data: new Uint8Array(), objects: [full, delta] };
     },
@@ -220,7 +224,7 @@ for (const format of ["sha1", "sha256"] as const) {
   test(`${format}: inline and chunked full objects with a retained delta`, () => {
     const raw = new TextEncoder().encode("blob 3\0abc"),
       encoded = zlibSync(raw);
-    for (const storage of ["inline", "full", "delta"] as const) {
+    for (const storage of ["inline", "inline-delta", "full", "delta"] as const) {
       const sample = fixture(format, raw, encoded, storage);
       try {
         expect(new TextDecoder().decode(sample.catalog.object(sample.id, 3, 256).bytes)).toBe(
@@ -229,8 +233,37 @@ for (const format of ["sha1", "sha256"] as const) {
       } finally {
         drop(sample.catalog);
       }
-      expect(sample.counts().drops).toBe(storage === "inline" ? 3 : storage === "full" ? 5 : 7);
-      expect(sample.counts().reads).toBe(storage === "inline" ? 0 : Math.ceil(encoded.length / 3));
+      expect(sample.counts().drops).toBe(
+        storage.startsWith("inline") ? 3 : storage === "full" ? 5 : 7,
+      );
+      expect(sample.counts().reads).toBe(
+        storage.startsWith("inline") ? 0 : Math.ceil(encoded.length / 3),
+      );
+    }
+  });
+
+  test(`${format}: inline compressed length boundary`, () => {
+    for (const compressedSize of [2048, 2049]) {
+      const size = compressedSize - 21,
+        header = new TextEncoder().encode(`blob ${size}\0`),
+        raw = new Uint8Array(header.length + size);
+      raw.set(header);
+      const encoded = zlibSync(raw, { level: 0 }),
+        sample = fixture(format, raw, encoded, "inline-delta", size);
+      expect(encoded.length).toBe(compressedSize);
+      try {
+        if (compressedSize === 2048)
+          expect(sample.catalog.object(sample.id, 3, 4096).bytes).toEqual(
+            raw.subarray(header.length),
+          );
+        else
+          expect(() => sample.catalog.object(sample.id, 3, 4096)).toThrow(
+            "Invalid stored object length",
+          );
+      } finally {
+        drop(sample.catalog);
+      }
+      expect(sample.counts()).toEqual({ reads: 0, drops: 3 });
     }
   });
 }

@@ -30,16 +30,17 @@ type store struct {
 	owned   []*wal.Object
 	writers []*byteWriter
 	storage.Storer
-	failure     error
-	progress    *receiveProgress
-	tailEntries uint64
-	session     *wal.Session
-	recovery    *wal.Recovery
-	stateRoot   *wal.Object
-	meta        rootMeta
-	buckets     map[string]*wal.Object
-	loaded      map[*wal.Object]radixNode[indexed, *wal.Object]
-	pending     map[string]indexed
+	failure       error
+	progress      *receiveProgress
+	tailEntries   uint64
+	session       *wal.Session
+	recovery      *wal.Recovery
+	stateRoot     *wal.Object
+	meta          rootMeta
+	buckets       map[string]*wal.Object
+	loaded        map[*wal.Object]radixNode[indexed, *wal.Object]
+	pending       map[string]indexed
+	pendingInline int64
 }
 
 func openStore(ctx context.Context, session *wal.Session, repository repositoryConfig, limits requestLimits) (result *store, err error) {
@@ -235,6 +236,12 @@ func (w *objectWriter) Close() (err error) {
 		return fmt.Errorf("incomplete object")
 	}
 	id := w.codec.Hash().String()
+	replaced := len(w.s.pending[id].Inline)
+	if w.sink.writer == nil && int64(len(w.sink.prefix)) > w.s.limits.inlineRemaining(w.s.pendingInline, replaced) {
+		if err := w.sink.spill(); err != nil {
+			return err
+		}
+	}
 	item := indexed{objectMeta: objectMeta{ID: id, Kind: w.kind, Size: w.size, Encoding: "zlib", StoredSize: w.sink.written}}
 	if w.sink.writer == nil {
 		item.Inline = w.sink.prefix
@@ -246,6 +253,7 @@ func (w *objectWriter) Close() (err error) {
 		w.s.owned = append(w.s.owned, item.root)
 	}
 	w.sink.prefix = nil
+	w.s.pendingInline += int64(len(item.Inline) - replaced)
 	w.s.pending[id] = item
 	return nil
 }
@@ -265,17 +273,21 @@ func (w *objectSink) Write(p []byte) (int, error) {
 			w.prefix = append(w.prefix, p...)
 			return len(p), nil
 		}
-		var err error
-		w.writer, err = w.s.newByteWriter()
-		if err != nil {
+		if err := w.spill(); err != nil {
 			return 0, err
 		}
-		if _, err = w.writer.Write(w.prefix); err != nil {
-			return 0, err
-		}
-		w.prefix = nil
 	}
 	return w.writer.Write(p)
+}
+
+func (w *objectSink) spill() error {
+	var err error
+	w.writer, err = w.s.newByteWriter()
+	if err == nil {
+		_, err = w.writer.Write(w.prefix)
+	}
+	w.prefix = nil
+	return err
 }
 
 type storedObject struct {

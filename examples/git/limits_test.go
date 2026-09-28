@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,6 +27,32 @@ func TestObjectAndMetadataLimits(t *testing.T) {
 				t.Fatalf("%s size %d: got %v, want limit=%v", kind, size, err, wantLimit)
 			}
 		}
+	}
+}
+
+func TestPendingInlineBudget(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		catalog, objects, used int64
+		replaced               int
+		want                   int64
+	}{
+		{"catalog cap", 1000, 3, 0, 0, 1000},
+		{"pack cap", 2000, 3, 0, 0, 1536},
+		{"catalog remainder", 1537, 4, 0, 0, 1537},
+		{"exactly full", 2048, 4, 2048, 0, 0},
+		{"replace inline", 2048, 4, 2048, 1024, 1024},
+		{"replace external", 2048, 4, 1024, 0, 1024},
+		{"large pack count", math.MaxInt64, math.MaxInt64, 0, 0, math.MaxInt64},
+		{"large pack product", math.MaxInt64, math.MaxInt64 / 512, 0, 0, math.MaxInt64 / 512 * 512},
+		{"large full replacement", math.MaxInt64, math.MaxInt64, math.MaxInt64, 2048, 2048},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			limits := requestLimits{catalogBytes: test.catalog, packObjects: test.objects}
+			if got := limits.inlineRemaining(test.used, test.replaced); got != test.want {
+				t.Fatalf("available=%d want=%d", got, test.want)
+			}
+		})
 	}
 }
 

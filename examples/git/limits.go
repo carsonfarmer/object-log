@@ -145,3 +145,13 @@ func (l requestLimits) chargeCatalog(size int) error {
 	*l.catalogRead += int64(size)
 	return nil
 }
+
+// Pending full objects keep at most the former 512 bytes per pack object,
+// capped by the catalog budget. Replacing an entry releases its inline bytes.
+func (l requestLimits) inlineRemaining(used int64, replaced int) int64 {
+	limit := l.catalogBytes
+	if l.packObjects <= limit/512 {
+		limit = l.packObjects * 512
+	}
+	return limit - (used - int64(replaced))
+}

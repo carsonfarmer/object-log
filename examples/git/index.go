@@ -9,6 +9,9 @@ import (
 // one hex digit at a time, so they have at most sixteen children.
 const indexLeafSize = 1024
 
+// Pack new leaves more tightly without changing the legal reader limit.
+const indexLeafTarget = 128
+
 type radixNode[V, H any] struct {
 	Items    map[string]V
 	Children map[string]H
@@ -35,7 +38,7 @@ func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[stri
 		items := make(map[string]V, len(node.Items)+len(updates))
 		maps.Copy(items, node.Items)
 		maps.Copy(items, updates)
-		if len(items) <= indexLeafSize {
+		if len(items) <= indexLeafTarget {
 			return save(radixNode[V, H]{Items: items})
 		}
 		updates = items

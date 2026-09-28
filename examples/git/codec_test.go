@@ -219,7 +219,7 @@ func TestInlineMetadataBound(t *testing.T) {
 	}
 	meta.Inline = meta.Inline[:inlineObjectLimit]
 	meta.StoredSize--
-	leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafSize)}
+	leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafTarget)}
 	for i := range leaf.Items {
 		leaf.Items[i] = meta
 	}
@@ -326,6 +326,16 @@ func TestCatalogMetadataAdmission(t *testing.T) {
 			item := objectMeta{ID: id, Kind: plumbing.BlobObject, Size: 1, Encoding: "zlib", StoredSize: 1}
 			if !validObjectMeta(item, format, "ab") {
 				t.Fatal("rejected valid object metadata")
+			}
+			inline := item
+			inline.Inline = []byte{1}
+			inline.Delta = &deltaMeta{Base: "ab" + strings.Repeat("2", format.HexSize()-2), Size: 2, Data: []byte{1}}
+			if !validObjectMeta(inline, format, "ab") {
+				t.Fatal("inline object with inline delta rejected")
+			}
+			inline.Delta = &deltaMeta{Base: inline.Delta.Base, Size: 2, StoredSize: inlineDeltaLimit + 1}
+			if validObjectMeta(inline, format, "ab") {
+				t.Fatal("inline object with external delta accepted")
 			}
 			for name, mutate := range map[string]func(*objectMeta){
 				"path":      func(m *objectMeta) { m.ID = "ac" + m.ID[2:] },

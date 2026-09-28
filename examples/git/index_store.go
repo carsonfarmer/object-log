@@ -106,7 +106,9 @@ func (s *store) saveBucket(node radixNode[indexed, *wal.Object]) (*wal.Object, e
 			}
 		}
 	}
-	limitDeltas(meta.Items)
+	if err := limitDeltas(meta.Items); err != nil {
+		return nil, err
+	}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return nil, err

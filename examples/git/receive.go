@@ -71,7 +71,7 @@ func (p *incomingPack) Close() (err error) {
 	if err := offsets.deltas(reader, reader.size, func(id plumbing.Hash, delta *deltaMeta) error {
 		key := id.String()
 		item := p.s.pending[key]
-		if len(item.Inline) != 0 || item.Delta != nil || int64(len(delta.Data)) >= item.StoredSize {
+		if item.Delta != nil || int64(len(delta.Data)) >= item.StoredSize {
 			return nil
 		}
 		cost := int64(len(delta.Data) + len(delta.Base) + 64)

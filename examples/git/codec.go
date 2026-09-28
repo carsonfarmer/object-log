@@ -103,12 +103,12 @@ func validObjectMeta(item objectMeta, format config.ObjectFormat, prefix string)
 		item.Kind == plumbing.CommitObject || item.Kind == plumbing.TagObject
 	validStorage := item.validInline() || len(item.Inline) == 0 && item.Encoding == "zlib" && item.StoredSize > 0
 	validDelta := item.Delta == nil || item.Delta.valid() && validID(format, item.Delta.Base) &&
-		item.Delta.Base != item.ID && len(item.Inline) == 0
+		item.Delta.Base != item.ID && (len(item.Inline) == 0 || item.Delta.StoredSize == 0)
 	return validID(format, item.ID) && strings.HasPrefix(item.ID, prefix) && validKind && item.Size >= 0 && validStorage && validDelta
 }
 
 // Keep full catalog leaves below the WAL node limit, including base64 encoding.
-const inlineObjectLimit = 512
+const inlineObjectLimit = 2 << 10
 
 type objectMeta struct {
 	ID         string
