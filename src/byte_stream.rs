@@ -22,7 +22,7 @@ pub struct ByteWriter {
     failed: bool,
 }
 
-/// An authenticated byte stream with one cached storage chunk.
+/// An authenticated byte stream with at most two cached storage chunks.
 #[derive(Debug)]
 pub struct ByteReader {
     log: Log,
@@ -30,7 +30,7 @@ pub struct ByteReader {
     chunk_bytes: u64,
     len: u64,
     children: Vec<ObjectRef>,
-    cached: Option<(usize, Bytes)>,
+    cached: [Option<(usize, Bytes)>; 2],
 }
 
 impl Log {
@@ -112,7 +112,7 @@ impl Log {
             chunk_bytes,
             len,
             children: node.children,
-            cached: None,
+            cached: [None, None],
         })
     }
 }
@@ -195,7 +195,9 @@ impl ByteReader {
 
     /// Reads at most `max_len` bytes from an offset, stopping at the next chunk boundary.
     /// Zero-length requests and offsets at or beyond EOF return empty bytes.
-    /// Each storage read authenticates a complete chunk; consecutive reads reuse one cache.
+    /// Each storage read authenticates a complete chunk. The two most recently used
+    /// chunks are cached, using at most four MiB for the cache. Returned byte slices
+    /// can keep evicted chunks alive while the caller holds them.
     ///
     /// # Errors
     /// Returns an error for an expired view, corrupt chunk, or storage failure.
@@ -204,19 +206,28 @@ impl ByteReader {
             return Ok(Bytes::new());
         }
         let index = usize::try_from(offset / self.chunk_bytes).map_err(|_| invalid())?;
-        if self
-            .cached
+        if self.cached[0]
             .as_ref()
             .is_none_or(|(cached, _)| *cached != index)
         {
-            self.cached = None;
-            let bytes = self
-                .log
-                .read_object(&self.view, &self.children[index])
-                .await?;
-            self.cached = Some((index, bytes));
+            if self.cached[1]
+                .as_ref()
+                .is_some_and(|(cached, _)| *cached == index)
+            {
+                self.cached.swap(0, 1);
+            } else {
+                // Release the older chunk before reading, so a miss cannot
+                // temporarily retain three storage chunks.
+                self.cached[1] = None;
+                let bytes = self
+                    .log
+                    .read_object(&self.view, &self.children[index])
+                    .await?;
+                self.cached[1] = self.cached[0].take();
+                self.cached[0] = Some((index, bytes));
+            }
         }
-        let (_, bytes) = self.cached.as_ref().ok_or_else(invalid)?;
+        let (_, bytes) = self.cached[0].as_ref().ok_or_else(invalid)?;
         let start = usize::try_from(offset % self.chunk_bytes).map_err(|_| invalid())?;
         Ok(bytes.slice(start..start + max_len.min(bytes.len() - start)))
     }
