@@ -574,3 +574,7 @@ pub enum Error {
     #[error("object store: {0}")]
     Store(#[from] object_store::Error),
 }
+
+pub(crate) fn invalid(message: &str) -> Error {
+    Error::InvalidFormat(message.into())
+}

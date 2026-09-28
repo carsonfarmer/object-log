@@ -366,19 +366,19 @@ impl ScopedStore {
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
-        self.admit(Request::Read { max_bytes })?;
-        let mut result = read().await;
-        for _ in 1..SAFE_READ_ATTEMPTS {
-            if !matches!(
-                result,
-                Err(Error::Store(object_store::Error::Generic { .. }))
-            ) {
+        for attempt in 0..SAFE_READ_ATTEMPTS {
+            self.admit(Request::Read { max_bytes })?;
+            let result = read().await;
+            if attempt + 1 == SAFE_READ_ATTEMPTS
+                || !matches!(
+                    result,
+                    Err(Error::Store(object_store::Error::Generic { .. }))
+                )
+            {
                 return result;
             }
-            self.admit(Request::Read { max_bytes })?;
-            result = read().await;
         }
-        result
+        unreachable!("read attempts are positive")
     }
 
     /// Returns the validated identity bound to this namespace.
@@ -397,19 +397,7 @@ impl ScopedStore {
         key: StoreKey,
         max_bytes: usize,
     ) -> Result<Option<StoredObject>, Error> {
-        let location = self.location(key);
-        let store = &self.store;
-        self.retry_safe_read(max_bytes, || {
-            let location = &location;
-            async move {
-                match store.get(location).await {
-                    Ok(result) => Ok(Some(collect_object(result, max_bytes).await?)),
-                    Err(object_store::Error::NotFound { .. }) => Ok(None),
-                    Err(error) => Err(error.into()),
-                }
-            }
-        })
-        .await
+        self.read_with(key, max_bytes, collect_object).await
     }
 
     pub(crate) async fn read_integrity(
@@ -417,16 +405,26 @@ impl ScopedStore {
         key: StoreKey,
         max_bytes: usize,
     ) -> Result<Option<(Digest, u64)>, Error> {
+        self.read_with(key, max_bytes, collect_integrity).await
+    }
+
+    // Retry the complete GET and collector together, including streamed-body failures.
+    async fn read_with<T, F, Fut>(
+        &self,
+        key: StoreKey,
+        max_bytes: usize,
+        collect: F,
+    ) -> Result<Option<T>, Error>
+    where
+        F: Fn(object_store::GetResult, usize) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
         let location = self.location(key);
-        let store = &self.store;
-        self.retry_safe_read(max_bytes, || {
-            let location = &location;
-            async move {
-                match store.get(location).await {
-                    Ok(result) => Ok(Some(collect_integrity(result, max_bytes).await?)),
-                    Err(object_store::Error::NotFound { .. }) => Ok(None),
-                    Err(error) => Err(error.into()),
-                }
+        self.retry_safe_read(max_bytes, || async {
+            match self.store.get(&location).await {
+                Ok(result) => Ok(Some(collect(result, max_bytes).await?)),
+                Err(object_store::Error::NotFound { .. }) => Ok(None),
+                Err(error) => Err(error.into()),
             }
         })
         .await
