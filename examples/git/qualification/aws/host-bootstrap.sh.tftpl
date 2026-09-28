@@ -32,6 +32,11 @@ aws --region '${region}' s3 cp '${artifact_uri}' "$workdir/git.tar.gz"
 printf '%s  %s\n' '${artifact_sha}' "$workdir/git.tar.gz" | sha256sum --check
 tar -xzf "$workdir/git.tar.gz" -C /opt/object-log-git --no-same-owner spin.toml git.wasm
 chmod 644 /opt/object-log-git/spin.toml /opt/object-log-git/git.wasm
+if tar -tzf "$workdir/git.tar.gz" viewer/dist/viewer.wasm >/dev/null 2>&1; then
+  install -d -m 755 /opt/object-log-git/viewer/dist
+  tar -xzf "$workdir/git.tar.gz" -C /opt/object-log-git --no-same-owner viewer/dist/viewer.wasm
+  chmod 644 /opt/object-log-git/viewer/dist/viewer.wasm
+fi
 printf '%s' '${variables_base64}' | base64 --decode > /etc/object-log-git/variables.json
 printf '%s' '${maintenance_config}' | base64 --decode > /etc/object-log-git/maintenance.json
 printf '%s' '${maintenance_script}' | base64 --decode > /usr/local/bin/object-log-maintenance

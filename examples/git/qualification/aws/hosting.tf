@@ -27,7 +27,7 @@ variable "host_name" {
 }
 
 variable "host_artifact_path" {
-  description = "Local tar.gz containing only the built spin.toml and git.wasm."
+  description = "Local tar.gz containing built spin.toml, git.wasm and optionally viewer/dist/viewer.wasm."
   type        = string
   default     = ""
 }

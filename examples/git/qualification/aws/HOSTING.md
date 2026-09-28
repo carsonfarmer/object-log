@@ -10,6 +10,18 @@ make git-build
 tar -C examples/git -czf "$qualification_state/git.tar.gz" spin.toml git.wasm
 ```
 
+To include the [repository viewer](../../viewer/README.md), build it, stage its
+generated `spin.viewer.toml` as `spin.toml`, and include `viewer/dist/viewer.wasm`:
+
+```sh
+viewer_stage="$qualification_state/viewer-artifact"
+mkdir -p "$viewer_stage/viewer/dist"
+cp examples/git/spin.viewer.toml "$viewer_stage/spin.toml"
+cp examples/git/git.wasm "$viewer_stage/git.wasm"
+cp examples/git/viewer/dist/viewer.wasm "$viewer_stage/viewer/dist/viewer.wasm"
+tar -C "$viewer_stage" -czf "$qualification_state/git.tar.gz" spin.toml git.wasm viewer/dist/viewer.wasm
+```
+
 Enable the commented `host_*` inputs in `terraform.tfvars.example`. For a domain,
 supply an unused `host_name` in an existing public `host_route53_zone_id`.
 Alternatively, leave both empty to use the Elastic IP with a publicly trusted
