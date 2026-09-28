@@ -97,17 +97,16 @@ export function snapshot(catalog: Catalog, query: URLSearchParams) {
     throw new NotFound();
   let id = selected || catalog.root.Refs[branch],
     tip = "";
-  for (let i = 0; id && i < 8; i++) {
-    let current: ReturnType<typeof commit>;
-    try {
-      current = commit(catalog, id);
-    } catch (error) {
-      if (i === 0 && selected && error instanceof MissingObject) throw new NotFound();
-      throw error;
+  try {
+    for (let i = 0; id && i < 8; i++) {
+      const current = commit(catalog, id);
+      if (i === 0) tip = current.tree;
+      view.history.push(current.summary);
+      id = current.parent;
     }
-    if (i === 0) tip = current.tree;
-    view.history.push(current.summary);
-    id = current.parent;
+  } catch (error) {
+    if (!view.history.length && selected && error instanceof MissingObject) throw new NotFound();
+    throw error;
   }
   let entries = tree(catalog, tip);
   const parts = view.path ? view.path.split("/") : [];
@@ -124,13 +123,11 @@ export function snapshot(catalog: Catalog, query: URLSearchParams) {
       const blob = catalog.object(entry.id, 3, previewBytes);
       view.file.size = blob.size;
       view.file.state = blob.bytes ? "binary" : "large";
-      if (blob.bytes && !blob.bytes.includes(0)) {
-        try {
-          view.file.text = strictText.decode(blob.bytes);
-          view.file.state = "text";
-        } catch {
-          /* Binary preview. */
-        }
+      try {
+        if (blob.bytes && !blob.bytes.includes(0))
+          Object.assign(view.file, { state: "text", text: strictText.decode(blob.bytes) });
+      } catch {
+        /* Binary preview. */
       }
     }
     return view;
