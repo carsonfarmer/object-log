@@ -8,7 +8,6 @@ const messages: Record<number, string> = {
   401: "Authentication required.",
   403: "This credential cannot read this repository.",
   404: "Repository or path not found.",
-  409: "This repository already exists. Open it to browse.",
 };
 
 function validRepository(name: string): boolean {
@@ -127,7 +126,6 @@ function App() {
   const [search, setSearch] = useState(location.search);
   const [authorization, setAuthorization] = useState({ header: "" });
   const [result, setResult] = useState<{ view?: Snapshot; error?: string; status?: number }>({});
-  const [created, setCreated] = useState("");
   const [tab, setTab] = useState("code");
   const [copied, setCopied] = useState(false);
   const cloneInput = useRef<HTMLInputElement>(null);
@@ -151,7 +149,7 @@ function App() {
     void (async () => {
       try {
         const params = new URLSearchParams(search);
-        const response = await fetch(`/browse/api?${params}`, {
+        const response = await fetch(`/_viewer/api?${params}`, {
           headers: authorization.header ? { Authorization: authorization.header } : {},
           credentials: "omit",
           cache: "no-store",
@@ -200,16 +198,11 @@ function App() {
   return (
     <>
       <header>
-        <a href="/browse">◈ object-log</a>
+        <a href="/">◈ object-log</a>
         <span>Repository explorer</span>
       </header>
       <main>
-        <h1>{repository.replace(/\.git$/, "") || "Repository"}</h1>
-        {created && created === repository && (
-          <p role="status">
-            Repository created. Push to <code>{cloneURL}</code>.
-          </p>
-        )}
+        <h1>{repository.replace(/\.git$/, "") || "Repositories"}</h1>
         {!valid ? (
           <form
             class="panel"
@@ -221,69 +214,23 @@ function App() {
             }}
           >
             <label>
-              Repository path
-              <input name="repo" placeholder="team/project.git" required />
+              Repository name
+              <input name="repo" placeholder="team/project" required />
             </label>
             <button type="submit">Open repository</button>
+            <p class="muted">Open a repository. A first push creates it at the same Git URL.</p>
             <p role="status">{result.error}</p>
           </form>
         ) : !view ? (
           <>
             <p role="status">{result.error ?? "Loading repository…"}</p>
-            {created !== repository &&
-              (result.status === 403 || result.status === 404) &&
-              !query.get("ref") &&
-              !query.get("path") && (
-                <form
-                  class="panel"
-                  onSubmit={async (event) => {
-                    event.preventDefault();
-                    const format = String(new FormData(event.currentTarget).get("format"));
-                    setResult({});
-                    try {
-                      const response = await fetch(
-                        `/browse/api?${new URLSearchParams({ repo: repository })}`,
-                        {
-                          method: "POST",
-                          headers: {
-                            Authorization: authorization.header,
-                            "Content-Type": "application/json",
-                          },
-                          body: JSON.stringify({ format }),
-                          credentials: "omit",
-                          cache: "no-store",
-                        },
-                      );
-                      if (response.ok || response.status === 409) {
-                        if (response.status === 201) setCreated(repository);
-                        navigate(new URLSearchParams({ repo: repository }));
-                        setAuthorization({ header: authorization.header });
-                      } else
-                        setResult({
-                          error:
-                            (await response.text()) ||
-                            messages[response.status] ||
-                            "Repository unavailable. Try again.",
-                          status: response.status,
-                        });
-                    } catch {
-                      setResult({ error: "Repository unavailable. Try again." });
-                    }
-                  }}
-                >
-                  <label>
-                    Git format
-                    <select name="format">
-                      <option value="sha1">SHA-1</option>
-                      <option value="sha256">SHA-256</option>
-                    </select>
-                  </label>
-                  <button type="submit">Create repository</button>
-                  <p class="muted">
-                    Creates an empty repository at {repository}; default branch main.
-                  </p>
-                </form>
-              )}
+            {result.status === 404 && !query.get("ref") && !query.get("path") && (
+              <p class="panel">
+                Push your first branch to create this repository:
+                <br />
+                <code>git push {cloneURL} HEAD</code>
+              </p>
+            )}
             {result.error && (
               <form
                 class="panel"

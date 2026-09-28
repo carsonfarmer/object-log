@@ -24,7 +24,7 @@ func TestRepositoryCreation(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.SetBasicAuth("git", password)
-		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Content-Type", "application/x-git-receive-pack-request")
 		response, err := http.DefaultClient.Do(r)
 		if err != nil {
 			t.Fatal(err)
@@ -40,92 +40,107 @@ func TestRepositoryCreation(t *testing.T) {
 			name := fmt.Sprintf("created/%s-%d", format, time.Now().UnixNano())
 			url := strings.TrimRight(endpoint, "/") + "/" + name
 			password := os.Getenv("GIT_PROBE_PASSWORD")
-			settings := `{"format":"` + format + `","default_branch":"release"}`
-			request(http.MethodPost, url+"/create", "wrong-password", settings, 401)
-			request(http.MethodGet, url+"/info/refs?service=git-upload-pack", password, "", 404)
-			request(http.MethodGet, url+"/info/refs?service=git-receive-pack", password, "", 404)
-			request(http.MethodPost, url+"/maintenance", password, "{}", 404)
-			request(http.MethodPost, url+"/create", password, strings.Repeat(" ", 4097), 413)
-			request(http.MethodPost, url+"/create", password, `{"log_id":"override"}`, 400)
-			request(http.MethodPost, url+"/create", password, settings, 201)
-			request(http.MethodPost, url+".git/create", password, settings, 409)
-			other := "sha1"
-			if format == other {
-				other = "sha256"
+			read := url + "/info/refs?service=git-upload-pack"
+			request(http.MethodGet, url+"/info/refs?service=git-receive-pack", "wrong-password", "", 401)
+			request(http.MethodGet, read, password, "", 404)
+			request(http.MethodGet, url+"/info/refs?service=git-receive-pack", password, "", 200)
+			request(http.MethodPost, url+"/git-receive-pack", password, "0000", 200)
+			request(http.MethodGet, read, password, "", 404)
+			request(http.MethodPost, url+"/git-receive-pack", password, "invalid", 400)
+			width := 40
+			if format == "sha256" {
+				width = 64
 			}
-			request(http.MethodPost, url+"/create", password, `{"format":"`+other+`"}`, 409)
+			command := packet(strings.Repeat("0", width) + " " + strings.Repeat("1", width) + " refs/heads/release\x00report-status object-format=" + format + "\n")
+			request(http.MethodPost, url+"/git-receive-pack", password, string(command)+"0000broken pack", 200)
+			request(http.MethodGet, read, password, "", 404)
 			root := t.TempDir()
 			git(t, nil, "init", "--object-format="+format, "-b", "release", root)
 			write(t, filepath.Join(root, "README.md"), []byte(name))
 			git(t, nil, "-C", root, "add", ".")
-			git(t, nil, "-C", root, "commit", "-m", "created through API")
+			git(t, nil, "-C", root, "commit", "-m", "created by first push")
 			git(t, nil, "-C", root, "push", url, "HEAD:refs/heads/release")
 			clone := filepath.Join(t.TempDir(), "clone")
 			git(t, nil, "-c", "protocol.version=2", "clone", url+".git", clone)
 			git(t, nil, "-C", clone, "fsck", "--full")
 			if got := git(t, nil, "-C", clone, "symbolic-ref", "--short", "HEAD"); strings.TrimSpace(string(got)) != "release" {
-				t.Fatal("created default branch was lost")
+				t.Fatal("first branch was not retained as default")
 			}
 			if got := git(t, nil, "-C", clone, "show", "HEAD:README.md"); !bytes.Equal(got, []byte(name)) {
 				t.Fatal("created repository data differs")
 			}
 		})
 	}
-	t.Run("concurrent creators", func(t *testing.T) {
+	t.Run("concurrent first pushes", func(t *testing.T) {
 		url := fmt.Sprintf("%s/created/race-%d", strings.TrimRight(endpoint, "/"), time.Now().UnixNano())
+		type candidate struct {
+			format, tip string
+			body        []byte
+		}
+		var pushes []candidate
+		for _, format := range []string{"sha1", "sha256"} {
+			root := t.TempDir()
+			git(t, nil, "init", "--object-format="+format, "-b", "main", root)
+			write(t, filepath.Join(root, "README.md"), []byte(format))
+			git(t, nil, "-C", root, "add", ".")
+			git(t, nil, "-C", root, "commit", "-m", "first push")
+			tip := strings.TrimSpace(string(git(t, nil, "-C", root, "rev-parse", "HEAD")))
+			body := append(packet(strings.Repeat("0", len(tip))+" "+tip+" refs/heads/main\x00report-status object-format="+format+"\n"), []byte("0000")...)
+			body = append(body, git(t, []byte(tip+"\n"), "-C", root, "pack-objects", "--revs", "--stdout")...)
+			pushes = append(pushes, candidate{format, tip, body})
+		}
 		type result struct {
-			format string
+			candidate
 			status int
+			body   []byte
 			err    error
 		}
 		results := make(chan result, 2)
-		for _, format := range []string{"sha1", "sha256"} {
+		start := make(chan struct{})
+		for _, push := range pushes {
 			go func() {
-				r, err := http.NewRequest(http.MethodPost, url+"/create", strings.NewReader(`{"format":"`+format+`"}`))
-				if err != nil {
-					results <- result{format: format, err: err}
-					return
-				}
-				r.SetBasicAuth("git", os.Getenv("GIT_PROBE_PASSWORD"))
-				response, err := http.DefaultClient.Do(r)
-				status := 0
+				r := result{candidate: push}
+				request, err := http.NewRequest(http.MethodPost, url+"/git-receive-pack", bytes.NewReader(push.body))
 				if err == nil {
-					status = response.StatusCode
-					_, _ = io.Copy(io.Discard, response.Body)
-					err = response.Body.Close()
+					request.SetBasicAuth("git", os.Getenv("GIT_PROBE_PASSWORD"))
+					request.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+					<-start
+					var response *http.Response
+					response, err = http.DefaultClient.Do(request)
+					if err == nil {
+						r.status = response.StatusCode
+						r.body, err = io.ReadAll(response.Body)
+						response.Body.Close()
+					}
 				}
-				results <- result{format: format, status: status, err: err}
+				r.err = err
+				results <- r
 			}()
 		}
+		close(start)
 		winner := ""
 		for range 2 {
 			r := <-results
-			if r.err != nil || (r.status != 201 && r.status != 409) {
-				t.Fatalf("concurrent creation: %+v", r)
+			if r.err != nil {
+				t.Fatal(r.err)
 			}
-			if r.status == 201 {
+			if r.status == 200 && bytes.Contains(r.body, []byte("ok refs/heads/main")) {
 				if winner != "" {
-					t.Fatal("two creations committed")
+					t.Fatal("two incompatible first pushes committed")
 				}
-				winner = r.format
+				winner = r.tip
+			} else if r.status != 400 && !bytes.Contains(r.body, []byte("ng refs/heads/main")) {
+				t.Fatalf("unexpected losing push: status=%d reply=%s", r.status, r.body)
 			}
 		}
 		if winner == "" {
-			t.Fatal("no creation committed")
+			t.Fatal("no first push committed")
 		}
-		r, err := http.NewRequest(http.MethodGet, url+"/info/refs?service=git-receive-pack", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r.SetBasicAuth("git", os.Getenv("GIT_PROBE_PASSWORD"))
-		response, err := http.DefaultClient.Do(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		data, err := io.ReadAll(response.Body)
-		if err != nil || response.StatusCode != 200 || !bytes.Contains(data, []byte("object-format="+winner)) {
-			t.Fatal("stored format does not match winning creator")
+		clone := filepath.Join(t.TempDir(), "clone")
+		git(t, nil, "clone", url, clone)
+		git(t, nil, "-C", clone, "fsck", "--full")
+		if tip := strings.TrimSpace(string(git(t, nil, "-C", clone, "rev-parse", "HEAD"))); tip != winner {
+			t.Fatal("acknowledged first push was overwritten")
 		}
 	})
 }

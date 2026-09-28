@@ -18,6 +18,9 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	refNames := dotgit.New(memfs.New())
 	for _, cmd := range cmds {
 		name := string(cmd.Name)
+		if cmd.Old.HexSize() != st.meta.Format.HexSize() || cmd.New.HexSize() != st.meta.Format.HexSize() {
+			return nil, fmt.Errorf("invalid object format")
+		}
 		if seen[name] || (cmd.Old.IsZero() && cmd.New.IsZero()) {
 			return nil, fmt.Errorf("invalid ref update")
 		}

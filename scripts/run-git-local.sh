@@ -135,25 +135,17 @@ if [[ "$validated" != 1 ]]; then
   exit 1
 fi
 
-for format in sha1 sha256; do
-  curl --fail-with-body --silent --show-error --max-time 30 \
-    --user git:local-git-password -H 'Content-Type: application/json' \
-    --data "{\"format\":\"$format\"}" \
-    "http://127.0.0.1:$git_port/$format.git/create" >/dev/null
-done
-
 cat <<EOF
 Git service ready at http://127.0.0.1:$git_port
-  SHA-1:   http://127.0.0.1:$git_port/sha1.git
-  SHA-256: http://127.0.0.1:$git_port/sha256.git
   Spin log: $demo_dir/spin.log
+  Git log:  $root/examples/git/.spin/logs/git_stderr.txt
 
-Push an initial commit to the prepared SHA-256 repository:
-  git init --object-format=sha256 -b main demo
+Storage starts empty. Push an initial commit to create a repository:
+  git init -b main demo
   cd demo
   echo hello > README.md
   git add README.md && git commit -m 'Initial commit'
-  git push http://127.0.0.1:$git_port/sha256.git main
+  git push http://127.0.0.1:$git_port/team/demo.git main
 
 When prompted, use username git and password local-git-password.
 Press Ctrl-C here to stop Spin and MinIO and remove their disposable data.

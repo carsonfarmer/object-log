@@ -1,6 +1,6 @@
 # Repository explorer
 
-A small repository browser with creation through its TypeScript Spin API and Preact UI.
+A small repository browser with a TypeScript Spin API and Preact UI.
 It shows branches, directories, file previews and recent commits for authorized
 repositories. The API and UI live in a separate component; the WAL is unchanged.
 
@@ -20,44 +20,35 @@ bun install --frozen-lockfile
 bun start
 ```
 
-This builds both components, starts disposable local MinIO and Spin, and prints
-the Git URL. Open `http://127.0.0.1:19100/browse?repo=team/project.git`, sign in
-with password `local-git-password`, choose SHA-1 or SHA-256 and click
-**Create repository**. Then push an existing repository of that format:
+This builds both components and starts disposable local MinIO and Spin. Open
+`http://127.0.0.1:19100/`. Storage starts empty; push an existing repository:
 
 ```sh
-git push http://127.0.0.1:19100/team/project.git HEAD:main
+git push http://127.0.0.1:19100/team/project.git HEAD
 ```
 
-When Git prompts, use username `git` and password `local-git-password`.
-Press Ctrl-C in the startup terminal to stop both services and remove their
-disposable data. Each restart begins with empty storage.
+The first successful push creates the repository using the local Git format and
+first branch. SHA-1 is Git's default; SHA-256 repositories work too. When Git
+prompts, use username `git` and password `local-git-password`.
 
-The default `"*"` policy allows authorized creation of any repository through
-the API or UI, without per-repository TOML or a restart. Creation records its
-Git format; reads never create repositories. Bare names such as `team/project` identify the same
-repository as `team/project.git`. Exact configuration entries override the
-whole wildcard policy and may pin a WAL identity or Git format. Cognito access
-tokens use the Git service's existing read permissions. Credentials stay in page
-memory and clear on reload. Branch and path selections stay in the URL.
+Enter `team/project` in the viewer and sign in with the same password to browse
+its files and commits. The default `"*"` policy admits new names without editing
+TOML or restarting. Browsing a missing repository creates nothing. Bare names
+and their `.git` URLs select the same repository. Exact policies may override
+permissions or pin a WAL identity, format or default branch.
+
+Credentials stay in page memory and clear on reload. Branch and path selections
+stay in the URL. Press Ctrl-C in the startup terminal to stop both services and
+remove their disposable data. Each restart begins with empty storage.
 
 For an existing backend, use `bun run build`, then follow the
 [Git example's configuration](../README.md#configuration) and add
 `-f spin.viewer.toml` to its `spin up` command.
 
-Hosted proxies must forward `/browse`, `/browse/api`, `/browse/assets/client.js`
-and `/browse/assets/style.css` to Spin. `GET /browse/api` takes `repo` and
-optional `ref` and `path` query parameters. `POST /browse/api?repo=<name>`
-forwards creation to the Git service, using its write permission:
-
-```sh
-curl --fail-with-body -u git:local-git-password \
-  -H 'Content-Type: application/json' -d '{"format":"sha1"}' \
-  'http://127.0.0.1:19100/browse/api?repo=team/project.git'
-```
-
-Creation defaults to SHA-1 and `main`; `default_branch` is optional. A successful
-creation returns 201; creating an existing repository returns 409.
+Hosted proxies must forward `/`, `/_viewer/api`, `/_viewer/client.js` and
+`/_viewer/style.css` to Spin. `GET /_viewer/api` takes `repo` and optional
+`ref` and `path` query parameters. Git traffic goes directly to the Git component;
+the viewer has no repository-creation endpoint.
 
 ## Build and checks
 
