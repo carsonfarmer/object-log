@@ -95,12 +95,15 @@ authority. Use ordinary Spin and unmodified
 S3-compatible storage.
 
 The optional repository viewer has its own TypeScript Spin API and reads the
-existing WAL catalog; it adds no routes or code to the Go Git service. Its
+existing WAL catalog; browsing remains outside the Go Git service. Its
 compiler temporarily uses the focused opaque-resource fix in ComponentizeJS
 PR #357, with exact provenance in `THIRD_PARTY.md`.
-Its authorization probe uses protocol-v2 capability discovery. That GET still
-recovers and validates repository metadata, but does not acquire reader
-retention; actual fetches and older discovery retain their existing protection.
+Its authorization probe uses `GET /<repository>/authorize-read`, which checks the
+existing read policy and drain/admission rules without opening storage. A 204
+means permission is granted, not that a repository exists. The viewer maps missing
+logs and unpublished repositories to 404. Backend capabilities are validated by
+the deployment's startup probe. Actual Git fetches and older discovery retain
+their existing reader protection.
 History navigation reads 20 first-parent commits per page and uses bounded
 tab-local anchors for the reverse links. Its fixed-size origin selector keeps
 shared older histories distinct; it is removed before the API request. Browser

@@ -29,7 +29,11 @@ afterEach(() => {
   };
 });
 
-function emptySession(format: string, overrides: Record<string, unknown> = {}): Session {
+function emptySession(
+  format: string,
+  overrides: Record<string, unknown> = {},
+  children = 0,
+): Session {
   const dispose = () => undefined;
   let next = true;
   return {
@@ -50,7 +54,7 @@ function emptySession(format: string, overrides: Record<string, unknown> = {}): 
             ...overrides,
           }),
         ),
-        objects: [],
+        objects: Array.from({ length: children }, () => ({ [Symbol.dispose]: dispose })),
       }),
       [Symbol.dispose]: dispose,
     }),
@@ -59,10 +63,7 @@ function emptySession(format: string, overrides: Record<string, unknown> = {}): 
   } as unknown as Session;
 }
 
-const discovery = () =>
-  new Response("refs", {
-    headers: { "Content-Type": "application/x-git-upload-pack-advertisement" },
-  });
+const readAccess = () => new Response(null, { status: 204 });
 
 test("catalog requires a persisted branch HEAD and accepts an unborn branch", () => {
   for (const format of ["sha1", "sha256"]) {
@@ -76,6 +77,46 @@ test("catalog requires a persisted branch HEAD and accepts an unborn branch", ()
   }
 });
 
+test("catalog validates root fields, references and sorted bucket prefixes", () => {
+  for (const format of ["sha1", "sha256"]) {
+    const id = "11".repeat(format === "sha1" ? 20 : 32);
+    const invalid: [Record<string, unknown>, number][] = [
+      [{ Validated: 1 }, 0],
+      [{ Extra: true }, 0],
+      [{ Head: "refs/heads/a..b" }, 0],
+      [{ Head: "refs/heads/\u200c./nested" }, 0],
+      [{ Refs: [] }, 0],
+      [{ Refs: { "refs/heads/main.lock": id } }, 0],
+      [{ Refs: { "refs/heads/main": 1 } }, 0],
+      [{ Refs: { "refs/heads/main": id.slice(2) } }, 0],
+      [{ Refs: { "refs/heads/main": "00".repeat(id.length / 2) } }, 0],
+      [{ Refs: { "refs/heads/main": "AA".repeat(id.length / 2) } }, 0],
+      [{ Refs: { "refs/heads/a": id, "refs/heads/a/b": id } }, 0],
+      [{ Buckets: {} }, 0],
+      [{ Buckets: ["0G"] }, 1],
+      [{ Buckets: ["aa", "aa"] }, 2],
+      [{ Buckets: ["bb", "aa"] }, 2],
+    ];
+    for (const [fields, children] of invalid)
+      expect(() => new Catalog(emptySession(format, fields, children), "", { bytes: 0 })).toThrow(
+        "Invalid repository catalog",
+      );
+    for (const Head of ["refs/heads/@", "refs/heads/feature/日本語", "refs/heads/a\u200cb"])
+      drop(
+        new Catalog(
+          emptySession(format, { Head, Refs: { [Head]: id }, Buckets: ["00", "ff"] }, 2),
+          "",
+          { bytes: 0 },
+        ),
+      );
+    const empty = new Catalog(emptySession(format, { Refs: null, Buckets: null }), "", {
+      bytes: 0,
+    });
+    expect(snapshot(empty, new URLSearchParams()).branches).toEqual([]);
+    drop(empty);
+  }
+});
+
 test("wildcard repositories recover their stored format and canonical WAL identity", async () => {
   policies = '{"*":{}}';
   for (const format of ["sha1", "sha256"]) {
@@ -84,11 +125,9 @@ test("wildcard repositories recover their stored format and canonical WAL identi
       const canonical = name === "team/project.GIT" ? "team/project.GIT.git" : "team/project.git";
       let authorized = false;
       globalThis.fetch = mock(async (url: RequestInfo | URL) => {
-        expect(String(url)).toBe(
-          `http://git.spin.internal/${canonical}/info/refs?service=git-upload-pack`,
-        );
+        expect(String(url)).toBe(`http://git.spin.internal/${canonical}/authorize-read`);
         authorized = true;
-        return discovery();
+        return readAccess();
       }) as unknown as typeof fetch;
       openSession = (config) => {
         expect(authorized).toBe(true);
@@ -105,7 +144,7 @@ test("wildcard repositories recover their stored format and canonical WAL identi
 });
 
 test("exact aliases override the whole wildcard policy and enforce pinned formats", async () => {
-  globalThis.fetch = mock(async () => discovery()) as unknown as typeof fetch;
+  globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
   for (const key of ["team/project", "team/project.git"]) {
     policies = JSON.stringify({
       "*": { format: "sha256" },
@@ -312,12 +351,9 @@ test("a catalogued blob cannot be selected as a commit", () => {
 test("Git authorization completes before viewer storage is opened", async () => {
   const baseline = opened;
   globalThis.fetch = mock(async (input: RequestInfo | URL, options?: RequestInit) => {
-    expect(String(input)).toBe(
-      "http://git.spin.internal/team/demo.git/info/refs?service=git-upload-pack",
-    );
+    expect(String(input)).toBe("http://git.spin.internal/team/demo.git/authorize-read");
     expect(options?.headers).toEqual({
       Authorization: "Bearer test-token",
-      "Git-Protocol": "version=2",
     });
     expect(options?.redirect).toBe("manual");
     return new Response("Denied", { status: 403 });
@@ -347,31 +383,71 @@ test("Git authorization completes before viewer storage is opened", async () => 
   expect(opened).toBe(baseline);
 });
 
-test("bounded discovery drain cancels its stream and releases the reader before storage", async () => {
+test("access-check errors cancel their bodies without opening storage", async () => {
   const baseline = opened;
-  let cancelled = false;
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(new Uint8Array(8 << 20));
-      controller.enqueue(new Uint8Array(1));
-    },
-    cancel() {
-      cancelled = true;
-    },
-  });
-  globalThis.fetch = mock(async () => new Response(body)) as unknown as typeof fetch;
-  await expect(
-    browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git")),
-  ).rejects.toThrow("Git discovery exceeds 8 MiB");
-  expect(cancelled).toBe(true);
-  expect(body.locked).toBe(false);
+  for (const status of [200, 302, 401, 403, 404, 503]) {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    globalThis.fetch = mock(async () => new Response(body, { status })) as unknown as typeof fetch;
+    const response = await browse(
+      new Request("https://viewer.test/_viewer/api?repo=team/demo.git"),
+    );
+    expect(response.status).toBe([200, 302].includes(status) ? 502 : status);
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
+  }
   expect(opened).toBe(baseline);
+});
+
+test("authorized missing repositories return 404, while invalid durable state remains an error", async () => {
+  globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
+  const request = new Request("https://viewer.test/_viewer/api?repo=team/demo.git");
+  openSession = () => {
+    throw { payload: { tag: "missing" } };
+  };
+  expect((await browse(request)).status).toBe(404);
+  for (const count of [0, 2]) {
+    let dropped = 0;
+    const dispose = () => dropped++;
+    openSession = () =>
+      ({
+        recover: () => {
+          let next = true;
+          return {
+            next: () => {
+              if (!next) return undefined;
+              next = false;
+              return {
+                tag: "checkpoint",
+                val: {
+                  objects: Array.from({ length: count }, () => ({ [Symbol.dispose]: dispose })),
+                },
+              };
+            },
+            [Symbol.dispose]: dispose,
+          };
+        },
+        [Symbol.dispose]: dispose,
+      }) as unknown as Session;
+    if (count === 0) expect((await browse(request)).status).toBe(404);
+    else await expect(browse(request)).rejects.toThrow("Invalid repository root count");
+    expect(dropped).toBe(count + 2);
+  }
+  const failure = { payload: { tag: "other" } };
+  openSession = () => {
+    throw failure;
+  };
+  await expect(browse(request)).rejects.toBe(failure);
 });
 
 test("commit queries reject malformed selectors before authorization and return 404 for missing IDs", async () => {
   const baseline = opened;
   globalThis.fetch = mock(async () => {
-    throw new Error("Unexpected discovery");
+    throw new Error("Unexpected authorization");
   }) as unknown as typeof fetch;
   for (const selector of [
     "",
@@ -388,7 +464,7 @@ test("commit queries reject malformed selectors before authorization and return 
       ).status,
     ).toBe(400);
   expect(opened).toBe(baseline);
-  globalThis.fetch = mock(async () => discovery()) as unknown as typeof fetch;
+  globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
   openSession = () => emptySession("sha256", { Refs: { "refs/heads/main": "22".repeat(32) } });
   for (const selector of ["11".repeat(32), "11".repeat(20)])
     expect(
@@ -590,12 +666,7 @@ test("expired reads refresh once, close both views, and retain cumulative usage"
       },
     }) as unknown as Session;
   openSession = () => makeSession(false);
-  globalThis.fetch = mock(
-    async () =>
-      new Response("refs", {
-        headers: { "Content-Type": "application/x-git-upload-pack-advertisement" },
-      }),
-  ) as unknown as typeof fetch;
+  globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
   const response = await browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git"));
   expect(response.status).toBe(200);
   expect((await response.json()).history).toEqual([]);

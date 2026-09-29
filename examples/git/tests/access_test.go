@@ -25,6 +25,9 @@ func TestAccess(t *testing.T) {
 		status                 int
 	}
 	cases := []request{
+		{"GET", "/sha1.git/authorize-read", password, 204},
+		{"POST", "/sha1.git/authorize-read", password, 405},
+		{"GET", "/sha1.git/authorize-read?", password, 404},
 		{"GET", "/sha1.git/info/refs?service=git-receive-pack", password, receiveStatus},
 		{"GET", "/sha1.git/info/refs?service=git-upload-pack", password, 200},
 		{"POST", "/sha1.git/info/refs?service=git-upload-pack", password, 405},
@@ -41,7 +44,8 @@ func TestAccess(t *testing.T) {
 		cases = append(cases, request{"POST", "/sha1.git/maintenance", password, 403})
 	}
 	if password != "" {
-		cases = append(cases, request{"GET", "/sha1.git/info/refs?service=git-upload-pack", "wrong", 401})
+		cases = append(cases, request{"GET", "/sha1.git/info/refs?service=git-upload-pack", "wrong", 401},
+			request{"GET", "/sha1.git/authorize-read", "wrong", 401})
 	}
 	for _, c := range cases {
 		r, err := http.NewRequest(c.method, endpoint+c.path, nil)

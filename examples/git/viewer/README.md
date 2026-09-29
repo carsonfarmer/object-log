@@ -4,8 +4,9 @@ A small repository browser with a TypeScript Spin API and Preact UI.
 It shows branches, directories, file previews and recent commits for authorized
 repositories. The API and UI live in a separate component; the WAL is unchanged.
 
-The API checks access through ordinary Git discovery, then reads the repository's
-existing WAL catalog directly. Code reads follow only the selected commit and path;
+The API checks read permission through the Git service's `authorize-read` endpoint,
+then reads the repository's existing WAL catalog directly. The permission check
+does not open storage. Code reads follow only the selected commit and path;
 opening a large file summary does not download the file. SHA-1 and SHA-256 both
 work. Storage settings come from the same Spin variables as the Git example.
 
