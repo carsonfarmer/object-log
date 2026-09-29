@@ -169,6 +169,12 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, err.Error(), operationStatus(err))
 		return
 	}
+	if service == "authorize-read" {
+		response.Header().Set("Cache-Control", "no-store")
+		log.Printf("wal %s %s id=%s calls=0 bytes=0", r.Method, r.URL.Path, requestID)
+		response.WriteHeader(http.StatusNoContent)
+		return
+	}
 	var pushCapabilities *capability.List
 	if service == transport.ReceivePackService && method == http.MethodPost {
 		format, capabilities, body, err := receiveFormat(r.Body, limits.negotiationBytes)

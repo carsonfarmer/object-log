@@ -179,6 +179,7 @@ func TestResolveRepositorySelectsServiceAndAction(t *testing.T) {
 			service: transport.UploadPackService, action: gitRead},
 		{name: "write discovery", method: http.MethodGet, path: "info/refs?service=git-receive-pack",
 			service: transport.ReceivePackService, action: gitWrite},
+		{name: "read permission", method: http.MethodGet, path: "authorize-read", service: "authorize-read", action: gitRead},
 		{name: "read RPC", method: http.MethodPost, path: "git-upload-pack",
 			service: transport.UploadPackService, action: gitRead},
 		{name: "write RPC", method: http.MethodPost, path: "git-receive-pack",
@@ -219,6 +220,8 @@ func TestResolveRepositoryRejectsAliasesAndUnknownRoutes(t *testing.T) {
 		"/team/alpha.git/info/refs?service=git-upload-pack&service=git-receive-pack",
 		"/team/alpha.git/info/refs?service=git-upload-pack&extra=1",
 		"/team/alpha.git/info/refs?service=git-upload-pack&bad=%ZZ",
+		"/team/alpha.git/authorize-read?", "/team/alpha.git/authorize-read?service=git-upload-pack",
+		"/missing.git/authorize-read",
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
@@ -235,6 +238,16 @@ func TestResolveRepositoryMethodErrorPreservesWriteDiscoveryAction(t *testing.T)
 	route, err := resolveRepository(repositoriesForTest(t), request)
 	if !errors.Is(err, errRepositoryMethod) || route.Method != http.MethodGet || route.Action != gitWrite {
 		t.Fatalf("route=%+v error=%v", route, err)
+	}
+}
+
+func TestReadPermissionMethodErrorPreservesAction(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{http.MethodPost, http.MethodHead} {
+		route, err := resolveRepository(repositoriesForTest(t), httptest.NewRequest(method, "/team/alpha/authorize-read", nil))
+		if !errors.Is(err, errRepositoryMethod) || route.Method != http.MethodGet || route.Action != gitRead || route.Name != "team/alpha.git" {
+			t.Fatalf("route=%+v error=%v", route, err)
+		}
 	}
 }
 

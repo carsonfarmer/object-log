@@ -19,6 +19,7 @@ export interface Repository {
 export const automaticLogId = (name: string) =>
   `auto-${hex(sha256(new TextEncoder().encode(name)))}`;
 export class MissingObject extends Error {}
+export class NotFound extends Error {}
 interface Bucket {
   Items?: {
     ID: string;
@@ -37,6 +38,24 @@ export interface Root {
   Head: string;
   Refs: Record<string, string>;
   Buckets: string[];
+}
+
+function validRef(name: string): boolean {
+  return (
+    typeof name === "string" &&
+    name.startsWith("refs/") &&
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: Git refnames forbid ASCII controls.
+    !/[\u0000-\u0020\u007f~^:?*[\\]|\.\.|@\{|\.$/.test(name) &&
+    name
+      .split("/")
+      .every(
+        (part) =>
+          part &&
+          !part.startsWith(".") &&
+          !part.endsWith(".lock") &&
+          !/^\.\.?$/.test(part.replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, "")),
+      )
+  );
 }
 
 export function settings(repository: Repository): wal.Config {
@@ -88,16 +107,42 @@ export class Catalog {
         for (const root of this.owned) drop(root);
         this.owned = record.val.objects;
       }
-      if (this.owned.length !== 1) throw new Error("Repository has no published root");
+      if (!this.owned.length) throw new NotFound("Repository has no published root");
+      if (this.owned.length !== 1) throw new Error("Invalid repository root count");
       const node = this.node(this.owned[0]);
       this.root = json<Root>(node.data);
+      this.root.Refs ??= {};
+      this.root.Buckets ??= [];
+      const idPattern = new RegExp(`^[0-9a-f]{${this.root.Format === "sha1" ? 40 : 64}}$`);
       if (
-        !this.root.Validated ||
+        Object.keys(this.root).some(
+          (key) => !["Validated", "Format", "Head", "Refs", "Buckets"].includes(key),
+        ) ||
+        this.root.Validated !== true ||
         !["sha1", "sha256"].includes(this.root.Format) ||
-        typeof this.root.Head !== "string" ||
-        !/^refs\/heads\/.+$/.test(this.root.Head) ||
+        !validRef(this.root.Head) ||
+        !this.root.Head.startsWith("refs/heads/") ||
         (format && this.root.Format !== format) ||
-        this.root.Buckets.length !== node.objects.length
+        typeof this.root.Refs !== "object" ||
+        Array.isArray(this.root.Refs) ||
+        Object.entries(this.root.Refs).some(
+          ([name, id]) =>
+            !validRef(name) ||
+            typeof id !== "string" ||
+            !idPattern.test(id) ||
+            /^0+$/.test(id) ||
+            name
+              .split("/")
+              .some((_, i, parts) => Object.hasOwn(this.root.Refs, parts.slice(0, i).join("/"))),
+        ) ||
+        !Array.isArray(this.root.Buckets) ||
+        this.root.Buckets.length !== node.objects.length ||
+        this.root.Buckets.some(
+          (prefix, i, all) =>
+            typeof prefix !== "string" ||
+            !/^[0-9a-f]{2}$/.test(prefix) ||
+            (i > 0 && all[i - 1] >= prefix),
+        )
       )
         throw new Error("Invalid repository catalog");
       this.buckets = new Map(this.root.Buckets.map((prefix, i) => [prefix, node.objects[i]]));

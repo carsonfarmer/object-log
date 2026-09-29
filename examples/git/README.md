@@ -200,6 +200,11 @@ repositories and cannot clone or push. Its token must include both
 `git_cognito_scope` and `git/maintenance`. It uses Cognito's client-credentials
 grant, not a user's password or refresh token.
 
+`GET /<repository>/authorize-read` checks the same read policy without opening
+storage. Its empty, non-cacheable 204 response grants permission; it does not
+confirm that the repository exists. The separate viewer uses this check before
+reading the catalog itself. Drained recovery mode still blocks it.
+
 User authentication is separate from storage authentication. On EC2, set
 `wal_credential_mode = "instance-role"` and leave all static credential fields
 empty. The established object_store provider obtains and renews role credentials

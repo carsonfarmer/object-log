@@ -232,7 +232,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	}
 	for _, service := range []string{
 		"info/refs", transport.UploadPackService, transport.ReceivePackService,
-		"maintenance", "collect", "recover-retentions-after-drain",
+		"authorize-read", "maintenance", "collect", "recover-retentions-after-drain",
 	} {
 		suffix := "/" + service
 		if strings.HasSuffix(r.URL.Path, suffix) {
@@ -269,8 +269,11 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 	} else if r.URL.RawQuery != "" || r.URL.ForceQuery {
 		return repositoryRoute{}, errRepositoryNotFound
 	}
+	if route.Service == "authorize-read" {
+		route.Method = http.MethodGet
+	}
 	switch route.Service {
-	case transport.UploadPackService:
+	case transport.UploadPackService, "authorize-read":
 		route.Action = gitRead
 	case transport.ReceivePackService:
 		route.Action = gitWrite

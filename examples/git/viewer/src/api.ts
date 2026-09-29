@@ -29,37 +29,24 @@ export async function browse(request: Request): Promise<Response> {
     repositories["*"];
   if (!policy) return new Response("Repository not found", { status: 404 });
   const repository = { ...policy, log_id: policy.log_id || wal.automaticLogId(name) };
-  // Standard Git discovery enforces the unchanged service's repository permissions.
-  const authorized = await fetch(
-    `http://git.spin.internal/${name}/info/refs?service=git-upload-pack`,
-    {
-      headers: {
-        Authorization: request.headers.get("Authorization") ?? "",
-        "Git-Protocol": "version=2",
-      },
-      redirect: "manual",
-    },
-  );
-  const body = authorized.body?.getReader();
-  try {
-    let bytes = 0;
-    for (let part = await body?.read(); part && !part.done; part = await body?.read()) {
-      bytes += part.value.length;
-      if (bytes > 8 << 20) throw new Error("Git discovery exceeds 8 MiB");
-    }
-  } finally {
-    await body?.cancel();
-    body?.releaseLock();
-  }
-  if (authorized.status !== 200)
+  const authorized = await fetch(`http://git.spin.internal/${name}/authorize-read`, {
+    headers: { Authorization: request.headers.get("Authorization") ?? "" },
+    redirect: "manual",
+  });
+  await authorized.body?.cancel();
+  if (authorized.status !== 204)
     return new Response("Repository access denied", {
       status: [401, 403, 404, 503].includes(authorized.status) ? authorized.status : 502,
     });
-  const type = authorized.headers.get("Content-Type") ?? "";
-  if (!type.startsWith("application/x-git-upload-pack-advertisement"))
-    return new Response("Invalid Git discovery response", { status: 502 });
-  // Successful discovery has validated this same declaratively configured backend.
-  let session = wal.openExisting(wal.settings(repository));
+  // Deployment validates backend capabilities before serving either component.
+  let session: ReturnType<typeof wal.openExisting>;
+  try {
+    session = wal.openExisting(wal.settings(repository));
+  } catch (error) {
+    if ((error as { payload?: { tag: string } }).payload?.tag === "missing")
+      return new Response("Repository not found", { status: 404 });
+    throw error;
+  }
   const budget = { bytes: 0 };
   try {
     for (let attempt = 0; ; attempt++) {

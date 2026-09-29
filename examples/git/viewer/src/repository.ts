@@ -1,4 +1,6 @@
-import { type Catalog, hex, MissingObject } from "./wal";
+import { type Catalog, hex, MissingObject, NotFound } from "./wal";
+
+export { NotFound };
 
 export type Commit = ReturnType<typeof commit>["summary"];
 export type Snapshot = ReturnType<typeof snapshot>;
@@ -13,7 +15,6 @@ const text = new TextDecoder();
 const strictText = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const previewBytes = 256 << 10;
 const metadataBytes = 16 << 20;
-export class NotFound extends Error {}
 
 // Decode only loose commit/tree objects; packs and deltas remain the Git service's concern.
 function commit(catalog: Catalog, id: string) {
