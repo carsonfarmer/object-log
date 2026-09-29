@@ -13,20 +13,6 @@ const messages: Record<number, string> = {
   404: "Repository, commit or path not found.",
 };
 
-function Icon({ kind }: { kind: "folder" | "file" | "code" | "chevron" }) {
-  const paths = {
-    folder: "M2 4h5l2 2h5v7H2z",
-    file: "M4 2h5l3 3v9H4zM9 2v4h3",
-    code: "M6 4 2 8l4 4m4-8 4 4-4 4",
-    chevron: "m4 6 4 4 4-4",
-  };
-  return (
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <path d={paths[kind]} stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 const href = (query: Record<string, string>) => `/?${new URLSearchParams(query)}`;
 
 function CommitLink({ commit, branch }: { commit: Commit; branch: string }) {
@@ -54,18 +40,18 @@ function History({ view, pages }: { view: Snapshot; pages: HistoryPages }) {
   if (first && view.next) pages.remember(prefix + view.next, first);
   return (
     <section aria-label="Commits">
-      <p class="muted">First-parent history</p>
+      <p>First-parent history</p>
       <div class="panel">
         {view.history.map((commit) => (
           <article key={commit.id}>
             <CommitLink commit={commit} branch={view.branch} />
-            <p class="muted">
+            <p>
               {commit.author || "Unknown author"} committed on{" "}
               <time dateTime={commit.date}>{new Date(commit.date).toLocaleDateString()}</time>
             </p>
           </article>
         ))}
-        {!view.history.length && <p class="empty">No commits yet.</p>}
+        {!view.history.length && <p>No commits yet.</p>}
         {(previous || view.next) && (
           <article class="row tip pager">
             {previous ? (
@@ -111,9 +97,10 @@ function Code({ view }: { view: Snapshot }) {
       Number(b.kind === "directory") - Number(a.kind === "directory") ||
       a.name.localeCompare(b.name),
   );
+  if (!file && view.path) entries.unshift({ name: "..", kind: "directory", id: "" });
   return (
     <section aria-label="Code">
-      <nav class="breadcrumbs" aria-label="File path">
+      <nav aria-label="File path">
         {link(query.repo.replace(/\.git$/, ""), "")}
         {(view.path ? view.path.split("/") : []).map((part, i, parts) => (
           <span key={parts.slice(0, i + 1).join("/")}>
@@ -128,47 +115,40 @@ function Code({ view }: { view: Snapshot }) {
             <CommitLink commit={view.history[0]} branch={view.branch} />
           </article>
         )}
-        {file ? (
-          <>
-            <article class="row tip">
-              <span>{file.size.toLocaleString()} bytes</span>
-              <code>{file.id.slice(0, 12)}</code>
-            </article>
-            {file.state === "text" ? (
-              <pre>{file.text}</pre>
-            ) : (
-              <p class="empty">{previewMessages[file.state] ?? `Submodule · ${file.id}`}</p>
-            )}
-          </>
-        ) : (
-          <>
-            {view.path && (
-              <article class="row">
-                <Icon kind="folder" />
-                {link("..", view.path.split("/").slice(0, -1).join("/"))}
-              </article>
-            )}
-            {entries.map((entry) => (
-              <article class="row" key={`${entry.unavailable ? "bytes" : "text"}:${entry.name}`}>
-                <Icon kind={entry.kind === "directory" ? "folder" : "file"} />
-                {entry.unavailable ? (
-                  <span title="This filename is not UTF-8">{entry.name}</span>
-                ) : (
-                  link(entry.name, [view.path, entry.name].filter(Boolean).join("/"))
-                )}
-                <code>{entry.id.slice(0, 7)}</code>
-              </article>
-            ))}
-            {!entries.length && (
-              <p class="empty">
-                {view.history.length
-                  ? "This directory is empty."
-                  : "This repository is empty. Push a branch to start exploring."}
-              </p>
-            )}
-            {view.more && <p class="empty">Showing the first 500 entries.</p>}
-          </>
+        {file && (
+          <article class="row tip">
+            <span>{file.size.toLocaleString()} bytes</span>
+          </article>
         )}
+        {file &&
+          (file.state === "text" ? (
+            <pre>{file.text}</pre>
+          ) : (
+            <p>{previewMessages[file.state] ?? `Submodule · ${file.id}`}</p>
+          ))}
+        {entries.map((entry) => (
+          <article class="row" key={`${entry.unavailable ? "bytes" : "text"}:${entry.name}`}>
+            <span aria-hidden="true">{entry.kind === "directory" ? "📁" : "📄"}</span>
+            {entry.unavailable ? (
+              <span title="This filename is not UTF-8">{entry.name}</span>
+            ) : (
+              link(
+                entry.name,
+                entry.name === ".."
+                  ? view.path.split("/").slice(0, -1).join("/")
+                  : [view.path, entry.name].filter(Boolean).join("/"),
+              )
+            )}
+          </article>
+        ))}
+        {!file && !view.entries.length && (
+          <p>
+            {view.history.length
+              ? "This directory is empty."
+              : "This repository is empty. Push a branch to start exploring."}
+          </p>
+        )}
+        {view.more && <p>Showing the first 500 entries.</p>}
       </div>
     </section>
   );
@@ -224,9 +204,8 @@ function App() {
 
   return (
     <>
-      <header class="row site-header">
+      <header class="row">
         <a href="/">◈ object-log</a>
-        <span>Repository explorer</span>
       </header>
       <main>
         <h1>{repository.replace(/\.git$/, "") || "Repositories"}</h1>
@@ -267,13 +246,10 @@ function App() {
             {valid && (
               <>
                 <h2>Sign in to read this repository</h2>
-                <label>
-                  Credential
-                  <select name="mode">
-                    <option value="basic">Git password</option>
-                    <option value="bearer">Cognito access token</option>
-                  </select>
-                </label>
+                <select name="mode" aria-label="Credential type">
+                  <option value="basic">Git password</option>
+                  <option value="bearer">Cognito access token</option>
+                </select>
               </>
             )}
             <label>
@@ -289,26 +265,20 @@ function App() {
               />
             </label>
             <button type="submit">{valid ? "Sign in" : "Open repository"}</button>
-            <p class="muted">
-              {valid
-                ? "Used for this page only."
-                : "Open a repository. A first push creates it at the same Git URL."}
-            </p>
             {!valid && <p role="status">{result.error}</p>}
           </form>
         )}
         {valid && view && (
           <>
-            <nav class="row tabs" aria-label="Repository views">
+            <nav class="row" aria-label="Repository views">
               {["code", "commits"].map((name) => (
-                <button
-                  type="button"
+                <a
                   key={name}
-                  aria-pressed={tab === name}
-                  onClick={() => route(href({ ...query, view: name }))}
+                  aria-current={tab === name ? "page" : undefined}
+                  href={href({ ...query, view: name })}
                 >
                   {name === "code" ? "Code" : "Commits"}
-                </button>
+                </a>
               ))}
             </nav>
             <div class="row toolbar">
@@ -328,16 +298,11 @@ function App() {
                   ))}
                 </select>
               </label>
-              <span class="muted">
-                {view.branches.length} {view.branches.length === 1 ? "branch" : "branches"}
-              </span>
               {"commit" in query && (
                 <a href={href({ repo: repository, ref: view.branch, view: tab })}>Branch tip</a>
               )}
               <details>
-                <summary class="row">
-                  <Icon kind="code" /> Code <Icon kind="chevron" />
-                </summary>
+                <summary>〈〉 Code ▾</summary>
                 <div class="panel clone-box">
                   <label>
                     Clone URL
