@@ -586,6 +586,63 @@ for (const format of ["sha1", "sha256"] as const) {
       expect(page.history[0].id).toBe(start);
     }
   });
+
+  test(`${format}: wide trees keep listing limits and validate discarded entries`, async () => {
+    const width = format === "sha1" ? 20 : 32,
+      id = (value: number) => value.toString(16).padStart(width * 2, "0"),
+      encode = (value: string) => new TextEncoder().encode(value);
+    const rows = Array.from({ length: 600 }, (_, index) => ({
+      name: `file-${String(index).padStart(4, "0")}`,
+      target: id(3),
+    }));
+    const tree = (entries: typeof rows) => {
+      const parts = entries.map(({ name, target }) => {
+        const header = encode(`100644 ${name}\0`),
+          bytes = new Uint8Array(header.length + width);
+        bytes.set(header);
+        bytes.set(Uint8Array.fromHex(target), header.length);
+        return bytes;
+      });
+      const bytes = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+      let offset = 0;
+      for (const part of parts) {
+        bytes.set(part, offset);
+        offset += part.length;
+      }
+      return bytes;
+    };
+    let treeBytes = tree([...rows, { name: rows[599].name, target: id(4) }]);
+    const catalog = {
+      root: { Format: format, Head: "refs/heads/main", Refs: { "refs/heads/main": id(1) } },
+      object(key: string) {
+        const bytes =
+          key === id(1)
+            ? encode(`tree ${id(2)}\nauthor A <a@b> 1700000000 +0000\n\nTitle\n`)
+            : key === id(2)
+              ? treeBytes
+              : encode(key === id(3) ? "first match" : "duplicate");
+        return { size: bytes.length, bytes };
+      },
+    } as unknown as InstanceType<typeof Catalog>;
+    const listing = await snapshot(catalog, new URLSearchParams());
+    expect(listing.entries.map((entry) => entry.name)).toEqual(
+      rows.slice(0, 500).map((row) => row.name),
+    );
+    expect(listing.more).toBe(true);
+    const selected = await snapshot(catalog, new URLSearchParams({ path: rows[599].name }));
+    expect(selected.file?.id).toBe(id(3));
+    expect(selected.file?.text).toBe("first match");
+    treeBytes = tree(rows.slice(0, 500));
+    expect((await snapshot(catalog, new URLSearchParams())).more).toBe(false);
+    for (const malformed of [
+      tree([...rows, { name: ".", target: id(3) }]),
+      new Uint8Array([...tree(rows), 255]),
+    ]) {
+      treeBytes = malformed;
+      for (const query of [new URLSearchParams(), new URLSearchParams({ path: rows[0].name })])
+        await expect(snapshot(catalog, query)).rejects.toThrow();
+    }
+  });
 }
 
 test("unusual filenames remain listed without hiding valid siblings", async () => {
