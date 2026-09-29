@@ -2,9 +2,9 @@ import { type Catalog, hex, MissingObject, NotFound } from "./wal";
 
 export { NotFound };
 
-export type Commit = ReturnType<typeof commit>["summary"];
-export type Snapshot = ReturnType<typeof snapshot>;
-type TreeEntry = ReturnType<typeof tree>[number];
+export type Commit = Awaited<ReturnType<typeof commit>>["summary"];
+export type Snapshot = Awaited<ReturnType<typeof snapshot>>;
+type TreeEntry = Awaited<ReturnType<typeof tree>>[number];
 interface FilePreview {
   id: string;
   size: number;
@@ -17,8 +17,8 @@ const previewBytes = 256 << 10;
 const metadataBytes = 16 << 20;
 
 // Decode only loose commit/tree objects; packs and deltas remain the Git service's concern.
-function commit(catalog: Catalog, id: string) {
-  const raw = text.decode(catalog.object(id, 1, metadataBytes).bytes);
+async function commit(catalog: Catalog, id: string) {
+  const raw = text.decode((await catalog.object(id, 1, metadataBytes)).bytes);
   const split = raw.indexOf("\n\n"),
     header = raw.slice(0, split).split("\n");
   const fields = (name: string) =>
@@ -41,8 +41,8 @@ function commit(catalog: Catalog, id: string) {
   };
 }
 
-function tree(catalog: Catalog, id: string) {
-  const bytes = catalog.object(id, 2, metadataBytes).bytes;
+async function tree(catalog: Catalog, id: string) {
+  const bytes = (await catalog.object(id, 2, metadataBytes)).bytes;
   if (!bytes) throw new Error("Tree exceeds metadata limit");
   const width = catalog.root.Format === "sha256" ? 32 : 20,
     result = [];
@@ -74,7 +74,7 @@ function tree(catalog: Catalog, id: string) {
   return result;
 }
 
-export function snapshot(catalog: Catalog, query: URLSearchParams) {
+export async function snapshot(catalog: Catalog, query: URLSearchParams) {
   const history = query.get("view") === "commits";
   const branches = Object.keys(catalog.root.Refs)
     .filter((ref) => ref.startsWith("refs/heads/"))
@@ -102,7 +102,7 @@ export function snapshot(catalog: Catalog, query: URLSearchParams) {
     tip = "";
   try {
     for (let i = 0; id && i < (history ? 20 : 1); i++) {
-      const current = commit(catalog, id);
+      const current = await commit(catalog, id);
       if (i === 0) tip = current.tree;
       view.history.push(current.summary);
       id = current.parent;
@@ -115,19 +115,19 @@ export function snapshot(catalog: Catalog, query: URLSearchParams) {
     view.next = id;
     return view;
   }
-  let entries = tree(catalog, tip);
+  let entries = await tree(catalog, tip);
   const parts = view.path ? view.path.split("/") : [];
   for (const [index, part] of parts.entries()) {
     const entry = entries.find((value) => !value.unavailable && value.name === part);
     if (!entry) throw new NotFound();
     if (entry.kind === "directory") {
-      entries = tree(catalog, entry.id);
+      entries = await tree(catalog, entry.id);
       continue;
     }
     if (index !== parts.length - 1) throw new NotFound();
     view.file = { id: entry.id, size: 0, state: "submodule" };
     if (entry.kind !== "submodule") {
-      const blob = catalog.object(entry.id, 3, previewBytes);
+      const blob = await catalog.object(entry.id, 3, previewBytes);
       view.file.size = blob.size;
       view.file.state = blob.bytes ? "binary" : "large";
       try {

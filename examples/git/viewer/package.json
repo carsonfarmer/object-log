@@ -24,7 +24,6 @@
     "@bytecodealliance/componentize-js": "https://github.com/carsonfarmer/ComponentizeJS/releases/download/opaque-resource-v0.23.0/bytecodealliance-componentize-js-0.23.0-opaque-resource.1.tgz"
   },
   "dependencies": {
-    "@noble/hashes": "2.4.0",
     "@spinframework/spin-variables": "1.0.1",
     "@spinframework/wasi-http-proxy": "2.0.0",
     "fflate": "0.8.3",
