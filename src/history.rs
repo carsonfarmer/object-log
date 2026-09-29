@@ -43,6 +43,7 @@ pub enum HistoryItem {
 
 /// A bounded cursor over one exact view's checkpoint and active tail.
 /// Reads ahead by at most eight commits under the log's byte budget.
+/// The initial window shares its encoded-byte allowance with the checkpoint.
 #[derive(Debug)]
 pub struct HistoryCursor {
     log: Log,
@@ -80,7 +81,8 @@ impl HistoryCursor {
     }
 
     /// Reads the next authenticated checkpoint or commit without retaining
-    /// earlier records. The checkpoint, when present, is returned first.
+    /// earlier records. The checkpoint, when present, is returned first,
+    /// after any admitted initial read-ahead completes.
     ///
     /// # Errors
     ///
@@ -91,7 +93,23 @@ impl HistoryCursor {
             return Ok(None);
         }
         if !self.checkpoint_read {
-            let checkpoint = self.log.read_checkpoint(&self.view).await?;
+            let available = (self.log.options().max_object_bytes as u64)
+                .saturating_sub(self.view.checkpoint().map_or(0, |base| base.object().len()));
+            let initial = self
+                .view
+                .tail()
+                .iter()
+                .take(self.log.commit_read_window(READ_AHEAD))
+                .scan(available, |remaining, commit| {
+                    *remaining = remaining.checked_sub(commit.len())?;
+                    Some(())
+                })
+                .count();
+            let (checkpoint, ready) =
+                futures::try_join!(self.log.read_checkpoint(&self.view), async {
+                    Ok::<_, Error>(self.read_ahead(initial).await)
+                },)?;
+            self.ready = ready;
             self.checkpoint_read = true;
             if let Some(record) = checkpoint {
                 let proofs = record_proofs(&self.log, &self.view, record.objects());
@@ -103,14 +121,9 @@ impl HistoryCursor {
         }
         if self.next_commit < self.view.tail().len() {
             if self.ready.is_empty() {
-                let window = self.log.commit_read_window(READ_AHEAD);
-                let end = self.view.tail().len().min(self.next_commit + window);
-                self.ready = futures::future::join_all(
-                    (self.next_commit..end)
-                        .map(|index| self.log.read_tail_record_optional(&self.view, index)),
-                )
-                .await
-                .into();
+                self.ready = self
+                    .read_ahead(self.log.commit_read_window(READ_AHEAD))
+                    .await;
             }
             let record = match self.ready.pop_front().ok_or(Error::CorruptObject)? {
                 Ok(Some(record)) => record,
@@ -130,6 +143,16 @@ impl HistoryCursor {
         self.log.remember_tail(&self.view);
         self.complete = true;
         Ok(None)
+    }
+
+    async fn read_ahead(&self, count: usize) -> VecDeque<Result<Option<CommitRecord>, Error>> {
+        let end = self.view.tail().len().min(self.next_commit + count);
+        futures::future::join_all(
+            (self.next_commit..end)
+                .map(|index| self.log.read_tail_record_optional(&self.view, index)),
+        )
+        .await
+        .into()
     }
 }
 
@@ -189,6 +212,111 @@ mod tests {
     use super::*;
     use crate::sim::{Failure, FailurePhase, FaultStore, Operation};
     use crate::{CommitStatus, LogId, Options, TransactionId, ValidatedBackend};
+
+    #[tokio::test]
+    async fn checkpoint_read_overlaps_only_tail_records_that_fit_and_retries_in_order()
+    -> Result<(), Error> {
+        for (snapshot_bytes, admitted, fail) in [
+            (0, 2, false),
+            (2048, 1, false),
+            (3072, 0, false),
+            (0, 2, true),
+        ] {
+            let faults = FaultStore::new(InMemory::new());
+            let backend =
+                ValidatedBackend::new(Arc::new(faults.clone()), Path::from("overlap-test")).await?;
+            let options = Options {
+                max_object_bytes: 4096,
+                max_commit_bytes: 2048,
+                ..Options::default()
+            };
+            let log = Log::open(&backend, &LogId::new("history")?, options).await?;
+            let mut view = log.load().await?;
+            let snapshot = Bytes::from(vec![0; snapshot_bytes]);
+            for i in 0..4 {
+                let prepared = log.prepare(
+                    &view,
+                    TransactionId::new(),
+                    Bytes::from(vec![i; 1024]),
+                    Bytes::new(),
+                    Vec::new(),
+                )?;
+                let CommitStatus::Committed(next) = log.commit(prepared).await? else {
+                    return Err(Error::CorruptObject);
+                };
+                view = next;
+                if i == 0 {
+                    view = match log
+                        .publish_checkpoint(&view, &view.tail()[0], snapshot.clone(), Vec::new())
+                        .await?
+                    {
+                        crate::CheckpointStatus::Published(next) => next,
+                        _ => return Err(Error::CorruptObject),
+                    };
+                }
+            }
+            let mut cursor = history(&log, view)?;
+            faults.reset();
+            let first = if admitted > 0 {
+                let mut checkpoint = faults.pause_get_at(1, FailurePhase::Before);
+                if fail {
+                    for (occurrence, phase) in [
+                        (1, FailurePhase::After),
+                        (4, FailurePhase::Before),
+                        (5, FailurePhase::Before),
+                    ] {
+                        faults.schedule(Failure {
+                            operation: Operation::Get,
+                            occurrence,
+                            phase,
+                        });
+                    }
+                }
+                let (first, ()) = futures::join!(cursor.next(), async {
+                    assert!(matches!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(1),
+                            checkpoint.wait_until_entered()
+                        )
+                        .await,
+                        Ok(true)
+                    ));
+                    assert_eq!(
+                        faults.metrics().operation(Operation::Get).requests,
+                        1 + admitted
+                    );
+                    assert!(checkpoint.release());
+                });
+                first
+            } else {
+                let first = cursor.next().await;
+                assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+                first
+            };
+            let first = if fail {
+                assert!(first.is_err());
+                assert_eq!(faults.metrics().operation(Operation::Get).requests, 5);
+                cursor.next().await?
+            } else {
+                first?
+            };
+            assert!(matches!(first, Some(HistoryItem::Checkpoint(record))
+                if record.record().snapshot() == &snapshot));
+            for i in 1..4 {
+                assert!(
+                    matches!(cursor.next().await?, Some(HistoryItem::Commit(record))
+                    if record.record().operation() == &Bytes::from(vec![i; 1024]))
+                );
+            }
+            assert!(cursor.next().await?.is_none());
+            assert!(cursor.is_complete());
+            assert_eq!(
+                faults.metrics().operation(Operation::Get).requests,
+                if fail { 9 } else { 4 }
+            );
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn history_cursor_preserves_metadata_proofs_and_order() -> Result<(), Error> {

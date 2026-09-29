@@ -46,7 +46,8 @@ The reference encoding changed; use a fresh prefix for this revision.
 
 The core also exposes a bounded authenticated-history cursor. It returns at
 most one checkpoint or commit per call, preserves complete commit metadata and
-publication proofs, and remains bound to one exact view. The reusable WASIp2
+publication proofs, and remains bound to one exact view. Checkpoint and initial
+commit reads overlap within the same encoded-byte allowance. The reusable WASIp2
 component exposes that cursor directly. View-sensitive reads, staging,
 publication, and checkpointing require a fully consumed recovery resource.
 Uncertain commits have durable recovery tokens; uncertain checkpoints retain
@@ -76,6 +77,10 @@ permissions, and machine-client administration. Stock Linux Git directly invoked
 git-credential-oauth to refresh expired credentials before reader fetches and a
 writer push. Request `openid git/access` with the helper so Cognito includes
 repository group claims.
+
+The September 28 live review deployment has been destroyed at the owner's
+request. Its EC2, S3, Cognito, IAM and temporary-secret resources are gone;
+the released IP must not be used. Domain registration and delegation remain.
 
 Incoming packs are staged as WAL streams. Unmodified go-git buffers delta bases
 and results during import; object limits do not bound peak memory. Receive-pack
@@ -193,8 +198,8 @@ stock-Spin TLS tests verify timeout and same-instance cleanup without an SDK for
 Wrong-issuer rejection and controlled signing-key rotation have native coverage;
 the run did not rotate Cognito's actual signing keys or use an alternate pool.
 
-The full provider suite passes against the public HTTPS deployment; all five
-live core S3 tests also pass. Exact complete refs were checked across all eight
+The full provider suite passed against the public HTTPS deployment; all five
+live core S3 tests also passed. Exact complete refs were checked across all eight
 repositories after process kill/automatic restart and again after an EC2 reboot.
 The failure drills cold-cloned and ran fsck on the two main hash repositories.
 Separate cold clones of idle and active repositories passed after scheduled
