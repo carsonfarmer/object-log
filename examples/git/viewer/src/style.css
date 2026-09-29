@@ -1,5 +1,4 @@
 :root {
-  color-scheme: light;
   font:
     14px / 1.5 system-ui,
     sans-serif;
@@ -9,10 +8,6 @@
 * {
   box-sizing: border-box;
   margin: 0;
-}
-svg,
-code {
-  flex-shrink: 0;
 }
 a {
   color: #0969da;
@@ -32,12 +27,8 @@ summary {
   background: #f6f8fa;
   color: inherit;
 }
-button,
-select,
-summary {
-  cursor: pointer;
-}
 select {
+  max-width: 220px;
   appearance: none;
   padding-right: 32px;
   background: #f6f8fa
@@ -52,129 +43,66 @@ input {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-width: 0;
 }
-.site-header {
-  gap: 24px;
-  padding: clamp(16px, 2vw, 20px) clamp(16px, 3vw, 32px);
-  background: #f6f8fa;
-  border-bottom: 1px solid #d0d7de;
-}
-header a {
-  color: inherit;
-  font-weight: 650;
-}
-header span,
-.muted,
-code,
-.empty {
-  color: #656d76;
+header {
+  padding: 16px 24px;
 }
 main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
   max-width: 1120px;
   margin: auto;
-  padding: clamp(24px, 3vw, 32px) clamp(16px, 3vw, 32px);
+  padding: 24px;
   overflow-wrap: anywhere;
-}
-h1 {
-  margin: 0 0 24px;
-  font-size: clamp(19px, 2vw, 22px);
-  color: #0969da;
-}
-h2 {
-  font-size: 16px;
 }
 .panel {
   border: 1px solid #d0d7de;
   border-radius: 6px;
   overflow: hidden;
 }
-p.panel {
-  padding: 16px 24px;
-}
-.panel + .panel,
-p[role="status"] + .panel {
-  margin-top: 16px;
+p.panel,
+.panel > p {
+  padding: 16px;
 }
 form.panel {
   display: grid;
   gap: 12px;
   max-width: 520px;
-  padding: 24px;
+  padding: 16px;
 }
 label {
   display: grid;
   gap: 6px;
 }
-form button {
-  justify-self: start;
-}
-summary,
-form button {
-  background: #1f883d;
-  color: white;
-  border-color: #1f883d;
-}
-.tabs {
-  gap: 8px;
-  border-bottom: 1px solid #d0d7de;
-  margin-bottom: 20px;
-}
-.tabs button {
-  border: 0;
-  border-radius: 0;
-  padding: 10px 16px;
-  background: transparent;
-  border-bottom: 2px solid transparent;
-}
-.tabs [aria-pressed="true"] {
-  border-bottom-color: #fd8c73;
+[aria-current="page"] {
   font-weight: 600;
 }
 .toolbar {
   flex-wrap: wrap;
-  gap: clamp(8px, 1.5vw, 16px);
-  margin-bottom: 20px;
-}
-.toolbar label {
-  gap: 6px;
-}
-.toolbar select {
-  max-width: 220px;
 }
 details {
   position: relative;
   margin-left: auto;
 }
-summary.row {
-  gap: 8px;
+summary {
   list-style: none;
 }
-summary svg:last-child {
-  margin-left: 8px;
-}
 .clone-box {
+  display: grid;
+  gap: 12px;
   position: absolute;
   right: 0;
   z-index: 1;
-  width: min(340px, calc(100vw - 32px));
+  width: min(340px, calc(100vw - 48px));
   padding: 16px;
   background: white;
-}
-.clone-box button {
-  margin-top: 8px;
-}
-.breadcrumbs {
-  margin-bottom: 12px;
 }
 article {
   padding: 12px 16px;
   border-bottom: 1px solid #d0d7de;
 }
-article:last-child {
-  border-bottom: 0;
-}
-article > a {
+article:not(.pager) > a {
   flex: 1;
   min-width: 0;
 }
@@ -182,35 +110,13 @@ article > a {
   background: #f6f8fa;
   justify-content: space-between;
 }
-.pager > a {
-  flex: none;
-}
 .commit-title {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
-}
-code,
-pre {
-  font:
-    12px / 1.65 ui-monospace,
-    monospace;
 }
 pre {
-  padding: 20px;
+  padding: 16px;
   overflow: auto;
-  tab-size: 4;
-}
-.empty {
-  padding: 40px 24px;
-  text-align: center;
-}
-@media (max-width: 600px) {
-  header span {
-    display: none;
-  }
-  article > code {
-    display: none;
-  }
 }
