@@ -107,8 +107,10 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             let session = wal::open_existing(&settings)?;
             let before = session.usage();
             let unchanged = session.refresh()?;
-            assert_eq!(unchanged.usage().calls, before.calls + 1);
-            assert_eq!(unchanged.usage().bytes, before.bytes);
+            // The first refresh renews the fixture's expired role credentials:
+            // three metadata requests, then the conditional head GET.
+            assert_eq!(unchanged.usage().calls, before.calls + 4);
+            assert!(unchanged.usage().bytes > before.bytes);
             assert_eq!(session.usage().calls, unchanged.usage().calls);
 
             let recovery = session.recover()?;

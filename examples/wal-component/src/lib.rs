@@ -424,12 +424,13 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
         );
         let log_id = object_log::LogId::new(settings.log_id)?;
         let options = log_options(settings.log_limits)?;
-        let log = if create {
-            Log::open(&backend, &log_id, options).await
+        let (log, view) = if create {
+            let log = Log::open(&backend, &log_id, options).await?;
+            let view = log.load().await?;
+            (log, view)
         } else {
-            Log::open_existing(&backend, &log_id, options).await
-        }?;
-        let view = log.load().await?;
+            Log::open_existing_with_view(&backend, &log_id, options).await?
+        };
         Ok(Session::new(SessionState {
             log,
             view: RefCell::new(view),
