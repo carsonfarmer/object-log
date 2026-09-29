@@ -55,32 +55,6 @@ function validRef(name: string): boolean {
   );
 }
 
-async function inflateInline(
-  data: Uint8Array<ArrayBuffer>,
-  expected: number,
-): Promise<Uint8Array<ArrayBuffer>> {
-  const reader = new Blob([data])
-    .stream()
-    .pipeThrough(new DecompressionStream("deflate"))
-    .getReader();
-  const output = new Uint8Array(expected + 1);
-  let length = 0;
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) return output.subarray(0, length);
-      if (value.length > expected - length) {
-        await reader.cancel();
-        throw new Error("Git object exceeds catalog length");
-      }
-      output.set(value, length);
-      length += value.length;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 export function settings(repository: Repository): wal.Config {
   return {
     endpoint: variable("wal_endpoint"),
@@ -238,10 +212,7 @@ export class Catalog {
         const names: Record<number, string> = { 1: "commit", 2: "tree", 3: "blob" };
         const header = new TextEncoder().encode(`${names[kind]} ${item.Size}\0`);
         const expected = header.length + item.Size;
-        // Inline compressed bytes are capped at 2 KiB; external objects keep bounded synchronous inflation.
-        const content = item.Inline
-          ? await inflateInline(compressed, expected)
-          : unzlibSync(compressed, { out: new Uint8Array(expected + 1) });
+        const content = unzlibSync(compressed, { out: new Uint8Array(expected + 1) });
         if (
           content.length !== expected ||
           hex(new Uint8Array(await crypto.subtle.digest(hash, content))) !== id ||
