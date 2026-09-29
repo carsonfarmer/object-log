@@ -18,14 +18,19 @@ a:hover {
 }
 button,
 input,
-select,
-summary {
+select {
   font: inherit;
   padding: 6px 12px;
   border: 1px solid #d0d7de;
   border-radius: 6px;
   background: #f6f8fa;
   color: inherit;
+}
+button {
+  background: #1f883d;
+  border-color: #1a7f37;
+  color: white;
+  cursor: pointer;
 }
 select {
   max-width: 220px;
@@ -46,6 +51,14 @@ input {
 }
 header {
   padding: 16px 24px;
+  background: #f6f8fa;
+  border-bottom: 1px solid #d0d7de;
+  font-weight: 600;
+}
+h1 {
+  color: #0969da;
+  font-size: 24px;
+  font-weight: 600;
 }
 main {
   display: grid;
@@ -61,6 +74,12 @@ main {
   border-radius: 6px;
   overflow: hidden;
 }
+section > nav {
+  margin-bottom: 12px;
+}
+article > p {
+  color: #656d76;
+}
 p.panel,
 .panel > p {
   padding: 16px;
@@ -75,28 +94,23 @@ label {
   display: grid;
   gap: 6px;
 }
+.tabs {
+  gap: 24px;
+  border-bottom: 1px solid #d0d7de;
+}
+.tabs a {
+  color: inherit;
+  padding: 8px 0;
+}
 [aria-current="page"] {
   font-weight: 600;
+  box-shadow: 0 2px #fd8c73;
 }
 .toolbar {
   flex-wrap: wrap;
 }
-details {
-  position: relative;
+.toolbar > button {
   margin-left: auto;
-}
-summary {
-  list-style: none;
-}
-.clone-box {
-  display: grid;
-  gap: 12px;
-  position: absolute;
-  right: 0;
-  z-index: 1;
-  width: min(340px, calc(100vw - 48px));
-  padding: 16px;
-  background: white;
 }
 article {
   padding: 12px 16px;
@@ -119,4 +133,7 @@ article:not(.pager) > a {
 pre {
   padding: 16px;
   overflow: auto;
+  font:
+    12px / 1.6 ui-monospace,
+    monospace;
 }

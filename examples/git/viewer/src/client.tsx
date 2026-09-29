@@ -1,5 +1,5 @@
 import { render } from "preact";
-import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { useLayoutEffect, useState } from "preact/hooks";
 import { LocationProvider, useLocation } from "preact-iso/router";
 
 import { HistoryPages } from "./history";
@@ -40,7 +40,6 @@ function History({ view, pages }: { view: Snapshot; pages: HistoryPages }) {
   if (first && view.next) pages.remember(prefix + view.next, first);
   return (
     <section aria-label="Commits">
-      <p>First-parent history</p>
       <div class="panel">
         {view.history.map((commit) => (
           <article key={commit.id}>
@@ -164,9 +163,8 @@ function App() {
     status?: number;
   }>({});
   const tab = query.view === "commits" ? "commits" : "code";
-  const [copied, setCopied] = useState(false);
+  const [copy, setCopy] = useState({ url: "", label: "Copy URL" });
   const [pages] = useState(() => new HistoryPages());
-  const cloneInput = useRef<HTMLInputElement>(null);
   const repository = query.repo ?? "";
   const valid = !!repositoryName(repository, location.origin);
   const view = result.url === url ? result.view : undefined;
@@ -270,7 +268,7 @@ function App() {
         )}
         {valid && view && (
           <>
-            <nav class="row" aria-label="Repository views">
+            <nav class="row tabs" aria-label="Repository views">
               {["code", "commits"].map((name) => (
                 <a
                   key={name}
@@ -301,28 +299,21 @@ function App() {
               {"commit" in query && (
                 <a href={href({ repo: repository, ref: view.branch, view: tab })}>Branch tip</a>
               )}
-              <details>
-                <summary>〈〉 Code ▾</summary>
-                <div class="panel clone-box">
-                  <label>
-                    Clone URL
-                    <input ref={cloneInput} value={cloneURL} readOnly />
-                  </label>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(cloneURL);
-                        setCopied(true);
-                      } catch {
-                        cloneInput.current?.select();
-                      }
-                    }}
-                  >
-                    {copied ? "Copied" : "Copy URL"}
-                  </button>
-                </div>
-              </details>
+              <button
+                type="button"
+                title={cloneURL}
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(cloneURL);
+                    setCopy({ url: cloneURL, label: "Copied" });
+                  } catch {
+                    setCopy({ url: cloneURL, label: "Copy failed" });
+                  }
+                }}
+              >
+                {copy.url === cloneURL ? copy.label : "Copy URL"}
+              </button>
+              {copy.url === cloneURL && copy.label === "Copy failed" && <code>{cloneURL}</code>}
             </div>
             {tab === "commits" ? <History view={view} pages={pages} /> : <Code view={view} />}
           </>
