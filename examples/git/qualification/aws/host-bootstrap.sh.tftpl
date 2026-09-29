@@ -21,8 +21,8 @@ trap 'rm -rf "$workdir"' EXIT
 # downloaded CLI package signature before installing it system-wide.
 curl -fsSL https://awscli.amazonaws.com/v2/install.sh -o "$workdir/install-aws.sh"
 bash "$workdir/install-aws.sh" --system
-curl -fsSL --retry 3 https://github.com/spinframework/spin/releases/download/v4.0.2/spin-v4.0.2-linux-amd64.tar.gz -o "$workdir/spin.tar.gz"
-printf '%s  %s\n' 79523cfc93424d555b3493c7ea07e0fb482e1fd9972f29a83bea0ba7d764bf00 "$workdir/spin.tar.gz" | sha256sum --check
+curl -fsSL --retry 3 https://github.com/spinframework/spin/releases/download/v4.1.0/spin-v4.1.0-linux-amd64.tar.gz -o "$workdir/spin.tar.gz"
+printf '%s  %s\n' aeeb892f94cf861f5302546faa0bdaa82cc4be30539621299746a6dc011f3b5a "$workdir/spin.tar.gz" | sha256sum --check
 tar -xzf "$workdir/spin.tar.gz" -C "$workdir" spin
 install -m 755 "$workdir/spin" /usr/local/bin/spin
 

@@ -14,7 +14,7 @@ an instance role restricted to that prefix. It opens no inbound ports and is
 separate from the hosted Git service.
 
 Optional [remote hosting](HOSTING.md) adds one Ubuntu EC2 host, Caddy HTTPS,
-stock Spin 4.0.2, restricted workload identity, Cognito, and periodic maintenance.
+stock Spin 4.1.0, restricted workload identity, Cognito, and periodic maintenance.
 That option stores a generated maintenance client secret in sensitive Terraform
 state and an SSM SecureString parameter. Follow the hosting guide's
 [client requirements](HOSTING.md#interactive-git-authentication) for OAuth and
