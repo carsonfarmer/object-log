@@ -12,15 +12,6 @@ Read `AGENTS.md`, `PLAN.md`, and `GIT_PLAN.md` before changing behavior.
 
 - `src/`: Rust WAL, authenticated object graph, recovery, checkpoints,
   retention, collection, simulator, and request limits.
-- `crates/object-log-kv/`: sparse radix-tree consumer for bounded small records,
-  with atomic batches, exact snapshots, scans, and root checkpoints. The guide
-  defines its local qualification and caller-owned recovery/maintenance duties.
-  Its qualified profile documents KV-owned per-call buffers separately from
-  caller, WAL, provider, runtime, allocator, and concurrency costs.
-- `integrations/spin-key-value/`: native provider for Spin 4.1's existing KV
-  factor. Consumers link and register it in their own runtime; no CLI or Spin
-  fork is shipped. Issue #52 covers registration, unchanged-guest execution,
-  host limits, pending results, recovery, and local MinIO qualification.
 - `examples/git/`: go-git smart-HTTP service and provider tests.
 - `examples/wal-component/`: reusable WASIp2 object-log component with S3,
   static or IMDSv2 credentials, bounded transport, and exact recovery.
@@ -150,14 +141,9 @@ The service-readiness and remote HTTPS qualification in issue #45 are complete.
 Issue #10 retains its completed local-Spin/live-S3 scope. Issue #47 is complete:
 collection plans have an independent candidate cap. Issue #46 is closed after
 deployed automatic-maintenance qualification and independent review.
-KV's bounded small-record delivery in #39 is complete. The local workload reaches
-65,536 one-KiB records in memory and 16,384 on MinIO, with model equality,
-contention, retained scans, cold recovery and collection. Existing publication
-and per-call limits remain unchanged. Issue #49 now documents a 4.07 MiB
-KV-owned variable-buffer envelope for the qualified profile; whole-process RSS
-also includes the database/provider, test oracle, WAL, runtime, allocator, and
-concurrent calls. Issue #50 is complete: one ordered batch reuses shared paths
-and stages each final node once, without raising limits.
+The key-value library, native Spin provider, tests and qualification guides are
+parked on `cf/park-key-value` at `9ba5c12`. They are absent from main and are not
+part of the active work.
 
 Core performance measurements cover append through a 1,024-entry tail,
 conflicts, exact recovery, checkpoints, retention and collection. Reproduction
