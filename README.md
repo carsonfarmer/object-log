@@ -163,7 +163,8 @@ form application-defined trees without exposing storage paths. `history` returns
 ordered commits, including transaction IDs and recorded results, for bindings
 or consumers that rebuild application state. Each item includes process-local
 publication proofs for its object references. The cursor returns one record at
-a time and remains bound to the exact view being reconstructed.
+a time and overlaps checkpoint and initial commit reads within the encoded-byte
+allowance. It remains bound to the exact view being reconstructed.
 
 ## Checkpoints and collection
 
