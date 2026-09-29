@@ -396,25 +396,31 @@ impl Log {
         options: Options,
     ) -> Result<Self, Error> {
         let store = backend.scope(log_id);
-        let incarnation = if let Some(stored) =
-            store.read(StoreKey::Head, options.max_head_bytes).await?
-        {
-            Self::incarnation_from_stored(&store, options, &stored)?
-        } else {
-            let initial = Head::empty(store.log_id().clone(), uuid::Uuid::new_v4(), options);
-            let initial_bytes = format::encode_head(&initial)?;
-            Self::validate_head_size(options, &initial_bytes)?;
-            match store.create(StoreKey::Head, initial_bytes).await {
-                Ok(true) => initial.incarnation,
-                Ok(false) => Self::load_incarnation(&store, options).await?,
-                Err(create_error) => {
-                    match store.read(StoreKey::Head, options.max_head_bytes).await? {
-                        Some(stored) => Self::incarnation_from_stored(&store, options, &stored)?,
-                        None => return Err(create_error),
+        let incarnation =
+            if let Some(stored) = store.read(StoreKey::Head, options.max_head_bytes).await? {
+                Self::head_from_stored(&store, options, &stored)?.incarnation
+            } else {
+                let initial = Head::empty(store.log_id().clone(), uuid::Uuid::new_v4(), options);
+                let initial_bytes = format::encode_head(&initial)?;
+                Self::validate_head_size(options, &initial_bytes)?;
+                match store.create(StoreKey::Head, initial_bytes).await {
+                    Ok(true) => initial.incarnation,
+                    Ok(false) => {
+                        Self::load_existing_head(&store, options)
+                            .await?
+                            .0
+                            .incarnation
+                    }
+                    Err(create_error) => {
+                        match store.read(StoreKey::Head, options.max_head_bytes).await? {
+                            Some(stored) => {
+                                Self::head_from_stored(&store, options, &stored)?.incarnation
+                            }
+                            None => return Err(create_error),
+                        }
                     }
                 }
-            }
-        };
+            };
         let staging_domain = Arc::new(StagingDomain);
         Ok(Self {
             store,
@@ -440,14 +446,34 @@ impl Log {
         log_id: &LogId,
         options: Options,
     ) -> Result<Self, Error> {
+        Ok(Self::open_existing_with_view(backend, log_id, options)
+            .await?
+            .0)
+    }
+
+    /// Opens an existing log and returns the exact view from its single head read.
+    ///
+    /// The head is authenticated before either result is returned. This does not
+    /// retain or cache the head; later [`Self::load`] calls read current storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LogNotFound`] for an absent head, or an error for invalid
+    /// durable state, a different log identity, mismatched options, or storage failure.
+    pub async fn open_existing_with_view(
+        backend: &ValidatedBackend,
+        log_id: &LogId,
+        options: Options,
+    ) -> Result<(Self, View), Error> {
         let store = backend.scope(log_id);
-        let incarnation = Self::load_incarnation(&store, options).await?;
-        Ok(Self {
+        let (head, version) = Self::load_existing_head(&store, options).await?;
+        let log = Self {
             store,
             options,
-            incarnation,
+            incarnation: head.incarnation,
             staging_domain: Arc::new(StagingDomain),
-        })
+        };
+        Ok((log, Self::view(head, version)))
     }
 
     /// Clones this log with operation-local request admission.
@@ -2704,19 +2730,25 @@ impl Log {
         Ok(())
     }
 
-    async fn load_incarnation(store: &ScopedStore, options: Options) -> Result<uuid::Uuid, Error> {
+    async fn load_existing_head(
+        store: &ScopedStore,
+        options: Options,
+    ) -> Result<(Head, UpdateVersion), Error> {
         let stored = store
             .read(StoreKey::Head, options.max_head_bytes)
             .await?
             .ok_or(Error::LogNotFound)?;
-        Self::incarnation_from_stored(store, options, &stored)
+        Ok((
+            Self::head_from_stored(store, options, &stored)?,
+            stored.version,
+        ))
     }
 
-    fn incarnation_from_stored(
+    fn head_from_stored(
         store: &ScopedStore,
         options: Options,
         stored: &crate::store::StoredObject,
-    ) -> Result<uuid::Uuid, Error> {
+    ) -> Result<Head, Error> {
         let head = format::decode_head(&stored.bytes)?;
         if head.log_id != *store.log_id() {
             return Err(invalid("the durable head belongs to another log"));
@@ -2724,7 +2756,7 @@ impl Log {
         if head.options != options {
             return Err(Error::ConfigurationMismatch("options"));
         }
-        Ok(head.incarnation)
+        Ok(head)
     }
 }
 
@@ -2742,6 +2774,7 @@ mod tests {
     use super::*;
 
     include!("request_guard_tests.rs");
+    include!("open_existing_view_tests.rs");
 
     #[tokio::test]
     async fn cold_resume_keeps_the_exact_token_when_the_first_head_read_fails()
