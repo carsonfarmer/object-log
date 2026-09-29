@@ -48,8 +48,8 @@ their upstream licenses apply.
 
 ## Optional TypeScript repository viewer
 
-The viewer uses Bun, TypeScript, Biome, Preact, `fflate`, `@noble/hashes` and the
-Spin JavaScript SDK. Its `examples/git/viewer/bun.lock` records exact versions
+The viewer uses Bun, TypeScript, Biome, Preact, `fflate` and the Spin JavaScript
+SDK. Its `examples/git/viewer/bun.lock` records exact versions
 and package integrity. Their upstream licenses apply.
 
 The compiler uses a temporary package based on official ComponentizeJS 0.23.0,

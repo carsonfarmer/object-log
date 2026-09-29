@@ -1,6 +1,4 @@
 import * as wal from "object-log:storage/wal@0.1.0";
-import { sha1 } from "@noble/hashes/legacy.js";
-import { sha256 } from "@noble/hashes/sha2.js";
 import { get } from "@spinframework/spin-variables";
 import { unzlibSync } from "fflate";
 
@@ -9,15 +7,14 @@ export const disposable = <T>(resource: T) => resource as T & Disposable;
 export const drop = (resource: unknown) => disposable(resource)[Symbol.dispose]();
 const decode = new TextDecoder("utf-8", { fatal: true });
 export const json = <T>(data: Uint8Array): T => JSON.parse(decode.decode(data));
-export const hex = (bytes: Uint8Array) =>
-  Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+export const hex = (bytes: Uint8Array) => bytes.toHex();
 
 export interface Repository {
   log_id: string;
   format?: "sha1" | "sha256" | "";
 }
-export const automaticLogId = (name: string) =>
-  `auto-${hex(sha256(new TextEncoder().encode(name)))}`;
+export const automaticLogId = async (name: string) =>
+  `auto-${hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(name))))}`;
 export class MissingObject extends Error {}
 export class NotFound extends Error {}
 interface Bucket {
@@ -163,9 +160,13 @@ export class Catalog {
     return entry;
   }
 
-  object(id: string, kind: number, maxBytes: number): { size: number; bytes?: Uint8Array } {
-    const hash = this.root.Format === "sha256" ? sha256 : sha1;
-    if (!new RegExp(`^[0-9a-f]{${hash.outputLen * 2}}$`).test(id))
+  async object(
+    id: string,
+    kind: number,
+    maxBytes: number,
+  ): Promise<{ size: number; bytes?: Uint8Array }> {
+    const hash = this.root.Format === "sha256" ? "SHA-256" : "SHA-1";
+    if (!new RegExp(`^[0-9a-f]{${hash === "SHA-256" ? 64 : 40}}$`).test(id))
       throw new Error("Invalid Git object ID");
     let prefix = id.slice(0, 2),
       root = this.buckets.get(prefix);
@@ -190,8 +191,7 @@ export class Catalog {
           return { size: item.Size };
         }
         let compressed: Uint8Array;
-        if (item.Inline)
-          compressed = Uint8Array.from(atob(item.Inline), (char) => char.charCodeAt(0));
+        if (item.Inline) compressed = Uint8Array.fromBase64(item.Inline);
         else {
           if (!value) throw new Error("Missing object reference");
           const full = item.Delta?.StoredSize ? this.node(value).objects[0] : value;
@@ -215,7 +215,7 @@ export class Catalog {
         const content = unzlibSync(compressed, { out: new Uint8Array(expected + 1) });
         if (
           content.length !== expected ||
-          hex(hash(content)) !== id ||
+          hex(new Uint8Array(await crypto.subtle.digest(hash, content))) !== id ||
           !header.every((byte, i) => content[i] === byte)
         )
           throw new Error("Git object differs from its catalog");

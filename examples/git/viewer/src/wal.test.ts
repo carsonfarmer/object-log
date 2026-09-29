@@ -65,19 +65,19 @@ function emptySession(
 
 const readAccess = () => new Response(null, { status: 204 });
 
-test("catalog requires a persisted branch HEAD and accepts an unborn branch", () => {
+test("catalog requires a persisted branch HEAD and accepts an unborn branch", async () => {
   for (const format of ["sha1", "sha256"]) {
     for (const Head of [undefined, "", "refs/tags/main", "refs/heads/"])
       expect(() => new Catalog(emptySession(format, { Head }), "", { bytes: 0 })).toThrow(
         "Invalid repository catalog",
       );
     const catalog = new Catalog(emptySession(format), "", { bytes: 0 });
-    expect(snapshot(catalog, new URLSearchParams()).branches).toEqual([]);
+    expect((await snapshot(catalog, new URLSearchParams())).branches).toEqual([]);
     drop(catalog);
   }
 });
 
-test("catalog validates root fields, references and sorted bucket prefixes", () => {
+test("catalog validates root fields, references and sorted bucket prefixes", async () => {
   for (const format of ["sha1", "sha256"]) {
     const id = "11".repeat(format === "sha1" ? 20 : 32);
     const invalid: [Record<string, unknown>, number][] = [
@@ -112,7 +112,7 @@ test("catalog validates root fields, references and sorted bucket prefixes", () 
     const empty = new Catalog(emptySession(format, { Refs: null, Buckets: null }), "", {
       bytes: 0,
     });
-    expect(snapshot(empty, new URLSearchParams()).branches).toEqual([]);
+    expect((await snapshot(empty, new URLSearchParams())).branches).toEqual([]);
     drop(empty);
   }
 });
@@ -260,15 +260,33 @@ function fixture(
 }
 
 for (const format of ["sha1", "sha256"] as const) {
-  test(`${format}: inline and chunked full objects with a retained delta`, () => {
+  test(`${format}: object digest and Git header are checked independently`, async () => {
+    const encode = (value: string) => new TextEncoder().encode(value);
+    for (const [expected, stored] of [
+      ["blob 3\0abc", "blob 3\0abd"],
+      ["tree 3\0abc", "tree 3\0abc"],
+    ]) {
+      const sample = fixture(format, encode(expected), zlibSync(encode(stored)));
+      try {
+        await expect(sample.catalog.object(sample.id, 3, 256)).rejects.toThrow(
+          "Git object differs from its catalog",
+        );
+      } finally {
+        drop(sample.catalog);
+      }
+      expect(sample.counts()).toEqual({ reads: 0, drops: 3 });
+    }
+  });
+
+  test(`${format}: inline and chunked full objects with a retained delta`, async () => {
     const raw = new TextEncoder().encode("blob 3\0abc"),
       encoded = zlibSync(raw);
     for (const storage of ["inline", "inline-delta", "full", "delta"] as const) {
       const sample = fixture(format, raw, encoded, storage);
       try {
-        expect(new TextDecoder().decode(sample.catalog.object(sample.id, 3, 256).bytes)).toBe(
-          "abc",
-        );
+        expect(
+          new TextDecoder().decode((await sample.catalog.object(sample.id, 3, 256)).bytes),
+        ).toBe("abc");
       } finally {
         drop(sample.catalog);
       }
@@ -281,7 +299,7 @@ for (const format of ["sha1", "sha256"] as const) {
     }
   });
 
-  test(`${format}: inline compressed length boundary`, () => {
+  test(`${format}: inline compressed length boundary`, async () => {
     for (const compressedSize of [2048, 2049]) {
       const size = compressedSize - 21,
         header = new TextEncoder().encode(`blob ${size}\0`),
@@ -292,11 +310,11 @@ for (const format of ["sha1", "sha256"] as const) {
       expect(encoded.length).toBe(compressedSize);
       try {
         if (compressedSize === 2048)
-          expect(sample.catalog.object(sample.id, 3, 4096).bytes).toEqual(
+          expect((await sample.catalog.object(sample.id, 3, 4096)).bytes).toEqual(
             raw.subarray(header.length),
           );
         else
-          expect(() => sample.catalog.object(sample.id, 3, 4096)).toThrow(
+          await expect(sample.catalog.object(sample.id, 3, 4096)).rejects.toThrow(
             "Invalid stored object length",
           );
       } finally {
@@ -307,7 +325,7 @@ for (const format of ["sha1", "sha256"] as const) {
   });
 }
 
-test("inflation rejects excess decoded bytes and truncated input", () => {
+test("inflation rejects excess decoded bytes and truncated input", async () => {
   const raw = new TextEncoder().encode("blob 3\0abc");
   for (const encoded of [
     zlibSync(new TextEncoder().encode("blob 3\0abcEXTRA")),
@@ -315,7 +333,7 @@ test("inflation rejects excess decoded bytes and truncated input", () => {
   ]) {
     const sample = fixture("sha256", raw, encoded);
     try {
-      expect(() => sample.catalog.object(sample.id, 3, 256)).toThrow();
+      await expect(sample.catalog.object(sample.id, 3, 256)).rejects.toThrow();
     } finally {
       drop(sample.catalog);
     }
@@ -323,25 +341,25 @@ test("inflation rejects excess decoded bytes and truncated input", () => {
   }
 });
 
-test("large preview reads only metadata", () => {
+test("large preview reads only metadata", async () => {
   const raw = new TextEncoder().encode("blob 3\0abc"),
     sample = fixture("sha256", raw, zlibSync(raw), "delta");
   try {
-    expect(sample.catalog.object(sample.id, 3, 2)).toEqual({ size: 3 });
+    expect(await sample.catalog.object(sample.id, 3, 2)).toEqual({ size: 3 });
   } finally {
     drop(sample.catalog);
   }
   expect(sample.counts().reads).toBe(0);
 });
 
-test("a catalogued blob cannot be selected as a commit", () => {
+test("a catalogued blob cannot be selected as a commit", async () => {
   const raw = new TextEncoder().encode("blob 3\0abc"),
     sample = fixture("sha256", raw, zlibSync(raw));
   sample.catalog.root.Refs["refs/heads/main"] = "22".repeat(32);
   try {
-    expect(() => snapshot(sample.catalog, new URLSearchParams({ commit: sample.id }))).toThrow(
-      NotFound,
-    );
+    await expect(
+      snapshot(sample.catalog, new URLSearchParams({ commit: sample.id })),
+    ).rejects.toThrow(NotFound);
   } finally {
     drop(sample.catalog);
   }
@@ -477,7 +495,7 @@ test("commit queries reject malformed selectors before authorization and return 
 });
 
 for (const format of ["sha1", "sha256"] as const) {
-  test(`${format}: Code reads the selected path and Commits reads only its history page`, () => {
+  test(`${format}: Code reads the selected path and Commits reads only its history page`, async () => {
     const width = format === "sha1" ? 20 : 32,
       id = (n: number) => n.toString(16).padStart(width * 2, "0"),
       encode = (value: string) => new TextEncoder().encode(value);
@@ -509,13 +527,16 @@ for (const format of ["sha1", "sha256"] as const) {
         return { size: object.bytes.length, bytes: object.bytes };
       },
     } as unknown as InstanceType<typeof Catalog>;
-    const view = snapshot(catalog, new URLSearchParams({ commit: id(25), path: "src/README" }));
+    const view = await snapshot(
+      catalog,
+      new URLSearchParams({ commit: id(25), path: "src/README" }),
+    );
     expect(view.branch).toBe("refs/heads/main");
     expect(view.history.map((commit) => commit.title)).toEqual(["Commit 25"]);
     expect(view.file?.text).toBe("selected content");
     expect(reads).toEqual([id(25), id(101), id(102), id(103)]);
     reads.length = 0;
-    const page = snapshot(
+    const page = await snapshot(
       catalog,
       new URLSearchParams({ commit: id(25), path: "src/README", view: "commits" }),
     );
@@ -527,26 +548,30 @@ for (const format of ["sha1", "sha256"] as const) {
     expect(page.next).toBe(id(5));
     expect(reads).toEqual(page.history.map((commit) => commit.id));
     reads.length = 0;
-    const older = snapshot(catalog, new URLSearchParams({ commit: page.next, view: "commits" }));
+    const older = await snapshot(
+      catalog,
+      new URLSearchParams({ commit: page.next, view: "commits" }),
+    );
     expect(older.history.map((commit) => commit.id)).toEqual([5, 4, 3, 2, 1].map(id));
     expect(older.next).toBe("");
     expect(reads).toEqual(older.history.map((commit) => commit.id));
     reads.length = 0;
     expect(
-      snapshot(catalog, new URLSearchParams({ commit: id(2), path: "src" })).entries[0]?.name,
+      (await snapshot(catalog, new URLSearchParams({ commit: id(2), path: "src" }))).entries[0]
+        ?.name,
     ).toBe("README");
     expect(reads).toEqual([id(2), id(101), id(102)]);
     for (const commit of [id(104), id(103)])
-      expect(() => snapshot(catalog, new URLSearchParams({ commit }))).toThrow(NotFound);
-    expect(() =>
+      await expect(snapshot(catalog, new URLSearchParams({ commit }))).rejects.toThrow(NotFound);
+    await expect(
       snapshot(catalog, new URLSearchParams({ ref: "refs/heads/missing", commit: id(25) })),
-    ).toThrow(NotFound);
+    ).rejects.toThrow(NotFound);
     const starts: string[] = [];
     let start = id(100);
     while (start) {
       starts.push(start);
       reads.length = 0;
-      const page = snapshot(catalog, new URLSearchParams({ commit: start, view: "commits" }));
+      const page = await snapshot(catalog, new URLSearchParams({ commit: start, view: "commits" }));
       expect(reads).toEqual(page.history.map((commit) => commit.id));
       expect(reads).toHaveLength(20);
       start = page.next;
@@ -554,7 +579,7 @@ for (const format of ["sha1", "sha256"] as const) {
     expect(starts).toEqual([100, 80, 60, 40, 20].map(id));
     for (const start of [...starts].reverse()) {
       reads.length = 0;
-      const page = snapshot(catalog, new URLSearchParams({ commit: start, view: "commits" }));
+      const page = await snapshot(catalog, new URLSearchParams({ commit: start, view: "commits" }));
       expect(reads).toEqual(page.history.map((commit) => commit.id));
       expect(reads).toHaveLength(20);
       expect(page.history[0].id).toBe(start);
@@ -562,7 +587,7 @@ for (const format of ["sha1", "sha256"] as const) {
   });
 }
 
-test("unusual filenames remain listed without hiding valid siblings", () => {
+test("unusual filenames remain listed without hiding valid siblings", async () => {
   const encode = (value: string) => new TextEncoder().encode(value);
   const commitId = "11".repeat(20),
     treeId = "22".repeat(20),
@@ -598,7 +623,7 @@ test("unusual filenames remain listed without hiding valid siblings", () => {
         return { size: bytes.length, bytes };
       },
     } as unknown as InstanceType<typeof Catalog>;
-    const view = snapshot(catalog, new URLSearchParams());
+    const view = await snapshot(catalog, new URLSearchParams());
     expect(view.history[0].title).toBe("Title");
     expect(view.entries).toEqual([
       { name: "\\xff", kind: "file", id: blobId, unavailable: true },
@@ -607,8 +632,8 @@ test("unusual filenames remain listed without hiding valid siblings", () => {
       { name: "\uFEFFREADME", kind: "file", id: "36".repeat(20) },
       { name: "README", kind: "file", id: "37".repeat(20) },
     ]);
-    expect(snapshot(catalog, new URLSearchParams({ path: "�" })).file?.text).toBe("safe");
-    expect(snapshot(catalog, new URLSearchParams({ path: "\\xff" })).file?.id).toBe(
+    expect((await snapshot(catalog, new URLSearchParams({ path: "�" }))).file?.text).toBe("safe");
+    expect((await snapshot(catalog, new URLSearchParams({ path: "\\xff" }))).file?.id).toBe(
       "35".repeat(20),
     );
   }

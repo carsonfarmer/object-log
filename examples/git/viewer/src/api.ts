@@ -28,7 +28,7 @@ export async function browse(request: Request): Promise<Response> {
     Object.entries(repositories).find(([key]) => key !== "*" && canonicalName(key) === name)?.[1] ??
     repositories["*"];
   if (!policy) return new Response("Repository not found", { status: 404 });
-  const repository = { ...policy, log_id: policy.log_id || wal.automaticLogId(name) };
+  const repository = { ...policy, log_id: policy.log_id || (await wal.automaticLogId(name)) };
   const authorized = await fetch(`http://git.spin.internal/${name}/authorize-read`, {
     headers: { Authorization: request.headers.get("Authorization") ?? "" },
     redirect: "manual",
@@ -53,7 +53,7 @@ export async function browse(request: Request): Promise<Response> {
       let catalog: wal.Catalog | undefined;
       try {
         catalog = new wal.Catalog(session, repository.format, budget);
-        const view = snapshot(catalog, query),
+        const view = await snapshot(catalog, query),
           usage = session.usage();
         return Response.json(view, {
           headers: {
