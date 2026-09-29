@@ -201,16 +201,6 @@ for the durable format and recovery invariants. The schema is defined in
 
 ## Examples
 
-The [native Spin key-value provider](integrations/spin-key-value/README.md) lets
-custom Spin runtimes register object-log as a host-side store at compile time.
-Guests keep the standard key-value API; S3 credentials and transport stay in the
-host. Spin dependencies remain outside the core and KV workspaces.
-
-- [`object-log-kv`](https://github.com/carsonfarmer/object-log/tree/main/crates/object-log-kv)
-  is a byte-key/value store with sparse reads and writes, atomic batches,
-  immutable snapshots, ordered scans, and checkpoint recovery. Its guide defines
-  the locally qualified small-record profile and the caller's recovery and
-  maintenance responsibilities.
 - [`examples/git`](https://github.com/carsonfarmer/object-log/tree/main/examples/git)
   is a working Git service using go-git and the
   same public WAL API through the reusable `WASIp2` component. It supports ordinary Git
@@ -258,7 +248,7 @@ formats are intentionally absent. A tagged durable-format release will require a
 new format version for incompatible changes.
 
 The crate forbids unsafe Rust and denies missing public documentation. CI runs
-`make check`, the composed WASI credential tests, and the Spin key-value provider
+`make check`, the composed WASI credential tests, and the repository viewer
 checks. `make check` covers native tests and strict linting, including a `WASIp2`
 type-check. The API examples are
 `no_run` doctests: compiled but not executed. The local `MinIO` and

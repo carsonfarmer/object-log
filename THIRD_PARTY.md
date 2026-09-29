@@ -1,8 +1,8 @@
 # Third-party software
 
 Project code is Apache-2.0; see [LICENSE](LICENSE). `object-log` is the only
-publishable Cargo package. The key-value example and WASIp2 component are also
-Apache-2.0 and set `publish = false`. Dependencies retain their own licenses.
+publishable Cargo package. The WASIp2 component is also Apache-2.0 and sets
+`publish = false`. Dependencies retain their own licenses.
 
 ## Git component dependencies
 
@@ -65,21 +65,14 @@ build details accompany the
 Remove the package override once an upstream release includes this fix.
 The compiler change adds no viewer behavior or Git-specific code.
 
-## Native Spin provider
+## Hosted Spin runtime
 
-The isolated [Spin key-value provider](integrations/spin-key-value/README.md)
-uses unmodified [Spin v4.1.0](https://github.com/spinframework/spin/releases/tag/v4.1.0).
-Its annotated tag resolves to commit
-[`c0b3726`](https://github.com/spinframework/spin/commit/c0b3726aa4857961e20cf8616a0df5f0741af73d),
-which is the revision in the provider's Cargo.lock.
-Spin is Apache-2.0 WITH LLVM-exception. The opt-in guest test fetches and compiles
-that release's unmodified key-value test component and helper; it does not
-vendor them into this repository. The provider is Apache-2.0 and unpublished.
-Its separate Cargo.lock records its native and development dependencies.
+The optional Git host runs unmodified [Spin v4.1.0](https://github.com/spinframework/spin/releases/tag/v4.1.0),
+which is Apache-2.0 WITH LLVM-exception.
 
 Spin 4.1 transitively resolves the OpenTelemetry SDK version affected by
 [GHSA-w9wp-h8wv-79jx](https://github.com/open-telemetry/opentelemetry-rust/security/advisories/GHSA-w9wp-h8wv-79jx).
-The provider has no HTTP boundary. The optional hosted Git example constrains
+The optional hosted Git example constrains
 untrusted `baggage` headers in Caddy pending the coordinated upstream upgrade in
 [spinframework/spin#3598](https://github.com/spinframework/spin/issues/3598).
 
@@ -95,7 +88,7 @@ Micelio is MPL-2.0.
 
 - [`licenses/rust-direct.tsv`](licenses/rust-direct.tsv) records resolved direct
   Rust dependency names, versions, and reviewed license expressions across all
-  Rust packages in three workspaces.
+  Rust packages in two workspaces.
 - [`licenses/go.csv`](licenses/go.csv) records the Go packages used by the Git
   example. Its Rust component build tools use Apache-2.0 WITH LLVM-exception.
 - Lockfiles remain authoritative for exact dependency versions.
@@ -104,7 +97,7 @@ Audit the resolved dependencies when lockfiles change:
 
 ```sh
 cargo install cargo-license --version 0.7.0 --locked
-for manifest in Cargo.toml crates/object-log-kv/Cargo.toml examples/wal-component/Cargo.toml integrations/spin-key-value/Cargo.toml; do
+for manifest in Cargo.toml examples/wal-component/Cargo.toml; do
     cargo license --manifest-path "$manifest" --all-features --direct-deps-only --tsv
 done
 
@@ -120,7 +113,3 @@ output into the tracked inventories, preserving fork-specific revision URLs.
 Before distributing the composed Git component, collect dependency license and
 notice files from the same locked build inputs and include this project's
 license plus the bundled adapter license.
-
-Before distributing a runtime that embeds the native Spin provider, collect
-licenses and notices from its separate locked workspace as well. Include this
-project's license and Spin's Apache-2.0 WITH LLVM-exception terms.

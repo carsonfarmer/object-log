@@ -22,7 +22,6 @@ include = [
 ]
 
 [workspace]
-members = ["crates/object-log-kv"]
 resolver = "3"
 
 [dependencies]

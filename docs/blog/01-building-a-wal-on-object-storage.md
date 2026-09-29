@@ -13,8 +13,7 @@ the result works.
 The library underneath that example is a Rust write-ahead log over conditional
 object storage. An application supplies bytes describing its operations and
 state. The log supplies their durable order, explicit recovery outcomes, and
-the machinery to keep referenced data alive. Git is the demanding proof; a
-small key-value library is a second consumer of the same API.
+the machinery to keep referenced data alive. Git is the demanding proof.
 
 ## Publish through one object
 
@@ -153,13 +152,6 @@ Large Git objects required streaming storage. Cold repository access required
 sparse reads. Pushes with uncertain responses required honest publication
 outcomes. Concurrent fetch
 and collection required explicit reader retention.
-
-The key-value library uses a compressed radix tree for sparse reads, path-copy
-writes, and ordered scans. It publishes one root per atomic batch and reuses
-the WAL's snapshots, recovery, and collection. Its tests compare results against
-an independent in-memory map. The qualified local workload grows to 65,536
-one-KiB records in memory and 16,384 on MinIO, then exercises contention,
-retained scans, cold recovery, and collection.
 
 The core benchmarks measure the protocol separately from those applications.
 On local MinIO, appending a small record used two writes whether the active tail

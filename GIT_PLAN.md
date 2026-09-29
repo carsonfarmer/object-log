@@ -96,8 +96,7 @@ Issue #45 records the completed remote qualification and verified teardown.
 Automatic-maintenance issue #46 is closed after deployed qualification and
 independent review. Issue #6 tracks core performance; completed issue #10 retains
 its original local-Spin/live-S3 scope. Root integrates reviewed tranches;
-implementing workers use exclusive worktrees. KV qualification remains separate
-in #39.
+implementing workers use exclusive worktrees.
 
 ### 1. Repository identity and access
 

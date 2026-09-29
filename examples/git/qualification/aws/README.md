@@ -1,7 +1,6 @@
 # Disposable AWS S3 qualification
 
-This Terraform root provisions an isolated backend for the Git, WAL, and KV
-integration tests. It creates:
+This Terraform root provisions an isolated backend for the Git and WAL integration tests. It creates:
 
 - one private, unversioned, AES-256-encrypted S3 bucket;
 - public-access blocking and bucket-owner-enforced ownership;
@@ -71,7 +70,7 @@ EOF
 ```
 
 Read `qualification_runner_instance_id` after apply and use SSM Run Command or
-Session Manager to run the KV commands below from `/opt/object-log`. The runner
+Session Manager to run the core commands below from `/opt/object-log`. The runner
 role supplies S3 credentials through EC2 instance metadata; do not copy the
 temporary IAM-user session onto the host. Capture `/usr/bin/time -v` with the
 test output when measuring whole-process memory. Record the Terraform outputs,
@@ -190,38 +189,6 @@ cargo test --features aws,test-util --test gc_acceptance \
   minio_gc_removes_10001_objects -- --ignored --nocapture
 ```
 
-To qualify the KV library and native Spin provider against the same disposable
-S3 backend, use separate child prefixes. A local process uses the temporary
-session above. On the qualification runner, leave the AWS credential variables
-unset so the same commands use its instance role:
-
-```sh
-export OBJECT_LOG_AWS_BUCKET="$bucket"
-export OBJECT_LOG_AWS_REGION="$region"
-export OBJECT_LOG_AWS_PREFIX="${prefix}/kv"
-export SPIN_KV_AWS_BUCKET="$bucket"
-export SPIN_KV_AWS_REGION="$region"
-export SPIN_KV_AWS_PREFIX="${prefix}/spin-kv"
-
-cargo test -p object-log-kv --features aws --test kv \
-  aws_correctness_matrix -- --ignored --nocapture
-cargo test -p object-log-kv --features aws --test qualification \
-  aws_growth_and_contention -- --ignored --nocapture
-cargo test -p object-log-kv --features aws --test qualification \
-  aws_value_size_envelope -- --ignored --nocapture
-(cd integrations/spin-key-value && \
-  cargo test --locked --test aws -- --ignored --nocapture)
-make spin-kv-guest-test
-```
-
-These tests create random descendants below the supplied prefixes. They run
-the fault/recovery matrix, growth and contention workload, progressive value
-sizes, the native provider, and upstream's unchanged Spin guest. They are
-explicit remote tests and never run in the ordinary workspace gate.
-
-A loopback Spin URL qualifies the application against live S3. It does not test
-a deployment host's inbound TLS, routing, authentication integration, or
-host-wide resource admission.
 
 ## Destroy
 

@@ -65,13 +65,3 @@ jobs:
           echo "$RUNNER_TEMP/wasi-tools" >> "$GITHUB_PATH"
       - name: Lint, typecheck, and build viewer
         run: bun install --frozen-lockfile && bun run check && bun test && bun run build
-
-  spin-key-value:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select pinned Rust toolchain
-        run: rustup show active-toolchain
-      - name: Check native provider and unchanged guest
-        run: make spin-kv-check spin-kv-guest-test
