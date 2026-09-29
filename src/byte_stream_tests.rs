@@ -128,6 +128,134 @@ async fn reads_are_short_authenticated_and_cache_two_chunks() -> TestResult {
 }
 
 #[tokio::test]
+async fn one_chunk_streams_use_one_authenticated_blob() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let (log, view) = setup(Arc::new(faults.clone()), small()).await?;
+    for len in [1, 17, 256] {
+        let payload = vec![7; len];
+        let mut writer = log.byte_writer(&view)?;
+        faults.reset();
+        writer.write(&payload).await?;
+        let root = writer.finish().await?;
+        assert_eq!(root.reference().kind(), ObjectKind::Blob);
+        assert_eq!(root.reference().subtree_objects, 1);
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 1);
+        faults.reset();
+        let mut reader = log.open_bytes(&view, root.reference()).await?;
+        assert_eq!(reader.len(), len as u64);
+        assert_eq!(reader.read_at(0, usize::MAX).await?.as_ref(), &payload);
+        assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+    }
+    let empty = log.put_object(&view, Bytes::new()).await?;
+    faults.reset();
+    assert!(log.open_bytes(&view, empty.reference()).await?.is_empty());
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_chunk_streams_round_trip_on_filesystem() -> TestResult {
+    let directory = tempfile::TempDir::new()?;
+    let store = object_store::local::LocalFileSystem::new_with_prefix(directory.path())?;
+    // Filesystem storage supports these immutable reads/writes, but not head updates.
+    let backend = ValidatedBackend::assume_validated(Arc::new(store), Path::from("byte-streams"));
+    let log = Log::open(&backend, &LogId::new("test")?, small()).await?;
+    let view = log.load().await?;
+    for len in [1, 17, 256] {
+        let payload = vec![9; len];
+        let mut writer = log.byte_writer(&view)?;
+        writer.write(&payload).await?;
+        let root = writer.finish().await?;
+        let mut reader = log.open_bytes(&view, root.reference()).await?;
+        assert_eq!(reader.read_at(0, usize::MAX).await?.as_ref(), &payload);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_blob_open_enforces_bounds_and_storage_integrity() -> TestResult {
+    let faults = FaultStore::new(InMemory::new());
+    let (log, view) = setup(
+        Arc::new(faults.clone()),
+        Options {
+            max_object_bytes: MAX_CHUNK_BYTES + 1,
+            ..Options::default()
+        },
+    )
+    .await?;
+    let large = log
+        .put_object(&view, Bytes::from(vec![1; MAX_CHUNK_BYTES + 1]))
+        .await?;
+    faults.reset();
+    assert!(matches!(
+        log.open_bytes(&view, large.reference()).await,
+        Err(Error::LimitExceeded(_))
+    ));
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+    let exact = log
+        .put_object(&view, Bytes::from(vec![1; MAX_CHUNK_BYTES]))
+        .await?;
+    faults.reset();
+    let mut reader = log.open_bytes(&view, exact.reference()).await?;
+    assert_eq!(
+        reader
+            .read_at((MAX_CHUNK_BYTES - 1) as u64, 1)
+            .await?
+            .as_ref(),
+        &[1]
+    );
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 1);
+    let mut malformed = exact.reference().clone();
+    malformed.subtree_objects = 2;
+    faults.reset();
+    assert!(matches!(
+        log.open_bytes(&view, &malformed).await,
+        Err(Error::CorruptObject)
+    ));
+    assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
+    let (foreign, foreign_view) = setup(Arc::new(InMemory::new()), small()).await?;
+    assert!(matches!(
+        foreign.open_bytes(&view, large.reference()).await,
+        Err(Error::InvalidFormat(_))
+    ));
+    assert!(matches!(
+        log.open_bytes(&foreign_view, large.reference()).await,
+        Err(Error::InvalidFormat(_))
+    ));
+    for replacement in [
+        Some(Bytes::from_static(b"abd")),
+        Some(Bytes::from_static(b"ab")),
+        None,
+    ] {
+        faults.reset();
+        let root = log.put_object(&view, Bytes::from_static(b"abc")).await?;
+        let path = faults
+            .metrics()
+            .events
+            .first()
+            .ok_or("missing blob upload")?
+            .path
+            .clone();
+        if let Some(bytes) = replacement {
+            faults.put(&Path::from(path), bytes.into()).await?;
+        } else {
+            faults.delete(&Path::from(path)).await?;
+        }
+        assert!(matches!(
+            log.open_bytes(&view, root.reference()).await,
+            Err(Error::CorruptObject)
+        ));
+    }
+    let root = log.put_object(&view, Bytes::new()).await?;
+    collect(&log).await?;
+    assert!(matches!(
+        log.open_bytes(&view, root.reference()).await,
+        Err(Error::ViewExpired)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn authenticated_malformed_descriptors_fail_before_payload_reads() -> TestResult {
     let faults = FaultStore::new(InMemory::new());
     let (log, view) = setup(Arc::new(faults.clone()), small()).await?;
@@ -198,10 +326,10 @@ async fn failed_and_cancelled_writes_cannot_finish() -> TestResult {
     Ok(())
 }
 
-async fn lifecycle(store: Arc<dyn ObjectStore>) -> TestResult {
+async fn lifecycle(store: Arc<dyn ObjectStore>, len: usize) -> TestResult {
     let (log, view) = setup(Arc::clone(&store), small()).await?;
     let mut writer = log.byte_writer(&view)?;
-    writer.write(&[9; 500]).await?;
+    writer.write(&vec![9; len]).await?;
     let root = writer.finish().await?;
     let reference = root.reference().clone();
     let prepared = log.prepare(
@@ -224,7 +352,16 @@ async fn lifecycle(store: Arc<dyn ObjectStore>) -> TestResult {
     collect(&log).await?;
     let (cold, current) = setup(store, small()).await?;
     let mut reader = cold.open_bytes(&current, &reference).await?;
-    assert_eq!(reader.read_at(256, 500).await?.as_ref(), &[9; 244]);
+    assert_eq!(
+        reader.read_at(0, 500).await?.as_ref(),
+        &vec![9; len.min(256)]
+    );
+    if len > 256 {
+        assert_eq!(
+            reader.read_at(256, 500).await?.as_ref(),
+            &vec![9; len - 256]
+        );
+    }
     // Old stream proofs cannot be reused against the post-collection view.
     let mut old = log.byte_writer(&view)?;
     old.write(&[7; 256]).await?;
@@ -257,7 +394,9 @@ async fn lifecycle(store: Arc<dyn ObjectStore>) -> TestResult {
 }
 #[tokio::test]
 async fn published_stream_survives_checkpoint_collection_and_cold_reopen() -> TestResult {
-    lifecycle(Arc::new(InMemory::new())).await?;
+    for len in [17, 256, 500] {
+        lifecycle(Arc::new(InMemory::new()), len).await?;
+    }
     Ok(())
 }
 
@@ -301,7 +440,7 @@ async fn offset_read_verifies_the_entire_chunk() -> TestResult {
     let (log, view) = setup(Arc::new(faults.clone()), small()).await?;
     let mut writer = log.byte_writer(&view)?;
     faults.reset();
-    writer.write(&[1; 256]).await?;
+    writer.write(&[1; 257]).await?;
     let path = faults
         .metrics()
         .events

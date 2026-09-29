@@ -1,4 +1,4 @@
-//! Bounded byte streams over immutable blobs and an authenticated reference node.
+//! Bounded byte streams over immutable blobs and optional authenticated reference nodes.
 
 use bytes::Bytes;
 
@@ -76,11 +76,30 @@ impl Log {
         })
     }
 
-    /// Opens a byte stream from its authenticated node, without reading its payload chunks.
+    /// Opens a byte stream from a blob or an authenticated descriptor node.
+    /// A blob is fully authenticated at open; a node leaves its payload chunks lazy.
     ///
     /// # Errors
-    /// Returns an error for a foreign or expired view, malformed geometry, or storage failure.
+    /// Returns an error for a foreign or expired view, malformed geometry, configured limits,
+    /// or storage failure.
     pub async fn open_bytes(&self, view: &View, root: &ObjectRef) -> Result<ByteReader, Error> {
+        if root.kind() == ObjectKind::Blob {
+            self.validate_view(view)?;
+            root.validate_count()?;
+            let chunk_bytes = self.options().max_object_bytes.min(MAX_CHUNK_BYTES) as u64;
+            if root.len() > chunk_bytes {
+                return Err(Error::LimitExceeded("byte stream chunk bytes"));
+            }
+            let bytes = self.read_object(view, root).await?;
+            return Ok(ByteReader {
+                log: self.clone(),
+                view: view.clone(),
+                chunk_bytes,
+                len: root.len(),
+                children: vec![root.clone()],
+                cached: [Some((0, bytes)), None],
+            });
+        }
         let node = self.read_node(view, root).await?;
         let descriptor = node.payload();
         if descriptor.len() != DESCRIPTOR_BYTES || &descriptor[..8] != TAG {
@@ -169,6 +188,9 @@ impl ByteWriter {
                     .put_object(&self.view, Bytes::from(self.buffer))
                     .await?,
             );
+        }
+        if let [child] = self.children.as_slice() {
+            return Ok(child.clone());
         }
         let mut descriptor = Vec::with_capacity(DESCRIPTOR_BYTES);
         descriptor.extend_from_slice(TAG);
