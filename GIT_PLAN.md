@@ -57,7 +57,9 @@ Push validation finishes before publication. A push is never replayed after an
 uncertain response; ordinary clients refresh refs. Expired reads may reopen once
 before response bytes are sent, with cumulative limits across the retry.
 
-Fetch holds a WAL retention through the last response write. At the configured
+Fetch holds a WAL retention through the last response write. Protocol-v2 GET
+discovery recovers and validates the catalog without retention; its capability
+response uses only the recovered metadata. At the configured
 tail threshold, push admission checkpoints the authenticated catalog. The
 maintenance endpoint prunes unreachable Git objects, starts or resumes one WAL
 collection batch, and reports whether another pass is needed. Clearing lost

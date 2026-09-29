@@ -243,8 +243,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if service == transport.UploadPackService {
 		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
-			retain, release := sessionRetention(session)
-			return retained(r.Context(), retain, release, func() error {
+			run := func() error {
 				s, err := openStore(r.Context(), session, route.Repository, limits)
 				if err != nil {
 					return err
@@ -280,7 +279,13 @@ func serve(response http.ResponseWriter, r *http.Request) {
 				b.ErrorLog = log.Default()
 				b.ServeHTTP(attempt, request)
 				return s.failure
-			})
+			}
+			// V2 discovery writes only capabilities from the recovered metadata.
+			if request.Method == http.MethodGet && request.Header.Get("Git-Protocol") == "version=2" {
+				return run()
+			}
+			retain, release := sessionRetention(session)
+			return retained(r.Context(), retain, release, run)
 		})
 		if e != nil {
 			log.Printf("git read failed: %v", e)

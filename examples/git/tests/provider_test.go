@@ -52,6 +52,30 @@ func TestWALGit(t *testing.T) {
 			old := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
 			base := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD:changing.bin")))
 			git(t, nil, "-C", source, "push", "--atomic", url, "HEAD:refs/heads/"+branch, "HEAD:refs/heads/other")
+			t.Run("discovery", func(t *testing.T) {
+				var calls [2]uint64
+				for i, version := range []string{"version=0", "version=2"} {
+					request, err := http.NewRequest(http.MethodGet, url+"/info/refs?service=git-upload-pack", nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					request.SetBasicAuth("git", os.Getenv("GIT_PROBE_PASSWORD"))
+					request.Header.Set("Git-Protocol", version)
+					data, usage := requestGit(t, request)
+					if !bytes.Contains(data, []byte("object-format="+format)) ||
+						(version == "version=2" && !bytes.Contains(data, []byte("version 2\n"))) {
+						t.Fatalf("invalid %s discovery: %s", version, data)
+					}
+					calls[i], err = strconv.ParseUint(usage.Get("X-Wal-Calls"), 10, 64)
+					if err != nil {
+						t.Fatal("discovery counters require trailers or GIT_PROBE_LOG: ", err)
+					}
+				}
+				// This fresh repository has no tags to peel: only retention differs.
+				if calls[1]+2 != calls[0] {
+					t.Fatalf("v2 discovery did not save two retention writes: v0=%d v2=%d", calls[0], calls[1])
+				}
+			})
 			advertisement, err := http.NewRequest(http.MethodGet, url+"/info/refs?service=git-receive-pack", nil)
 			if err != nil {
 				t.Fatal(err)
@@ -247,15 +271,6 @@ func write(t *testing.T, path string, b []byte) {
 func packet(line string) []byte { return []byte(fmt.Sprintf("%04x%s", len(line)+4, line)) }
 func post(t *testing.T, url, service string, body []byte) ([]byte, http.Header) {
 	t.Helper()
-	logPath := os.Getenv("GIT_PROBE_LOG")
-	var offset int64
-	if logPath != "" {
-		info, err := os.Stat(logPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		offset = info.Size()
-	}
 	r, e := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if e != nil {
 		t.Fatal(e)
@@ -265,6 +280,19 @@ func post(t *testing.T, url, service string, body []byte) ([]byte, http.Header) 
 	}
 	r.Header.Set("Content-Type", "application/x-"+service+"-request")
 	r.Header.Set("Git-Protocol", "version=2")
+	return requestGit(t, r)
+}
+func requestGit(t *testing.T, r *http.Request) ([]byte, http.Header) {
+	t.Helper()
+	logPath := os.Getenv("GIT_PROBE_LOG")
+	var offset int64
+	if logPath != "" {
+		info, err := os.Stat(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset = info.Size()
+	}
 	response, e := http.DefaultClient.Do(r)
 	if e != nil {
 		t.Fatal(e)
@@ -285,7 +313,7 @@ func post(t *testing.T, url, service string, body []byte) ([]byte, http.Header) 
 		if requestID == "" {
 			t.Fatal("missing request ID for log counters")
 		}
-		prefix := "wal POST " + r.URL.Path + " id=" + requestID + " calls="
+		prefix := "wal " + r.Method + " " + r.URL.Path + " id=" + requestID + " calls="
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			contents, err := os.ReadFile(logPath)

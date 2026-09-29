@@ -98,6 +98,9 @@ The optional repository viewer has its own TypeScript Spin API and reads the
 existing WAL catalog; it adds no routes or code to the Go Git service. Its
 compiler temporarily uses the focused opaque-resource fix in ComponentizeJS
 PR #357, with exact provenance in `THIRD_PARTY.md`.
+Its authorization probe uses protocol-v2 capability discovery. That GET still
+recovers and validates repository metadata, but does not acquire reader
+retention; actual fetches and older discovery retain their existing protection.
 History navigation reads 20 first-parent commits per page and uses bounded
 tab-local anchors for the reverse links. Its fixed-size origin selector keeps
 shared older histories distinct; it is removed before the API request. Browser
