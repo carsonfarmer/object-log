@@ -159,10 +159,20 @@ Each object reference authenticates a subtree count: one for a blob, or one
 plus its child counts for a node. Commit and checkpoint admission include their
 own enclosing object and reject graphs above `max_collection_objects` without
 reading descendants again. Shared descendants count once per reference path,
-so this is a conservative bound. Collection still counts distinct physical
-objects exactly. A complete-state commit can be checkpointed using the same
-roots within this limit; the combined historical tail can exceed it and must
-be checkpointed before collection.
+so this is a conservative bound. A complete-state commit can be checkpointed
+using the same roots within this limit. Collection deduplicates physical
+objects during traversal, but also bounds accumulated checkpoint and tail
+root references before deduplication. Combined history can exceed these bounds
+and must be checkpointed before collection.
+
+`byte_writer` stages a stream as one blob when it has one chunk; otherwise it
+uses a node authenticating the length, chunk geometry, and ordered chunk
+references. Chunks are at most `min(max_object_bytes, 2 MiB)`. `open_bytes`
+authenticates the blob or descriptor node, leaving a node's payload chunks lazy.
+`ByteReader::read_at` authenticates the complete requested chunk and returns
+bytes only up to its boundary. The reader retains at most two chunks, but
+caller-held byte slices can keep evicted chunks alive; this is not a
+whole-process memory ceiling.
 
 ## Commit
 
@@ -193,13 +203,16 @@ state. It can reconcile a head revision that changed only reader-retention
 bookkeeping, as described under garbage collection. For any other newer view,
 the application must read the winning operations, validate its intent again,
 and prepare a new candidate. The transaction ID can remain stable. The commit
-digest changes because its expected position changes.
+digest changes only when encoded fields change, including `expected_tip`;
+checkpoint or collection movement alone can leave it unchanged. The assigned
+sequence belongs to the head's commit reference, not the immutable commit body.
 
 ## Pending resolution
 
 Resolution reads the current head:
 
-- A matching transaction ID and commit digest proves success.
+- A matching complete commit reference proves success: sequence, transaction
+  ID, physical storage ID, digest, and encoded length must all match.
 - The original head still present permits retry of the exact conditional write.
 - A changed publication base at the expected sequence, or a different retained
   commit at that sequence, proves that the candidate did not publish.
@@ -214,12 +227,13 @@ new work after this result.
 
 `PreparedCommit::recovery_token` records digests of the source head and
 publication base, the source storage version and position, and the candidate's
-operation, result, object references, and transaction ID. It excludes the
-complete head and process-local staging proof. The caller must persist this
-token before publication if process-loss recovery is required. `Log::resume`
-uses that evidence to classify the current head, fully verifies the referenced
-graph, and can stage the missing WAL object. It retries only the exact candidate,
-allowing newer storage versions only for reader-retention bookkeeping.
+operation, result, object references, transaction ID, and physical storage ID.
+It excludes the complete head and process-local staging proof. The caller must
+persist this token before publication if process-loss recovery is required.
+`Log::resume` uses that evidence to classify the current head, fully verifies
+the referenced graph, and can stage the missing WAL object. It retries only the
+exact candidate, allowing newer storage versions only for reader-retention
+bookkeeping.
 
 ## Checkpoint
 
@@ -307,11 +321,13 @@ when storage failures or concurrent head updates occur.
 
 The plan object is not in its positive set. After a rejected fence update,
 the library reloads the head before cleanup: a matching active plan means the
-update succeeded. A head that does not name the plan permits cleanup. The
-library also cleans up after a successful clear. The clear can return `Conflict`
-after 16 lost updates if other writers change the head faster than one
-conditional-update round trip. The plan stays active for a later retry. A later
-collection can remove the plan if cleanup fails.
+update succeeded. An unchanged head and storage version leave the result
+`Pending` and preserve the plan. A changed head or storage version permits
+cleanup when the head does not name the plan. The library also cleans up after
+a successful clear. The clear can return `Conflict` after 16 lost updates if
+other writers change the head faster than one conditional-update round trip.
+The plan stays active for a later retry. A later collection can remove the
+plan if cleanup fails.
 
 One `View` caches the authenticated deletion candidates after its first plan
 read. Repeated publications from that view reuse them; a new view reads and
