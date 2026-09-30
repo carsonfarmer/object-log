@@ -38,8 +38,10 @@ TOML or restarting. Browsing a missing repository creates nothing. Bare names
 and their `.git` URLs select the same repository. Exact policies may override
 permissions or pin a WAL identity, format or default branch.
 
-Credentials stay in page memory and clear on reload. Branch, commit and path selections
-stay in the URL. Press Ctrl-C in the startup terminal to stop both services and
+Credentials survive reloads using the tab's session storage and clear when the
+server rejects authentication. If browser storage is unavailable, login lasts
+until reload. Branch, commit and path selections stay in the URL. Press Ctrl-C
+in the startup terminal to stop both services and
 remove their disposable data. Each restart begins with empty storage.
 
 For an existing backend, use `bun run build`, then follow the
@@ -76,8 +78,8 @@ each parent's repository root, including all parents of a merge. The Commits tab
 reads 20 first-parent summaries at a time, without loading trees or files. Older
 and newer links revisit those pages without rescanning from the branch tip. Paging
 stays on the displayed commits if the branch advances. The browser retains up to
-256 page anchors for the tab, including across reloads; it stores no credentials
-or file content. A direct link without a retained newer anchor can return to the
+256 page anchors for the tab, including across reloads, without storing file
+content. A direct link without a retained newer anchor can return to the
 branch tip instead.
 The UI shows 500 entries per directory and UTF-8 text previews up to 256 KiB. Binary and
 larger files show a summary. Symlinks show their stored target; submodules show

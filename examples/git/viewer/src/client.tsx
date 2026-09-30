@@ -15,6 +15,7 @@ const messages: Record<number, string> = {
 };
 
 const href = (query: Record<string, string>) => `/?${new URLSearchParams(query)}`;
+const authorizationKey = "object-log.authorization";
 
 function CommitLink({ commit, branch }: { commit: Commit; branch: string }) {
   const { query } = useLocation();
@@ -184,7 +185,13 @@ function Code({ view, query }: { view: Snapshot; query: Record<string, string> }
 
 function App() {
   const { url, query: requested, route } = useLocation();
-  const [authorization, setAuthorization] = useState({ header: "" });
+  const [authorization, setAuthorization] = useState(() => {
+    try {
+      return { header: sessionStorage.getItem(authorizationKey) ?? "" };
+    } catch {
+      return { header: "" };
+    }
+  });
   const [result, setResult] = useState<{
     url?: string;
     query?: Record<string, string>;
@@ -226,7 +233,16 @@ function App() {
               error: messages[response.status] ?? "Repository unavailable. Try again.",
               status: response.status,
             };
-        if (!request.signal.aborted) setResult(next);
+        if (!request.signal.aborted) {
+          try {
+            if (response.ok && authorization.header)
+              sessionStorage.setItem(authorizationKey, authorization.header);
+            else if (response.status === 401) sessionStorage.removeItem(authorizationKey);
+          } catch {
+            // Sign-in still works for this page when browser storage is unavailable.
+          }
+          setResult(next);
+        }
       } catch (error) {
         if (!request.signal.aborted)
           setResult({ error: error instanceof Error ? error.message : "Repository unavailable." });
