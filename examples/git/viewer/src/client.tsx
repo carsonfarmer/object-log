@@ -27,8 +27,15 @@ function CommitLink({ commit, branch }: { commit: Commit; branch: string }) {
   );
 }
 
-function History({ view, pages }: { view: Snapshot; pages: HistoryPages }) {
-  const { query } = useLocation();
+function History({
+  view,
+  pages,
+  query,
+}: {
+  view: Snapshot;
+  pages: HistoryPages;
+  query: Record<string, string>;
+}) {
   const first = view.history[0]?.id;
   const origin =
     query.origin?.length === first?.length && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(query.origin)
@@ -87,8 +94,7 @@ const previewMessages: Record<string, string> = {
   large: "This file exceeds the 256 KiB preview limit.",
 };
 
-function Code({ view }: { view: Snapshot }) {
-  const { query } = useLocation();
+function Code({ view, query }: { view: Snapshot; query: Record<string, string> }) {
   const link = (label: string, path: string) => <a href={href({ ...query, path })}>{label}</a>;
   const file = view.file;
   const entries = [...view.entries].sort(
@@ -154,25 +160,31 @@ function Code({ view }: { view: Snapshot }) {
 }
 
 function App() {
-  const { url, query, route } = useLocation();
+  const { url, query: requested, route } = useLocation();
   const [authorization, setAuthorization] = useState({ header: "" });
   const [result, setResult] = useState<{
     url?: string;
+    query?: Record<string, string>;
     view?: Snapshot;
     error?: string;
     status?: number;
   }>({});
-  const tab = query.view === "commits" ? "commits" : "code";
   const [copy, setCopy] = useState({ url: "", label: "Copy URL" });
   const [pages] = useState(() => new HistoryPages());
-  const repository = query.repo ?? "";
+  const repository = requested.repo ?? "";
   const valid = !!repositoryName(repository, location.origin);
-  const view = result.url === url ? result.view : undefined;
+  const shown = result.query?.repo === repository ? result : undefined;
+  const query = shown?.query ?? requested;
+  const view = shown?.view;
+  const tab = query.view === "commits" ? "commits" : "code";
+  const loading = valid && !result.error && result.url !== url;
   const cloneURL = `${location.origin}/${repository}`;
 
   useLayoutEffect(() => {
     document.title = repository ? `${repository} · object-log` : "Repository · object-log";
-    setResult({});
+    setResult((current) =>
+      current.query?.repo === repository ? { ...current, url: undefined } : {},
+    );
     if (!valid) return;
     const request = new AbortController();
     void (async () => {
@@ -186,7 +198,7 @@ function App() {
           signal: request.signal,
         });
         const next = response.ok
-          ? { url, view: (await response.json()) as Snapshot }
+          ? { url, query: requested, view: (await response.json()) as Snapshot }
           : {
               error: messages[response.status] ?? "Repository unavailable. Try again.",
               status: response.status,
@@ -236,6 +248,7 @@ function App() {
               const encoded = btoa(
                 String.fromCharCode(...new TextEncoder().encode(`git:${credential}`)),
               );
+              setResult({});
               setAuthorization({
                 header: data.get("mode") === "bearer" ? `Bearer ${credential}` : `Basic ${encoded}`,
               });
@@ -299,6 +312,9 @@ function App() {
               {"commit" in query && (
                 <a href={href({ repo: repository, ref: view.branch, view: tab })}>Branch tip</a>
               )}
+              <span class="loading" role="status">
+                {loading ? "Loading…" : ""}
+              </span>
               <button
                 type="button"
                 title={cloneURL}
@@ -315,7 +331,11 @@ function App() {
               </button>
               {copy.url === cloneURL && copy.label === "Copy failed" && <code>{cloneURL}</code>}
             </div>
-            {tab === "commits" ? <History view={view} pages={pages} /> : <Code view={view} />}
+            {tab === "commits" ? (
+              <History view={view} pages={pages} query={query} />
+            ) : (
+              <Code view={view} query={query} />
+            )}
           </>
         )}
       </main>
