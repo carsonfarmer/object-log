@@ -26,11 +26,13 @@ async function commit(catalog: Catalog, id: string) {
   const author = /^(.*?) <.*>[ \t]+(-?\d+)[ \t]+[+-]\d{4}$/.exec(fields("author") ?? "");
   const tree = fields("tree");
   if (split < 0 || !tree || !author) throw new Error("Invalid Git commit");
+  const parents = header.filter((line) => line.startsWith("parent ")).map((line) => line.slice(7));
   return {
     tree,
-    parent: fields("parent") ?? "",
+    parent: parents[0] ?? "",
     summary: {
       id,
+      parents,
       title: raw
         .slice(split + 2)
         .split("\n", 1)[0]

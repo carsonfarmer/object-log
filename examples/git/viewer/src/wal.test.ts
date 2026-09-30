@@ -506,7 +506,7 @@ for (const format of ["sha1", "sha256"] as const) {
       objects.set(id(i), {
         kind: 1,
         bytes: encode(
-          `tree ${id(101)}\n${i > 1 ? `parent ${id(i - 1)}\n` : ""}author A <a@b> 1700000000 +0000\n\nCommit ${i}\n`,
+          `tree ${id(101)}\n${i > 1 ? `parent ${id(i - 1)}\n` : ""}${i === 25 ? `parent ${id(200)}\nparent ${id(201)}\n` : ""}author A <a@b> 1700000000 +0000\n\nCommit ${i}\n`,
         ),
       });
     const tree = (mode: string, name: string, target: number) => {
@@ -535,6 +535,7 @@ for (const format of ["sha1", "sha256"] as const) {
     );
     expect(view.branch).toBe("refs/heads/main");
     expect(view.history.map((commit) => commit.title)).toEqual(["Commit 25"]);
+    expect(view.history[0].parents).toEqual([id(24), id(200), id(201)]);
     expect(view.file?.text).toBe("selected content");
     expect(reads).toEqual([id(25), id(101), id(102), id(103)]);
     reads.length = 0;
@@ -555,6 +556,8 @@ for (const format of ["sha1", "sha256"] as const) {
       new URLSearchParams({ commit: page.next, view: "commits" }),
     );
     expect(older.history.map((commit) => commit.id)).toEqual([5, 4, 3, 2, 1].map(id));
+    expect(older.history[0].parents).toEqual([id(4)]);
+    expect(older.history.at(-1)?.parents).toEqual([]);
     expect(older.next).toBe("");
     expect(reads).toEqual(older.history.map((commit) => commit.id));
     reads.length = 0;
