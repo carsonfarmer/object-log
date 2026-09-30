@@ -82,7 +82,7 @@ branch tip instead.
 The UI shows 500 entries per directory and UTF-8 text previews up to 256 KiB. Binary and
 larger files show a summary. Symlinks show their stored target; submodules show
 their commit ID. Highlight.js colors Rust, Go, JavaScript, TypeScript, JSON, shell,
-YAML, TOML, HTML and CSS previews; other files remain plain text.
+YAML, TOML, HTML, CSS and Markdown previews; other files remain plain text.
 Non-UTF-8 filenames appear as byte escapes without a browse link; valid sibling
 files remain browsable. Names and file content render as text. Git metadata reads are
 limited to 16 MiB per object and 64 MiB of catalog data per request. An expired

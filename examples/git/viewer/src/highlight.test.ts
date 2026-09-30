@@ -10,6 +10,8 @@ test("filename aliases select the registered grammars; unknown files stay plain"
     "a.js",
     "a.jsx",
     "a.json",
+    "README.md",
+    "notes.MD",
     "a.sh",
     "a.yaml",
     "a.toml",
@@ -25,19 +27,23 @@ test("filename aliases select the registered grammars; unknown files stay plain"
   expect(highlight("const value: string = 'hello';", "src/app.ts")).toContain(
     'class="hljs-built_in"',
   );
+  expect(highlight("# Heading\n\n**bold** and `code`", "README.md")).toContain(
+    'class="hljs-section"',
+  );
 });
 
-test("highlighting preserves source markup as text", () => {
-  const html = highlight('<section title="notes">a & b 日本語</section>', "index.html") ?? "";
-  expect(html).toContain("&lt;");
-  expect(html).toContain("&amp;");
-  expect(html).not.toContain("<section");
-  expect(
-    html
-      .replace(/<\/?span(?: [^>]*)?>/g, "")
-      .replaceAll("&lt;", "<")
-      .replaceAll("&gt;", ">")
-      .replaceAll("&quot;", '"')
-      .replaceAll("&amp;", "&"),
-  ).toBe('<section title="notes">a & b 日本語</section>');
-});
+for (const path of ["index.html", "README.md"])
+  test(`${path}: highlighting preserves source markup as text`, () => {
+    const html = highlight('<section title="notes">a & b 日本語</section>', path) ?? "";
+    expect(html).toContain("&lt;");
+    expect(html).toContain("&amp;");
+    expect(html).not.toContain("<section");
+    expect(
+      html
+        .replace(/<\/?span(?: [^>]*)?>/g, "")
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&quot;", '"')
+        .replaceAll("&amp;", "&"),
+    ).toBe('<section title="notes">a & b 日本語</section>');
+  });

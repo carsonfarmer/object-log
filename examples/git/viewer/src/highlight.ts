@@ -5,6 +5,7 @@ import go from "highlight.js/lib/languages/go";
 import ini from "highlight.js/lib/languages/ini";
 import javascript from "highlight.js/lib/languages/javascript";
 import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
 import rust from "highlight.js/lib/languages/rust";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
@@ -17,6 +18,7 @@ for (const [name, grammar] of Object.entries({
   ini,
   javascript,
   json,
+  markdown,
   rust,
   typescript,
   xml,
