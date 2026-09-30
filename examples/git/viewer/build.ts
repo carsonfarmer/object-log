@@ -12,7 +12,10 @@ const component = await Bun.build({
   naming: "component.js",
   define: {
     CLIENT_SCRIPT: JSON.stringify(await client.outputs[0].text()),
-    STYLES: JSON.stringify(await Bun.file("src/style.css").text()),
+    STYLES: JSON.stringify(
+      (await Bun.file("node_modules/highlight.js/styles/github.css").text()) +
+        (await Bun.file("src/style.css").text()),
+    ),
     PAGE: JSON.stringify(await Bun.file("src/page.html").text()),
   },
 });

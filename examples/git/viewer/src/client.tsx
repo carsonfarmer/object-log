@@ -1,7 +1,8 @@
 import { render } from "preact";
+import { memo } from "preact/compat";
 import { useLayoutEffect, useState } from "preact/hooks";
 import { LocationProvider, useLocation } from "preact-iso/router";
-
+import { highlight } from "./highlight";
 import { HistoryPages } from "./history";
 import { repositoryName } from "./names";
 import type { Commit, Snapshot } from "./repository";
@@ -94,6 +95,15 @@ const previewMessages: Record<string, string> = {
   large: "This file exceeds the 256 KiB preview limit.",
 };
 
+const Source = memo(function Source({ text, path }: { text: string; path: string }) {
+  const html = highlight(text, path);
+  return html === undefined ? (
+    <pre>{text}</pre>
+  ) : (
+    <pre class="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+  );
+});
+
 function Code({ view, query }: { view: Snapshot; query: Record<string, string> }) {
   const link = (label: string, path: string) => <a href={href({ ...query, path })}>{label}</a>;
   const file = view.file;
@@ -118,6 +128,19 @@ function Code({ view, query }: { view: Snapshot; query: Record<string, string> }
         {view.history[0] && (
           <article class="row tip">
             <CommitLink commit={view.history[0]} branch={view.branch} />
+            {!!view.history[0].parents.length && (
+              <span class="row">
+                Parent{view.history[0].parents.length > 1 ? "s" : ""}
+                {view.history[0].parents.map((parent) => (
+                  <a
+                    key={parent}
+                    href={href({ repo: query.repo, ref: view.branch, commit: parent })}
+                  >
+                    <code>{parent.slice(0, 7)}</code>
+                  </a>
+                ))}
+              </span>
+            )}
           </article>
         )}
         {file && (
@@ -127,7 +150,7 @@ function Code({ view, query }: { view: Snapshot; query: Record<string, string> }
         )}
         {file &&
           (file.state === "text" ? (
-            <pre>{file.text}</pre>
+            <Source text={file.text ?? ""} path={view.path} />
           ) : (
             <p>{previewMessages[file.state] ?? `Submodule · ${file.id}`}</p>
           ))}

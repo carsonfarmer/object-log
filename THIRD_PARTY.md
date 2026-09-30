@@ -48,9 +48,11 @@ their upstream licenses apply.
 
 ## Optional TypeScript repository viewer
 
-The viewer uses Bun, TypeScript, Biome, Preact, `fflate` and the Spin JavaScript
+The viewer uses Bun, TypeScript, Biome, Preact, `fflate`, Highlight.js and the Spin JavaScript
 SDK. Its `examples/git/viewer/bun.lock` records exact versions
 and package integrity. Their upstream licenses apply.
+Highlight.js's BSD-3-Clause license is reproduced in
+[`licenses/highlight.js.txt`](licenses/highlight.js.txt) for the bundled browser code.
 
 The compiler uses a temporary package based on official ComponentizeJS 0.23.0,
 with the binding splicer rebuilt from
