@@ -4,6 +4,7 @@ import (
 	"io"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 )
 
@@ -61,7 +62,11 @@ func (p *incomingPack) Close() (err error) {
 	}
 	defer reader.Close()
 	offsets := packOffsets{}
-	if err := importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits, offsets, p.s.progress); err != nil {
+	observers := []packfile.Observer{offsets, p.s.progress}
+	if p.s.progress == nil {
+		observers = observers[:1]
+	}
+	if err := importPack(p.s.ctx, reader, p.s, p.s.meta.Format, p.s.limits, observers...); err != nil {
 		return err
 	}
 	if err := p.s.progress.message("Indexing deltas...\n"); err != nil {

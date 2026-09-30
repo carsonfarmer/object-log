@@ -22,14 +22,11 @@ object_prefix = "object-log-qualification/replace-with-run-id"
 # host_groups          = ["readers", "writers", "admins"]
 # host_repositories = {
 #   "team/project.git" = {
-#     log_id         = "team-project"
-#     format         = "sha1"
-#     default_branch = "main"
 #     read_groups    = ["readers", "writers", "admins"]
 #     write_groups   = ["writers"]
 #     admin_groups   = ["admins"]
 #   }
-#   "team/next.git" = { log_id = "team-next", format = "sha256", read_groups = ["readers"], write_groups = ["writers"] }
+#   "team/next.git" = { read_groups = ["readers"], write_groups = ["writers"] }
 # }
 # host_maintenance_interval = 300 # Seconds after the previous run finishes.
 # host_maintenance_budget_seconds = 300 # Absolute time budget per repository.

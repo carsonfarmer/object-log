@@ -38,17 +38,16 @@ type store struct {
 	stateRoot     *wal.Object
 	meta          rootMeta
 	buckets       map[string]*wal.Object
-	loaded        map[*wal.Object]radixNode[indexed, *wal.Object]
+	loaded        map[bucketKey]radixNode[indexed, *wal.Object]
 	pending       map[string]indexed
 	pendingInline int64
 }
 
-func openStore(ctx context.Context, session *wal.Session, repository repositoryConfig, limits requestLimits) (result *store, err error) {
+func openStore(ctx context.Context, session *wal.Session, format config.ObjectFormat, limits requestLimits) (result *store, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	format := repository.Format
-	s := &store{ctx: ctx, limits: limits, session: session, buckets: map[string]*wal.Object{}, loaded: map[*wal.Object]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
+	s := &store{ctx: ctx, limits: limits, session: session, buckets: map[string]*wal.Object{}, loaded: map[bucketKey]radixNode[indexed, *wal.Object]{}, pending: map[string]indexed{}}
 	defer func() {
 		if result == nil {
 			s.Close()
@@ -91,11 +90,7 @@ func openStore(ctx context.Context, session *wal.Session, repository repositoryC
 	// An empty repository has no unchecked objects. Existing roots must certify validation.
 	s.meta.Validated = true
 	if s.stateRoot == nil {
-		branch := repository.DefaultBranch
-		if branch == "" {
-			branch = "main"
-		}
-		s.meta.Head = "refs/heads/" + branch
+		s.meta.Head = "refs/heads/main"
 	}
 	if e := s.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.ReferenceName(s.meta.Head))); e != nil {
 		return nil, e

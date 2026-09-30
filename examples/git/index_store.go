@@ -3,12 +3,16 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"maps"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 	"slices"
-	"strings"
 )
+
+// Cached metadata has already been validated for this exact handle and path.
+type bucketKey struct {
+	root   *wal.Object
+	prefix string
+}
 
 type bucketMeta struct {
 	Items    []objectMeta `json:",omitempty"`
@@ -16,8 +20,12 @@ type bucketMeta struct {
 }
 
 func (s *store) loadBucket(prefix string, value *wal.Object) (radixNode[indexed, *wal.Object], error) {
-	if node, ok := s.loaded[value]; ok {
-		return node, validateBucket(node, s.meta.Format, prefix)
+	if len(prefix) < 2 || len(prefix) >= s.meta.Format.HexSize() {
+		return radixNode[indexed, *wal.Object]{}, fmt.Errorf("invalid index prefix")
+	}
+	key := bucketKey{root: value, prefix: prefix}
+	if node, ok := s.loaded[key]; ok {
+		return node, nil
 	}
 	node := radixNode[indexed, *wal.Object]{}
 	entry, err := s.readNode(value)
@@ -67,25 +75,8 @@ func (s *store) loadBucket(prefix string, value *wal.Object) (radixNode[indexed,
 			return node, fmt.Errorf("extra index objects")
 		}
 	}
-	s.loaded[value] = node
+	s.loaded[key] = node
 	return node, nil
-}
-
-func validateBucket(node radixNode[indexed, *wal.Object], format config.ObjectFormat, prefix string) error {
-	if len(prefix) < 2 || len(prefix) >= format.HexSize() {
-		return fmt.Errorf("invalid index prefix")
-	}
-	for key := range node.Children {
-		if !validPrefix(key, len(prefix)+1, prefix) {
-			return fmt.Errorf("invalid index child")
-		}
-	}
-	for _, item := range node.Items {
-		if !strings.HasPrefix(item.ID, prefix) {
-			return fmt.Errorf("invalid indexed object")
-		}
-	}
-	return nil
 }
 
 func (s *store) saveBucket(node radixNode[indexed, *wal.Object]) (*wal.Object, error) {

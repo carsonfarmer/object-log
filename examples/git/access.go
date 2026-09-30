@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"net/http"
+	"time"
 )
 
 // Local password and anonymous modes are explicit alternatives to Cognito.
@@ -29,14 +30,15 @@ func authorizeRequest(r *http.Request, route repositoryRoute, getenv func(string
 		}
 		return 0, nil
 	case "cognito":
-		auth, err := newCognitoAuthenticator(cognitoConfig{
-			issuer: getenv("GIT_COGNITO_ISSUER"), clientID: getenv("GIT_COGNITO_CLIENT_ID"),
-			requiredScope: getenv("GIT_COGNITO_SCOPE"), operatorClientID: getenv("GIT_COGNITO_OPERATOR_CLIENT_ID"),
-		}, transport)
-		if err != nil {
+		principal, err := authenticateCognito(
+			r,
+			getenv,
+			transport,
+			time.Now,
+		)
+		if errors.Is(err, errAuthConfig) {
 			return http.StatusInternalServerError, err
 		}
-		principal, err := auth.Authenticate(r)
 		if errors.Is(err, errAuthUnavailable) {
 			return http.StatusServiceUnavailable, err
 		}

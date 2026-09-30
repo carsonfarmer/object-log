@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -69,16 +68,6 @@ func TestSamePrefixSplitsAndPreservesOldRoot(t *testing.T) {
 			_, found, err = lookupRadix(key(2299), "aa", root, db.load)
 			if !found || err != nil || len(db.reads) > width {
 				t.Fatalf("lookup failed or exceeded one path: %v %v %d", found, err, len(db.reads))
-			}
-			got := map[string]int{}
-			if err = walkRadix("aa", root, db.load, func(id string, value int) { got[id] = value }); err != nil {
-				t.Fatal(err)
-			}
-			for id, value := range updates {
-				values[id] = value
-			}
-			if !reflect.DeepEqual(values, got) {
-				t.Fatal("walk differs from inserted objects")
 			}
 		})
 	}
@@ -166,9 +155,6 @@ func TestTraversalPassesAuthenticatedPath(t *testing.T) {
 	if err != nil || !found || got != 7 {
 		t.Fatalf("lookup: %d %v %v", got, found, err)
 	}
-	if err = walkRadix("aa", 1, load, func(string, int) {}); err != nil {
-		t.Fatal(err)
-	}
 	root, present, err := filterRadix("aa", 1, func(string) bool { return true }, load, func(radixNode[int, int]) (int, error) { return 0, nil })
 	if err != nil || !present || root != 1 {
 		t.Fatalf("filter: %d %v %v", root, present, err)
@@ -209,23 +195,26 @@ func TestPruneCatalogKeepsOnlyReachableObjectsAndPreservesOldRoot(t *testing.T) 
 	if len(db.nodes) != count+2 {
 		t.Fatal("prune should rewrite only changed leaf and parent")
 	}
-	result := map[string]int{}
-	if err = walkRadix("aa", filtered, db.load, func(id string, item int) { result[id] = item }); err != nil {
-		t.Fatal(err)
-	}
-	expected := map[string]int{}
 	for id, item := range items {
-		if keep(id) {
-			expected[id] = item
+		got, found, err := lookupRadix(
+			id,
+			"aa",
+			filtered,
+			db.load,
+		)
+		valid := found == keep(id) && (!found || got == item)
+		if err != nil || !valid {
+			t.Fatal("prune changed live objects or retained dead objects", err)
 		}
-	}
-	if !reflect.DeepEqual(result, expected) {
-		t.Fatal("prune changed live objects or retained dead objects")
-	}
-	original := map[string]int{}
-	_ = walkRadix("aa", root, db.load, func(id string, item int) { original[id] = item })
-	if !reflect.DeepEqual(original, items) {
-		t.Fatal("original view changed")
+		got, found, err = lookupRadix(
+			id,
+			"aa",
+			root,
+			db.load,
+		)
+		if err != nil || !found || got != item {
+			t.Fatal("original view changed", err)
+		}
 	}
 	_, present, err = filterRadix("aa", filtered, func(string) bool { return false }, db.load, db.save)
 	if err != nil || present {

@@ -77,7 +77,7 @@ func TestAccess(t *testing.T) {
 	}
 }
 
-// Run again after restarting Spin with a different default-branch setting.
+// Run again after restarting Spin to verify the published default branch.
 func TestPersistedHead(t *testing.T) {
 	endpoint, branch := os.Getenv("GIT_PROBE_URL"), os.Getenv("GIT_PROBE_BRANCH")
 	if endpoint == "" || branch == "" || os.Getenv("GIT_PROBE_PERSISTED_HEAD") != "true" {

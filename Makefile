@@ -1,3 +1,5 @@
+export GOEXPERIMENT = jsonv2
+
 .PHONY: check test bench minio-test minio-performance gc-acceptance git-check git-build git-local git-spin-config-test wasi-credential-test git-provider-test git-qualification-tools-test
 
 check:

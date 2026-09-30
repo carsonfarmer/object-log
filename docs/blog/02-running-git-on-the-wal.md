@@ -37,10 +37,10 @@ ordinary Git client
 Spin is the host for this example. The core WAL is a Rust library independent
 of both Spin and Git, and can also run natively.
 
-Configuration maps repository paths to stable WAL identities, hash formats,
-default branches, and permissions. Each repository has its own storage
-namespace. The first successful authorized push publishes the format, refs and
-catalog together; reads only open existing repositories. A wildcard
+Configuration assigns permissions to repository names. Each canonical name
+determines its WAL identity and storage namespace. The first successful
+authorized push publishes the format, default branch, refs and catalog together;
+reads only open existing repositories. A wildcard
 access policy can admit new repository names without changing the component
 binary or configuration.
 

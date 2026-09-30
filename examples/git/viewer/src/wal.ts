@@ -9,10 +9,6 @@ const decode = new TextDecoder("utf-8", { fatal: true });
 export const json = <T>(data: Uint8Array): T => JSON.parse(decode.decode(data));
 export const hex = (bytes: Uint8Array) => bytes.toHex();
 
-export interface Repository {
-  log_id: string;
-  format?: "sha1" | "sha256" | "";
-}
 export const automaticLogId = async (name: string) =>
   `auto-${hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(name))))}`;
 export class MissingObject extends Error {}
@@ -55,7 +51,7 @@ function validRef(name: string): boolean {
   );
 }
 
-export function settings(repository: Repository): wal.Config {
+export function settings(logId: string): wal.Config {
   return {
     endpoint: variable("wal_endpoint"),
     bucket: variable("wal_bucket"),
@@ -66,7 +62,7 @@ export function settings(repository: Repository): wal.Config {
     secretKey: variable("wal_secret_key"),
     sessionToken: variable("wal_session_token") || undefined,
     prefix: variable("wal_prefix"),
-    logId: repository.log_id,
+    logId,
     logLimits: {
       maxTailEntries: 1024n,
       resolutionWindow: 1024n,
@@ -95,7 +91,6 @@ export class Catalog {
 
   constructor(
     session: wal.Session,
-    format: string | undefined,
     private budget: { bytes: number },
   ) {
     this.recovery = session.recover();
@@ -119,7 +114,6 @@ export class Catalog {
         !["sha1", "sha256"].includes(this.root.Format) ||
         !validRef(this.root.Head) ||
         !this.root.Head.startsWith("refs/heads/") ||
-        (format && this.root.Format !== format) ||
         typeof this.root.Refs !== "object" ||
         Array.isArray(this.root.Refs) ||
         Object.entries(this.root.Refs).some(

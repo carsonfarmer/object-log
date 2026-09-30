@@ -50,18 +50,15 @@ variable "host_git_max_object_bytes" {
 
 variable "host_repositories" {
   description = "Repository policies; '*' supplies defaults for repositories created on first push."
-  type = map(object({
-    log_id         = optional(string, "")
-    format         = optional(string, "")
-    default_branch = optional(string, "main")
-    read_groups    = optional(list(string), [])
-    write_groups   = optional(list(string), [])
-    admin_groups   = optional(list(string), [])
-  }))
-  default = {}
+  type        = map(map(list(string)))
+  nullable    = false
+  default     = {}
   validation {
-    condition     = alltrue([for repo in var.host_repositories : contains(["", "sha1", "sha256"], repo.format)])
-    error_message = "Repository format must be empty, sha1 or sha256."
+    condition = alltrue([for policy in values(var.host_repositories) : try(
+      length(setsubtract(keys(policy), ["read_groups", "write_groups", "admin_groups"])) == 0 &&
+      alltrue([for groups in values(policy) : groups != null]), false
+    )])
+    error_message = "Repository policies allow only read_groups, write_groups, and admin_groups lists."
   }
 }
 
@@ -331,7 +328,7 @@ resource "aws_instance" "host" {
     }
     precondition {
       condition = alltrue(flatten([for repo in var.host_repositories : [
-        for group in concat(repo.read_groups, repo.write_groups, repo.admin_groups) : contains(var.host_groups, group)
+        for group in flatten(values(repo)) : contains(var.host_groups, group)
       ]]))
       error_message = "Every repository policy group must be declared in host_groups."
     }

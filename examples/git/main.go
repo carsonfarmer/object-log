@@ -176,11 +176,9 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var pushCapabilities *capability.List
+	var pushFormat config.ObjectFormat
 	if service == transport.ReceivePackService && method == http.MethodPost {
 		format, capabilities, body, err := receiveFormat(r.Body, limits.negotiationBytes)
-		if err == nil && format != "" && route.Repository.Format != "" && route.Repository.Format != format {
-			err = config.ErrInvalidObjectFormat
-		}
 		if err != nil {
 			status := operationStatus(err)
 			if status == http.StatusInternalServerError {
@@ -195,7 +193,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			response.WriteHeader(http.StatusOK)
 			return
 		}
-		route.Repository.Format = format
+		pushFormat = format
 		pushCapabilities = capabilities
 		r.Body = gitio.NewReadCloser(body, r.Body)
 	}
@@ -213,11 +211,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	})
 	if errors.Is(e, errLogMissing) && service == transport.ReceivePackService && method == http.MethodGet {
 		response.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
-		format := route.Repository.Format
-		if format == "" {
-			format = config.SHA1
-		}
-		if err := advertise(response, &store{meta: rootMeta{Format: format}}, route.Repository.Format == ""); err != nil {
+		if err := advertise(response, &store{meta: rootMeta{Format: config.SHA1}}, true); err != nil {
 			log.Printf("git discovery failed: %v", err)
 		}
 		return
@@ -250,7 +244,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	if service == transport.UploadPackService {
 		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
 			run := func() error {
-				s, err := openStore(r.Context(), session, route.Repository, limits)
+				s, err := openStore(r.Context(), session, pushFormat, limits)
 				if err != nil {
 					return err
 				}
@@ -320,7 +314,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		writeMaintenance(w, report, err)
 		return
 	}
-	open := func() (*store, error) { return openStore(r.Context(), session, route.Repository, limits) }
+	open := func() (*store, error) { return openStore(r.Context(), session, pushFormat, limits) }
 	s, e := retryOpenStore(open, refresh)
 	if e != nil {
 		log.Printf("git request setup failed stage=open-store: %v", e)
@@ -366,7 +360,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	if service == transport.ReceivePackService && method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
-		e = advertise(w, s, s.stateRoot == nil && route.Repository.Format == "")
+		e = advertise(w, s, s.stateRoot == nil)
 	} else if service == transport.ReceivePackService {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 		s.progress = newReceiveProgress(w, pushCapabilities, cancel)
@@ -386,7 +380,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				return e
 			}
-			if s.stateRoot == nil && route.Repository.DefaultBranch == "" {
+			if s.stateRoot == nil {
 				for _, command := range info.Commands {
 					if command.Action() != packp.Delete && command.Name.IsBranch() {
 						s.meta.Head = command.Name.String()

@@ -36,7 +36,8 @@ rustup target add wasm32-wasip2
 
 The first build compiles the pinned component build tool; later builds use
 the cached binary. `make git-build` builds and composes the Go and Rust WAL
-components into `examples/git/git.wasm` without starting the service.
+components into `examples/git/git.wasm` without starting the service. The Make
+targets enable Go's `jsonv2` experiment for strict configuration decoding.
 
 ## Run locally
 
@@ -103,7 +104,7 @@ credentials for its disposable MinIO instance.
 | `wal_collection_candidates` | `1000` | Maximum entries in a new deletion plan, capped by the durable graph limit |
 | `wal_max_collection_objects` | `100000` | Complete publication graph and distinct collection live-object bound; shared paths count separately for publication |
 | `wal_recover_retentions_after_drain` | `false` | Exclusive lost-retention recovery mode |
-| `git_repositories` | `{"*":{}}` | JSON access policies; optional fixed identities, formats and default branches |
+| `git_repositories` | `{"*":{}}` | JSON read/write/admin permission groups by repository name |
 | `git_auth_mode` | `password` | `password`, `cognito`, or explicit local `anonymous` mode |
 | `git_password` | empty | Required password for local password mode |
 | `git_cognito_issuer` | empty | HTTPS Cognito user-pool issuer |
@@ -165,7 +166,7 @@ git push http://127.0.0.1:19100/team/project HEAD:main
 
 The push requires write permission and publishes its Git format, default branch,
 refs and object catalog together through the existing WAL. The first pushed
-branch becomes the default unless configuration specifies `default_branch`;
+branch becomes the default;
 a tag-only first push leaves an unborn `main`. Later pushes preserve the stored
 format and default branch. Read discovery never initializes storage. Failed
 pushes can leave unreachable staged objects or an empty WAL head, but no
@@ -179,10 +180,11 @@ git_repositories = '{"*":{"read_groups":["developers"],"write_groups":["develope
 ```
 
 An exact entry replaces the whole default policy; omitted groups deny access.
-An omitted `log_id` derives an isolated identity from the canonical name, so
-adding a permission override preserves the existing repository. Explicit IDs
-must be unique and cannot use the reserved `auto-` prefix. An optional `format`
-pins that policy to SHA-1 or SHA-256; otherwise readers recover the stored format.
+The canonical name determines the WAL identity, so adding a permission override
+preserves the existing repository. Configuration accepts only `read_groups`,
+`write_groups`, and `admin_groups`. The stored root records the Git format and
+default branch selected by the first push. Earlier explicit-ID configurations
+require a fresh storage prefix; no migration or fallback reader is provided.
 Clients cannot change permissions or reinterpret an existing repository.
 The local shared-password mode grants the password holder access to all names;
 anonymous mode allows public writes, including first-push creation.

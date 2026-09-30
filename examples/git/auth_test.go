@@ -36,6 +36,35 @@ type authTestBody struct {
 
 func (b *authTestBody) Close() error { b.closed = true; return b.ReadCloser.Close() }
 
+type cognitoConfig struct {
+	issuer, clientID, operatorClientID, requiredScope string
+}
+
+func (c cognitoConfig) get(name string) string {
+	return map[string]string{
+		"GIT_COGNITO_ISSUER": c.issuer, "GIT_COGNITO_CLIENT_ID": c.clientID,
+		"GIT_COGNITO_OPERATOR_CLIENT_ID": c.operatorClientID, "GIT_COGNITO_SCOPE": c.requiredScope,
+	}[name]
+}
+
+type cognitoClaims struct {
+	jwt.Claims
+	ClientID string   `json:"client_id"`
+	TokenUse string   `json:"token_use"`
+	Scope    string   `json:"scope"`
+	Groups   []string `json:"cognito:groups"`
+}
+
+type authTestAuthenticator struct {
+	config    cognitoConfig
+	transport http.RoundTripper
+	now       func() time.Time
+}
+
+func (a *authTestAuthenticator) Authenticate(r *http.Request) (gitPrincipal, error) {
+	return authenticateCognito(r, a.config.get, a.transport, a.now)
+}
+
 func authTestConfig() cognitoConfig {
 	return cognitoConfig{issuer: authTestIssuer, clientID: "git-client", requiredScope: "git/access"}
 }
@@ -95,13 +124,14 @@ func authKeyResponse(t *testing.T, set jose.JSONWebKeySet) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}
 }
 
-func authForTest(t *testing.T, transport http.RoundTripper) *cognitoAuthenticator {
+func authForTest(t *testing.T, transport http.RoundTripper) *authTestAuthenticator {
 	t.Helper()
-	auth, err := newCognitoAuthenticator(authTestConfig(), transport)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return auth
+	return &authTestAuthenticator{config: authTestConfig(), transport: transport, now: time.Now}
+}
+
+func authenticateForContext(t *testing.T, auth *authTestAuthenticator, ctx context.Context) (gitPrincipal, error) {
+	t.Helper()
+	return auth.Authenticate(authRequest(authSignedToken(t, authTestClaims(time.Now()), nil)).WithContext(ctx))
 }
 
 func authRequest(token string) *http.Request {
@@ -110,7 +140,7 @@ func authRequest(token string) *http.Request {
 	return r
 }
 
-func TestNewCognitoAuthenticatorRejectsIncompleteConfiguration(t *testing.T) {
+func TestCognitoRejectsIncompleteConfiguration(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
@@ -118,12 +148,8 @@ func TestNewCognitoAuthenticatorRejectsIncompleteConfiguration(t *testing.T) {
 	}{
 		{name: "empty issuer", change: func(c *cognitoConfig) { c.issuer = "" }},
 		{name: "HTTP issuer", change: func(c *cognitoConfig) { c.issuer = strings.Replace(c.issuer, "https", "http", 1) }},
-		{name: "arbitrary host", change: func(c *cognitoConfig) { c.issuer = "https://keys.example/pool" }},
-		{name: "issuer query", change: func(c *cognitoConfig) { c.issuer += "?keys=evil" }},
-		{name: "pool region mismatch", change: func(c *cognitoConfig) {
-			c.issuer = "https://cognito-idp.us-east-1.amazonaws.com/us-west-2_Example"
-		}},
 		{name: "client missing", change: func(c *cognitoConfig) { c.clientID = "" }},
+		{name: "shared user and operator client", change: func(c *cognitoConfig) { c.operatorClientID = c.clientID }},
 		{name: "scope missing", change: func(c *cognitoConfig) { c.requiredScope = "" }},
 		{name: "multiple scopes", change: func(c *cognitoConfig) { c.requiredScope = "one two" }},
 	}
@@ -136,12 +162,12 @@ func TestNewCognitoAuthenticatorRejectsIncompleteConfiguration(t *testing.T) {
 			t.Parallel()
 			config := authTestConfig()
 			tt.change(&config)
-			if _, err := newCognitoAuthenticator(config, transport); err == nil {
+			if _, err := authenticateCognito(authRequest("token"), config.get, transport, time.Now); !errors.Is(err, errAuthConfig) {
 				t.Fatal("accepted invalid configuration")
 			}
 		})
 	}
-	if _, err := newCognitoAuthenticator(authTestConfig(), nil); err == nil {
+	if _, err := authenticateCognito(authRequest("token"), authTestConfig().get, nil, time.Now); !errors.Is(err, errAuthConfig) {
 		t.Fatal("accepted missing transport")
 	}
 }
@@ -270,8 +296,8 @@ func TestCognitoAuthenticateRejectsSignatureAndHeaderAttacks(t *testing.T) {
 		{name: "tampered signature", token: strings.Join(parts, ".")},
 		{name: "wrong algorithm", token: hmacToken},
 		{name: "no signature", token: "eyJhbGciOiJub25lIn0.e30."},
-		{name: "missing kid", token: authSignedToken(t, claims, &jose.SignerOptions{})},
 		{name: "unknown kid", token: authSignedToken(t, claims, (&jose.SignerOptions{}).WithHeader("kid", "unknown"))},
+		{name: "missing kid", token: authSignedToken(t, claims, &jose.SignerOptions{})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -338,10 +364,10 @@ func TestRequestAccessToken(t *testing.T) {
 
 func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 	t.Parallel()
-	valid := authTestJWKS(t)
 	tests := []struct {
 		name string
 		get  func() *http.Response
+		want error
 	}{
 		{name: "HTTP failure", get: func() *http.Response {
 			return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader("down"))}
@@ -358,25 +384,7 @@ func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 		{name: "malformed", get: func() *http.Response {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{"))}
 		}},
-		{name: "empty keys", get: func() *http.Response { return authKeyResponse(t, jose.JSONWebKeySet{}) }},
-		{name: "duplicate kid", get: func() *http.Response {
-			return authKeyResponse(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{valid.Keys[0], valid.Keys[0]}})
-		}},
-		{name: "non signing key", get: func() *http.Response {
-			key := valid.Keys[0]
-			key.Use = "enc"
-			return authKeyResponse(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{key}})
-		}},
-		{name: "wrong key algorithm", get: func() *http.Response {
-			key := valid.Keys[0]
-			key.Algorithm = string(jose.RS512)
-			return authKeyResponse(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{key}})
-		}},
-		{name: "symmetric key", get: func() *http.Response {
-			key := valid.Keys[0]
-			key.Key = []byte(strings.Repeat("a", 32))
-			return authKeyResponse(t, jose.JSONWebKeySet{Keys: []jose.JSONWebKey{key}})
-		}},
+		{name: "empty keys", get: func() *http.Response { return authKeyResponse(t, jose.JSONWebKeySet{}) }, want: errAuthInvalid},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -392,7 +400,11 @@ func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 				}
 				return response, nil
 			}))
-			if _, err := auth.key(context.Background(), "key-one"); !errors.Is(err, errAuthUnavailable) {
+			want := tt.want
+			if want == nil {
+				want = errAuthUnavailable
+			}
+			if _, err := authenticateForContext(t, auth, context.Background()); !errors.Is(err, want) {
 				t.Fatalf("key error = %v, want unavailable", err)
 			}
 			if calls != 1 {
@@ -402,6 +414,74 @@ func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 				t.Fatal("returned before closing key response")
 			}
 		})
+	}
+}
+
+func TestCognitoTrustedIssuerIsMatchedExactly(t *testing.T) {
+	t.Parallel()
+	auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
+		return authKeyResponse(t, authTestJWKS(t)), nil
+	}))
+	auth.config.issuer = "https://identity.example/trusted-pool"
+	claims := authTestClaims(time.Now())
+	claims.Issuer = auth.config.issuer
+	if _, err := auth.Authenticate(authRequest(authSignedToken(t, claims, nil))); err != nil {
+		t.Fatalf("configured trusted issuer rejected: %v", err)
+	}
+	claims.Issuer = "https://attacker.example/pool"
+	if _, err := auth.Authenticate(authRequest(authSignedToken(t, claims, nil))); !errors.Is(err, errAuthInvalid) {
+		t.Fatalf("unconfigured issuer accepted: %v", err)
+	}
+}
+
+func TestCognitoKeyMetadataDoesNotGrantTokenAuthority(t *testing.T) {
+	t.Parallel()
+	for _, change := range []func(*jose.JSONWebKeySet){
+		func(s *jose.JSONWebKeySet) { s.Keys = append(s.Keys, s.Keys[0]) },
+		func(s *jose.JSONWebKeySet) { s.Keys[0].Use = "enc" },
+		func(s *jose.JSONWebKeySet) { s.Keys[0].Algorithm = string(jose.RS512) },
+	} {
+		keys := authTestJWKS(t)
+		change(&keys)
+		auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
+			return authKeyResponse(t, keys), nil
+		}))
+		claims := authTestClaims(time.Now())
+		if _, err := auth.Authenticate(authRequest(authSignedToken(t, claims, nil))); err != nil {
+			t.Fatalf("trusted signing key rejected because of unrelated metadata: %v", err)
+		}
+		claims.ClientID = "other-client"
+		if _, err := auth.Authenticate(authRequest(authSignedToken(t, claims, nil))); !errors.Is(err, errAuthInvalid) {
+			t.Fatalf("key metadata bypassed client policy: %v", err)
+		}
+	}
+}
+
+func TestCognitoExpiryIsCheckedAfterKeyFetch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		claims := authTestClaims(time.Now())
+		claims.Expiry = jwt.NewNumericDate(time.Now().Add(2 * time.Second))
+		token := authSignedToken(t, claims, nil)
+		auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
+			time.Sleep(3 * time.Second)
+			return authKeyResponse(t, authTestJWKS(t)), nil
+		}))
+		if _, err := auth.Authenticate(authRequest(token)); !errors.Is(err, errAuthInvalid) {
+			t.Fatalf("accepted token that expired during key fetch: %v", err)
+		}
+	})
+}
+
+func TestCognitoAlreadyCanceledRequestDoesNotFetchKeys(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
+		t.Fatal("already canceled authentication fetched keys")
+		return nil, nil
+	}))
+	if _, err := authenticateForContext(t, auth, ctx); !errors.Is(err, errAuthUnavailable) {
+		t.Fatalf("key error = %v, want unavailable", err)
 	}
 }
 
@@ -430,6 +510,55 @@ func TestCognitoCanceledRequestDoesNotAffectNextAuthentication(t *testing.T) {
 	}
 }
 
+type authContextBody struct {
+	ctx    context.Context
+	closed bool
+}
+
+func (b *authContextBody) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *authContextBody) Close() error { b.closed = true; return nil }
+
+func TestCognitoFetchBodyClosesBeforeCancellationOrDeadlineReturns(t *testing.T) {
+	for _, cancelEarly := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var body *authContextBody
+			auth := authForTest(t, authTestTransport(func(r *http.Request) (*http.Response, error) {
+				body = &authContextBody{ctx: r.Context()}
+				if cancelEarly {
+					time.AfterFunc(time.Second, cancel)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+			}))
+			start := time.Now()
+			if _, err := authenticateForContext(t, auth, ctx); !errors.Is(err, errAuthUnavailable) {
+				t.Fatalf("fetch error = %v, want unavailable", err)
+			}
+			if body == nil || !body.closed {
+				t.Fatal("authentication returned while the detached OIDC fetch still owned its response body")
+			}
+			want := authFetchTimeout
+			if cancelEarly {
+				want = time.Second
+			}
+			if elapsed := time.Since(start); elapsed != want {
+				t.Fatalf("fetch duration = %v, want %v", elapsed, want)
+			}
+			auth.transport = authTestTransport(func(*http.Request) (*http.Response, error) {
+				return authKeyResponse(t, authTestJWKS(t)), nil
+			})
+			if _, err := authenticateForContext(t, auth, context.Background()); err != nil {
+				t.Fatalf("subsequent authentication inherited a failed request: %v", err)
+			}
+		})
+	}
+}
+
 func TestCognitoKeyFetchDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		auth := authForTest(t, authTestTransport(func(r *http.Request) (*http.Response, error) {
@@ -437,7 +566,7 @@ func TestCognitoKeyFetchDeadline(t *testing.T) {
 			return nil, r.Context().Err()
 		}))
 		start := time.Now()
-		if _, err := auth.key(context.Background(), "key-one"); !errors.Is(err, errAuthUnavailable) {
+		if _, err := authenticateForContext(t, auth, context.Background()); !errors.Is(err, errAuthUnavailable) {
 			t.Fatalf("key error = %v", err)
 		}
 		if elapsed := time.Since(start); elapsed != authFetchTimeout {

@@ -1,3 +1,5 @@
+export GOEXPERIMENT = jsonv2
+
 WAL_WIT ?= ../wal-component/wit
 COMPONENTIZE_GO = .componentize/bin/componentize-go
 

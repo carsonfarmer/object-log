@@ -9,16 +9,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/transport"
-	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	"github.com/go-git/go-git/v6/storage/memory"
 	gitio "github.com/go-git/go-git/v6/utils/ioutil"
 )
+
+type refNameSink struct{ *memory.Storage }
+
+func (s *refNameSink) PackfileWriter() (io.WriteCloser, error) {
+	return gitio.WriteNopCloser(io.Discard), nil
+}
 
 func TestReceiveRefNamesBeforePublication(t *testing.T) {
 	bad := plumbing.ReferenceName("refs/heads/\u200c./review-probe")
@@ -33,11 +37,10 @@ func TestReceiveRefNamesBeforePublication(t *testing.T) {
 		t.Run(format.String(), func(t *testing.T) {
 			zero := plumbing.NewHash(strings.Repeat("0", format.HexSize()))
 			tip := plumbing.NewHash(strings.Repeat("1", format.HexSize()))
-			refNames := dotgit.New(memfs.New())
 			published := 0
 			hook := func(info *transport.PreReceiveInfo) error {
 				for _, cmd := range info.Commands {
-					if err := validateRefName(refNames, cmd.Name); err != nil {
+					if err := validateRefName(cmd.Name); err != nil {
 						return err
 					}
 				}
@@ -80,7 +83,7 @@ func receiveRefForTest(t *testing.T, format config.ObjectFormat, command *packp.
 		t.Fatal(err)
 	}
 	request.Write(pack)
-	sink := &receiveSink{Storage: memory.NewStorage(memory.WithObjectFormat(format))}
+	sink := &refNameSink{Storage: memory.NewStorage(memory.WithObjectFormat(format))}
 	if !command.Old.IsZero() {
 		if err := sink.SetReference(plumbing.NewHashReference(command.Name, command.Old)); err != nil {
 			t.Fatal(err)
@@ -92,4 +95,33 @@ func receiveRefForTest(t *testing.T, format config.ObjectFormat, command *packp.
 	}
 	err := transport.ReceivePack(t.Context(), sink, io.NopCloser(&request), gitio.WriteNopCloser(&reply), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: hooks})
 	return reply.String(), err
+}
+
+func TestReceiveRejectsDuplicateRefsBeforePublication(t *testing.T) {
+	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
+		t.Run(format.String(), func(t *testing.T) {
+			var request, reply bytes.Buffer
+			old, next := strings.Repeat("0", format.HexSize()), strings.Repeat("1", format.HexSize())
+			for _, suffix := range []string{"\x00report-status object-format=" + format.String(), ""} {
+				if _, err := pktline.Writef(&request, "%s %s refs/heads/main%s\n", old, next, suffix); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := pktline.WriteFlush(&request); err != nil {
+				t.Fatal(err)
+			}
+			request.WriteString("staged pack")
+			published := false
+			sink := &refNameSink{Storage: memory.NewStorage(memory.WithObjectFormat(format))}
+			err := transport.ReceivePack(t.Context(), sink, io.NopCloser(&request), gitio.WriteNopCloser(&reply), &transport.ReceivePackRequest{
+				StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(context.Context, *transport.PreReceiveInfo) error {
+					published = true
+					return nil
+				}},
+			})
+			if err == nil || published || !strings.Contains(reply.String(), "multiple updates for ref") {
+				t.Fatalf("duplicate ref reached publication: err=%v published=%t reply=%q", err, published, &reply)
+			}
+		})
+	}
 }

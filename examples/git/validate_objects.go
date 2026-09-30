@@ -93,43 +93,31 @@ func validateObjectHeaders(o plumbing.EncodedObject) error {
 	}
 	defer r.Close()
 	reader := bufio.NewReader(r)
-	fields := []string{"tree "}
+	fields := []string{"tree ", "author ", "committer "}
 	if o.Type() == plumbing.TagObject {
 		fields = []string{"object ", "type ", "tag "}
 	}
 	for _, field := range fields {
 		line, err := reader.ReadString('\n')
+		for field == "author " && err == nil && strings.HasPrefix(line, "parent ") {
+			line, err = reader.ReadString('\n')
+		}
 		if err != nil {
 			return err
 		}
-		if !strings.HasPrefix(line, field) {
-			return fmt.Errorf("%s missing %sheader", o.Type(), field)
+		value, ok := strings.CutPrefix(line, field)
+		if !ok || ((field == "author " || field == "committer ") && !validIdentityHeader(value)) {
+			return fmt.Errorf("%s has invalid %sheader", o.Type(), field)
 		}
 	}
-	line, err := reader.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return err
-	}
 	if o.Type() == plumbing.TagObject {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
 		// Historical tags may omit tagger; validate it when present.
 		if identity, ok := strings.CutPrefix(line, "tagger "); ok && !validIdentityHeader(identity) {
 			return fmt.Errorf("tag has invalid tagger header")
-		}
-		return nil
-	}
-	for err == nil && strings.HasPrefix(line, "parent ") {
-		line, err = reader.ReadString('\n')
-	}
-	for _, header := range []string{"author ", "committer "} {
-		if err != nil {
-			return err
-		}
-		identity, ok := strings.CutPrefix(line, header)
-		if !ok || !validIdentityHeader(identity) {
-			return fmt.Errorf("commit has invalid %sheader", header)
-		}
-		if header == "author " {
-			line, err = reader.ReadString('\n')
 		}
 	}
 	return nil

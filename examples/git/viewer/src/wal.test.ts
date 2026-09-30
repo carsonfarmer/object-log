@@ -3,8 +3,6 @@ import type { Config, Session } from "object-log:storage/wal@0.1.0";
 import { zlibSync } from "fflate";
 
 let opened = 0;
-const defaultPolicies = '{"team/demo.git":{"log_id":"demo","format":"sha256"}}';
-let policies = defaultPolicies;
 let openSession: (config: Config) => Session = () => {
   throw new Error("Unexpected storage access");
 };
@@ -15,7 +13,7 @@ mock.module("object-log:storage/wal@0.1.0", () => ({
   },
 }));
 mock.module("@spinframework/spin-variables", () => ({
-  get: (name: string) => (name === "git_repositories" ? policies : ""),
+  get: () => "",
 }));
 const { Catalog, MissingObject, drop } = await import("./wal");
 const { browse } = await import("./api");
@@ -23,7 +21,6 @@ const { NotFound, snapshot } = await import("./repository");
 const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  policies = defaultPolicies;
   openSession = () => {
     throw new Error("Unexpected storage access");
   };
@@ -68,10 +65,10 @@ const readAccess = () => new Response(null, { status: 204 });
 test("catalog requires a persisted branch HEAD and accepts an unborn branch", async () => {
   for (const format of ["sha1", "sha256"]) {
     for (const Head of [undefined, "", "refs/tags/main", "refs/heads/"])
-      expect(() => new Catalog(emptySession(format, { Head }), "", { bytes: 0 })).toThrow(
+      expect(() => new Catalog(emptySession(format, { Head }), { bytes: 0 })).toThrow(
         "Invalid repository catalog",
       );
-    const catalog = new Catalog(emptySession(format), "", { bytes: 0 });
+    const catalog = new Catalog(emptySession(format), { bytes: 0 });
     expect((await snapshot(catalog, new URLSearchParams())).branches).toEqual([]);
     drop(catalog);
   }
@@ -82,6 +79,7 @@ test("catalog validates root fields, references and sorted bucket prefixes", asy
     const id = "11".repeat(format === "sha1" ? 20 : 32);
     const invalid: [Record<string, unknown>, number][] = [
       [{ Validated: 1 }, 0],
+      [{ Format: "md5" }, 0],
       [{ Extra: true }, 0],
       [{ Head: "refs/heads/a..b" }, 0],
       [{ Head: "refs/heads/\u200c./nested" }, 0],
@@ -98,18 +96,17 @@ test("catalog validates root fields, references and sorted bucket prefixes", asy
       [{ Buckets: ["bb", "aa"] }, 2],
     ];
     for (const [fields, children] of invalid)
-      expect(() => new Catalog(emptySession(format, fields, children), "", { bytes: 0 })).toThrow(
+      expect(() => new Catalog(emptySession(format, fields, children), { bytes: 0 })).toThrow(
         "Invalid repository catalog",
       );
     for (const Head of ["refs/heads/@", "refs/heads/feature/日本語", "refs/heads/a\u200cb"])
       drop(
         new Catalog(
           emptySession(format, { Head, Refs: { [Head]: id }, Buckets: ["00", "ff"] }, 2),
-          "",
           { bytes: 0 },
         ),
       );
-    const empty = new Catalog(emptySession(format, { Refs: null, Buckets: null }), "", {
+    const empty = new Catalog(emptySession(format, { Refs: null, Buckets: null }), {
       bytes: 0,
     });
     expect((await snapshot(empty, new URLSearchParams())).branches).toEqual([]);
@@ -117,10 +114,8 @@ test("catalog validates root fields, references and sorted bucket prefixes", asy
   }
 });
 
-test("wildcard repositories recover their stored format and canonical WAL identity", async () => {
-  policies = '{"*":{}}';
+test("authorized repositories recover their stored format and canonical WAL identity", async () => {
   for (const format of ["sha1", "sha256"]) {
-    policies = format === "sha1" ? '{"*":{}}' : '{"*":{},"team/project":{"log_id":"","format":""}}';
     for (const name of ["team/project", "team/project.git", "team/project.GIT"]) {
       const canonical = name === "team/project.GIT" ? "team/project.GIT.git" : "team/project.git";
       let authorized = false;
@@ -141,34 +136,6 @@ test("wildcard repositories recover their stored format and canonical WAL identi
       ).toBe(200);
     }
   }
-});
-
-test("exact aliases override the whole wildcard policy and enforce pinned formats", async () => {
-  globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
-  for (const key of ["team/project", "team/project.git"]) {
-    policies = JSON.stringify({
-      "*": { format: "sha256" },
-      [key]: { log_id: "custom", format: "" },
-    });
-    openSession = (config) => {
-      expect(config.logId).toBe("custom");
-      return emptySession("sha1");
-    };
-    for (const name of ["team/project", "team/project.git"])
-      expect(
-        (await browse(new Request(`https://viewer.test/_viewer/api?repo=${name}`))).status,
-      ).toBe(200);
-  }
-  policies = '{"*":{"format":"sha256"}}';
-  openSession = () => emptySession("sha1");
-  await expect(
-    browse(new Request("https://viewer.test/_viewer/api?repo=team/project")),
-  ).rejects.toThrow("Invalid repository catalog");
-  policies = '{"*":{}}';
-  openSession = () => emptySession("md5");
-  await expect(
-    browse(new Request("https://viewer.test/_viewer/api?repo=team/project")),
-  ).rejects.toThrow("Invalid repository catalog");
 });
 
 function fixture(
@@ -253,7 +220,7 @@ function fixture(
       drops++;
     },
   };
-  const catalog = new Catalog({ recover: () => recovery } as unknown as Session, format, {
+  const catalog = new Catalog({ recover: () => recovery } as unknown as Session, {
     bytes: 0,
   });
   return { catalog, id, counts: () => ({ drops, reads }) };
@@ -385,12 +352,17 @@ test("Git authorization completes before viewer storage is opened", async () => 
   );
   expect(response.status).toBe(403);
   expect(opened).toBe(baseline);
-  globalThis.fetch = mock(async () => {
-    throw new Error("Unexpected HTTP call");
+  globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+    expect(String(input)).toBe("http://git.spin.internal/missing.git/authorize-read");
+    return new Response(null, { status: 404 });
   }) as unknown as typeof fetch;
   expect(
     (await browse(new Request("https://viewer.test/_viewer/api?repo=missing.git"))).status,
   ).toBe(404);
+  expect(opened).toBe(baseline);
+  globalThis.fetch = mock(async () => {
+    throw new Error("Unexpected HTTP call");
+  }) as unknown as typeof fetch;
   expect(
     (await browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git&path=..")))
       .status,

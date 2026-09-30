@@ -89,22 +89,6 @@ func lookupRadix[V, H any](id, prefix string, root H, load func(string, H) (radi
 	}
 }
 
-func walkRadix[V, H any](prefix string, root H, load func(string, H) (radixNode[V, H], error), visit func(string, V)) error {
-	node, err := load(prefix, root)
-	if err != nil {
-		return err
-	}
-	for id, value := range node.Items {
-		visit(id, value)
-	}
-	for prefix, child := range node.Children {
-		if err := walkRadix(prefix, child, load, visit); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // Filter immutable catalog nodes, retaining the original proof whenever a
 // subtree is unchanged. The caller publishes the replacement root through WAL.
 func filterRadix[V any, H comparable](prefix string, root H, keep func(string) bool, load func(string, H) (radixNode[V, H], error), save func(radixNode[V, H]) (H, error)) (H, bool, error) {

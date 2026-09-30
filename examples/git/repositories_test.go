@@ -8,17 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 )
 
 const repositoryTestConfig = `{
 	"team/alpha.git": {
-		"log_id": "alpha", "format": "sha1", "default_branch": "release/v1",
 		"read_groups": ["readers"], "write_groups": ["writers"], "admin_groups": ["operators"]
 	},
-	"team/beta.git": {"log_id": "beta", "format": "sha1", "read_groups": ["beta-readers"]},
-	"R&D/Lib+client@v2.git": {"log_id": "third", "format": "sha256"}
+	"team/beta.git": {"read_groups": ["beta-readers"]},
+	"R&D/Lib+client@v2.git": {}
 }`
 
 func repositoriesFromText(text string) (map[string]repositoryConfig, error) {
@@ -39,18 +37,13 @@ func repositoriesForTest(t *testing.T) map[string]repositoryConfig {
 	return repositories
 }
 
-func TestLoadRepositoriesIsolatesSameFormatRepositories(t *testing.T) {
+func TestLoadRepositoriesDerivesIndependentIdentitiesAndDefersPushMetadata(t *testing.T) {
 	t.Parallel()
 	repositories := repositoriesForTest(t)
 	alpha, beta := repositories["team/alpha.git"], repositories["team/beta.git"]
-	if alpha.Format != config.SHA1 || beta.Format != config.SHA1 || alpha.LogID == beta.LogID {
-		t.Fatal("same-format repositories did not retain independent identities")
-	}
-	if alpha.DefaultBranch != "release/v1" || beta.DefaultBranch != "" {
-		t.Fatal("per-repository default branches were not preserved")
-	}
-	if repositories["R&D/Lib+client@v2.git"].Format != config.SHA256 {
-		t.Fatal("canonical URL-safe punctuation or SHA-256 was rejected")
+	if alpha.LogID != automaticRepositoryID("team/alpha.git") ||
+		beta.LogID != automaticRepositoryID("team/beta.git") || alpha.LogID == beta.LogID {
+		t.Fatal("repository names did not retain independent storage identities")
 	}
 	if _, exists := repositories["sha1.git"]; exists {
 		t.Fatal("configuration introduced an implicit repository")
@@ -70,36 +63,38 @@ func TestLoadRepositoriesRejectsInvalidConfiguration(t *testing.T) {
 		{name: "trailing document", text: `{} {}`},
 		{name: "duplicate name", text: `{"r.git":{},"r.git":{}}`},
 		{name: "escaped duplicate name", text: `{"r.git":{},"\u0072.git":{}}`},
-		{name: "duplicate field", text: `{"r.git":{"log_id":"one","log_id":"two","format":"sha1"}}`},
-		{name: "escaped duplicate field", text: `{"r.git":{"format":"sha1","\u0066ormat":"sha256"}}`},
-		{name: "case alias field", text: `{"r.git":{"log_id":"one","LOG_ID":"two","format":"sha1"}}`},
-		{name: "unknown field", text: `{"r.git":{"log_id":"one","format":"sha1","public":true}}`},
-		{name: "duplicate identity", text: `{
-			"a.git":{"log_id":"same","format":"sha1"},
-			"b.git":{"log_id":"same","format":"sha256"}
-		}`},
-		{name: "invalid format", text: `{"r.git":{"log_id":"one","format":"SHA1"}}`},
-		{name: "null format", text: `{"r.git":{"log_id":"one","format":null}}`},
-		{name: "path identity", text: `{"r.git":{"log_id":"a/b","format":"sha1"}}`},
-		{name: "dot identity", text: `{"r.git":{"log_id":"..","format":"sha1"}}`},
-		{name: "long identity", text: `{"r.git":{"log_id":"` + strings.Repeat("a", 129) + `","format":"sha1"}}`},
-		{name: "invalid branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"a..b"}}`},
-		{name: "HEAD branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"HEAD"}}`},
-		{name: "hyphen branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"-bad"}}`},
-		{name: "unsafe branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"\u200c./review-probe"}}`},
-		{name: "null branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":null}}`},
-		{name: "string groups", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":"everyone"}}`},
-		{name: "null groups", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":null}}`},
-		{name: "wrong group type", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":[true]}}`},
-		{name: "null group element", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":[null]}}`},
+		{name: "duplicate field", text: `{"r.git":{"read_groups":["one"],"read_groups":["two"]}}`},
+		{name: "escaped duplicate field", text: `{"r.git":{"read_groups":[],"\u0072ead_groups":["reader"]}}`},
+		{name: "case alias field", text: `{"r.git":{"read_groups":[],"READ_GROUPS":["reader"]}}`},
+		{name: "unknown field", text: `{"r.git":{"public":true}}`},
+		{name: "string groups", text: `{"r.git":{"read_groups":"everyone"}}`},
+		{name: "null groups", text: `{"r.git":{"read_groups":null}}`},
+		{name: "wrong group type", text: `{"r.git":{"read_groups":[true]}}`},
+		{name: "null group element", text: `{"r.git":{"read_groups":[null]}}`},
+		{name: "empty read group", text: `{"r.git":{"read_groups":[""]}}`},
+		{name: "empty write group", text: `{"r.git":{"write_groups":[""]}}`},
+		{name: "empty admin group", text: `{"r.git":{"admin_groups":[""]}}`},
 		{name: "size bound", text: strings.Repeat(" ", repositoriesConfigBytes+1)},
 		{name: "invalid UTF-8", text: string([]byte{0xff})},
+		{name: "invalid UTF-8 group", text: `{"r.git":{"read_groups":["` + string([]byte{0xff}) + `"]}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if _, err := repositoriesFromText(tt.text); err == nil {
 				t.Fatal("invalid configuration was accepted")
+			}
+		})
+	}
+}
+
+func TestLoadRepositoriesRejectsDiscardedMetadataFields(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{`"log_id":"custom"`, `"format":"sha1"`, `"default_branch":"release"`} {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			if _, err := repositoriesFromText(`{"r.git":{` + field + `}}`); err == nil {
+				t.Fatal("discarded configuration field was silently accepted")
 			}
 		})
 	}
@@ -115,7 +110,7 @@ func TestLoadRepositoriesRejectsNoncanonicalNames(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			encoded, err := json.Marshal(map[string]repositoryConfig{
-				name: {LogID: "one", Format: config.SHA1, repositoryAccess: repositoryAccess{
+				name: {LogID: "one", repositoryAccess: repositoryAccess{
 					ReadGroups: []string{}, WriteGroups: []string{}, AdminGroups: []string{},
 				}},
 			})
@@ -153,14 +148,14 @@ func TestAddRepositoryRequiresOnlyConfiguration(t *testing.T) {
 		t.Fatalf("unprovisioned repository route error = %v", err)
 	}
 	text := strings.TrimSuffix(repositoryTestConfig, "}") + `,
-		"new/nested.git":{"log_id":"new-stable-id","format":"sha1"}
+		"new/nested.git":{}
 	}`
 	repositories, err := repositoriesFromText(text)
 	if err != nil {
 		t.Fatal(err)
 	}
 	route, err := resolveRepository(repositories, request)
-	if err != nil || route.Repository.LogID != "new-stable-id" {
+	if err != nil || route.Repository.LogID != automaticRepositoryID("new/nested.git") {
 		t.Fatalf("configured route=%+v error=%v", route, err)
 	}
 }
@@ -196,7 +191,7 @@ func TestResolveRepositorySelectsServiceAndAction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if route.Name != "team/alpha.git" || route.Repository.LogID != "alpha" {
+			if route.Name != "team/alpha.git" || route.Repository.LogID != automaticRepositoryID("team/alpha.git") {
 				t.Fatalf("wrong repository: %+v", route)
 			}
 			if route.Service != tt.service || route.Method != tt.method || route.Action != tt.action {
@@ -285,7 +280,7 @@ func TestDiscoveredLogMaintenanceRequiresScopeOperator(t *testing.T) {
 		}
 	}
 	// A repository with this name still has ordinary Git routes and permissions.
-	route, err := resolveRepository(map[string]repositoryConfig{"_maintenance.git": {LogID: "named", Format: config.SHA1}},
+	route, err := resolveRepository(map[string]repositoryConfig{"_maintenance.git": {LogID: "named"}},
 		httptest.NewRequest(http.MethodGet, "/_maintenance/info/refs?service=git-upload-pack", nil))
 	if err != nil || route.Repository.LogID != "named" || route.Action != gitRead {
 		t.Fatalf("named repository route=%+v error=%v", route, err)
@@ -351,7 +346,7 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if route.Name != "team/project.git" || route.Action != gitWrite || route.Repository.Format != "" {
+		if route.Name != "team/project.git" || route.Action != gitWrite {
 			t.Fatalf("unexpected automatic route: %+v", route)
 		}
 		if first.Name != "" && first.Repository.LogID != route.Repository.LogID {

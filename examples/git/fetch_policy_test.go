@@ -272,6 +272,15 @@ func TestVisibleFetchStopsBeforeUnrelatedHistory(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(got, []plumbing.Hash{ids["tree"]}) {
 				t.Fatalf("tree-tag haves: %v, %v", got, err)
 			}
+			s.payloads = map[plumbing.Hash]int{}
+			s.readFailure = map[plumbing.Hash]error{ids["tree"]: failure}
+			if _, err := visibleFetch(s, []plumbing.Hash{treeTag}, []plumbing.Hash{ids["dead"]}, nil); err == nil || errors.Is(err, failure) {
+				t.Fatalf("commit-only visibility inspected a tagged tree: %v", err)
+			}
+			if s.payloads[ids["tree"]] != 0 {
+				t.Fatal("opened tagged tree payload for commit-only visibility")
+			}
+			s.readFailure = nil
 			// A tag target may already be a deferred parent of another tip.
 			merge := put(&object.Commit{TreeHash: empty, ParentHashes: []plumbing.Hash{parent, ids["tip"]}})
 			s.payloads = map[plumbing.Hash]int{}
@@ -311,6 +320,28 @@ func BenchmarkVisibleFetchSharedParents(b *testing.B) {
 	for b.Loop() {
 		if _, err := visibleFetch(s.Storage, tips, []plumbing.Hash{ids["dead"]}, nil); err == nil {
 			b.Fatal("accepted unpublished commit")
+		}
+	}
+}
+
+func BenchmarkVisibleFetchWideTree(b *testing.B) {
+	s, ids := policyFixture(b, config.SHA256)
+	tree := &object.Tree{}
+	for i := range 2048 {
+		tree.Entries = append(tree.Entries, object.TreeEntry{Name: fmt.Sprintf("file-%04d", i), Mode: filemode.Regular, Hash: ids["blob"]})
+	}
+	encoded := s.NewEncodedObject()
+	if err := tree.Encode(encoded); err != nil {
+		b.Fatal(err)
+	}
+	id, err := s.SetEncodedObject(encoded)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := visibleFetch(s.Storage, []plumbing.Hash{id}, []plumbing.Hash{ids["blob"]}, nil); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

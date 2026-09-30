@@ -69,14 +69,20 @@ func TestMaintenanceClientCannotReadOrPushRepositories(t *testing.T) {
 	keys := authTestTransport(func(*http.Request) (*http.Response, error) {
 		return authKeyResponse(t, authTestJWKS(t)), nil
 	})
+	policy := repositoryConfig{repositoryAccess: repositoryAccess{
+		ReadGroups: []string{"readers"}, WriteGroups: []string{"readers"}, AdminGroups: []string{"readers"},
+	}}
 	for _, client := range []string{"maintenance-client", "git-client", "other-client"} {
 		for _, scope := range []string{"git/access", "git/access git/maintenance"} {
 			claims := authTestClaims(time.Now())
 			claims.ClientID, claims.Scope = client, scope
 			request := authRequest(authSignedToken(t, claims, nil))
 			for _, action := range []gitAction{gitRead, gitWrite, gitAdmin} {
-				status, _ := authorizeRequest(request, repositoryRoute{Action: action}, get, keys)
-				want := 403 // No repository groups grant this token access.
+				status, _ := authorizeRequest(request, repositoryRoute{Action: action, Repository: policy}, get, keys)
+				want := 403
+				if client == "git-client" {
+					want = 0
+				}
 				if client == "other-client" {
 					want = 401
 				}
