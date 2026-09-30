@@ -215,7 +215,7 @@ bandwidth, but uses Git's existing negotiation without changing clients.
 The Go component uses unmodified go-git, Spin, MinIO, and componentize-go. It
 pins the unchanged contributor revision from an unmerged go-pkg pull request so
 garbage collection does not run during a restricted component allocation step.
-[THIRD_PARTY.md](../../THIRD_PARTY.md) records the exact revision and license.
+[THIRD_PARTY.md](../../THIRD_PARTY.md) explains the dependency overrides.
 
 Branch updates must be fast-forward, including when a client requests a force
 push. Partial-clone filters and packfile URIs are outside the current service.

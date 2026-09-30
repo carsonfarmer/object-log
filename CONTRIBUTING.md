@@ -42,6 +42,12 @@ Storage protocol changes should also run the local MinIO suite:
 make minio-test
 ```
 
+Collection tests cover both orderings of publication and retention races,
+direct and transitive fences, cancellation, repeated and delayed deletion,
+competing collectors, physical-ID collisions, log incarnations, expired reads,
+and invalid or oversized graphs. `make gc-acceptance` exercises 100,000 memory
+candidates and 10,001 MinIO candidates.
+
 Git changes should follow the build and provider-test instructions in
 [`examples/git/README.md`](examples/git/README.md). Network-backed tests are
 opt-in and must use isolated disposable storage.

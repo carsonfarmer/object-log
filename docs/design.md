@@ -268,6 +268,9 @@ exist, the method writes one sorted positive plan and installs its reference
 with the head CAS that increments the collection epoch. Candidate deletion
 starts only after that fence is durable.
 
+Listing alone never authorizes deletion. Graph, namespace-scan, and plan-size
+limit failures occur before installing a plan or deleting any objects.
+
 `start_collection_with_limit` selects a smaller positive candidate count for
 one new plan without changing the log's durable live-graph limit. The count
 must be positive and at most `max_collection_objects`; invalid values fail

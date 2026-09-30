@@ -257,7 +257,5 @@ and maintenance schedule with your own workload before deploying.
 
 `object-log` is licensed under
 [Apache-2.0](https://github.com/carsonfarmer/object-log/blob/main/LICENSE).
-Dependency and retained source notices are described in
+Build dependency overrides are described in
 [THIRD_PARTY.md](https://github.com/carsonfarmer/object-log/blob/main/THIRD_PARTY.md).
-Please report security issues according to
-[SECURITY.md](https://github.com/carsonfarmer/object-log/blob/main/SECURITY.md).
