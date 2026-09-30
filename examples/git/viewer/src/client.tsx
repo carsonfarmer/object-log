@@ -216,12 +216,15 @@ function App() {
     <>
       <header class="row">
         <a href="/">◈ object-log</a>
+        <span role="status">
+          {loading && <span class="loading" role="img" aria-label="Loading repository" />}
+        </span>
       </header>
       <main>
         <h1>{repository.replace(/\.git$/, "") || "Repositories"}</h1>
-        {valid && !view && (
+        {valid && !view && result.error && (
           <>
-            <p role="status">{result.error ?? "Loading repository…"}</p>
+            <p role="status">{result.error}</p>
             {result.status === 404 && !query.ref && !query.commit && !query.path && (
               <p class="panel">
                 Push your first branch to create this repository:
@@ -312,9 +315,6 @@ function App() {
               {"commit" in query && (
                 <a href={href({ repo: repository, ref: view.branch, view: tab })}>Branch tip</a>
               )}
-              <span class="loading" role="status">
-                {loading ? "Loading…" : ""}
-              </span>
               <button
                 type="button"
                 title={cloneURL}
