@@ -43,7 +43,7 @@ async function commit(catalog: Catalog, id: string) {
   };
 }
 
-async function tree(catalog: Catalog, id: string) {
+async function tree(catalog: Catalog, id: string, wanted?: string) {
   const bytes = (await catalog.object(id, 2, metadataBytes)).bytes;
   if (!bytes) throw new Error("Tree exceeds metadata limit");
   const width = catalog.root.Format === "sha256" ? 32 : 20,
@@ -53,8 +53,7 @@ async function tree(catalog: Catalog, id: string) {
       nul = bytes.indexOf(0, space + 1);
     if (space < offset || nul <= space || nul + 1 + width > bytes.length)
       throw new Error("Invalid Git tree");
-    const mode = text.decode(bytes.subarray(offset, space)),
-      rawName = bytes.subarray(space + 1, nul);
+    const rawName = bytes.subarray(space + 1, nul);
     let name: string,
       unavailable = false;
     try {
@@ -65,12 +64,19 @@ async function tree(catalog: Catalog, id: string) {
     }
     if (!name || name === "." || name === ".." || name.includes("/"))
       throw new Error("Invalid Git name");
-    result.push({
-      name,
-      kind: mode === "40000" ? "directory" : mode === "160000" ? "submodule" : "file",
-      id: hex(bytes.subarray(nul + 1, nul + 1 + width)),
-      ...(unavailable ? { unavailable: true as const } : {}),
-    });
+    if (
+      wanted === undefined
+        ? result.length <= 500
+        : !result.length && !unavailable && name === wanted
+    ) {
+      const mode = text.decode(bytes.subarray(offset, space));
+      result.push({
+        name,
+        kind: mode === "40000" ? "directory" : mode === "160000" ? "submodule" : "file",
+        id: hex(bytes.subarray(nul + 1, nul + 1 + width)),
+        ...(unavailable ? { unavailable: true as const } : {}),
+      });
+    }
     offset = nul + 1 + width;
   }
   return result;
@@ -117,13 +123,13 @@ export async function snapshot(catalog: Catalog, query: URLSearchParams) {
     view.next = id;
     return view;
   }
-  let entries = await tree(catalog, tip);
   const parts = view.path ? view.path.split("/") : [];
-  for (const [index, part] of parts.entries()) {
-    const entry = entries.find((value) => !value.unavailable && value.name === part);
+  let entries = await tree(catalog, tip, parts[0]);
+  for (const index of parts.keys()) {
+    const [entry] = entries;
     if (!entry) throw new NotFound();
     if (entry.kind === "directory") {
-      entries = await tree(catalog, entry.id);
+      entries = await tree(catalog, entry.id, parts[index + 1]);
       continue;
     }
     if (index !== parts.length - 1) throw new NotFound();
