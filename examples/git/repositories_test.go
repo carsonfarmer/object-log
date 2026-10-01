@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -65,8 +66,8 @@ func TestLoadRepositoriesRejectsInvalidConfiguration(t *testing.T) {
 		text string
 	}{
 		{name: "not object", text: `[]`},
-		{name: "null root", text: `null`},
 		{name: "null entry", text: `{"r.git":null}`},
+		{name: "null entry with wildcard", text: `{"*":{"read_groups":["readers"]},"r.git":null}`},
 		{name: "malformed", text: `{"r.git":`},
 		{name: "trailing document", text: `{} {}`},
 		{name: "duplicate name", text: `{"r.git":{},"r.git":{}}`},
@@ -76,7 +77,6 @@ func TestLoadRepositoriesRejectsInvalidConfiguration(t *testing.T) {
 		{name: "case alias field", text: `{"r.git":{"read_groups":[],"READ_GROUPS":["reader"]}}`},
 		{name: "unknown field", text: `{"r.git":{"public":true}}`},
 		{name: "string groups", text: `{"r.git":{"read_groups":"everyone"}}`},
-		{name: "null groups", text: `{"r.git":{"read_groups":null}}`},
 		{name: "wrong group type", text: `{"r.git":{"read_groups":[true]}}`},
 		{name: "null group element", text: `{"r.git":{"read_groups":[null]}}`},
 		{name: "empty read group", text: `{"r.git":{"read_groups":[""]}}`},
@@ -93,6 +93,25 @@ func TestLoadRepositoriesRejectsInvalidConfiguration(t *testing.T) {
 				t.Fatal("invalid configuration was accepted")
 			}
 		})
+	}
+}
+
+func TestNullPermissionListsKeepEmptyPolicy(t *testing.T) {
+	repositories, err := repositoriesFromText(`{"r.git":{"read_groups":null,"write_groups":null,"admin_groups":null}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/r.git/authorize-read", nil)
+	route, err := resolveRepository(repositories, request)
+	if err != nil || route.Name != "r.git" || len(route.Repository.ReadGroups)+len(route.Repository.WriteGroups)+len(route.Repository.AdminGroups) != 0 {
+		t.Fatalf("null lists changed empty policy: route=%+v error=%v", route, err)
+	}
+	// Password mode admits explicitly configured repositories, including {}.
+	request.SetBasicAuth("git", "password")
+	if status, err := authorizeRequest(request, route, func(name string) string {
+		return map[string]string{"GIT_AUTH_MODE": "password", "GIT_PASSWORD": "password"}[name]
+	}, nil); status != 0 || err != nil {
+		t.Fatalf("null lists changed explicit password-mode admission: status=%d error=%v", status, err)
 	}
 }
 
@@ -145,7 +164,7 @@ func TestRepositoryNameBoundaries(t *testing.T) {
 
 func TestLoadRepositoriesEmptyConfigDeniesAll(t *testing.T) {
 	t.Parallel()
-	for _, text := range []string{"", " ", "{}"} {
+	for _, text := range []string{"", " ", "{}", "null"} {
 		t.Run("config="+text, func(t *testing.T) {
 			t.Parallel()
 			repositories, err := repositoriesFromText(text)
@@ -227,14 +246,10 @@ func TestResolveRepositoryRejectsAliasesAndUnknownRoutes(t *testing.T) {
 		"/missing.git/git-upload-pack", "/sha1.git/git-upload-pack", "/team/alpha.git",
 		"/team/alpha.git/unknown", "/team/alpha.git/create", "/team/alpha.git/git-upload-pack/", "/team/alpha.git//git-upload-pack",
 		"//team/alpha.git/git-upload-pack", "/team/./alpha.git/git-upload-pack",
-		"/team/other/../alpha.git/git-upload-pack", "/team%2falpha.git/git-upload-pack",
-		"/team/%61lpha.git/git-upload-pack", "/team/alpha%2egit/git-upload-pack",
-		"/team/alpha.git/git-upload-pack?", "/team/alpha.git/git-upload-pack?service=git-receive-pack",
+		"/team/other/../alpha.git/git-upload-pack",
 		"/team/alpha.git/info/refs", "/team/alpha.git/info/refs?service=unknown",
 		"/team/alpha.git/info/refs?service=git-upload-pack&service=git-receive-pack",
-		"/team/alpha.git/info/refs?service=git-upload-pack&extra=1",
 		"/team/alpha.git/info/refs?service=git-upload-pack&bad=%ZZ",
-		"/team/alpha.git/authorize-read?", "/team/alpha.git/authorize-read?service=git-upload-pack",
 		"/missing.git/authorize-read",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -243,6 +258,28 @@ func TestResolveRepositoryRejectsAliasesAndUnknownRoutes(t *testing.T) {
 				t.Fatalf("route error = %v, want not found", err)
 			}
 		})
+	}
+}
+
+func TestCanonicalHTTPAliasesKeepRepositoryIdentityAndPolicy(t *testing.T) {
+	repositories := repositoriesForTest(t)
+	for _, target := range []string{
+		"/team%2falpha.git/git-upload-pack", "/team/%61lpha.git/git-upload-pack", "/team/alpha%2egit/git-upload-pack",
+		"/team/alpha.git/git-upload-pack?", "/team/alpha.git/git-upload-pack?service=git-receive-pack",
+		"/team/alpha.git/info/refs?service=git-upload-pack&extra=1",
+		"/team/alpha.git/authorize-read?", "/team/alpha.git/authorize-read?service=git-receive-pack",
+	} {
+		method := http.MethodPost
+		if strings.Contains(target, "info/refs") || strings.Contains(target, "authorize-read") {
+			method = http.MethodGet
+		}
+		route, err := resolveRepository(repositories, httptest.NewRequest(method, target, nil))
+		if err != nil || route.Name != "team/alpha.git" || route.LogID != automaticRepositoryID("team/alpha.git") || route.Action != gitRead {
+			t.Fatalf("alias %s changed identity or action: route=%+v error=%v", target, route, err)
+		}
+		if !reflect.DeepEqual(route.Repository, repositories["team/alpha.git"]) {
+			t.Fatalf("alias %s selected another access policy: %+v", target, route.Repository)
+		}
 	}
 }
 
@@ -366,7 +403,7 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var first repositoryRoute
-	for _, name := range []string{"team/project", "team/project.git"} {
+	for _, name := range []string{"team/project", "team/project.git", "team/%70roject"} {
 		route, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/git-receive-pack", nil))
 		if err != nil {
 			t.Fatal(err)
@@ -396,7 +433,7 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 	if status, err := authorizeForTest(t, private, claims); status != http.StatusForbidden || err == nil || private.LogID == first.LogID {
 		t.Fatal("exact denial or repository isolation lost")
 	}
-	for _, name := range []string{"*", "team/../project", "team//project", "%70roject"} {
+	for _, name := range []string{"*", "team/../project", "team//project"} {
 		if _, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/git-receive-pack", nil)); err == nil {
 			t.Fatalf("wildcard accepted invalid name %q", name)
 		}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -41,24 +40,15 @@ func loadRepositories(getenv func(string) string) (map[string]repositoryAccess, 
 	if strings.TrimSpace(text) == "" {
 		return repositories, nil
 	}
-	entries := map[string]repositoryAccess{}
-	err := json.Unmarshal(
-		[]byte(text),
-		&entries,
-		json.RejectUnknownMembers(true),
-		json.WithUnmarshalers(
-			json.UnmarshalFromFunc(func(dec *jsontext.Decoder, _ any) error {
-				if dec.PeekKind() == jsontext.KindNull {
-					return errors.New("repository configuration must not contain null")
-				}
-				return errors.ErrUnsupported
-			}),
-		),
-	)
+	entries := map[string]*repositoryAccess{}
+	err := json.Unmarshal([]byte(text), &entries, json.RejectUnknownMembers(true))
 	if err != nil {
 		return nil, fmt.Errorf("GIT_REPOSITORIES: %w", err)
 	}
 	for name, repository := range entries {
+		if repository == nil {
+			return nil, errors.New("repository policy must not be null")
+		}
 		if name != "*" && !validRepositoryName(name) {
 			return nil, fmt.Errorf("GIT_REPOSITORIES: noncanonical repository name %q", name)
 		}
@@ -73,7 +63,7 @@ func loadRepositories(getenv func(string) string) (map[string]repositoryAccess, 
 				return nil, errors.New("permission groups must be nonempty strings")
 			}
 		}
-		repositories[name] = repository
+		repositories[name] = *repository
 	}
 	return repositories, nil
 }
@@ -105,8 +95,9 @@ type repositoryRoute struct {
 	Action     gitAction
 }
 
-// Resolve exact permitted names and endpoint suffixes without cleaning or
-// decoding path aliases. The caller must authorize Action before opening a WAL.
+// Resolve permitted repository names and endpoint suffixes.
+// Decoded URL spellings share one canonical storage identity and access policy.
+// The caller must authorize Action before opening a WAL.
 // A method error preserves Method so the caller can send an Allow header.
 func resolveRepository(repositories map[string]repositoryAccess, r *http.Request) (repositoryRoute, error) {
 	route := repositoryRoute{Method: http.MethodPost, Action: gitAdmin}
@@ -114,10 +105,6 @@ func resolveRepository(repositories map[string]repositoryAccess, r *http.Request
 	if r.URL.Path == "/_validate_backend" {
 		route.Service = "validate-backend"
 	} else {
-		if r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path || r.URL.Fragment != "" ||
-			r.URL.Opaque != "" || !strings.HasPrefix(r.URL.Path, "/") {
-			return repositoryRoute{}, errRepositoryNotFound
-		}
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {
 			return repositoryRoute{}, errRepositoryNotFound
@@ -139,7 +126,7 @@ func resolveRepository(repositories map[string]repositoryAccess, r *http.Request
 			}
 			route.Name, route.Service = canonicalRepositoryName(endpoint[1]), endpoint[2]
 			if route.Service == "info/refs" {
-				if len(query) != 1 || len(query["service"]) != 1 {
+				if len(query["service"]) != 1 {
 					return repositoryRoute{}, errRepositoryNotFound
 				}
 				route.Service = query.Get("service")
@@ -147,8 +134,6 @@ func resolveRepository(repositories map[string]repositoryAccess, r *http.Request
 					return repositoryRoute{}, errRepositoryNotFound
 				}
 				route.Method = http.MethodGet
-			} else if r.URL.RawQuery != "" || r.URL.ForceQuery {
-				return repositoryRoute{}, errRepositoryNotFound
 			}
 			if route.Service == "authorize-read" {
 				route.Method = http.MethodGet
