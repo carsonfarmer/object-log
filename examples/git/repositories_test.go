@@ -103,7 +103,7 @@ func TestLoadRepositoriesRejectsDiscardedMetadataFields(t *testing.T) {
 func TestLoadRepositoriesRejectsNoncanonicalNames(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{
-		"", ".git", "team/.git", "/r.git", "r.git/", "team//r.git", "./r.git",
+		"", ".", ".git", "team/.git", "/r.git", "r.git/", "team//r.git", "./r.git",
 		"team/./r.git", "team/../r.git", "../r.git", "r%2egit", `team\r.git`, "r?.git", "r#.git",
 		"r space.git", "résumé.git",
 	} {
@@ -121,6 +121,19 @@ func TestLoadRepositoriesRejectsNoncanonicalNames(t *testing.T) {
 				t.Fatal("noncanonical name was accepted")
 			}
 		})
+	}
+}
+
+func TestRepositoryNameBoundaries(t *testing.T) {
+	for _, name := range []string{"...git", "team/...git", "team/a:b+c&d=e.git", strings.Repeat("a", 4092), strings.Repeat("a", 4092) + ".git"} {
+		if !validRepositoryName(name) {
+			t.Fatalf("rejected canonical repository name %q", name)
+		}
+	}
+	for _, name := range []string{strings.Repeat("a", 4093), strings.Repeat("a", 4093) + ".git", "team/../r", "team/./r", "team\x00r"} {
+		if validRepositoryName(name) {
+			t.Fatalf("accepted noncanonical or oversized name %q", name)
+		}
 	}
 }
 
