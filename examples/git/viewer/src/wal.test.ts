@@ -41,7 +41,7 @@ function emptySession(
       readNode: () => ({
         data: new TextEncoder().encode(
           JSON.stringify({
-            Validated: true,
+            Version: 1,
             Format: format,
             Head: "refs/heads/main",
             Refs: {},
@@ -76,7 +76,10 @@ test("catalog validates root fields, references and sorted bucket prefixes", asy
   for (const format of ["sha1", "sha256"]) {
     const id = "11".repeat(format === "sha1" ? 20 : 32);
     const invalid: [Record<string, unknown>, number][] = [
-      [{ Validated: 1 }, 0],
+      [{ Version: true }, 0],
+      [{ Version: undefined }, 0],
+      [{ Version: 0 }, 0],
+      [{ Version: 2 }, 0],
       [{ Format: "md5" }, 0],
       [{ Extra: true }, 0],
       [{ Head: "refs/heads/a..b" }, 0],
@@ -142,10 +145,12 @@ function fixture(
   encoded: Uint8Array,
   storage: "inline" | "inline-delta" | "full" | "delta" = "inline",
   size = 3,
+  precedingDelta = false,
 ) {
   const id = new Bun.CryptoHasher(format).update(raw).digest("hex");
   let drops = 0,
-    reads = 0;
+    reads = 0,
+    nodes = 0;
   const handle = () => ({
     [Symbol.dispose]() {
       drops++;
@@ -153,15 +158,15 @@ function fixture(
   });
   const root = handle(),
     leaf = handle(),
-    wrapper = handle(),
     full = handle(),
-    delta = handle();
+    delta = handle(),
+    previousFull = handle(),
+    previousDelta = handle();
   const item = {
     ID: id,
     Kind: 3,
     Size: size,
     StoredSize: encoded.length,
-    Encoding: "zlib",
     ...(storage.startsWith("inline")
       ? {
           Inline: btoa(String.fromCharCode(...encoded)),
@@ -178,10 +183,11 @@ function fixture(
   const recovery = {
     latest: () => ({ tailEntries: 0n, item: { tag: "checkpoint", val: { objects: [root] } } }),
     readNode(value: unknown) {
+      nodes++;
       if (value === root)
         return entry(
           {
-            Validated: true,
+            Version: 1,
             Format: format,
             Head: "refs/heads/main",
             Refs: {},
@@ -191,10 +197,20 @@ function fixture(
         );
       if (value === leaf)
         return entry(
-          { Items: [item] },
-          storage.startsWith("inline") ? [] : storage === "full" ? [full] : [wrapper],
+          {
+            Items: precedingDelta
+              ? [{ ID: "predecessor", Delta: { StoredSize: 12 } }, item]
+              : [item],
+          },
+          precedingDelta
+            ? [previousFull, previousDelta, full]
+            : storage.startsWith("inline")
+              ? []
+              : storage === "full"
+                ? [full]
+                : [full, delta],
         );
-      return { data: new Uint8Array(), objects: [full, delta] };
+      throw new Error("Unexpected catalog node read");
     },
     openBytes(value: unknown) {
       expect(value).toBe(full);
@@ -216,7 +232,7 @@ function fixture(
   const catalog = new Catalog({ recover: () => recovery } as unknown as Session, {
     bytes: 0,
   });
-  return { catalog, id, counts: () => ({ drops, reads }) };
+  return { catalog, id, counts: () => ({ drops, reads }), nodes: () => nodes };
 }
 
 for (const format of ["sha1", "sha256"] as const) {
@@ -251,12 +267,26 @@ for (const format of ["sha1", "sha256"] as const) {
         drop(sample.catalog);
       }
       expect(sample.counts().drops).toBe(
-        storage.startsWith("inline") ? 3 : storage === "full" ? 5 : 7,
+        storage.startsWith("inline") ? 3 : storage === "full" ? 5 : 6,
       );
       expect(sample.counts().reads).toBe(
         storage.startsWith("inline") ? 0 : Math.ceil(encoded.length / 3),
       );
     }
+  });
+
+  test(`${format}: direct delta proofs preserve following object positions`, async () => {
+    const raw = new TextEncoder().encode("blob 3\0abc"),
+      sample = fixture(format, raw, zlibSync(raw), "full", 3, true);
+    try {
+      expect(new TextDecoder().decode((await sample.catalog.object(sample.id, 3, 256)).bytes)).toBe(
+        "abc",
+      );
+      expect(sample.nodes()).toBe(2);
+    } finally {
+      drop(sample.catalog);
+    }
+    expect(sample.counts().drops).toBe(7);
   });
 
   test(`${format}: inline compressed length boundary`, async () => {
@@ -639,7 +669,7 @@ for (const expiredAt of ["latest", "node"])
                 objects: [],
                 data: new TextEncoder().encode(
                   JSON.stringify({
-                    Validated: true,
+                    Version: 1,
                     Format: "sha256",
                     Head: "refs/heads/main",
                     Refs: {},

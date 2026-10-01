@@ -22,7 +22,8 @@ import (
 
 type indexed struct {
 	objectMeta
-	root *wal.Object
+	root      *wal.Object
+	deltaRoot *wal.Object
 }
 type store struct {
 	ctx     context.Context // Request-scoped; go-git storage methods do not accept contexts.
@@ -53,7 +54,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 			s.Close()
 		}
 	}()
-	s.meta = rootMeta{Format: format, Refs: map[string]string{}}
+	s.meta = rootMeta{Version: 1, Format: format, Refs: map[string]string{}}
 	recovery, e := storeCall(s, session.Recover)
 	if e != nil {
 		return nil, e
@@ -87,8 +88,6 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 			return nil, e
 		}
 	}
-	// An empty repository has no unchecked objects. Existing roots must certify validation.
-	s.meta.Validated = true
 	if s.stateRoot == nil {
 		s.meta.Head = "refs/heads/main"
 	}
@@ -194,7 +193,7 @@ func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteC
 				return err
 			}
 		}
-		item := indexed{objectMeta: objectMeta{ID: id, Kind: kind, Size: size, Encoding: "zlib", StoredSize: sink.written}}
+		item := indexed{objectMeta: objectMeta{ID: id, Kind: kind, Size: size, StoredSize: sink.written}}
 		if sink.writer == nil {
 			item.Inline = sink.prefix
 		} else {
@@ -271,17 +270,10 @@ func (o *storedObject) Reader() (reader io.ReadCloser, err error) {
 	if err := o.s.ctx.Err(); err != nil {
 		return nil, err
 	}
-	if o.item.Encoding != "zlib" {
-		return nil, fmt.Errorf("unknown object encoding")
-	}
 	if len(o.item.Inline) > 0 {
 		return o.item.readInline(o.s.meta.Format)
 	}
-	root, _, err := o.s.objectRoots(o.item.root, o.item.Delta != nil && o.item.Delta.StoredSize > 0)
-	if err != nil {
-		return nil, err
-	}
-	source, err := o.s.openBytes(root)
+	source, err := o.s.openBytes(o.item.root)
 	if err != nil {
 		return nil, err
 	}
@@ -293,26 +285,8 @@ func (o *storedObject) Reader() (reader io.ReadCloser, err error) {
 	return readLoose(source, o.s.meta.Format, o.item.Kind, o.item.Size, o.Hash())
 }
 
-func (s *store) objectRoots(root *wal.Object, external bool) (*wal.Object, *wal.Object, error) {
-	if !external {
-		return root, nil, nil
-	}
-	entry, err := s.readNode(root)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(entry.Data) != 0 || len(entry.Objects) != 2 {
-		return nil, nil, fmt.Errorf("invalid delta object")
-	}
-	return entry.Objects[0], entry.Objects[1], nil
-}
-
 func (s *store) openDelta(item indexed) (io.ReadCloser, error) {
-	_, root, err := s.objectRoots(item.root, true)
-	if err != nil {
-		return nil, err
-	}
-	source, err := s.openBytes(root)
+	source, err := s.openBytes(item.deltaRoot)
 	if err != nil {
 		return nil, err
 	}

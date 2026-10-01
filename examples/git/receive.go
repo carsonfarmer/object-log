@@ -5,7 +5,6 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
-	wal "object-log-git-proof/bindings/object_log_storage_wal"
 )
 
 // Incoming packs are staged as seekable WAL bytes before import.
@@ -75,12 +74,8 @@ func (s *store) importIncoming(writer *byteWriter) error {
 			if err != nil {
 				return err
 			}
-			root, err := s.putNode(nil, []*wal.Object{item.root, deltaRoot})
-			deltaRoot.Drop()
-			if err != nil {
-				return err
-			}
-			item.root = root
+			s.owned = append(s.owned, deltaRoot)
+			item.deltaRoot = deltaRoot
 			delta.StoredSize = int64(len(delta.Data))
 			delta.Data = nil
 		}

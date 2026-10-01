@@ -19,14 +19,13 @@ interface Bucket {
     Kind: number;
     Size: number;
     StoredSize: number;
-    Encoding: string;
     Inline?: string;
     Delta?: { StoredSize: number };
   }[];
   Prefixes?: string[];
 }
 export interface Root {
-  Validated: boolean;
+  Version: number;
   Format: string;
   Head: string;
   Refs: Record<string, string>;
@@ -105,9 +104,9 @@ export class Catalog {
       const idPattern = new RegExp(`^[0-9a-f]{${this.root.Format === "sha1" ? 40 : 64}}$`);
       if (
         Object.keys(this.root).some(
-          (key) => !["Validated", "Format", "Head", "Refs", "Buckets"].includes(key),
+          (key) => !["Version", "Format", "Head", "Refs", "Buckets"].includes(key),
         ) ||
-        this.root.Validated !== true ||
+        this.root.Version !== 1 ||
         !["sha1", "sha256"].includes(this.root.Format) ||
         !validRef(this.root.Head) ||
         !this.root.Head.startsWith("refs/heads/") ||
@@ -173,9 +172,10 @@ export class Catalog {
       let child = 0;
       for (const item of bucket.Items ?? []) {
         const value = item.Inline ? undefined : node.objects[child++];
+        if (item.Delta?.StoredSize) child++;
         if (item.ID !== id) continue;
         if (item.Kind !== kind) throw new MissingObject("Git object has a different kind");
-        if (item.Encoding !== "zlib" || !Number.isSafeInteger(item.Size) || item.Size < 0)
+        if (!Number.isSafeInteger(item.Size) || item.Size < 0)
           throw new Error("Invalid Git object metadata");
         if (item.Size > maxBytes) {
           if (kind !== 3) throw new Error("Git object exceeds metadata limit");
@@ -185,8 +185,7 @@ export class Catalog {
         if (item.Inline) compressed = Uint8Array.fromBase64(item.Inline);
         else {
           if (!value) throw new Error("Missing object reference");
-          const full = item.Delta?.StoredSize ? this.node(value).objects[0] : value;
-          using reader = disposable(this.recovery.openBytes(full));
+          using reader = disposable(this.recovery.openBytes(value));
           if (reader.length() !== BigInt(item.StoredSize) || item.StoredSize > maxBytes + 65536)
             throw new Error("Invalid stored object length");
           compressed = new Uint8Array(item.StoredSize);

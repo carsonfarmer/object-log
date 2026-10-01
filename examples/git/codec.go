@@ -13,11 +13,11 @@ import (
 )
 
 type rootMeta struct {
-	Validated bool `json:",omitempty"`
-	Format    config.ObjectFormat
-	Head      string
-	Refs      map[string]string
-	Buckets   []string
+	Version uint8
+	Format  config.ObjectFormat
+	Head    string
+	Refs    map[string]string
+	Buckets []string
 }
 
 func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta, error) {
@@ -26,7 +26,7 @@ func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta
 		return meta, err
 	}
 	validFormat := meta.Format == config.SHA1 || meta.Format == config.SHA256
-	if !meta.Validated || !validFormat || len(meta.Buckets) != children {
+	if meta.Version != 1 || !validFormat || len(meta.Buckets) != children {
 		return meta, fmt.Errorf("invalid repository root")
 	}
 	if format != "" && meta.Format != format {
@@ -90,7 +90,7 @@ func validPrefix(value string, width int, parent string) bool {
 func validObjectMeta(item objectMeta, format config.ObjectFormat, prefix string) bool {
 	validKind := item.Kind == plumbing.BlobObject || item.Kind == plumbing.TreeObject ||
 		item.Kind == plumbing.CommitObject || item.Kind == plumbing.TagObject
-	validStorage := item.validInline() || len(item.Inline) == 0 && item.Encoding == "zlib" && item.StoredSize > 0
+	validStorage := item.validInline() || len(item.Inline) == 0 && item.StoredSize > 0
 	validDelta := item.Delta == nil || item.Delta.valid() && validID(format, item.Delta.Base) &&
 		item.Delta.Base != item.ID && (len(item.Inline) == 0 || item.Delta.StoredSize == 0)
 	return validID(format, item.ID) && strings.HasPrefix(item.ID, prefix) && validKind && item.Size >= 0 && validStorage && validDelta
@@ -103,14 +103,13 @@ type objectMeta struct {
 	ID         string
 	Kind       plumbing.ObjectType
 	Size       int64
-	Encoding   string     `json:",omitempty"`
 	StoredSize int64      `json:",omitempty"`
 	Inline     []byte     `json:",omitempty"`
 	Delta      *deltaMeta `json:",omitempty"`
 }
 
 func (m objectMeta) validInline() bool {
-	return len(m.Inline) > 0 && len(m.Inline) <= inlineObjectLimit && m.Encoding == "zlib" && int64(len(m.Inline)) == m.StoredSize
+	return len(m.Inline) > 0 && len(m.Inline) <= inlineObjectLimit && int64(len(m.Inline)) == m.StoredSize
 }
 
 func (m objectMeta) readInline(format config.ObjectFormat) (io.ReadCloser, error) {

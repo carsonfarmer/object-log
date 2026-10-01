@@ -21,7 +21,11 @@ Supported behavior includes:
 The example is tested against local MinIO and a remotely hosted EC2/Cognito/S3
 service over HTTPS. Run the provider suite for your intended workload and host
 capacity before deployment. It is pre-release: use a fresh object-store prefix
-when changing incompatible revisions.
+when changing incompatible revisions. The catalog version is 1: leaf children
+contain each external full object followed by its optional external delta.
+Version 1 roots certify that incoming objects and ref updates passed Git
+validation before publication. Full objects use Git's loose zlib encoding.
+Earlier unversioned catalogs are unsupported.
 
 ## Setup
 

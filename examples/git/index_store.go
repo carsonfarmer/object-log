@@ -68,6 +68,13 @@ func (s *store) loadBucket(prefix string, value *wal.Object) (radixNode[indexed,
 				}
 				value.root = entry.Objects[next]
 				next++
+				if item.Delta != nil && item.Delta.StoredSize > 0 {
+					if next == len(entry.Objects) {
+						return node, fmt.Errorf("missing delta object")
+					}
+					value.deltaRoot = entry.Objects[next]
+					next++
+				}
 			}
 			node.Items[item.ID] = value
 		}
@@ -94,6 +101,9 @@ func (s *store) saveBucket(node radixNode[indexed, *wal.Object]) (*wal.Object, e
 			meta.Items = append(meta.Items, node.Items[id].objectMeta)
 			if len(node.Items[id].Inline) == 0 {
 				children = append(children, node.Items[id].root)
+				if node.Items[id].deltaRoot != nil {
+					children = append(children, node.Items[id].deltaRoot)
+				}
 			}
 		}
 	}

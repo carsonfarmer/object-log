@@ -132,7 +132,7 @@ func TestDeltaCatalogBound(t *testing.T) {
 	for _, size := range []int{inlineObjectLimit, 4096, inlineDeltaLimit} {
 		for _, mixInline := range []bool{false, true} {
 			t.Run(fmt.Sprintf("bytes=%d/mixed=%t", size, mixInline), func(t *testing.T) {
-				meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: math.MaxInt64, Delta: &deltaMeta{Base: strings.Repeat("f", 64), Size: math.MaxInt64, Data: make([]byte, size)}}
+				meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, StoredSize: math.MaxInt64, Delta: &deltaMeta{Base: strings.Repeat("f", 64), Size: math.MaxInt64, Data: make([]byte, size)}}
 				leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafSize)}
 				for i := range leaf.Items {
 					leaf.Items[i] = meta
@@ -168,7 +168,7 @@ func TestDeltaCatalogBound(t *testing.T) {
 func TestLegalLeafPayloadBound(t *testing.T) {
 	items := make([]objectMeta, indexLeafSize)
 	for i := range items {
-		items[i] = objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: inlineObjectLimit, Inline: make([]byte, inlineObjectLimit)}
+		items[i] = objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, StoredSize: inlineObjectLimit, Inline: make([]byte, inlineObjectLimit)}
 	}
 	if err := limitDeltas(items); err != nil {
 		t.Fatal("legal full leaf rejected", err)
