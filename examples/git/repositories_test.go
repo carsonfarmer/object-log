@@ -385,3 +385,28 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestBackendValidationIsGlobalAdministration(t *testing.T) {
+	for _, path := range []string{"/_validate_backend", "/_validate_backend?", "/_validate_backend?bad=%ZZ", "/%5fvalidate_backend"} {
+		for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodHead} {
+			route, err := resolveRepository(nil, httptest.NewRequest(method, path, nil))
+			want := error(nil)
+			if method != http.MethodPost {
+				want = errRepositoryMethod
+			}
+			if !errors.Is(err, want) || route.Service != "validate-backend" || route.Method != http.MethodPost ||
+				route.Action != gitAdmin || route.Name != "" || route.Repository.LogID != "" {
+				t.Fatalf("%s %s route=%+v error=%v", method, path, route, err)
+			}
+			if (gitPrincipal{subject: "admin-member", groups: []string{"operators"}}).Allows(route.Repository.repositoryAccess, route.Action) ||
+				!(gitPrincipal{subject: "operator", operator: true}).Allows(route.Repository.repositoryAccess, route.Action) {
+				t.Fatal("global validation inherited repository permissions")
+			}
+		}
+	}
+	for _, path := range []string{"/_validate_backend/", "//_validate_backend", "/_validate_backend/authorize-read"} {
+		if _, err := resolveRepository(nil, httptest.NewRequest(http.MethodPost, path, nil)); !errors.Is(err, errRepositoryNotFound) {
+			t.Fatalf("accepted validation alias %s: %v", path, err)
+		}
+	}
+}

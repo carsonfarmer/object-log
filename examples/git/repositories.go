@@ -127,13 +127,15 @@ type repositoryRoute struct {
 // A method error preserves Method so the caller can send an Allow header.
 func resolveRepository(repositories map[string]repositoryConfig, r *http.Request) (repositoryRoute, error) {
 	var route repositoryRoute
-	if r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
+	// Validation retains its decoded path and ignores queries.
+	if r.URL.Path != "/_validate_backend" && (r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path ||
+		r.URL.Fragment != "" || r.URL.Opaque != "" || !strings.HasPrefix(r.URL.Path, "/")) {
 		return route, errRepositoryNotFound
 	}
-	if r.URL.Fragment != "" || r.URL.Opaque != "" || !strings.HasPrefix(r.URL.Path, "/") {
-		return route, errRepositoryNotFound
-	}
-	if r.URL.Path == "/_maintenance" {
+	switch r.URL.Path {
+	case "/_validate_backend":
+		route = repositoryRoute{Service: "validate-backend", Method: http.MethodPost, Action: gitAdmin}
+	case "/_maintenance":
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		id, operation := query.Get("log_id"), query.Get("operation")
 		if err != nil || len(query) != 2 || len(query["log_id"]) != 1 || len(query["operation"]) != 1 ||
@@ -144,54 +146,51 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 		// Empty repository groups restrict discovered IDs to the scope-wide
 		// operator in Cognito mode.
 		route = repositoryRoute{Repository: repositoryConfig{LogID: id}, Service: operation, Method: http.MethodPost, Action: gitAdmin}
-		if r.Method != route.Method {
-			return route, errRepositoryMethod
-		}
-		return route, nil
-	}
-	endpoint := repositoryEndpoint.FindStringSubmatch(r.URL.Path)
-	if endpoint == nil {
-		return route, errRepositoryNotFound
-	}
-	route.Name, route.Service = endpoint[1], endpoint[2]
-	if !validRepositoryName(route.Name) {
-		return repositoryRoute{}, errRepositoryNotFound
-	}
-	route.Name = canonicalRepositoryName(route.Name)
-	repository, ok := repositories[route.Name]
-	if !ok {
-		repository, ok = repositories["*"]
-		repository.LogID = automaticRepositoryID(route.Name)
-	}
-	if !ok {
-		return repositoryRoute{}, errRepositoryNotFound
-	}
-	route.Repository = repository
-	route.Method = http.MethodPost
-	if route.Service == "info/refs" {
-		query, err := url.ParseQuery(r.URL.RawQuery)
-		services := query["service"]
-		if err != nil || len(query) != 1 || len(services) != 1 {
-			return repositoryRoute{}, errRepositoryNotFound
-		}
-		route.Service = services[0]
-		route.Method = http.MethodGet
-		if route.Service != transport.UploadPackService && route.Service != transport.ReceivePackService {
-			return repositoryRoute{}, errRepositoryNotFound
-		}
-	} else if r.URL.RawQuery != "" || r.URL.ForceQuery {
-		return repositoryRoute{}, errRepositoryNotFound
-	}
-	if route.Service == "authorize-read" {
-		route.Method = http.MethodGet
-	}
-	switch route.Service {
-	case transport.UploadPackService, "authorize-read":
-		route.Action = gitRead
-	case transport.ReceivePackService:
-		route.Action = gitWrite
 	default:
-		route.Action = gitAdmin
+		endpoint := repositoryEndpoint.FindStringSubmatch(r.URL.Path)
+		if endpoint == nil {
+			return route, errRepositoryNotFound
+		}
+		route.Name, route.Service = endpoint[1], endpoint[2]
+		if !validRepositoryName(route.Name) {
+			return repositoryRoute{}, errRepositoryNotFound
+		}
+		route.Name = canonicalRepositoryName(route.Name)
+		repository, ok := repositories[route.Name]
+		if !ok {
+			repository, ok = repositories["*"]
+			repository.LogID = automaticRepositoryID(route.Name)
+		}
+		if !ok {
+			return repositoryRoute{}, errRepositoryNotFound
+		}
+		route.Repository = repository
+		route.Method = http.MethodPost
+		if route.Service == "info/refs" {
+			query, err := url.ParseQuery(r.URL.RawQuery)
+			services := query["service"]
+			if err != nil || len(query) != 1 || len(services) != 1 {
+				return repositoryRoute{}, errRepositoryNotFound
+			}
+			route.Service = services[0]
+			route.Method = http.MethodGet
+			if route.Service != transport.UploadPackService && route.Service != transport.ReceivePackService {
+				return repositoryRoute{}, errRepositoryNotFound
+			}
+		} else if r.URL.RawQuery != "" || r.URL.ForceQuery {
+			return repositoryRoute{}, errRepositoryNotFound
+		}
+		if route.Service == "authorize-read" {
+			route.Method = http.MethodGet
+		}
+		switch route.Service {
+		case transport.UploadPackService, "authorize-read":
+			route.Action = gitRead
+		case transport.ReceivePackService:
+			route.Action = gitWrite
+		default:
+			route.Action = gitAdmin
+		}
 	}
 	if r.Method != route.Method {
 		return route, errRepositoryMethod

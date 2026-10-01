@@ -80,48 +80,12 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	response.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
 	response.Header().Set("X-Git-Target-ID", targetID(getConfig))
-	if r.URL.Path == "/_validate_backend" {
-		if r.Method != http.MethodPost {
-			response.Header().Set("Allow", http.MethodPost)
-			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if status, err := authorizeRequest(r, repositoryRoute{Action: gitAdmin}, getConfig, keyTransport{}); err != nil {
-			if status == http.StatusUnauthorized {
-				response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
-			}
-			http.Error(response, err.Error(), status)
-			return
-		}
-		if _, err := loadRepositories(getConfig); err != nil {
-			log.Printf("backend validation failed id=%s: %v", requestID, err)
-			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
-			return
-		}
-		limits, err := loadLimits(getConfig)
-		if err != nil {
-			log.Printf("backend validation failed id=%s: %v", requestID, err)
-			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
-			return
-		}
-		settings, err := walSettings(getConfig, "backend-validation", limits)
-		if err == nil {
-			_, err = unwrap(func() wt.Result[wt.Unit, wal.Failure] { return wal.ValidateBackend(settings) })
-		}
-		if err != nil {
-			log.Printf("backend validation failed id=%s: %v", requestID, err)
-			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
-			return
-		}
-		response.WriteHeader(http.StatusNoContent)
-		return
-	}
-	repositories, e := loadRepositories(getConfig)
-	if e != nil {
-		http.Error(response, e.Error(), http.StatusInternalServerError)
-		return
-	}
+	repositories, configErr := loadRepositories(getConfig)
 	route, e := resolveRepository(repositories, r)
+	if configErr != nil && route.Service != "validate-backend" {
+		http.Error(response, configErr.Error(), http.StatusInternalServerError)
+		return
+	}
 	if errors.Is(e, errRepositoryMethod) {
 		response.Header().Set("Allow", route.Method)
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
@@ -143,6 +107,23 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	collect := service == "collect"
 	recoverRetentions := service == "recover-retentions-after-drain"
 	limits, e := loadLimits(getConfig)
+	e = errors.Join(configErr, e)
+	if service == "validate-backend" {
+		if e == nil {
+			settings, err := walSettings(getConfig, "backend-validation", limits)
+			e = err
+			if e == nil {
+				_, e = unwrap(func() wt.Result[wt.Unit, wal.Failure] { return wal.ValidateBackend(settings) })
+			}
+		}
+		if e != nil {
+			log.Printf("backend validation failed id=%s: %v", requestID, e)
+			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
+		} else {
+			response.WriteHeader(http.StatusNoContent)
+		}
+		return
+	}
 	if e != nil {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
