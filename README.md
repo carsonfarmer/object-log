@@ -171,7 +171,11 @@ a time and remains bound to the exact view being reconstructed.
 ## Checkpoints and collection
 
 The mutable head and every encoded object have configurable limits. Applications
-publish checkpoints before the tail reaches its limit. Collection then:
+publish checkpoints before the tail reaches its limit. `publish_checkpoint` accepts
+an exact active-tail reference, or `None` to authenticate and replace an existing
+checkpoint at the same applied commit boundary. A rewrite preserves the tail and
+transaction outcome window; callers must preserve the snapshot's logical state.
+It cannot initialize an empty log. Collection then:
 
 1. authenticates the current checkpoint, tail, and every live reference-node edge;
 2. publishes a positive deletion plan through the same conditional head;

@@ -40,7 +40,7 @@ async fn publish(log: &Log, view: &View, roots: Vec<StagedObject>) -> TestResult
 async fn checkpoint(log: &Log, view: &View, roots: Vec<StagedObject>) -> TestResult<View> {
     let through = view.tail().last().ok_or("missing tail")?;
     let CheckpointStatus::Published(view) = log
-        .publish_checkpoint(view, through, Bytes::new(), roots)
+        .publish_checkpoint(view, Some(through), Bytes::new(), roots)
         .await?
     else {
         return Err("checkpoint did not complete".into());
@@ -70,7 +70,7 @@ async fn admission_includes_commit_and_checkpoint_envelopes() -> TestResult {
     assert_eq!(log.load().await?.generation(), view.generation());
     let view = publish(&log, &view, vec![fitting.clone()]).await?;
     assert!(matches!(
-        log.publish_checkpoint(&view, &view.tail()[0], Bytes::new(), vec![oversized])
+        log.publish_checkpoint(&view, Some(&view.tail()[0]), Bytes::new(), vec![oversized])
             .await,
         Err(Error::LimitExceeded("publication objects"))
     ));

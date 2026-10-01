@@ -344,7 +344,7 @@ async fn lifecycle(store: Arc<dyn ObjectStore>, len: usize) -> TestResult {
     };
     let through = view.tail().last().ok_or("missing tail")?;
     let CheckpointStatus::Published(_) = log
-        .publish_checkpoint(&view, through, Bytes::new(), vec![root])
+        .publish_checkpoint(&view, Some(through), Bytes::new(), vec![root])
         .await?
     else {
         return Err("checkpoint failed".into());

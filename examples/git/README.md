@@ -307,8 +307,10 @@ The JSON response state is:
   the explicit drain procedure below.
 
 `/maintenance` prunes unreachable Git objects and checkpoints the resulting
-catalog, then processes one WAL collection plan. `/collect` only reclaims
-physical objects; it does not repeat the Git graph walk. An installed plan is
+catalog, then processes one WAL collection plan. With an empty tail, the catalog
+is rewritten at the same applied commit boundary; pruning does not introduce a
+logical Git update. `/collect` only reclaims physical objects; it does not repeat
+the Git graph walk. An installed plan is
 resumed before opening the catalog. New plans use `wal_collection_candidates`;
 an installed larger plan always needs enough budget to finish in full.
 Candidate counts are plan entries, not guaranteed unique physical deletions.

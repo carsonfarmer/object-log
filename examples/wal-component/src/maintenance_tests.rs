@@ -65,7 +65,7 @@ async fn checkpoint_and_resumed_batches_keep_live_objects() {
         s.log
             .publish_checkpoint(
                 &s.current_view(),
-                s.current_view().tail().last().unwrap(),
+                Some(s.current_view().tail().last().unwrap()),
                 Bytes::from(vec![]),
                 vec![live.clone()]
             )
@@ -185,7 +185,7 @@ async fn recovered_view_checkpoints_prefix_and_preserves_concurrent_append() {
         .log
         .publish_checkpoint(
             recovery.view(),
-            recovery.view().tail().last().unwrap(),
+            Some(recovery.view().tail().last().unwrap()),
             Bytes::from(vec![]),
             vec![],
         )
@@ -223,7 +223,7 @@ async fn checkpoint_summary_leaves_failed_resolution_pending() {
         .log
         .publish_checkpoint(
             &view,
-            view.tail().last().unwrap(),
+            Some(view.tail().last().unwrap()),
             Bytes::from(b"snapshot".to_vec()),
             Vec::new(),
         )
@@ -393,7 +393,7 @@ async fn latest_reads_empty_logs_and_checkpoint_object_proofs() {
         s.log
             .publish_checkpoint(
                 &view,
-                view.tail().last().unwrap(),
+                Some(view.tail().last().unwrap()),
                 Bytes::from_static(b"snapshot"),
                 vec![root]
             )
@@ -503,7 +503,7 @@ async fn checkpoint_summary_reports_a_definite_loser_as_conflict() {
         .log
         .publish_checkpoint(
             &view,
-            view.tail().last().unwrap(),
+            Some(view.tail().last().unwrap()),
             Bytes::from(b"loser".to_vec()),
             vec![],
         )
@@ -517,7 +517,7 @@ async fn checkpoint_summary_reports_a_definite_loser_as_conflict() {
         s.log
             .publish_checkpoint(
                 &view,
-                view.tail().last().unwrap(),
+                Some(view.tail().last().unwrap()),
                 Bytes::from(b"winner".to_vec()),
                 vec![]
             )
@@ -559,7 +559,7 @@ async fn resume_reports_expired_after_checkpoint_discards_commit_evidence() {
         s.log
             .publish_checkpoint(
                 &committed,
-                committed.tail().last().unwrap(),
+                Some(committed.tail().last().unwrap()),
                 Bytes::from(b"snapshot".to_vec()),
                 vec![]
             )
@@ -594,7 +594,7 @@ async fn checkpoint_summary_preserves_expired_evidence_as_pending() {
         .log
         .publish_checkpoint(
             &view,
-            view.tail().last().unwrap(),
+            Some(view.tail().last().unwrap()),
             Bytes::from(b"old snapshot".to_vec()),
             vec![],
         )
@@ -608,7 +608,7 @@ async fn checkpoint_summary_preserves_expired_evidence_as_pending() {
         s.log
             .publish_checkpoint(
                 &view,
-                view.tail().last().unwrap(),
+                Some(view.tail().last().unwrap()),
                 Bytes::from(b"replacement".to_vec()),
                 vec![]
             )
@@ -705,7 +705,7 @@ async fn checkpoint_call_preserves_a_concurrent_checkpoint_winner() {
         .log
         .publish_checkpoint(
             &view,
-            view.tail().last().unwrap(),
+            Some(view.tail().last().unwrap()),
             Bytes::from_static(b"winner"),
             vec![],
         )
@@ -743,7 +743,7 @@ async fn selective_reads_leave_older_corruption_visible_and_block_publication() 
                 s.log
                     .publish_checkpoint(
                         &s.current_view(),
-                        s.current_view().tail().last().unwrap(),
+                        Some(s.current_view().tail().last().unwrap()),
                         Bytes::from(b"old checkpoint".to_vec()),
                         vec![]
                     )
@@ -815,5 +815,78 @@ async fn selective_reads_leave_older_corruption_visible_and_block_publication() 
         assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
         assert_eq!(cold.load().await.unwrap().generation(), generation);
         assert!(GuestRecovery::next(&recovery).is_err());
+    }
+}
+
+#[tokio::test]
+async fn empty_tail_checkpoint_rewrite_resolves_once_or_reports_pending() {
+    for phase in [FailurePhase::Before, FailurePhase::After] {
+        for unreadable_resolution in [false, true] {
+            let faults = FaultStore::new(InMemory::new());
+            let mut s = session_on(Arc::new(faults.clone())).await;
+            append(&mut s, vec![]).await;
+            let source = s.current_view();
+            let CheckpointStatus::Published(base) = s
+                .log
+                .publish_checkpoint(
+                    &source,
+                    source.tail().last(),
+                    Bytes::from_static(b"old"),
+                    vec![],
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("base did not publish");
+            };
+            let boundary = base.checkpoint().unwrap().clone();
+            let recovery = RecoveryState {
+                log: s.log.clone(),
+                value: RefCell::new(object_log::history(&s.log, base).unwrap()),
+            };
+            faults.reset();
+            faults.schedule(StoreFailure {
+                operation: Operation::Put,
+                occurrence: 2,
+                phase,
+            });
+            if unreadable_resolution {
+                for occurrence in 2..=4 {
+                    faults.schedule(StoreFailure {
+                        operation: Operation::Get,
+                        occurrence,
+                        phase: FailurePhase::Before,
+                    });
+                }
+            }
+            let state = GuestRecovery::checkpoint(&recovery, b"pruned".to_vec(), vec![]).unwrap();
+            assert_eq!(
+                state,
+                if unreadable_resolution {
+                    MaintenanceState::Pending
+                } else {
+                    MaintenanceState::Complete
+                }
+            );
+            faults.reset();
+            let current = s.log.load().await.unwrap();
+            assert!(current.tail().is_empty());
+            let reference = current.checkpoint().unwrap();
+            assert_eq!(reference.through_sequence(), boundary.through_sequence());
+            assert_eq!(reference.through_commit(), boundary.through_commit());
+            assert_eq!(
+                s.log
+                    .read_checkpoint(&current)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .snapshot(),
+                if unreadable_resolution && phase == FailurePhase::Before {
+                    b"old".as_slice()
+                } else {
+                    b"pruned".as_slice()
+                }
+            );
+        }
     }
 }

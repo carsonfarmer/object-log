@@ -94,7 +94,7 @@ async fn cold_collection_reads_only_edges_across_capped_and_empty_passes() -> Te
     let CheckpointStatus::Published(checkpointed) = log
         .publish_checkpoint(
             &committed,
-            &committed.tail()[0],
+            Some(&committed.tail()[0]),
             Bytes::new(),
             vec![root.clone()],
         )
@@ -357,7 +357,7 @@ async fn reopened_pending_checkpoint_validates_its_aggregate_count() -> TestResu
         phase: FailurePhase::Before,
     });
     let CheckpointStatus::Pending(pending) = log
-        .publish_checkpoint(&view, &view.tail()[0], Bytes::new(), vec![root])
+        .publish_checkpoint(&view, Some(&view.tail()[0]), Bytes::new(), vec![root])
         .await?
     else {
         return Err("checkpoint did not remain pending".into());

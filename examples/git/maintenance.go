@@ -78,50 +78,10 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 			return wal.CollectionResult{}, err
 		}
 	}
-	checkpointRecovery := s.recovery
-	if s.tailEntries == 0 {
-		outcome, err := s.publishRoot(root)
-		if err != nil {
-			return wal.CollectionResult{}, err
-		}
-		switch outcome.Tag() {
-		case wal.OutcomeCommitted:
-			fresh, err := unwrap(s.session.Refresh)
-			if err != nil {
-				return wal.CollectionResult{}, err
-			}
-			defer fresh.Drop()
-			current, err := unwrap(fresh.Recover)
-			if err != nil {
-				return wal.CollectionResult{}, err
-			}
-			defer current.Drop()
-			currentRoot, tailEntries, err := s.acceptRecovery(current)
-			if err != nil {
-				return wal.CollectionResult{}, err
-			}
-			if currentRoot == nil {
-				return wal.CollectionResult{}, fmt.Errorf("invalid published root")
-			}
-			// Another push may have followed pruning. Checkpoint its winning
-			// root, never the stale root we just published.
-			root = currentRoot
-			if tailEntries == 0 {
-				return s.collect()
-			}
-			checkpointRecovery = current
-		case wal.OutcomeConflict:
-			return wal.CollectionResult{State: wal.MaintenanceStateConflict}, nil
-		case wal.OutcomePending:
-			return wal.CollectionResult{State: wal.MaintenanceStatePending}, nil
-		default:
-			return wal.CollectionResult{}, fmt.Errorf("unknown publication outcome %d", outcome.Tag())
-		}
-	}
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	state, err := checkpoint(checkpointRecovery, root)
+	state, err := checkpoint(s.recovery, root)
 	if err != nil {
 		return wal.CollectionResult{}, err
 	}

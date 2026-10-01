@@ -685,7 +685,7 @@ async fn history_roots_are_authenticated_epoch_scoped_proofs() -> TestResult {
     let through = tail_view.tail()[0].clone();
     store.reset();
     let CheckpointStatus::Published(checkpoint_view) = log
-        .publish_checkpoint(&tail_view, &through, Bytes::new(), tail_proofs)
+        .publish_checkpoint(&tail_view, Some(&through), Bytes::new(), tail_proofs)
         .await?
     else {
         return Err(test_error("proof checkpoint did not publish").into());

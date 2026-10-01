@@ -67,7 +67,7 @@ async fn minio_passes_recovery_checkpoint_and_gc_flow() -> TestResult {
     let CheckpointStatus::Published(compacted) = log
         .publish_checkpoint(
             &committed,
-            &through,
+            Some(&through),
             Bytes::from_static(b"minio snapshot"),
             Vec::new(),
         )

@@ -337,11 +337,10 @@ impl GuestRecovery for RecoveryState {
         roots: Vec<ObjectBorrow<'_>>,
     ) -> Result<MaintenanceState, Failure> {
         let view = self.bound_view();
-        executor::run(self.log.read_checkpoint(&view))?;
-        let through = view
-            .tail()
-            .last()
-            .ok_or_else(|| Failure::Other("checkpoint requires an active tail".into()))?;
+        let through = view.tail().last();
+        if through.is_some() {
+            executor::run(self.log.read_checkpoint(&view))?;
+        }
         checkpoint_state(
             &self.log,
             executor::run(self.log.publish_checkpoint(

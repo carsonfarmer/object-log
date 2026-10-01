@@ -204,7 +204,7 @@ impl MaintenanceOracle {
         let roots = log.stage_objects(view, self.blobs.clone()).await?;
         let through = view.tail().last().ok_or("model expects nonempty tail")?;
         assert!(matches!(
-            log.publish_checkpoint(view, through, encode_history(&self.history), roots)
+            log.publish_checkpoint(view, Some(through), encode_history(&self.history), roots)
                 .await?,
             CheckpointStatus::Published(_)
         ));

@@ -264,7 +264,7 @@ async fn control_samples(
             .await?;
         let started = begin(faults);
         let checkpoint = cold
-            .publish_checkpoint(&view, &view.tail()[1], payload.clone(), objects)
+            .publish_checkpoint(&view, Some(&view.tail()[1]), payload.clone(), objects)
             .await?;
         record(&mut checkpoints, faults, started);
         let CheckpointStatus::Published(view) = checkpoint else {

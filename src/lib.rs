@@ -526,7 +526,6 @@ pub fn inspect_recovery_token(token: &[u8]) -> Result<RecoveryRecord, Error> {
 pub struct PendingCheckpoint {
     pub(crate) view: View,
     pub(crate) staging_domain: Arc<StagingDomain>,
-    pub(crate) through: CommitRef,
     pub(crate) checkpoint: CheckpointRef,
 }
 

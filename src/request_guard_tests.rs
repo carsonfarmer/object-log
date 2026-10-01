@@ -246,7 +246,7 @@ async fn request_guard_denied_checkpoint_recovery_keeps_candidate() -> GuardResu
         let CheckpointStatus::Pending(pending) = log
             .publish_checkpoint(
                 &view,
-                &view.tail()[0],
+                Some(&view.tail()[0]),
                 Bytes::from_static(b"snapshot"),
                 vec![],
             )
@@ -381,7 +381,7 @@ async fn request_guard_denied_cold_success_verification_retains_evidence() -> Gu
         phase: FailurePhase::After,
     });
     let CheckpointStatus::Pending(pending) = log
-        .publish_checkpoint(&view, &view.tail()[0], Bytes::new(), vec![])
+        .publish_checkpoint(&view, Some(&view.tail()[0]), Bytes::new(), vec![])
         .await?
     else {
         return Err("checkpoint pending".into());
