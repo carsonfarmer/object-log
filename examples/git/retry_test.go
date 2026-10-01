@@ -60,7 +60,9 @@ func TestRetryBeforePush(t *testing.T) {
 		wantCalls   int
 		wantReopens int
 	}{
+		{name: "no maintenance", results: []result{{}}, wantCalls: 1},
 		{name: "success", results: []result{{reopen: true}}, wantCalls: 1, wantReopens: 1},
+		{name: "completed maintenance reopen failure", results: []result{{reopen: true}}, reopenErr: refreshFailure, wantErr: refreshFailure, wantCalls: 1, wantReopens: 1},
 		{name: "retry", results: []result{{err: errMaintenanceConflict}, {reopen: true}}, wantCalls: 2, wantReopens: 2},
 		{name: "pending resolved", results: []result{{err: errMaintenancePending}, {}}, wantCalls: 2, wantReopens: 1},
 		{name: "bound", results: []result{{err: errMaintenancePending}, {err: errMaintenancePending}}, wantErr: errMaintenancePending, wantCalls: pushMaintenanceAttempts, wantReopens: pushMaintenanceAttempts - 1},

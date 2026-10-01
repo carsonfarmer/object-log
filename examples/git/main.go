@@ -38,12 +38,7 @@ func advertise(w io.Writer, s *store, unknownFormat bool) error {
 		return err
 	}
 	adv := &packp.AdvRefs{}
-	for _, feature := range []string{
-		capability.ReportStatus, capability.DeleteRefs, capability.OFSDelta,
-		capability.Atomic, capability.NoThin, capability.Sideband64k, capability.Quiet,
-	} {
-		adv.Capabilities.Add(feature)
-	}
+	capability.DecodeList([]byte("report-status delete-refs ofs-delta atomic no-thin side-band-64k quiet"), &adv.Capabilities)
 	adv.Capabilities.Set(capability.ObjectFormat, s.meta.Format.String())
 	if unknownFormat {
 		adv.Capabilities.Set(capability.ObjectFormat, "sha1", "sha256")
@@ -177,12 +172,11 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return
 	}
-	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
-		if service == transport.ReceivePackService && method == http.MethodPost {
-			return wal.Open(settings)
-		}
-		return wal.OpenExisting(settings)
-	})
+	openSession := wal.OpenExisting
+	if service == transport.ReceivePackService && method == http.MethodPost {
+		openSession = wal.Open
+	}
+	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] { return openSession(settings) })
 	if errors.Is(e, errLogMissing) && service == transport.ReceivePackService && method == http.MethodGet {
 		response.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 		if err := advertise(response, &store{meta: rootMeta{Format: config.SHA1}}, true); err != nil {
