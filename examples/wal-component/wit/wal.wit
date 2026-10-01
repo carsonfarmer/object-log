@@ -71,6 +71,7 @@ interface wal {
             roots: list<borrow<object>>,
         ) -> result<own<candidate>, failure>;
         // Authenticates this exact view's checkpoint and complete active tail.
+        // The caller's snapshot must preserve that view's logical application state.
         // Covers the tail, or rewrites an existing checkpoint at the same boundary.
         // Resolves an uncertain publication once; returns complete, conflict,
         // or pending. Pending requires reopening and recovering the durable view.

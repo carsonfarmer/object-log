@@ -66,6 +66,15 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
         }
         "/recovery-gates" => {
             let session = wal::open_existing(&settings)?;
+            let peeked = session.recover()?;
+            let Some(wal::HistoryItem::Commit(latest)) = peeked.latest()?.item else {
+                panic!("latest missed the fixture commit")
+            };
+            let Some(wal::HistoryItem::Commit(next)) = peeked.next()? else {
+                panic!("latest consumed the fixture commit")
+            };
+            assert_eq!(latest.transaction_id, vec![7; 16]);
+            assert_eq!(next.transaction_id, latest.transaction_id);
             let complete = session.recover()?;
             while complete.next()?.is_some() {}
             let writer = complete.write_bytes()?;
@@ -74,21 +83,17 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             let node = complete.put_node(b"node", &[])?;
 
             let incomplete = session.recover()?;
-            let requires_history = |result: Result<(), wal::Failure>| {
-                assert!(
-                    matches!(result, Err(wal::Failure::Other(message)) if message.contains("history must be consumed"))
-                );
-            };
-            requires_history(incomplete.write_bytes().map(|_| ()));
-            requires_history(incomplete.open_bytes(&bytes).map(|_| ()));
-            requires_history(incomplete.read_node(&node).map(|_| ()));
-            requires_history(incomplete.put_node(b"other", &[]).map(|_| ()));
-            requires_history(
-                incomplete
-                    .prepare(&[9; 16], b"op", b"result", &[])
-                    .map(|_| ()),
-            );
-            requires_history(incomplete.checkpoint(b"snapshot", &[]).map(|_| ()));
+            let writer = incomplete.write_bytes()?;
+            writer.write(b"other")?;
+            let other = writer.finish()?;
+            assert_eq!(incomplete.open_bytes(&bytes)?.read_at(0, 5)?, b"bytes");
+            assert_eq!(incomplete.open_bytes(&other)?.read_at(0, 5)?, b"other");
+            assert_eq!(incomplete.read_node(&node)?.data, b"node");
+            let other_node = incomplete.put_node(b"other", &[])?;
+            assert_eq!(incomplete.read_node(&other_node)?.data, b"other");
+            // Preparation authenticates the remaining history without publishing.
+            let _candidate = incomplete.prepare(&[9; 16], b"op", b"result", &[])?;
+            assert!(incomplete.next()?.is_none());
         }
         "/refresh" => {
             let session = wal::open_existing(&settings)?;
