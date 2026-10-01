@@ -114,6 +114,60 @@ fn invalid_options_are_rejected_before_backend_validation_or_open() {
     }
 }
 
+#[tokio::test]
+async fn refresh_preserves_bound_views_and_keeps_the_cached_head_after_failure() {
+    use object_log::sim::{Failure as Fault, FailurePhase, FaultStore, Operation};
+    use object_log::{CommitStatus, LogId, Options, TransactionId, ValidatedBackend};
+    use object_store::{memory::InMemory, path::Path};
+
+    let faults = FaultStore::new(InMemory::new());
+    let backend = ValidatedBackend::new(Arc::new(faults.clone()), Path::from("refresh"))
+        .await
+        .unwrap();
+    let log = Log::open(&backend, &LogId::new("view").unwrap(), Options::default())
+        .await
+        .unwrap();
+    let session = SessionState {
+        view: RefCell::new(log.load().await.unwrap()),
+        log,
+        transport: transport::Transport::new(10, 1024).unwrap(),
+    };
+    let mut bound = object_log::history(&session.log, session.current_view()).unwrap();
+    for id in 1..=2 {
+        let current = session.log.load().await.unwrap();
+        let prepared = session
+            .log
+            .prepare(
+                &current,
+                TransactionId::from_uuid(uuid::Uuid::from_u128(id)),
+                Bytes::new(),
+                Bytes::new(),
+                vec![],
+            )
+            .unwrap();
+        assert!(matches!(
+            session.log.commit(prepared).await.unwrap(),
+            CommitStatus::Committed(_)
+        ));
+        faults.reset();
+        for occurrence in 1..=3 {
+            faults.schedule(Fault {
+                operation: Operation::Get,
+                occurrence,
+                phase: FailurePhase::Before,
+            });
+        }
+        assert!(session.refresh().is_err());
+        assert_eq!(session.current_view().tail().len(), id as usize - 1);
+        faults.reset();
+        session.refresh().unwrap();
+        assert_eq!(session.current_view().tail().len(), id as usize);
+        assert!(bound.next().await.unwrap().is_none());
+        session.refresh().unwrap();
+        assert_eq!(session.current_view().tail().len(), id as usize);
+    }
+}
+
 fn instance_settings() -> Config {
     Config {
         credential_mode: CredentialMode::InstanceRole,

@@ -112,15 +112,10 @@ func (s *store) collect() (wal.CollectionResult, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	session, err := unwrap(s.session.Refresh)
-	if err != nil {
+	if _, err := unwrap(s.session.Refresh); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	defer session.Drop()
-	if err := s.ctx.Err(); err != nil {
-		return wal.CollectionResult{}, err
-	}
-	return collectSession(s.ctx, session, s.limits)
+	return collectSession(s.ctx, s.session, s.limits)
 }
 
 // Resume an installed deletion plan without loading the Git catalog again.

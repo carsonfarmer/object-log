@@ -58,9 +58,7 @@ export async function browse(request: Request): Promise<Response> {
         if (error instanceof NotFound)
           return new Response("Branch, commit or path not found", { status: 404 });
         if (attempt === 0 && (error as { payload?: { tag: string } }).payload?.tag === "expired") {
-          const fresh = session.refresh();
-          wal.drop(session);
-          session = fresh;
+          session.refresh();
         } else throw error;
       } finally {
         catalog?.[Symbol.dispose]();

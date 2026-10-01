@@ -191,14 +191,11 @@ impl GuestSession for SessionState {
         let (calls, bytes) = self.transport.usage();
         Usage { calls, bytes }
     }
-    fn refresh(&self) -> Result<Session, Failure> {
+    fn refresh(&self) -> Result<(), Failure> {
         let current = self.current_view();
         let view = executor::run(self.log.refresh(&current))?.unwrap_or(current);
-        Ok(Session::new(Self {
-            log: self.log.clone(),
-            view: RefCell::new(view),
-            transport: self.transport.clone(),
-        }))
+        self.view.replace(view);
+        Ok(())
     }
 
     fn recover(&self) -> Result<Recovery, Failure> {

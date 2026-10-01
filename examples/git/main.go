@@ -188,7 +188,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(response, e.Error(), operationStatus(e))
 		return
 	}
-	defer func() { session.Drop() }()
+	defer session.Drop()
 	w := &readResponse{ResponseWriter: response}
 	defer w.WriteHeader(http.StatusOK)
 	w.Header().Set("Trailer", "X-Wal-Calls, X-Wal-Bytes")
@@ -202,11 +202,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		if err := r.Context().Err(); err != nil {
 			return err
 		}
-		fresh, err := unwrap(session.Refresh)
-		if err == nil {
-			session.Drop()
-			session = fresh
-		}
+		_, err := unwrap(session.Refresh)
 		return err
 	}
 	if service == transport.UploadPackService {

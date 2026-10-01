@@ -89,7 +89,8 @@ interface wal {
         // Caps a new plan; an existing plan is resumed without shrinking it.
         collect: func(max-candidates: u64) -> result<collection-result, failure>;
         usage: func() -> usage;
-        refresh: func() -> result<own<session>, failure>;
+        // Updates the cached head; existing recovery cursors keep their exact views.
+        refresh: func() -> result<_, failure>;
         // Opens a bounded cursor over one exact authenticated view.
         recover: func() -> result<own<recovery>, failure>;
         resume: func(token: list<u8>) -> result<resolution, failure>;

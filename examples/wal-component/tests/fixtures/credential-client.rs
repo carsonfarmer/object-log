@@ -98,13 +98,22 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
         "/refresh" => {
             let session = wal::open_existing(&settings)?;
             let before = session.usage();
-            let unchanged = session.refresh()?;
+            session.refresh()?;
             // The first refresh renews the fixture's expired role credentials:
             // three metadata requests, then the conditional head GET.
-            assert_eq!(unchanged.usage().calls, before.calls + 4);
-            assert!(unchanged.usage().bytes > before.bytes);
-            assert_eq!(session.usage().calls, unchanged.usage().calls);
+            assert_eq!(session.usage().calls, before.calls + 4);
+            assert!(session.usage().bytes > before.bytes);
 
+            let stale = session.recover()?;
+            let lifetime = session.recover()?;
+            let writer = lifetime.write_bytes()?;
+            writer.write(b"before")?;
+            let readable = lifetime.write_bytes()?;
+            readable.write(b"reader")?;
+            let bytes = readable.finish()?;
+            let reader = lifetime.open_bytes(&bytes)?;
+            let prepared = lifetime.prepare(&[9; 16], b"unused", b"result", &[])?;
+            let token = prepared.recovery_token()?;
             let recovery = session.recover()?;
             assert!(matches!(
                 recovery.next()?,
@@ -114,16 +123,26 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             let candidate = recovery.prepare(&[8; 16], b"next", b"result", &[])?;
             assert!(matches!(candidate.publish()?, wal::Outcome::Committed));
 
-            let stale = unchanged.recover()?;
-            assert!(matches!(stale.next()?, Some(wal::HistoryItem::Commit(_))));
+            let before = session.usage();
+            session.refresh()?;
+            assert_eq!(session.usage().calls, before.calls + 1);
+            assert!(session.usage().bytes > before.bytes);
+            assert_eq!(reader.read_at(0, 6)?, b"reader");
+            writer.write(b"after")?;
+            let written = writer.finish()?;
+            assert_eq!(
+                lifetime.open_bytes(&written)?.read_at(0, 11)?,
+                b"beforeafter"
+            );
+            assert_eq!(prepared.recovery_token()?, token);
+            assert!(matches!(prepared.publish()?, wal::Outcome::Conflict));
+            let Some(wal::HistoryItem::Commit(commit)) = stale.next()? else {
+                panic!("session refresh changed an existing recovery view")
+            };
+            assert_eq!(commit.transaction_id, vec![7; 16]);
             assert!(stale.next()?.is_none());
-            let before = unchanged.usage();
-            let changed = unchanged.refresh()?;
-            assert_eq!(changed.usage().calls, before.calls + 1);
-            assert!(changed.usage().bytes > before.bytes);
-            assert_eq!(session.usage().calls, changed.usage().calls);
 
-            let recovery = changed.recover()?;
+            let recovery = session.recover()?;
             for transaction_id in [vec![7; 16], vec![8; 16]] {
                 let Some(wal::HistoryItem::Commit(commit)) = recovery.next()? else {
                     panic!("refreshed session missed a commit")
@@ -131,10 +150,10 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
                 assert_eq!(commit.transaction_id, transaction_id);
             }
             assert!(recovery.next()?.is_none());
-            let before = changed.usage();
-            let stable = changed.refresh()?;
-            assert_eq!(stable.usage().calls, before.calls + 1);
-            assert_eq!(stable.usage().bytes, before.bytes);
+            let before = session.usage();
+            session.refresh()?;
+            assert_eq!(session.usage().calls, before.calls + 1);
+            assert_eq!(session.usage().bytes, before.bytes);
         }
         "/checkpoint" => {
             let session = wal::open_existing(&settings)?;
@@ -144,8 +163,8 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
                 recovery.checkpoint(b"snapshot", &[])?,
                 wal::MaintenanceState::Complete
             ));
-            let current = session.refresh()?;
-            let recovery = current.recover()?;
+            session.refresh()?;
+            let recovery = session.recover()?;
             let Some(wal::HistoryItem::Checkpoint(entry)) = recovery.next()? else {
                 panic!("missing recovered checkpoint")
             };

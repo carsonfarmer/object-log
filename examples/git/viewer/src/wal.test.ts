@@ -643,19 +643,21 @@ for (const expiredAt of ["latest", "node"])
       bytes = 0,
       refreshes = 0;
     const closed: string[] = [];
-    const makeSession = (fresh: boolean): Session =>
-      ({
+    const makeSession = (): Session => {
+      let fresh = false;
+      return {
         recover() {
+          const bound = fresh;
           const root = {
             [Symbol.dispose]() {
-              closed.push(`root:${fresh}`);
+              closed.push(`root:${bound}`);
             },
           };
           return {
             latest: () => {
               calls++;
               bytes += 50;
-              if (!fresh && expiredAt === "latest") throw { payload: { tag: "expired" } };
+              if (!bound && expiredAt === "latest") throw { payload: { tag: "expired" } };
               return {
                 tailEntries: 0n,
                 item: { tag: "checkpoint", val: { objects: [root] } },
@@ -664,7 +666,7 @@ for (const expiredAt of ["latest", "node"])
             readNode() {
               calls++;
               bytes += 100;
-              if (!fresh) throw { payload: { tag: "expired" } };
+              if (!bound) throw { payload: { tag: "expired" } };
               return {
                 objects: [],
                 data: new TextEncoder().encode(
@@ -679,20 +681,21 @@ for (const expiredAt of ["latest", "node"])
               };
             },
             [Symbol.dispose]() {
-              closed.push(`recovery:${fresh}`);
+              closed.push(`recovery:${bound}`);
             },
           };
         },
         refresh() {
           refreshes++;
-          return makeSession(true);
+          fresh = true;
         },
         usage: () => ({ calls: BigInt(calls), bytes: BigInt(bytes) }),
         [Symbol.dispose]() {
-          closed.push(`session:${fresh}`);
+          closed.push("session");
         },
-      }) as unknown as Session;
-    openSession = () => makeSession(false);
+      } as unknown as Session;
+    };
+    openSession = () => makeSession();
     globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
     const response = await browse(
       new Request("https://viewer.test/_viewer/api?repo=team/demo.git"),
@@ -707,7 +710,6 @@ for (const expiredAt of ["latest", "node"])
       "recovery:true",
       ...(expiredAt === "latest" ? [] : ["root:false"]),
       "root:true",
-      "session:false",
-      "session:true",
+      "session",
     ]);
   });
