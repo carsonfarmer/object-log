@@ -150,7 +150,7 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             while recovery.next()?.is_some() {}
             assert!(matches!(
                 recovery.checkpoint(b"snapshot", &[])?,
-                wal::CheckpointOutcome::Published
+                wal::MaintenanceState::Complete
             ));
             let current = session.refresh()?;
             let recovery = current.recover()?;

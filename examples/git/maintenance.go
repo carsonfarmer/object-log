@@ -141,34 +141,9 @@ func (s *store) checkpointTail() (wal.MaintenanceState, error) {
 }
 
 func checkpoint(recovery *wal.Recovery, root *wal.Object) (wal.MaintenanceState, error) {
-	outcome, err := unwrap(func() wt.Result[wal.CheckpointOutcome, wal.Failure] {
+	return unwrap(func() wt.Result[wal.MaintenanceState, wal.Failure] {
 		return recovery.Checkpoint(nil, []*wal.Object{root})
 	})
-	if err != nil {
-		return 0, err
-	}
-	switch outcome.Tag() {
-	case wal.CheckpointOutcomePublished:
-		return wal.MaintenanceStateComplete, nil
-	case wal.CheckpointOutcomeConflict:
-		return wal.MaintenanceStateConflict, nil
-	case wal.CheckpointOutcomePending:
-		pending := outcome.Pending()
-		defer pending.Drop()
-		resolution, err := unwrap(pending.Resolve)
-		if err != nil {
-			return 0, err
-		}
-		switch resolution {
-		case wal.CheckpointResolutionPublished:
-			return wal.MaintenanceStateComplete, nil
-		case wal.CheckpointResolutionNotPublished:
-			return wal.MaintenanceStateConflict, nil
-		case wal.CheckpointResolutionStillPending, wal.CheckpointResolutionExpired:
-			return wal.MaintenanceStatePending, nil
-		}
-	}
-	return 0, fmt.Errorf("unknown checkpoint outcome %d", outcome.Tag())
 }
 
 func (s *store) collect() (wal.CollectionResult, error) {

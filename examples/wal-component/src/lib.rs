@@ -2,8 +2,7 @@
 use bytes::Bytes;
 use exports::object_log::storage::wal::*;
 use object_log::{
-    CheckpointResolution as LogCheckpointResolution, CheckpointStatus, CommitStatus,
-    HistoryItem as LogHistoryItem, Log, PendingCheckpoint as LogPendingCheckpoint,
+    CheckpointResolution, CheckpointStatus, CommitStatus, HistoryItem as LogHistoryItem, Log,
     Resolution as LogResolution, RetentionId, RetentionStatus, StagedObject, TransactionId, View,
 };
 use std::cell::{Ref, RefCell};
@@ -26,7 +25,6 @@ struct LogState<T> {
 }
 type CandidateState = LogState<Option<object_log::PreparedCommit>>;
 type RecoveryState = LogState<object_log::HistoryCursor>;
-type PendingCheckpointState = LogState<Option<LogPendingCheckpoint>>;
 
 impl<T> LogState<Option<T>> {
     fn live(&self, closed: &str) -> Result<Ref<'_, T>, Failure> {
@@ -337,43 +335,36 @@ impl GuestRecovery for RecoveryState {
         &self,
         data: Vec<u8>,
         roots: Vec<ObjectBorrow<'_>>,
-    ) -> Result<CheckpointOutcome, Failure> {
+    ) -> Result<MaintenanceState, Failure> {
         let view = self.bound_view();
         executor::run(self.log.read_checkpoint(&view))?;
         let through = view
             .tail()
             .last()
             .ok_or_else(|| Failure::Other("checkpoint requires an active tail".into()))?;
-        match executor::run(self.log.publish_checkpoint(
-            &view,
-            through,
-            data.into(),
-            proofs(&roots),
-        ))? {
-            CheckpointStatus::Published(_) => Ok(CheckpointOutcome::Published),
-            CheckpointStatus::Conflict(_) => Ok(CheckpointOutcome::Conflict),
-            CheckpointStatus::Pending(pending) => Ok(CheckpointOutcome::Pending(
-                PendingCheckpoint::new(PendingCheckpointState {
-                    log: self.log.clone(),
-                    value: RefCell::new(Some(pending)),
-                }),
-            )),
-        }
+        checkpoint_state(
+            &self.log,
+            executor::run(self.log.publish_checkpoint(
+                &view,
+                through,
+                data.into(),
+                proofs(&roots),
+            ))?,
+        )
     }
 }
-impl GuestPendingCheckpoint for PendingCheckpointState {
-    fn resolve(&self) -> Result<CheckpointResolution, Failure> {
-        let pending = self.live("resolved checkpoint")?.clone();
-        let (resolution, pending) = match executor::run(self.log.resolve_checkpoint(pending))? {
-            LogCheckpointResolution::Published(_) => (CheckpointResolution::Published, None),
-            LogCheckpointResolution::NotPublished(_) => (CheckpointResolution::NotPublished, None),
-            LogCheckpointResolution::Expired(_) => (CheckpointResolution::Expired, None),
-            LogCheckpointResolution::StillPending(pending) => {
-                (CheckpointResolution::StillPending, Some(pending))
+fn checkpoint_state(log: &Log, status: CheckpointStatus) -> Result<MaintenanceState, Failure> {
+    match status {
+        CheckpointStatus::Published(_) => Ok(MaintenanceState::Complete),
+        CheckpointStatus::Conflict(_) => Ok(MaintenanceState::Conflict),
+        CheckpointStatus::Pending(pending) => match executor::run(log.resolve_checkpoint(pending))?
+        {
+            CheckpointResolution::Published(_) => Ok(MaintenanceState::Complete),
+            CheckpointResolution::NotPublished(_) => Ok(MaintenanceState::Conflict),
+            CheckpointResolution::Expired(_) | CheckpointResolution::StillPending(_) => {
+                Ok(MaintenanceState::Pending)
             }
-        };
-        self.value.replace(pending);
-        Ok(resolution)
+        },
     }
 }
 impl GuestCandidate for CandidateState {
@@ -398,7 +389,6 @@ impl Guest for Component {
     type ByteWriter = WriterState;
     type ByteReader = ReaderState;
     type Candidate = CandidateState;
-    type PendingCheckpoint = PendingCheckpointState;
     type Recovery = RecoveryState;
     type Session = SessionState;
     type Object = StagedObject;

@@ -37,8 +37,6 @@ interface wal {
     variant failure { missing, expired, limit(string), other(string) }
     variant outcome { committed, conflict, pending(list<u8>) }
     variant resolution { committed, not-committed, still-pending(list<u8>), expired }
-    variant checkpoint-outcome { published, conflict, pending(own<pending-checkpoint>) }
-    enum checkpoint-resolution { published, not-published, still-pending, expired }
     enum retention-state { applied, active-collection, conflict, pending }
     enum maintenance-state { complete, more, conflict, pending, retained }
     record collection-result { state: maintenance-state, objects: u64, bytes: u64 }
@@ -68,9 +66,6 @@ interface wal {
         length: func() -> u64;
         read-at: func(offset: u64, max-len: u32) -> result<list<u8>, failure>;
     }
-    resource pending-checkpoint {
-        resolve: func() -> result<checkpoint-resolution, failure>;
-    }
     resource recovery {
         // Returns the optional checkpoint first, then commits in sequence.
         next: func() -> result<option<history-item>, failure>;
@@ -89,10 +84,12 @@ interface wal {
             roots: list<borrow<object>>,
         ) -> result<own<candidate>, failure>;
         // Authenticates this exact view's checkpoint and complete active tail.
+        // Resolves an uncertain publication once; returns complete, conflict,
+        // or pending. Pending requires reopening and recovering the durable view.
         checkpoint: func(
             data: list<u8>,
             roots: list<borrow<object>>,
-        ) -> result<checkpoint-outcome, failure>;
+        ) -> result<maintenance-state, failure>;
     }
     resource session {
         // Reads the cached view; refresh to observe another session's changes.

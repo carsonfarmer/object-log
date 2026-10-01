@@ -57,13 +57,14 @@ committed. After `candidate.publish` returns an error, do not retry that same
 candidate: its immutable object may already exist. Reopen a session and use
 `session.resume` with the token instead.
 
-An uncertain checkpoint returns an owned `pending-checkpoint` resource. Its
-`resolve` method keeps the same evidence while storage remains uncertain and
-distinguishes published, not-published, still-pending, and expired results.
-After process loss, open a fresh session and reconstruct the durable view before
-attempting another checkpoint.
+`recovery.checkpoint` publishes and resolves an uncertain result once, returning
+complete, conflict, or pending. Pending includes expired resolution evidence;
+it never proves that the checkpoint was not published. Reopen a session and
+reconstruct the durable view before attempting another checkpoint. Native Rust
+callers can use `PendingCheckpoint` and `Log::resolve_checkpoint` for repeated
+resolution of the exact original candidate.
 
-Object, recovery, reader, writer, candidate, pending-checkpoint, and session
+Object, recovery, reader, writer, candidate, and session
 values are owned component resources. Consumers must drop handles they no longer
 need. Byte streams retain the core's authenticated chunk geometry and bounded
 offset reads.

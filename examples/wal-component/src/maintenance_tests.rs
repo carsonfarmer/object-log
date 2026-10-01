@@ -207,7 +207,7 @@ async fn recovered_view_checkpoints_prefix_and_preserves_concurrent_append() {
 }
 
 #[tokio::test]
-async fn pending_checkpoint_keeps_exact_evidence_until_resolution() {
+async fn checkpoint_summary_leaves_failed_resolution_pending() {
     let faults = FaultStore::new(InMemory::new());
     let mut s = session_on(Arc::new(faults.clone())).await;
     append(&mut s, vec![]).await;
@@ -232,11 +232,6 @@ async fn pending_checkpoint_keeps_exact_evidence_until_resolution() {
     else {
         panic!("checkpoint outcome was not uncertain")
     };
-    let pending = PendingCheckpointState {
-        log: s.log.clone(),
-        value: RefCell::new(Some(pending)),
-    };
-
     faults.reset();
     for occurrence in 1..=3 {
         faults.schedule(StoreFailure {
@@ -246,17 +241,15 @@ async fn pending_checkpoint_keeps_exact_evidence_until_resolution() {
         });
     }
     assert_eq!(
-        GuestPendingCheckpoint::resolve(&pending).unwrap(),
-        CheckpointResolution::StillPending
+        checkpoint_state(&s.log, CheckpointStatus::Pending(pending.clone())).unwrap(),
+        MaintenanceState::Pending
     );
-    assert!(pending.value.borrow().is_some());
 
     faults.reset();
     assert_eq!(
-        GuestPendingCheckpoint::resolve(&pending).unwrap(),
-        CheckpointResolution::Published
+        checkpoint_state(&s.log, CheckpointStatus::Pending(pending)).unwrap(),
+        MaintenanceState::Complete
     );
-    assert!(pending.value.borrow().is_none());
 }
 
 #[tokio::test]
@@ -363,7 +356,7 @@ async fn latest_is_selective_view_bound_and_does_not_advance_history() {
     // Checkpointing verifies the remaining tail and preserves the concurrent suffix.
     assert!(matches!(
         GuestRecovery::checkpoint(&recovery, vec![], vec![]),
-        Ok(CheckpointOutcome::Published)
+        Ok(MaintenanceState::Complete)
     ));
     assert_eq!(s.log.load().await.unwrap().tail().len(), 1);
 }
@@ -495,7 +488,7 @@ async fn resume_reports_losing_and_unresolved_tokens_without_discarding_them() {
 }
 
 #[tokio::test]
-async fn pending_checkpoint_reports_a_definite_loser_once() {
+async fn checkpoint_summary_reports_a_definite_loser_as_conflict() {
     let faults = FaultStore::new(InMemory::new());
     let mut s = session_on(Arc::new(faults.clone())).await;
     append(&mut s, vec![]).await;
@@ -532,16 +525,10 @@ async fn pending_checkpoint_reports_a_definite_loser_once() {
             .unwrap(),
         CheckpointStatus::Published(_)
     ));
-    let pending = PendingCheckpointState {
-        log: s.log.clone(),
-        value: RefCell::new(Some(pending)),
-    };
     assert_eq!(
-        GuestPendingCheckpoint::resolve(&pending).unwrap(),
-        CheckpointResolution::NotPublished
+        checkpoint_state(&s.log, CheckpointStatus::Pending(pending)).unwrap(),
+        MaintenanceState::Conflict
     );
-    assert!(pending.value.borrow().is_none());
-    assert!(GuestPendingCheckpoint::resolve(&pending).is_err());
 }
 
 #[tokio::test]
@@ -592,7 +579,7 @@ async fn resume_reports_expired_after_checkpoint_discards_commit_evidence() {
 }
 
 #[tokio::test]
-async fn pending_checkpoint_reports_expired_after_head_advances_again() {
+async fn checkpoint_summary_preserves_expired_evidence_as_pending() {
     let faults = FaultStore::new(InMemory::new());
     let mut s = session_on(Arc::new(faults.clone())).await;
     append(&mut s, vec![]).await;
@@ -632,16 +619,116 @@ async fn pending_checkpoint_reports_expired_after_head_advances_again() {
     s.view.replace(s.log.load().await.unwrap());
     append(&mut s, vec![]).await;
 
-    let pending = PendingCheckpointState {
-        log: s.log.clone(),
-        value: RefCell::new(Some(pending)),
-    };
     assert_eq!(
-        GuestPendingCheckpoint::resolve(&pending).unwrap(),
-        CheckpointResolution::Expired
+        checkpoint_state(&s.log, CheckpointStatus::Pending(pending)).unwrap(),
+        MaintenanceState::Pending
     );
-    assert!(pending.value.borrow().is_none());
-    assert!(GuestPendingCheckpoint::resolve(&pending).is_err());
+}
+
+#[tokio::test]
+async fn checkpoint_call_resolves_one_lost_head_acknowledgement() {
+    for phase in [FailurePhase::Before, FailurePhase::After] {
+        let faults = FaultStore::new(InMemory::new());
+        let mut s = session_on(Arc::new(faults.clone())).await;
+        append(&mut s, vec![]).await;
+        let recovery = RecoveryState {
+            log: s.log.clone(),
+            value: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
+        };
+        faults.reset();
+        faults.schedule(StoreFailure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase,
+        });
+        assert!(matches!(
+            GuestRecovery::checkpoint(&recovery, b"snapshot".to_vec(), vec![]),
+            Ok(MaintenanceState::Complete)
+        ));
+        let fresh = s.log.load().await.unwrap();
+        assert!(fresh.tail().is_empty());
+        assert_eq!(
+            s.log
+                .read_checkpoint(&fresh)
+                .await
+                .unwrap()
+                .unwrap()
+                .snapshot(),
+            b"snapshot".as_slice()
+        );
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_call_returns_pending_when_resolution_reads_fail() {
+    for phase in [FailurePhase::Before, FailurePhase::After] {
+        let faults = FaultStore::new(InMemory::new());
+        let mut s = session_on(Arc::new(faults.clone())).await;
+        append(&mut s, vec![]).await;
+        let recovery = RecoveryState {
+            log: s.log.clone(),
+            value: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
+        };
+        faults.reset();
+        faults.schedule(StoreFailure {
+            operation: Operation::Put,
+            occurrence: 2,
+            phase,
+        });
+        for occurrence in 2..=4 {
+            faults.schedule(StoreFailure {
+                operation: Operation::Get,
+                occurrence,
+                phase: FailurePhase::Before,
+            });
+        }
+        assert!(matches!(
+            GuestRecovery::checkpoint(&recovery, b"snapshot".to_vec(), vec![]),
+            Ok(MaintenanceState::Pending)
+        ));
+        faults.reset();
+        let fresh = s.log.load().await.unwrap();
+        assert_eq!(fresh.checkpoint().is_some(), phase == FailurePhase::After);
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_call_preserves_a_concurrent_checkpoint_winner() {
+    let mut s = session().await;
+    append(&mut s, vec![]).await;
+    let view = s.current_view();
+    let recovery = RecoveryState {
+        log: s.log.clone(),
+        value: RefCell::new(object_log::history(&s.log, view.clone()).unwrap()),
+    };
+    let CheckpointStatus::Published(winner) = s
+        .log
+        .publish_checkpoint(
+            &view,
+            view.tail().last().unwrap(),
+            Bytes::from_static(b"winner"),
+            vec![],
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("winner did not publish");
+    };
+    assert!(matches!(
+        GuestRecovery::checkpoint(&recovery, b"loser".to_vec(), vec![]),
+        Ok(MaintenanceState::Conflict)
+    ));
+    let fresh = s.log.load().await.unwrap();
+    assert_eq!(fresh.generation(), winner.generation());
+    assert_eq!(
+        s.log
+            .read_checkpoint(&fresh)
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot(),
+        b"winner".as_slice()
+    );
 }
 
 #[tokio::test]
