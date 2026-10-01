@@ -48,7 +48,7 @@ func authorizeRequest(r *http.Request, route repositoryRoute, getenv func(string
 		if err != nil {
 			return http.StatusUnauthorized, err
 		}
-		if !principal.Allows(route.Repository.repositoryAccess, route.Action) {
+		if !principal.Allows(route.Repository, route.Action) {
 			return http.StatusForbidden, errors.New("repository access denied")
 		}
 		return 0, nil

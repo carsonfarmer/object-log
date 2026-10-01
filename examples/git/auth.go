@@ -84,13 +84,10 @@ func authenticateCognito(
 	}
 	// Cognito access tokens identify the app by client_id, not ID-token aud.
 	operator := operatorID != "" && claims.ClientID == operatorID
-	validClient := claims.ClientID == clientID || operator
 	current := now()
-	validTime := claims.Expiry != nil && current.Before(claims.Expiry.Time())
-	if !validTime || claims.ValidateWithLeeway(jwt.Expected{Issuer: issuer, Time: current}, 0) != nil {
-		return gitPrincipal{}, errAuthInvalid
-	}
-	if !validClient || claims.TokenUse != "access" || claims.Subject == "" {
+	if claims.Expiry == nil || !current.Before(claims.Expiry.Time()) ||
+		claims.ValidateWithLeeway(jwt.Expected{Issuer: issuer, Time: current}, 0) != nil ||
+		(claims.ClientID != clientID && !operator) || claims.TokenUse != "access" || claims.Subject == "" {
 		return gitPrincipal{}, errAuthInvalid
 	}
 	if !slices.Contains(strings.Fields(claims.Scope), scopes[0]) ||
@@ -108,19 +105,13 @@ func requestAccessToken(r *http.Request) (string, error) {
 	if len(headers) != 1 || len(headers[0]) > 2*authTokenBytes {
 		return "", errAuthInvalid
 	}
-	var token string
-	scheme, value, _ := strings.Cut(headers[0], " ")
-	switch {
-	case strings.EqualFold(scheme, "Basic"):
-		_, password, ok := r.BasicAuth()
-		if !ok {
+	_, token, basic := r.BasicAuth()
+	if !basic {
+		scheme, value, _ := strings.Cut(headers[0], " ")
+		if !strings.EqualFold(scheme, "Bearer") {
 			return "", errAuthInvalid
 		}
-		token = password
-	case strings.EqualFold(scheme, "Bearer"):
 		token = value
-	default:
-		return "", errAuthInvalid
 	}
 	if token == "" || len(token) > authTokenBytes {
 		return "", errAuthInvalid
@@ -157,10 +148,7 @@ func (p gitPrincipal) Allows(policy repositoryAccess, action gitAction) bool {
 		return action == gitAdmin
 	}
 	allowed := [...][]string{policy.ReadGroups, policy.WriteGroups, policy.AdminGroups}[action]
-	for _, group := range p.groups {
-		if group != "" && slices.Contains(allowed, group) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(p.groups, func(group string) bool {
+		return group != "" && slices.Contains(allowed, group)
+	})
 }

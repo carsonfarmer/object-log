@@ -179,7 +179,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		r.Body = gitio.NewReadCloser(body, r.Body)
 	}
 
-	settings, e := walSettings(getConfig, route.Repository.LogID, limits)
+	settings, e := walSettings(getConfig, route.LogID, limits)
 	if e != nil {
 		http.Error(response, e.Error(), http.StatusInternalServerError)
 		return

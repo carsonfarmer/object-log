@@ -19,7 +19,7 @@ const repositoryTestConfig = `{
 	"R&D/Lib+client@v2.git": {}
 }`
 
-func repositoriesFromText(text string) (map[string]repositoryConfig, error) {
+func repositoriesFromText(text string) (map[string]repositoryAccess, error) {
 	return loadRepositories(func(name string) string {
 		if name == "GIT_REPOSITORIES" {
 			return text
@@ -28,7 +28,7 @@ func repositoriesFromText(text string) (map[string]repositoryConfig, error) {
 	})
 }
 
-func repositoriesForTest(t *testing.T) map[string]repositoryConfig {
+func repositoriesForTest(t *testing.T) map[string]repositoryAccess {
 	t.Helper()
 	repositories, err := repositoriesFromText(repositoryTestConfig)
 	if err != nil {
@@ -37,10 +37,17 @@ func repositoriesForTest(t *testing.T) map[string]repositoryConfig {
 	return repositories
 }
 
-func TestLoadRepositoriesDerivesIndependentIdentitiesAndDefersPushMetadata(t *testing.T) {
+func TestRepositoryNamesDeriveIndependentIdentitiesAndDeferPushMetadata(t *testing.T) {
 	t.Parallel()
 	repositories := repositoriesForTest(t)
-	alpha, beta := repositories["team/alpha.git"], repositories["team/beta.git"]
+	alpha, err := resolveRepository(repositories, httptest.NewRequest(http.MethodGet, "/team/alpha.git/authorize-read", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, err := resolveRepository(repositories, httptest.NewRequest(http.MethodGet, "/team/beta.git/authorize-read", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if alpha.LogID != automaticRepositoryID("team/alpha.git") ||
 		beta.LogID != automaticRepositoryID("team/beta.git") || alpha.LogID == beta.LogID {
 		t.Fatal("repository names did not retain independent storage identities")
@@ -109,10 +116,8 @@ func TestLoadRepositoriesRejectsNoncanonicalNames(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			encoded, err := json.Marshal(map[string]repositoryConfig{
-				name: {LogID: "one", repositoryAccess: repositoryAccess{
-					ReadGroups: []string{}, WriteGroups: []string{}, AdminGroups: []string{},
-				}},
+			encoded, err := json.Marshal(map[string]repositoryAccess{
+				name: {ReadGroups: []string{}, WriteGroups: []string{}, AdminGroups: []string{}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -168,7 +173,7 @@ func TestAddRepositoryRequiresOnlyConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	route, err := resolveRepository(repositories, request)
-	if err != nil || route.Repository.LogID != automaticRepositoryID("new/nested.git") {
+	if err != nil || route.LogID != automaticRepositoryID("new/nested.git") {
 		t.Fatalf("configured route=%+v error=%v", route, err)
 	}
 }
@@ -204,7 +209,7 @@ func TestResolveRepositorySelectsServiceAndAction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if route.Name != "team/alpha.git" || route.Repository.LogID != automaticRepositoryID("team/alpha.git") {
+			if route.Name != "team/alpha.git" || route.LogID != automaticRepositoryID("team/alpha.git") {
 				t.Fatalf("wrong repository: %+v", route)
 			}
 			if route.Service != tt.service || route.Method != tt.method || route.Action != tt.action {
@@ -264,15 +269,15 @@ func TestDiscoveredLogMaintenanceRequiresScopeOperator(t *testing.T) {
 	for _, operation := range []string{"maintenance", "collect"} {
 		request := httptest.NewRequest(http.MethodPost, "/_maintenance?log_id=auto-123&operation="+operation, nil)
 		route, err := resolveRepository(nil, request)
-		if err != nil || route.Repository.LogID != "auto-123" || route.Service != operation || route.Action != gitAdmin {
+		if err != nil || route.LogID != "auto-123" || route.Service != operation || route.Action != gitAdmin {
 			t.Fatalf("route=%+v error=%v", route, err)
 		}
 		for _, principal := range []gitPrincipal{{}, {subject: "repository-admin", groups: []string{"operators"}}} {
-			if principal.Allows(route.Repository.repositoryAccess, route.Action) {
+			if principal.Allows(route.Repository, route.Action) {
 				t.Fatal("discovered log bypassed repository policy without a scope operator")
 			}
 		}
-		if !(gitPrincipal{subject: "scheduler", operator: true}).Allows(route.Repository.repositoryAccess, route.Action) {
+		if !(gitPrincipal{subject: "scheduler", operator: true}).Allows(route.Repository, route.Action) {
 			t.Fatal("scope operator cannot maintain a discovered log")
 		}
 		request.Method = http.MethodGet
@@ -293,9 +298,9 @@ func TestDiscoveredLogMaintenanceRequiresScopeOperator(t *testing.T) {
 		}
 	}
 	// A repository with this name still has ordinary Git routes and permissions.
-	route, err := resolveRepository(map[string]repositoryConfig{"_maintenance.git": {LogID: "named"}},
+	route, err := resolveRepository(map[string]repositoryAccess{"_maintenance.git": {}},
 		httptest.NewRequest(http.MethodGet, "/_maintenance/info/refs?service=git-upload-pack", nil))
-	if err != nil || route.Repository.LogID != "named" || route.Action != gitRead {
+	if err != nil || route.LogID != automaticRepositoryID("_maintenance.git") || route.Action != gitRead {
 		t.Fatalf("named repository route=%+v error=%v", route, err)
 	}
 }
@@ -338,7 +343,7 @@ func TestRepositoryRoutePolicyIsIndependentPerRepositoryAndAction(t *testing.T) 
 				t.Fatal(err)
 			}
 			principal := gitPrincipal{subject: "person", groups: []string{tt.group}}
-			if got := principal.Allows(route.Repository.repositoryAccess, route.Action); got != tt.want {
+			if got := principal.Allows(route.Repository, route.Action); got != tt.want {
 				t.Fatalf("permission = %v, want %v", got, tt.want)
 			}
 		})
@@ -362,20 +367,20 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		if route.Name != "team/project.git" || route.Action != gitWrite {
 			t.Fatalf("unexpected automatic route: %+v", route)
 		}
-		if first.Name != "" && first.Repository.LogID != route.Repository.LogID {
+		if first.Name != "" && first.LogID != route.LogID {
 			t.Fatal("URL aliases select different logs")
 		}
 		first = route
 	}
 	principal := gitPrincipal{subject: "writer", groups: []string{"writers"}}
-	if !principal.Allows(first.Repository.repositoryAccess, gitWrite) || principal.Allows(first.Repository.repositoryAccess, gitRead) {
+	if !principal.Allows(first.Repository, gitWrite) || principal.Allows(first.Repository, gitRead) {
 		t.Fatal("automatic policy lost independent permissions")
 	}
 	private, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/team/private.git/git-receive-pack", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal.Allows(private.Repository.repositoryAccess, gitWrite) || private.Repository.LogID == first.Repository.LogID {
+	if principal.Allows(private.Repository, gitWrite) || private.LogID == first.LogID {
 		t.Fatal("exact denial or repository isolation lost")
 	}
 	for _, name := range []string{"*", "team/../project", "team//project", "%70roject"} {
@@ -385,7 +390,11 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 	}
 	// Adding a permission override must preserve the automatically created log.
 	override, err := repositoriesFromText(`{"team/project":{"read_groups":["readers"]}}`)
-	if err != nil || override["team/project.git"].LogID != first.Repository.LogID {
+	if err != nil {
+		t.Fatal(err)
+	}
+	overridden, err := resolveRepository(override, httptest.NewRequest(http.MethodGet, "/team/project.git/authorize-read", nil))
+	if err != nil || overridden.LogID != first.LogID {
 		t.Fatal("permission override moved storage")
 	}
 	for _, text := range []string{
@@ -408,11 +417,11 @@ func TestBackendValidationIsGlobalAdministration(t *testing.T) {
 				want = errRepositoryMethod
 			}
 			if !errors.Is(err, want) || route.Service != "validate-backend" || route.Method != http.MethodPost ||
-				route.Action != gitAdmin || route.Name != "" || route.Repository.LogID != "" {
+				route.Action != gitAdmin || route.Name != "" || route.LogID != "" {
 				t.Fatalf("%s %s route=%+v error=%v", method, path, route, err)
 			}
-			if (gitPrincipal{subject: "admin-member", groups: []string{"operators"}}).Allows(route.Repository.repositoryAccess, route.Action) ||
-				!(gitPrincipal{subject: "operator", operator: true}).Allows(route.Repository.repositoryAccess, route.Action) {
+			if (gitPrincipal{subject: "admin-member", groups: []string{"operators"}}).Allows(route.Repository, route.Action) ||
+				!(gitPrincipal{subject: "operator", operator: true}).Allows(route.Repository, route.Action) {
 				t.Fatal("global validation inherited repository permissions")
 			}
 		}

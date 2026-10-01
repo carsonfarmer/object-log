@@ -31,22 +31,17 @@ var (
 
 // Configuration sets permissions only. The name determines storage identity;
 // the first accepted push establishes the format and default branch.
-type repositoryConfig struct {
-	LogID string `json:"-"`
-	repositoryAccess
-}
-
 // Exact policies override "*". Bare names and their .git URLs identify one log.
-func loadRepositories(getenv func(string) string) (map[string]repositoryConfig, error) {
+func loadRepositories(getenv func(string) string) (map[string]repositoryAccess, error) {
 	text := getenv("GIT_REPOSITORIES")
 	if len(text) > repositoriesConfigBytes {
 		return nil, errors.New("GIT_REPOSITORIES exceeds 64 KiB")
 	}
-	repositories := map[string]repositoryConfig{}
+	repositories := map[string]repositoryAccess{}
 	if strings.TrimSpace(text) == "" {
 		return repositories, nil
 	}
-	entries := map[string]repositoryConfig{}
+	entries := map[string]repositoryAccess{}
 	err := json.Unmarshal(
 		[]byte(text),
 		&entries,
@@ -78,9 +73,6 @@ func loadRepositories(getenv func(string) string) (map[string]repositoryConfig, 
 				return nil, errors.New("permission groups must be nonempty strings")
 			}
 		}
-		if name != "*" {
-			repository.LogID = automaticRepositoryID(name)
-		}
 		repositories[name] = repository
 	}
 	return repositories, nil
@@ -106,7 +98,8 @@ func automaticRepositoryID(name string) string {
 
 type repositoryRoute struct {
 	Name       string
-	Repository repositoryConfig
+	LogID      string
+	Repository repositoryAccess
 	Service    string
 	Method     string
 	Action     gitAction
@@ -115,7 +108,7 @@ type repositoryRoute struct {
 // Resolve exact permitted names and endpoint suffixes without cleaning or
 // decoding path aliases. The caller must authorize Action before opening a WAL.
 // A method error preserves Method so the caller can send an Allow header.
-func resolveRepository(repositories map[string]repositoryConfig, r *http.Request) (repositoryRoute, error) {
+func resolveRepository(repositories map[string]repositoryAccess, r *http.Request) (repositoryRoute, error) {
 	route := repositoryRoute{Method: http.MethodPost, Action: gitAdmin}
 	// Validation retains its decoded path and ignores queries.
 	if r.URL.Path == "/_validate_backend" {
@@ -138,7 +131,7 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 				return repositoryRoute{}, errRepositoryNotFound
 			}
 			// Discovered IDs have no repository groups; Cognito requires the operator.
-			route.Repository.LogID = id
+			route.LogID = id
 		} else {
 			endpoint := repositoryEndpoint.FindStringSubmatch(r.URL.Path)
 			if endpoint == nil || !validRepositoryName(endpoint[1]) {
@@ -170,11 +163,11 @@ func resolveRepository(repositories map[string]repositoryConfig, r *http.Request
 			route.Repository, ok = repositories[route.Name]
 			if !ok {
 				route.Repository, ok = repositories["*"]
-				route.Repository.LogID = automaticRepositoryID(route.Name)
 			}
 			if !ok {
 				return repositoryRoute{}, errRepositoryNotFound
 			}
+			route.LogID = automaticRepositoryID(route.Name)
 		}
 	}
 	if r.Method != route.Method {

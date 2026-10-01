@@ -8,9 +8,7 @@ import (
 )
 
 func TestAuthenticationModeNeverFallsBack(t *testing.T) {
-	route := repositoryRoute{Action: gitRead, Repository: repositoryConfig{
-		repositoryAccess: repositoryAccess{ReadGroups: []string{"readers"}},
-	}}
+	route := repositoryRoute{Action: gitRead, Repository: repositoryAccess{ReadGroups: []string{"readers"}}}
 	settings := map[string]string{
 		"GIT_AUTH_MODE": "cognito", "GIT_PASSWORD": "local-password",
 		"GIT_COGNITO_ISSUER": authTestIssuer, "GIT_COGNITO_CLIENT_ID": "git-client",
@@ -69,9 +67,9 @@ func TestMaintenanceClientCannotReadOrPushRepositories(t *testing.T) {
 	keys := authTestTransport(func(*http.Request) (*http.Response, error) {
 		return authKeyResponse(t, authTestJWKS(t)), nil
 	})
-	policy := repositoryConfig{repositoryAccess: repositoryAccess{
+	policy := repositoryAccess{
 		ReadGroups: []string{"readers"}, WriteGroups: []string{"readers"}, AdminGroups: []string{"readers"},
-	}}
+	}
 	for _, client := range []string{"maintenance-client", "git-client", "other-client"} {
 		for _, scope := range []string{"git/access", "git/access git/maintenance"} {
 			claims := authTestClaims(time.Now())
