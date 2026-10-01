@@ -71,6 +71,39 @@ func TestActiveCollectionPreventsOutput(t *testing.T) {
 	})
 }
 
+func TestUnresolvedRetentionPreventsRequestBodyConsumption(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state wal.RetentionState
+		err   error
+	}{
+		{name: "pending", state: wal.RetentionStatePending},
+		{name: "conflict", state: wal.RetentionStateConflict},
+		{name: "failed", err: io.ErrUnexpectedEOF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := bytes.NewReader([]byte("fetch negotiation"))
+			released := false
+			err := retained(t.Context(), func([]byte) (wal.RetentionState, error) {
+				return test.state, test.err
+			}, func([]byte) (wal.RetentionState, error) {
+				released = true
+				return wal.RetentionStateApplied, nil
+			}, func() error {
+				_, err := io.Copy(io.Discard, body)
+				return err
+			})
+			want := test.err
+			if want == nil {
+				want = errRetentionUnresolved
+			}
+			if !errors.Is(err, want) || body.Len() != len("fetch negotiation") || !released {
+				t.Fatalf("request admitted before retention: body=%d released=%v err=%v", body.Len(), released, err)
+			}
+		})
+	}
+}
+
 func TestRetentionCollectionWaitIsCancelable(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
