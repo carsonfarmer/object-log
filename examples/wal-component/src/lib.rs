@@ -225,57 +225,75 @@ impl GuestSession for SessionState {
     }
 }
 impl RecoveryState {
-    fn recovered_view(&self) -> Result<Ref<'_, View>, Failure> {
-        let cursor = self.value.borrow();
-        if !cursor.is_complete() {
-            return Err(Failure::Other(
-                "recovery history must be consumed before publication".into(),
-            ));
+    fn bound_view(&self) -> Ref<'_, View> {
+        Ref::map(self.value.borrow(), object_log::HistoryCursor::view)
+    }
+
+    fn latest_record(&self) -> Result<(usize, Option<LogHistoryItem>), Failure> {
+        let view = self.bound_view();
+        let entries = view.tail().len();
+        let item = if let Some(index) = entries.checked_sub(1) {
+            Some(LogHistoryItem::Commit(executor::run(
+                object_log::tail_record(&self.log, &view, index),
+            )?))
+        } else {
+            executor::run(object_log::history(&self.log, view.clone())?.next())?
+        };
+        Ok((entries, item))
+    }
+}
+
+fn history_item(item: LogHistoryItem) -> HistoryItem {
+    match item {
+        LogHistoryItem::Checkpoint(authenticated) => {
+            let (record, objects) = authenticated.into_parts();
+            HistoryItem::Checkpoint(Entry {
+                data: record.snapshot().to_vec(),
+                objects: objects.into_iter().map(Object::new).collect(),
+            })
         }
-        Ok(Ref::map(cursor, object_log::HistoryCursor::view))
+        LogHistoryItem::Commit(authenticated) => {
+            let (record, objects) = authenticated.into_parts();
+            let reference = record.reference();
+            HistoryItem::Commit(CommitRecord {
+                sequence: reference.sequence(),
+                transaction_id: reference.transaction_id().as_uuid().as_bytes().to_vec(),
+                operation: record.operation().to_vec(),
+                recorded_result: record.result().to_vec(),
+                objects: objects.into_iter().map(Object::new).collect(),
+            })
+        }
     }
 }
 impl GuestRecovery for RecoveryState {
     fn next(&self) -> Result<Option<HistoryItem>, Failure> {
-        let item = executor::run(self.value.borrow_mut().next())?;
-        Ok(item.map(|item| match item {
-            LogHistoryItem::Checkpoint(authenticated) => {
-                let (record, objects) = authenticated.into_parts();
-                HistoryItem::Checkpoint(Entry {
-                    data: record.snapshot().to_vec(),
-                    objects: objects.into_iter().map(Object::new).collect(),
-                })
-            }
-            LogHistoryItem::Commit(authenticated) => {
-                let (record, objects) = authenticated.into_parts();
-                let reference = record.reference();
-                HistoryItem::Commit(CommitRecord {
-                    sequence: reference.sequence(),
-                    transaction_id: reference.transaction_id().as_uuid().as_bytes().to_vec(),
-                    operation: record.operation().to_vec(),
-                    recorded_result: record.result().to_vec(),
-                    objects: objects.into_iter().map(Object::new).collect(),
-                })
-            }
-        }))
+        Ok(executor::run(self.value.borrow_mut().next())?.map(history_item))
+    }
+
+    fn latest(&self) -> Result<LatestRecord, Failure> {
+        let (entries, item) = self.latest_record()?;
+        Ok(LatestRecord {
+            tail_entries: entries as u64,
+            item: item.map(history_item),
+        })
     }
 
     fn write_bytes(&self) -> Result<ByteWriter, Failure> {
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         let writer = self.log.byte_writer(&view)?;
         Ok(ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
     }
 
     fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
         let value = value.get::<StagedObject>();
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         let reader = executor::run(self.log.open_bytes(&view, value.reference()))?;
         Ok(ByteReader::new(ReaderState(RefCell::new(reader))))
     }
 
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<StagedObject>();
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         let (data, objects) = executor::run(self.log.read_staged_node(&view, value))?;
         Ok(Entry {
             data: data.into(),
@@ -283,7 +301,7 @@ impl GuestRecovery for RecoveryState {
         })
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         Ok(Object::new(executor::run(self.log.put_node(
             &view,
             Bytes::from(data),
@@ -297,10 +315,11 @@ impl GuestRecovery for RecoveryState {
         result: Vec<u8>,
         roots: Vec<ObjectBorrow<'_>>,
     ) -> Result<Candidate, Failure> {
-        let view = self.recovered_view()?;
         let transaction_id = uuid::Uuid::from_slice(&transaction_id)
             .map(TransactionId::from_uuid)
             .map_err(|_| Failure::Other("transaction ID must contain 16 bytes".into()))?;
+        while executor::run(self.value.borrow_mut().next())?.is_some() {}
+        let view = self.bound_view();
         let prepared = self.log.prepare(
             &view,
             transaction_id,
@@ -319,7 +338,8 @@ impl GuestRecovery for RecoveryState {
         data: Vec<u8>,
         roots: Vec<ObjectBorrow<'_>>,
     ) -> Result<CheckpointOutcome, Failure> {
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
+        executor::run(self.log.read_checkpoint(&view))?;
         let through = view
             .tail()
             .last()

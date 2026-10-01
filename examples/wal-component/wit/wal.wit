@@ -53,6 +53,7 @@ interface wal {
         objects: list<own<object>>,
     }
     variant history-item { checkpoint(entry), commit(commit-record) }
+    record latest-record { tail-entries: u64, item: option<history-item> }
     resource candidate {
         recovery-token: func() -> result<list<u8>, failure>;
         // Save the token before publishing. After any publish error, reopen and
@@ -73,17 +74,21 @@ interface wal {
     resource recovery {
         // Returns the optional checkpoint first, then commits in sequence.
         next: func() -> result<option<history-item>, failure>;
+        // Reads only the last tail commit, or the checkpoint when the tail is empty.
+        // This does not advance next() or reconstruct application state.
+        latest: func() -> result<latest-record, failure>;
         write-bytes: func() -> result<own<byte-writer>, failure>;
         open-bytes: func(value: borrow<object>) -> result<own<byte-reader>, failure>;
         read-node: func(value: borrow<object>) -> result<entry, failure>;
         put-node: func(data: list<u8>, children: list<borrow<object>>) -> result<own<object>, failure>;
+        // Consumes and authenticates the remaining cursor before preparing publication.
         prepare: func(
             transaction-id: list<u8>,
             operation: list<u8>,
             recorded-result: list<u8>,
             roots: list<borrow<object>>,
         ) -> result<own<candidate>, failure>;
-        // Requires next() to have reached the end of this exact view.
+        // Authenticates this exact view's checkpoint and complete active tail.
         checkpoint: func(
             data: list<u8>,
             roots: list<borrow<object>>,

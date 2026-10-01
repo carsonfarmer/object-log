@@ -333,33 +333,101 @@ async fn candidate_token_precedes_single_use_publication_and_resumes() {
 }
 
 #[tokio::test]
-async fn recovery_requires_the_end_of_history_before_writing() {
-    let mut s = session().await;
-    let empty = RecoveryState {
-        log: s.log.clone(),
-        value: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
-    };
-    assert!(GuestRecovery::next(&empty).unwrap().is_none());
-    assert!(matches!(
-        GuestRecovery::checkpoint(&empty, vec![], vec![]),
-        Err(Failure::Other(message)) if message == "checkpoint requires an active tail"
-    ));
-    append(&mut s, vec![]).await;
+async fn latest_is_selective_view_bound_and_does_not_advance_history() {
+    let faults = FaultStore::new(InMemory::new());
+    let mut s = session_on(Arc::new(faults.clone())).await;
+    for _ in 0..12 {
+        append(&mut s, vec![]).await;
+    }
+    let view = s.log.load().await.unwrap();
+    let first = view.tail().first().unwrap().sequence();
+    let last = view.tail().last().unwrap().sequence();
     let recovery = RecoveryState {
         log: s.log.clone(),
-        value: RefCell::new(object_log::history(&s.log, s.current_view()).unwrap()),
+        value: RefCell::new(object_log::history(&s.log, view).unwrap()),
     };
-    let transaction = uuid::Uuid::from_u128(42).as_bytes().to_vec();
-    assert!(matches!(
-        GuestRecovery::prepare(&recovery, transaction, vec![], vec![], vec![]),
-        Err(Failure::Other(message)) if message.contains("history must be consumed")
-    ));
+    append(&mut s, vec![]).await;
+    faults.reset();
+    let latest = GuestRecovery::latest(&recovery).unwrap();
+    assert_eq!(latest.tail_entries, 12);
+    let Some(HistoryItem::Commit(record)) = latest.item else {
+        panic!("missing latest commit")
+    };
+    assert_eq!(record.sequence, last);
+    assert_eq!(faults.metrics().total_requests(), 1);
+    assert!(!recovery.value.borrow().is_complete());
+    let Some(HistoryItem::Commit(record)) = GuestRecovery::next(&recovery).unwrap() else {
+        panic!("history cursor advanced during latest read")
+    };
+    assert_eq!(record.sequence, first);
+    // Checkpointing verifies the remaining tail and preserves the concurrent suffix.
     assert!(matches!(
         GuestRecovery::checkpoint(&recovery, vec![], vec![]),
-        Err(Failure::Other(message)) if message.contains("history must be consumed")
+        Ok(CheckpointOutcome::Published)
     ));
-    while GuestRecovery::next(&recovery).unwrap().is_some() {}
-    assert!(recovery.recovered_view().is_ok());
+    assert_eq!(s.log.load().await.unwrap().tail().len(), 1);
+}
+
+#[tokio::test]
+async fn latest_reads_empty_logs_and_checkpoint_object_proofs() {
+    let mut s = session().await;
+    let log = s.log.clone();
+    let recovery = |view| RecoveryState {
+        log: log.clone(),
+        value: RefCell::new(object_log::history(&log, view).unwrap()),
+    };
+    assert!(
+        recovery(s.current_view())
+            .latest_record()
+            .unwrap()
+            .1
+            .is_none()
+    );
+    let view = s.current_view();
+    let blob = s
+        .log
+        .put_object(&view, Bytes::from_static(b"payload"))
+        .await
+        .unwrap();
+    let root = s
+        .log
+        .put_node(&view, Bytes::from_static(b"root"), vec![blob])
+        .await
+        .unwrap();
+    append(&mut s, vec![root.clone()]).await;
+    let view = s.current_view();
+    assert!(matches!(
+        s.log
+            .publish_checkpoint(
+                &view,
+                view.tail().last().unwrap(),
+                Bytes::from_static(b"snapshot"),
+                vec![root]
+            )
+            .await
+            .unwrap(),
+        CheckpointStatus::Published(_)
+    ));
+    let recovery = recovery(s.log.load().await.unwrap());
+    let (tail, Some(LogHistoryItem::Checkpoint(record))) = recovery.latest_record().unwrap() else {
+        panic!("missing current checkpoint")
+    };
+    assert_eq!(tail, 0);
+    assert_eq!(record.record().snapshot(), b"snapshot".as_slice());
+    let view = recovery.bound_view().clone();
+    let (data, children) = s
+        .log
+        .read_staged_node(&view, &record.proofs()[0])
+        .await
+        .unwrap();
+    assert_eq!(data, b"root".as_slice());
+    assert_eq!(
+        s.log
+            .read_object(&view, children[0].reference())
+            .await
+            .unwrap(),
+        b"payload".as_slice()
+    );
 }
 
 #[tokio::test]
@@ -577,10 +645,11 @@ async fn pending_checkpoint_reports_expired_after_head_advances_again() {
 }
 
 #[tokio::test]
-async fn recovery_does_not_skip_corrupt_older_commit_or_checkpoint() {
+async fn selective_reads_leave_older_corruption_visible_and_block_publication() {
     for checkpoint in [false, true] {
         let store = Arc::new(InMemory::new());
-        let mut s = session_on(store.clone()).await;
+        let faults = FaultStore::new(store.clone());
+        let mut s = session_on(Arc::new(faults.clone())).await;
         append(&mut s, vec![]).await;
         if checkpoint {
             assert!(matches!(
@@ -615,18 +684,49 @@ async fn recovery_does_not_skip_corrupt_older_commit_or_checkpoint() {
             .put(&key, Bytes::from_static(b"corrupt earlier record").into())
             .await
             .unwrap();
-        let mut cursor = object_log::history(&s.log, s.current_view()).unwrap();
-        let mut error = None;
-        loop {
-            match cursor.next().await {
-                Ok(Some(_)) => {}
-                Ok(None) => break,
-                Err(found) => {
-                    error = Some(found);
-                    break;
-                }
-            }
-        }
-        assert!(matches!(error, Some(object_log::Error::CorruptObject)));
+        // Fresh handles cannot reuse the earlier immutable-history proof.
+        let backend = object_log::ValidatedBackend::assume_validated(
+            Arc::new(faults.clone()),
+            Path::from("maintenance-tests"),
+        );
+        let cold = Log::open_existing(
+            &backend,
+            &object_log::LogId::new("repo").unwrap(),
+            Options {
+                max_collection_objects: 4,
+                ..Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        let view = cold.load().await.unwrap();
+        let generation = view.generation();
+        let recovery = RecoveryState {
+            log: cold.clone(),
+            value: RefCell::new(object_log::history(&cold, view).unwrap()),
+        };
+        faults.reset();
+        assert!(matches!(
+            GuestRecovery::latest(&recovery).unwrap().item,
+            Some(HistoryItem::Commit(_))
+        ));
+        assert_eq!(faults.metrics().total_requests(), 1);
+        assert!(matches!(
+            GuestRecovery::prepare(
+                &recovery,
+                uuid::Uuid::new_v4().as_bytes().to_vec(),
+                vec![],
+                vec![],
+                vec![],
+            ),
+            Err(Failure::Other(_))
+        ));
+        assert!(matches!(
+            GuestRecovery::checkpoint(&recovery, vec![], vec![]),
+            Err(Failure::Other(_))
+        ));
+        assert_eq!(faults.metrics().operation(Operation::Put).requests, 0);
+        assert_eq!(cold.load().await.unwrap().generation(), generation);
+        assert!(GuestRecovery::next(&recovery).is_err());
     }
 }

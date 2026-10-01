@@ -95,10 +95,7 @@ export class Catalog {
   ) {
     this.recovery = session.recover();
     try {
-      for (let record = this.recovery.next(); record; record = this.recovery.next()) {
-        for (const root of this.owned) drop(root);
-        this.owned = record.val.objects;
-      }
+      this.owned = this.recovery.latest().item?.val.objects ?? [];
       if (!this.owned.length) throw new NotFound("Repository has no published root");
       if (this.owned.length !== 1) throw new Error("Invalid repository root count");
       const node = this.node(this.owned[0]);

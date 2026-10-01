@@ -427,40 +427,28 @@ func (s *store) publishRoot(root *wal.Object) (wal.Outcome, error) {
 }
 
 func (s *store) acceptRecovery(recovery *wal.Recovery) (*wal.Object, uint64, error) {
-	var latest []*wal.Object
-	var tail uint64
-	for {
-		item, err := unwrap(recovery.Next)
-		if err != nil {
-			dropObjects(latest)
-			return nil, 0, err
-		}
-		if item.IsNone() {
-			break
-		}
-		var objects []*wal.Object
-		switch value := item.Some(); value.Tag() {
-		case wal.HistoryItemCheckpoint:
-			objects = value.Checkpoint().Objects
-		case wal.HistoryItemCommit:
-			objects = value.Commit().Objects
-			tail++
-		default:
-			dropObjects(latest)
-			return nil, 0, fmt.Errorf("unknown history item %d", value.Tag())
-		}
-		dropObjects(latest)
-		latest = objects
+	current, err := unwrap(recovery.Latest)
+	if err != nil {
+		return nil, 0, err
 	}
-	if latest == nil {
-		return nil, tail, nil
+	if current.Item.IsNone() {
+		return nil, current.TailEntries, nil
+	}
+	var latest []*wal.Object
+	switch item := current.Item.Some(); item.Tag() {
+	case wal.HistoryItemCheckpoint:
+		latest = item.Checkpoint().Objects
+	case wal.HistoryItemCommit:
+		latest = item.Commit().Objects
+	default:
+		return nil, 0, fmt.Errorf("unknown history item %d", item.Tag())
 	}
 	if len(latest) != 1 {
 		dropObjects(latest)
 		return nil, 0, fmt.Errorf("invalid root record")
 	}
 	s.owned = append(s.owned, latest[0])
-	return latest[0], tail, nil
+	return latest[0], current.TailEntries, nil
 }
 
 func dropObjects(objects []*wal.Object) {

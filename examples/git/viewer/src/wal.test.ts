@@ -32,14 +32,12 @@ function emptySession(
   children = 0,
 ): Session {
   const dispose = () => undefined;
-  let next = true;
   return {
     recover: () => ({
-      next: () => {
-        if (!next) return undefined;
-        next = false;
-        return { tag: "checkpoint", val: { objects: [{ [Symbol.dispose]: dispose }] } };
-      },
+      latest: () => ({
+        tailEntries: 0n,
+        item: { tag: "checkpoint", val: { objects: [{ [Symbol.dispose]: dispose }] } },
+      }),
       readNode: () => ({
         data: new TextEncoder().encode(
           JSON.stringify({
@@ -177,13 +175,8 @@ function fixture(
     data: new TextEncoder().encode(JSON.stringify(value)),
     objects: children,
   });
-  let history = true;
   const recovery = {
-    next() {
-      if (!history) return undefined;
-      history = false;
-      return { tag: "checkpoint", val: { objects: [root] } };
-    },
+    latest: () => ({ tailEntries: 0n, item: { tag: "checkpoint", val: { objects: [root] } } }),
     readNode(value: unknown) {
       if (value === root)
         return entry(
@@ -408,18 +401,16 @@ test("authorized missing repositories return 404, while invalid durable state re
     openSession = () =>
       ({
         recover: () => {
-          let next = true;
           return {
-            next: () => {
-              if (!next) return undefined;
-              next = false;
-              return {
+            latest: () => ({
+              tailEntries: 0n,
+              item: {
                 tag: "checkpoint",
                 val: {
                   objects: Array.from({ length: count }, () => ({ [Symbol.dispose]: dispose })),
                 },
-              };
-            },
+              },
+            }),
             [Symbol.dispose]: dispose,
           };
         },
@@ -616,71 +607,77 @@ test("unusual filenames remain listed without hiding valid siblings", async () =
   }
 });
 
-test("expired reads refresh once, close both views, and retain cumulative usage", async () => {
-  let calls = 0,
-    bytes = 0,
-    refreshes = 0;
-  const closed: string[] = [];
-  const makeSession = (fresh: boolean): Session =>
-    ({
-      recover() {
-        let next = true;
-        const root = {
-          [Symbol.dispose]() {
-            closed.push(`root:${fresh}`);
-          },
-        };
-        return {
-          next() {
-            if (!next) return undefined;
-            next = false;
-            return { tag: "checkpoint", val: { objects: [root] } };
-          },
-          readNode() {
-            calls++;
-            bytes += 100;
-            if (!fresh) throw { payload: { tag: "expired" } };
-            return {
-              objects: [],
-              data: new TextEncoder().encode(
-                JSON.stringify({
-                  Validated: true,
-                  Format: "sha256",
-                  Head: "refs/heads/main",
-                  Refs: {},
-                  Buckets: [],
-                }),
-              ),
-            };
-          },
-          [Symbol.dispose]() {
-            closed.push(`recovery:${fresh}`);
-          },
-        };
-      },
-      refresh() {
-        refreshes++;
-        return makeSession(true);
-      },
-      usage: () => ({ calls: BigInt(calls), bytes: BigInt(bytes) }),
-      [Symbol.dispose]() {
-        closed.push(`session:${fresh}`);
-      },
-    }) as unknown as Session;
-  openSession = () => makeSession(false);
-  globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
-  const response = await browse(new Request("https://viewer.test/_viewer/api?repo=team/demo.git"));
-  expect(response.status).toBe(200);
-  expect((await response.json()).history).toEqual([]);
-  expect(refreshes).toBe(1);
-  expect(response.headers.get("X-Wal-Calls")).toBe("2");
-  expect(response.headers.get("X-Wal-Bytes")).toBe("200");
-  expect(closed.sort()).toEqual([
-    "recovery:false",
-    "recovery:true",
-    "root:false",
-    "root:true",
-    "session:false",
-    "session:true",
-  ]);
-});
+for (const expiredAt of ["latest", "node"])
+  test(`expired ${expiredAt} reads refresh once, close both views, and retain cumulative usage`, async () => {
+    let calls = 0,
+      bytes = 0,
+      refreshes = 0;
+    const closed: string[] = [];
+    const makeSession = (fresh: boolean): Session =>
+      ({
+        recover() {
+          const root = {
+            [Symbol.dispose]() {
+              closed.push(`root:${fresh}`);
+            },
+          };
+          return {
+            latest: () => {
+              calls++;
+              bytes += 50;
+              if (!fresh && expiredAt === "latest") throw { payload: { tag: "expired" } };
+              return {
+                tailEntries: 0n,
+                item: { tag: "checkpoint", val: { objects: [root] } },
+              };
+            },
+            readNode() {
+              calls++;
+              bytes += 100;
+              if (!fresh) throw { payload: { tag: "expired" } };
+              return {
+                objects: [],
+                data: new TextEncoder().encode(
+                  JSON.stringify({
+                    Validated: true,
+                    Format: "sha256",
+                    Head: "refs/heads/main",
+                    Refs: {},
+                    Buckets: [],
+                  }),
+                ),
+              };
+            },
+            [Symbol.dispose]() {
+              closed.push(`recovery:${fresh}`);
+            },
+          };
+        },
+        refresh() {
+          refreshes++;
+          return makeSession(true);
+        },
+        usage: () => ({ calls: BigInt(calls), bytes: BigInt(bytes) }),
+        [Symbol.dispose]() {
+          closed.push(`session:${fresh}`);
+        },
+      }) as unknown as Session;
+    openSession = () => makeSession(false);
+    globalThis.fetch = mock(async () => readAccess()) as unknown as typeof fetch;
+    const response = await browse(
+      new Request("https://viewer.test/_viewer/api?repo=team/demo.git"),
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()).history).toEqual([]);
+    expect(refreshes).toBe(1);
+    expect(response.headers.get("X-Wal-Calls")).toBe(expiredAt === "latest" ? "3" : "4");
+    expect(response.headers.get("X-Wal-Bytes")).toBe(expiredAt === "latest" ? "200" : "300");
+    expect(closed.sort()).toEqual([
+      "recovery:false",
+      "recovery:true",
+      ...(expiredAt === "latest" ? [] : ["root:false"]),
+      "root:true",
+      "session:false",
+      "session:true",
+    ]);
+  });
