@@ -7,14 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-git/go-git/v6/backend"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/transport"
-	"github.com/go-git/go-git/v6/storage"
 	gitio "github.com/go-git/go-git/v6/utils/ioutil"
 	"go.bytecodealliance.org/pkg/wasihttp"
 	wt "go.bytecodealliance.org/pkg/wit/types"
@@ -22,15 +20,10 @@ import (
 	"log"
 	"maps"
 	"net/http"
-	"net/url"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 	"slices"
 	"strings"
 )
-
-type loader struct{ s storage.Storer }
-
-func (l loader) Load(*url.URL) (storage.Storer, error) { return l.s, nil }
 
 func sessionRetention(session *wal.Session) (retentionCall, retentionCall) {
 	return func(id []byte) (wal.RetentionState, error) {
@@ -203,7 +196,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { session.Drop() }()
 	w := &readResponse{ResponseWriter: response}
-	defer w.commit()
+	defer w.WriteHeader(http.StatusOK)
 	w.Header().Set("Trailer", "X-Wal-Calls, X-Wal-Bytes")
 	defer func() {
 		u := session.Usage()
@@ -223,8 +216,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return err
 	}
 	if service == transport.UploadPackService {
-		// Keep go-git's generic error body from committing a storage failure.
-		stream := &readResponse{ResponseWriter: w}
 		capabilitiesOnly := method == http.MethodGet && r.Header.Get("Git-Protocol") == "version=2"
 		run := func() error {
 			open := func() (*store, error) { return openStore(r.Context(), session, pushFormat, limits) }
@@ -242,9 +233,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			if s.stateRoot == nil {
 				return errLogMissing
 			}
-			stream.failure = &s.failure
+			var body io.Reader = r.Body
 			if method == http.MethodPost {
-				var body io.Reader = r.Body
 				if r.Header.Get("Content-Encoding") == "gzip" {
 					decoded, err := gzip.NewReader(body)
 					if err != nil {
@@ -252,7 +242,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 					}
 					defer decoded.Close()
 					body = decoded
-					r.Header.Del("Content-Encoding")
 				}
 				tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
 				for _, id := range s.meta.Refs {
@@ -263,12 +252,27 @@ func serve(response http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return err
 				}
-				r.Body = io.NopCloser(body)
 			}
-			b := backend.New(loader{s})
-			b.ErrorLog = log.Default()
-			b.ServeHTTP(stream, r)
-			return s.failure
+			if method == http.MethodGet {
+				w.Header().Set("Expires", "Fri, 01 Jan 1980 00:00:00 GMT")
+				w.Header().Set("Pragma", "no-cache")
+				w.Header().Set("Cache-Control", "no-cache, max-age=0, must-revalidate")
+				w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			} else {
+				if strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))) != "application/x-git-upload-pack-request" {
+					http.Error(w, "403 Forbidden", http.StatusForbidden)
+					return nil
+				}
+				w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
+			}
+			err = transport.UploadPack(r.Context(), s, io.NopCloser(body), gitio.WriteNopCloser(&failedWriter{w, &s.failure}), &transport.UploadPackRequest{
+				GitProtocol: r.Header.Get("Git-Protocol"), AdvertiseRefs: method == http.MethodGet, StatelessRPC: true,
+			})
+			if err != nil && s.failure == nil && !w.sent {
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			}
+			return errors.Join(s.failure, err)
 		}
 		// Retention advances the session before recovery and prevents view expiry.
 		// V2 discovery reads only metadata, so it retries recovery without retention.
@@ -350,9 +354,6 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
 		push := &receiveStore{Storer: s, commands: commands}
 		e = transport.ReceivePack(r.Context(), push, gitio.NewReadCloser(commands, r.Body), gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
-			if len(info.Commands) == 0 {
-				return nil
-			}
 			if s.progress != nil {
 				s.progress.writer = info.Progress
 			}
@@ -374,8 +375,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			if err := s.progress.message("Publishing update...\n"); err != nil {
 				return err
 			}
-			e = s.publish(refs)
-			return e
+			return s.publish(refs)
 		}}})
 	}
 	if e != nil {
