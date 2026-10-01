@@ -1,6 +1,31 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"math"
+	"testing"
+)
+
+func TestWALSettingsKeepExactObjectGeometryAndCollectionLimit(t *testing.T) {
+	for _, count := range []int64{1, 100_000, math.MaxInt64} {
+		settings, err := walSettings(func(name string) string {
+			if name == "WAL_CREDENTIAL_MODE" {
+				return "static"
+			}
+			return ""
+		}, "repo", requestLimits{collectionObjects: count})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var options map[string]int64
+		if err := json.Unmarshal(settings.LogOptions, &options); err != nil {
+			t.Fatal(err)
+		}
+		if len(options) != 2 || options["max_object_bytes"] != 2<<20 || options["max_collection_objects"] != count {
+			t.Fatalf("unexpected WAL options: %s", settings.LogOptions)
+		}
+	}
+}
 
 func TestSessionToken(t *testing.T) {
 	for _, test := range []struct {

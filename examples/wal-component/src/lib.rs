@@ -398,6 +398,7 @@ impl Guest for Component {
         open_session(settings, false)
     }
     fn validate_backend(settings: Config) -> Result<(), Failure> {
+        log_options(&settings.log_options)?;
         executor::run(async {
             let (store, _) = connect_store(&settings)?;
             object_log::ValidatedBackend::new(
@@ -425,6 +426,7 @@ fn connect_store(
 }
 
 fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
+    let options = log_options(&settings.log_options)?;
     executor::run(async {
         let (store, transport) = connect_store(&settings)?;
         let backend = object_log::ValidatedBackend::assume_validated(
@@ -432,7 +434,6 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
             object_store::path::Path::from(settings.prefix),
         );
         let log_id = object_log::LogId::new(settings.log_id)?;
-        let options = log_options(settings.log_limits)?;
         let (log, view) = if create {
             let log = Log::open(&backend, &log_id, options).await?;
             let view = log.load().await?;
@@ -448,29 +449,14 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
     })
 }
 
-fn log_options(limits: LogLimits) -> Result<object_log::Options, Failure> {
-    let limit =
-        |value, name| usize::try_from(value).map_err(|_| Failure::Other(format!("invalid {name}")));
-    Ok(object_log::Options {
-        max_tail_entries: limit(limits.max_tail_entries, "tail entry limit")?,
-        resolution_window: limit(limits.resolution_window, "resolution window")?,
-        max_inline_operation_bytes: limit(
-            limits.max_inline_operation_bytes,
-            "inline operation limit",
-        )?,
-        max_inline_result_bytes: limit(limits.max_inline_result_bytes, "inline result limit")?,
-        max_object_refs: limit(limits.max_object_refs, "object reference limit")?,
-        max_object_bytes: limit(limits.max_object_bytes, "object byte limit")?,
-        max_commit_bytes: limit(limits.max_commit_bytes, "commit byte limit")?,
-        max_head_bytes: limit(limits.max_head_bytes, "head byte limit")?,
-        max_checkpoint_bytes: limit(limits.max_checkpoint_bytes, "checkpoint byte limit")?,
-        max_retention_ids: limit(limits.max_retention_ids, "retention limit")?,
-        max_collection_objects: limit(limits.max_collection_objects, "collection object limit")?,
-        max_collection_plan_bytes: limit(
-            limits.max_collection_plan_bytes,
-            "collection plan byte limit",
-        )?,
-    })
+fn log_options(data: &[u8]) -> Result<object_log::Options, Failure> {
+    if data.len() > 2048 {
+        return Err(Failure::Limit("options bytes".into()));
+    }
+    if data.trim_ascii_start().first() != Some(&b'{') {
+        return Err(Failure::Other("options must be a JSON object".into()));
+    }
+    serde_json::from_slice(data).map_err(|error| Failure::Other(error.to_string()))
 }
 
 #[cfg(test)]

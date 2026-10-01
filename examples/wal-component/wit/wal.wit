@@ -2,20 +2,6 @@ package object-log:storage@0.1.0;
 
 interface wal {
     enum credential-mode { static-credentials, instance-role }
-    record log-limits {
-        max-tail-entries: u64,
-        resolution-window: u64,
-        max-inline-operation-bytes: u64,
-        max-inline-result-bytes: u64,
-        max-object-refs: u64,
-        max-object-bytes: u64,
-        max-commit-bytes: u64,
-        max-head-bytes: u64,
-        max-checkpoint-bytes: u64,
-        max-retention-ids: u64,
-        max-collection-objects: u64,
-        max-collection-plan-bytes: u64,
-    }
     record transport-limits {
         max-calls: u64,
         max-bytes: u64,
@@ -31,7 +17,8 @@ interface wal {
         session-token: option<string>,
         prefix: string,
         log-id: string,
-        log-limits: log-limits,
+        // Strict JSON Options object, at most 2048 bytes; omitted fields use native defaults.
+        log-options: list<u8>,
         transport-limits: transport-limits,
     }
     variant failure { missing, expired, limit(string), other(string) }

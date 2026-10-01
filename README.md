@@ -41,6 +41,10 @@ instead compose the reusable
 configuration, signing, credentials, HTTP transport, and bounded retries behind
 the WIT interface while leaving the core crate runtime independent.
 
+The optional `serde` feature lets configuration decode directly into `Options`.
+Omitted fields use `Options::default()` and unknown fields are rejected. The
+resulting durable limits must still match exactly when reopening a namespace.
+
 ## Storage contract
 
 A backend must provide:

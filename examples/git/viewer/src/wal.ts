@@ -62,20 +62,9 @@ export function settings(logId: string): wal.Config {
     sessionToken: variable("wal_session_token") || undefined,
     prefix: variable("wal_prefix"),
     logId,
-    logLimits: {
-      maxTailEntries: 1024n,
-      resolutionWindow: 1024n,
-      maxInlineOperationBytes: 65536n,
-      maxInlineResultBytes: 4096n,
-      maxObjectRefs: 1024n,
-      maxObjectBytes: 2097152n,
-      maxCommitBytes: 1048576n,
-      maxHeadBytes: 262144n,
-      maxCheckpointBytes: 16777216n,
-      maxRetentionIds: 1024n,
-      maxCollectionObjects: BigInt(variable("wal_max_collection_objects")),
-      maxCollectionPlanBytes: 16777216n,
-    },
+    logOptions: new TextEncoder().encode(
+      `{"max_object_bytes":2097152,"max_collection_objects":${BigInt(variable("wal_max_collection_objects"))}}`,
+    ),
     transportLimits: { maxCalls: 25984n, maxBytes: 26180845568n },
   };
 }

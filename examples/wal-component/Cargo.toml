@@ -16,7 +16,7 @@ path = "tests/fixtures/credential-client.rs"
 crate-type = ["cdylib"]
 required-features = ["test-imds"]
 [dependencies]
-object-log = { path = "../.." }
+object-log = { path = "../..", features = ["serde"] }
 object_store = { version = "0.14", default-features = false, features = ["aws-base"] }
 bytes = "1"
 futures = "0.3"
@@ -30,6 +30,7 @@ http-body-util = "0.1"
 sha2 = "0.10"
 wasi = "0.13"
 uuid = { version = "1", default-features = false }
+serde_json = "1"
 [dev-dependencies]
 object-log = { path = "../..", features = ["test-util"] }
 spin-sdk = { version = "5.2", default-features = false }

@@ -44,6 +44,8 @@ mod storage_accounting_tests;
 /// reopen that namespace with the same options; changing limits requires a new
 /// namespace because format version 1 has no options-migration operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct Options {
     /// Maximum commit references in the active tail.
     pub max_tail_entries: usize,
