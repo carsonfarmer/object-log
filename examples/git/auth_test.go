@@ -57,12 +57,13 @@ type cognitoClaims struct {
 
 type authTestAuthenticator struct {
 	config    cognitoConfig
+	route     repositoryRoute
 	transport http.RoundTripper
 	now       func() time.Time
 }
 
-func (a *authTestAuthenticator) Authenticate(r *http.Request) (gitPrincipal, error) {
-	return authenticateCognito(r, a.config.get, a.transport, a.now)
+func (a *authTestAuthenticator) Authenticate(r *http.Request) (int, error) {
+	return authorizeCognito(r, a.route, a.config.get, a.transport, a.now)
 }
 
 func authTestConfig() cognitoConfig {
@@ -126,10 +127,13 @@ func authKeyResponse(t *testing.T, set jose.JSONWebKeySet) *http.Response {
 
 func authForTest(t *testing.T, transport http.RoundTripper) *authTestAuthenticator {
 	t.Helper()
-	return &authTestAuthenticator{config: authTestConfig(), transport: transport, now: time.Now}
+	return &authTestAuthenticator{
+		config: authTestConfig(), transport: transport, now: time.Now,
+		route: repositoryRoute{Action: gitRead, Repository: repositoryAccess{ReadGroups: []string{"readers"}}},
+	}
 }
 
-func authenticateForContext(t *testing.T, auth *authTestAuthenticator, ctx context.Context) (gitPrincipal, error) {
+func authenticateForContext(t *testing.T, auth *authTestAuthenticator, ctx context.Context) (int, error) {
 	t.Helper()
 	return auth.Authenticate(authRequest(authSignedToken(t, authTestClaims(time.Now()), nil)).WithContext(ctx))
 }
@@ -138,6 +142,24 @@ func authRequest(token string) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "https://git.example/sha1.git/info/refs", nil)
 	r.SetBasicAuth("oauth2", token)
 	return r
+}
+
+func authorizeForTest(t *testing.T, route repositoryRoute, claims cognitoClaims) (int, error) {
+	t.Helper()
+	get := func(name string) string {
+		switch name {
+		case "GIT_AUTH_MODE":
+			return "cognito"
+		case "GIT_COGNITO_OPERATOR_CLIENT_ID":
+			return "maintenance-client"
+		default:
+			return authTestConfig().get(name)
+		}
+	}
+	keys := authTestTransport(func(*http.Request) (*http.Response, error) {
+		return authKeyResponse(t, authTestJWKS(t)), nil
+	})
+	return authorizeRequest(authRequest(authSignedToken(t, claims, nil)), route, get, keys)
 }
 
 func TestCognitoRejectsIncompleteConfiguration(t *testing.T) {
@@ -162,12 +184,12 @@ func TestCognitoRejectsIncompleteConfiguration(t *testing.T) {
 			t.Parallel()
 			config := authTestConfig()
 			tt.change(&config)
-			if _, err := authenticateCognito(authRequest("token"), config.get, transport, time.Now); !errors.Is(err, errAuthConfig) {
+			if status, err := authorizeCognito(authRequest("token"), repositoryRoute{}, config.get, transport, time.Now); !errors.Is(err, errAuthConfig) || status != http.StatusInternalServerError {
 				t.Fatal("accepted invalid configuration")
 			}
 		})
 	}
-	if _, err := authenticateCognito(authRequest("token"), authTestConfig().get, nil, time.Now); !errors.Is(err, errAuthConfig) {
+	if status, err := authorizeCognito(authRequest("token"), repositoryRoute{}, authTestConfig().get, nil, time.Now); !errors.Is(err, errAuthConfig) || status != http.StatusInternalServerError {
 		t.Fatal("accepted missing transport")
 	}
 }
@@ -181,28 +203,35 @@ func TestCognitoAuthenticateSignedAccessTokens(t *testing.T) {
 		change func(*cognitoClaims)
 		bearer bool
 		want   error
+		status int
 	}{
 		{name: "valid Basic password", change: func(*cognitoClaims) {}},
 		{name: "valid Bearer", change: func(*cognitoClaims) {}, bearer: true},
+		{name: "access token client overrides unrelated audience", change: func(c *cognitoClaims) {
+			c.Audience = jwt.Audience{"another-resource"}
+		}},
 		{name: "expired", change: func(c *cognitoClaims) {
 			c.Expiry = jwt.NewNumericDate(now.Add(-time.Second))
-		}, want: errAuthInvalid},
-		{name: "expiry boundary", change: func(c *cognitoClaims) { c.Expiry = jwt.NewNumericDate(now) }, want: errAuthInvalid},
-		{name: "missing expiry", change: func(c *cognitoClaims) { c.Expiry = nil }, want: errAuthInvalid},
+		}, want: errAuthInvalid, status: http.StatusUnauthorized},
+		{name: "expiry boundary", change: func(c *cognitoClaims) { c.Expiry = jwt.NewNumericDate(now) }, want: errAuthInvalid, status: http.StatusUnauthorized},
+		{name: "missing expiry", change: func(c *cognitoClaims) { c.Expiry = nil }, want: errAuthInvalid, status: http.StatusUnauthorized},
 		{name: "future issue", change: func(c *cognitoClaims) {
 			c.IssuedAt = jwt.NewNumericDate(now.Add(time.Minute))
-		}, want: errAuthInvalid},
+		}, want: errAuthInvalid, status: http.StatusUnauthorized},
 		{name: "not yet valid", change: func(c *cognitoClaims) {
 			c.NotBefore = jwt.NewNumericDate(now.Add(time.Minute))
-		}, want: errAuthInvalid},
-		{name: "wrong issuer", change: func(c *cognitoClaims) { c.Issuer += "Other" }, want: errAuthInvalid},
-		{name: "wrong client", change: func(c *cognitoClaims) { c.ClientID = "another-client" }, want: errAuthInvalid},
+		}, want: errAuthInvalid, status: http.StatusUnauthorized},
+		{name: "wrong issuer", change: func(c *cognitoClaims) { c.Issuer += "Other" }, want: errAuthInvalid, status: http.StatusUnauthorized},
+		{name: "wrong client", change: func(c *cognitoClaims) { c.ClientID = "another-client" }, want: errAuthInvalid, status: http.StatusUnauthorized},
+		{name: "audience cannot substitute for access token client", change: func(c *cognitoClaims) {
+			c.ClientID, c.Audience = "another-client", jwt.Audience{"git-client"}
+		}, want: errAuthInvalid, status: http.StatusUnauthorized},
 		{name: "ID token", change: func(c *cognitoClaims) {
 			c.TokenUse, c.Audience = "id", jwt.Audience{"git-client"}
-		}, want: errAuthInvalid},
-		{name: "missing subject", change: func(c *cognitoClaims) { c.Subject = "" }, want: errAuthInvalid},
-		{name: "scope missing", change: func(c *cognitoClaims) { c.Scope = "openid" }, want: errAuthScope},
-		{name: "scope substring", change: func(c *cognitoClaims) { c.Scope = "git/access-more" }, want: errAuthScope},
+		}, want: errAuthInvalid, status: http.StatusUnauthorized},
+		{name: "missing subject", change: func(c *cognitoClaims) { c.Subject = "" }, want: errAuthInvalid, status: http.StatusUnauthorized},
+		{name: "scope missing", change: func(c *cognitoClaims) { c.Scope = "openid" }, want: errAuthScope, status: http.StatusForbidden},
+		{name: "scope substring", change: func(c *cognitoClaims) { c.Scope = "git/access-more" }, want: errAuthScope, status: http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,15 +252,9 @@ func TestCognitoAuthenticateSignedAccessTokens(t *testing.T) {
 			if tt.bearer {
 				request.Header.Set("Authorization", "Bearer "+token)
 			}
-			principal, err := auth.Authenticate(request)
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("Authenticate error = %v, want %v", err, tt.want)
-			}
-			if err == nil && !principal.Allows(repositoryAccess{ReadGroups: []string{"readers"}}, gitRead) {
-				t.Fatal("verified group did not grant configured read access")
-			}
-			if err != nil && principal.subject != "" {
-				t.Fatal("failed authentication returned a principal")
+			status, err := auth.Authenticate(request)
+			if !errors.Is(err, tt.want) || status != tt.status {
+				t.Fatalf("authorization: status=%d error=%v, want status=%d error=%v", status, err, tt.status, tt.want)
 			}
 			if calls != 1 {
 				t.Fatalf("key fetches = %d, want one", calls)
@@ -261,17 +284,17 @@ func TestCognitoAuthenticateSigningKeyRotation(t *testing.T) {
 	auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
 		return authKeyResponse(t, set), nil
 	}))
-	if principal, err := auth.Authenticate(authRequest(original)); err != nil || principal.subject != claims.Subject {
-		t.Fatalf("original key: principal=%+v error=%v", principal, err)
+	if status, err := auth.Authenticate(authRequest(original)); err != nil || status != 0 {
+		t.Fatalf("original key: status=%d error=%v", status, err)
 	}
 	set = jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 		Key: &key.PublicKey, KeyID: "key-two", Algorithm: string(jose.RS256), Use: "sig",
 	}}}
-	if principal, err := auth.Authenticate(authRequest(rotated)); err != nil || principal.subject != claims.Subject {
-		t.Fatalf("rotated key: principal=%+v error=%v", principal, err)
+	if status, err := auth.Authenticate(authRequest(rotated)); err != nil || status != 0 {
+		t.Fatalf("rotated key: status=%d error=%v", status, err)
 	}
-	if principal, err := auth.Authenticate(authRequest(original)); !errors.Is(err, errAuthInvalid) || principal.subject != "" {
-		t.Fatalf("retired key: principal=%+v error=%v", principal, err)
+	if status, err := auth.Authenticate(authRequest(original)); !errors.Is(err, errAuthInvalid) || status != http.StatusUnauthorized {
+		t.Fatalf("retired key: status=%d error=%v", status, err)
 	}
 }
 
@@ -305,7 +328,7 @@ func TestCognitoAuthenticateRejectsSignatureAndHeaderAttacks(t *testing.T) {
 			auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
 				return authKeyResponse(t, authTestJWKS(t)), nil
 			}))
-			if _, err := auth.Authenticate(authRequest(tt.token)); !errors.Is(err, errAuthInvalid) {
+			if status, err := auth.Authenticate(authRequest(tt.token)); !errors.Is(err, errAuthInvalid) || status != http.StatusUnauthorized {
 				t.Fatalf("Authenticate error = %v, want invalid token", err)
 			}
 		})
@@ -365,9 +388,10 @@ func TestRequestAccessToken(t *testing.T) {
 func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		get  func() *http.Response
-		want error
+		name   string
+		get    func() *http.Response
+		want   error
+		status int
 	}{
 		{name: "HTTP failure", get: func() *http.Response {
 			return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader("down"))}
@@ -384,7 +408,7 @@ func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 		{name: "malformed", get: func() *http.Response {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{"))}
 		}},
-		{name: "empty keys", get: func() *http.Response { return authKeyResponse(t, jose.JSONWebKeySet{}) }, want: errAuthInvalid},
+		{name: "empty keys", get: func() *http.Response { return authKeyResponse(t, jose.JSONWebKeySet{}) }, want: errAuthInvalid, status: http.StatusUnauthorized},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -404,8 +428,12 @@ func TestCognitoKeyFetchFailuresDenyAndCloseBodies(t *testing.T) {
 			if want == nil {
 				want = errAuthUnavailable
 			}
-			if _, err := authenticateForContext(t, auth, context.Background()); !errors.Is(err, want) {
-				t.Fatalf("key error = %v, want unavailable", err)
+			wantStatus := tt.status
+			if wantStatus == 0 {
+				wantStatus = http.StatusServiceUnavailable
+			}
+			if status, err := authenticateForContext(t, auth, context.Background()); !errors.Is(err, want) || status != wantStatus {
+				t.Fatalf("key response: status=%d error=%v, want status=%d error=%v", status, err, wantStatus, want)
 			}
 			if calls != 1 {
 				t.Fatalf("key fetches = %d, want one", calls)
@@ -575,7 +603,7 @@ func TestCognitoKeyFetchDeadline(t *testing.T) {
 	})
 }
 
-func TestGitPrincipalActionsAreIndependentAndDenyByDefault(t *testing.T) {
+func TestCognitoActionsAreIndependentAndDenyByDefault(t *testing.T) {
 	t.Parallel()
 	policy := repositoryAccess{
 		ReadGroups: []string{"readers"}, WriteGroups: []string{"writers"}, AdminGroups: []string{"admins"},
@@ -600,16 +628,21 @@ func TestGitPrincipalActionsAreIndependentAndDenyByDefault(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			principal := gitPrincipal{subject: "person-123", groups: tt.groups}
-			if got := principal.Allows(policy, tt.action); got != tt.want {
-				t.Fatalf("Allows = %v, want %v", got, tt.want)
+			auth := authForTest(t, authTestTransport(func(*http.Request) (*http.Response, error) {
+				return authKeyResponse(t, authTestJWKS(t)), nil
+			}))
+			auth.route = repositoryRoute{Action: tt.action, Repository: policy}
+			claims := authTestClaims(time.Now())
+			claims.Groups = tt.groups
+			request := authRequest(authSignedToken(t, claims, nil))
+			status, err := auth.Authenticate(request)
+			if (status == 0 && err == nil) != tt.want {
+				t.Fatalf("authorization: status=%d error=%v, want allowed=%v", status, err, tt.want)
 			}
-			if principal.Allows(repositoryAccess{}, tt.action) {
-				t.Fatal("empty policy granted access")
+			auth.route.Repository = repositoryAccess{}
+			if status, err := auth.Authenticate(request); status != http.StatusForbidden || err == nil {
+				t.Fatalf("empty policy: status=%d error=%v", status, err)
 			}
 		})
-	}
-	if (gitPrincipal{}).Allows(policy, gitRead) {
-		t.Fatal("zero principal granted access")
 	}
 }

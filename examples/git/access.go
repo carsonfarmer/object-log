@@ -30,28 +30,13 @@ func authorizeRequest(r *http.Request, route repositoryRoute, getenv func(string
 		}
 		return 0, nil
 	case "cognito":
-		principal, err := authenticateCognito(
+		return authorizeCognito(
 			r,
+			route,
 			getenv,
 			transport,
 			time.Now,
 		)
-		if errors.Is(err, errAuthConfig) {
-			return http.StatusInternalServerError, err
-		}
-		if errors.Is(err, errAuthUnavailable) {
-			return http.StatusServiceUnavailable, err
-		}
-		if errors.Is(err, errAuthScope) {
-			return http.StatusForbidden, err
-		}
-		if err != nil {
-			return http.StatusUnauthorized, err
-		}
-		if !principal.Allows(route.Repository, route.Action) {
-			return http.StatusForbidden, errors.New("repository access denied")
-		}
-		return 0, nil
 	default:
 		return http.StatusInternalServerError, errors.New("GIT_AUTH_MODE must be cognito, password or anonymous")
 	}

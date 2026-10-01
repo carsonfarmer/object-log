@@ -29,48 +29,49 @@ var (
 	errAuthConfig      = errors.New("invalid Cognito issuer, client, operator, scope or transport configuration")
 )
 
-func authenticateCognito(
+func authorizeCognito(
 	r *http.Request,
+	route repositoryRoute,
 	getenv func(string) string,
 	transport http.RoundTripper,
 	now func() time.Time,
-) (gitPrincipal, error) {
+) (int, error) {
 	issuer, clientID := getenv("GIT_COGNITO_ISSUER"), getenv("GIT_COGNITO_CLIENT_ID")
 	operatorID, scopes := getenv("GIT_COGNITO_OPERATOR_CLIENT_ID"), strings.Fields(getenv("GIT_COGNITO_SCOPE"))
 	endpoint, err := url.ParseRequestURI(issuer)
 	invalidIssuer := err != nil || endpoint.Scheme != "https" || endpoint.Host == ""
 	invalidClient := clientID == "" || operatorID == clientID
 	if invalidIssuer || invalidClient || len(scopes) != 1 || transport == nil {
-		return gitPrincipal{}, errAuthConfig
+		return http.StatusInternalServerError, errAuthConfig
 	}
 	encoded, err := requestAccessToken(r)
 	if err != nil {
-		return gitPrincipal{}, err
+		return http.StatusUnauthorized, err
 	}
 	if r.Context().Err() != nil {
-		return gitPrincipal{}, errAuthUnavailable
+		return http.StatusServiceUnavailable, errAuthUnavailable
 	}
 	token, err := jwt.ParseSigned(encoded, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
-		return gitPrincipal{}, errAuthInvalid
+		return http.StatusUnauthorized, errAuthInvalid
 	}
 	fetchContext, cancel := context.WithTimeout(r.Context(), authFetchTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, issuer+"/.well-known/jwks.json", nil)
 	if err != nil {
-		return gitPrincipal{}, errAuthConfig
+		return http.StatusInternalServerError, errAuthConfig
 	}
 	// One synchronous request prevents redirects and background key fetches.
 	response, err := transport.RoundTrip(request)
 	if err != nil {
-		return gitPrincipal{}, errAuthUnavailable
+		return http.StatusServiceUnavailable, errAuthUnavailable
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, authJWKSBytes+1))
 	var keys jose.JSONWebKeySet
 	if err != nil || fetchContext.Err() != nil || response.StatusCode != http.StatusOK ||
 		len(body) > authJWKSBytes || json.Unmarshal(body, &keys) != nil {
-		return gitPrincipal{}, errAuthUnavailable
+		return http.StatusServiceUnavailable, errAuthUnavailable
 	}
 	var claims struct {
 		jwt.Claims
@@ -80,7 +81,7 @@ func authenticateCognito(
 		Groups   []string `json:"cognito:groups"`
 	}
 	if token.Claims(keys, &claims) != nil {
-		return gitPrincipal{}, errAuthInvalid
+		return http.StatusUnauthorized, errAuthInvalid
 	}
 	// Cognito access tokens identify the app by client_id, not ID-token aud.
 	operator := operatorID != "" && claims.ClientID == operatorID
@@ -88,13 +89,23 @@ func authenticateCognito(
 	if claims.Expiry == nil || !current.Before(claims.Expiry.Time()) ||
 		claims.ValidateWithLeeway(jwt.Expected{Issuer: issuer, Time: current}, 0) != nil ||
 		(claims.ClientID != clientID && !operator) || claims.TokenUse != "access" || claims.Subject == "" {
-		return gitPrincipal{}, errAuthInvalid
+		return http.StatusUnauthorized, errAuthInvalid
 	}
 	if !slices.Contains(strings.Fields(claims.Scope), scopes[0]) ||
 		(operator && !slices.Contains(strings.Fields(claims.Scope), "git/maintenance")) {
-		return gitPrincipal{}, errAuthScope
+		return http.StatusForbidden, errAuthScope
 	}
-	return gitPrincipal{subject: claims.Subject, groups: claims.Groups, operator: operator}, nil
+	// Actions are independent: write and admin do not imply read. Empty lists deny.
+	allowed := [...][]string{
+		route.Repository.ReadGroups, route.Repository.WriteGroups, route.Repository.AdminGroups,
+	}
+	if route.Action > gitAdmin || (operator && route.Action != gitAdmin) ||
+		(!operator && !slices.ContainsFunc(claims.Groups, func(group string) bool {
+			return group != "" && slices.Contains(allowed[route.Action], group)
+		})) {
+		return http.StatusForbidden, errors.New("repository access denied")
+	}
+	return 0, nil
 }
 
 func requestAccessToken(r *http.Request) (string, error) {
@@ -131,24 +142,4 @@ type repositoryAccess struct {
 	ReadGroups  []string `json:"read_groups"`
 	WriteGroups []string `json:"write_groups"`
 	AdminGroups []string `json:"admin_groups"`
-}
-
-type gitPrincipal struct {
-	subject  string
-	groups   []string
-	operator bool
-}
-
-// Actions are independent: write and admin do not imply read. Empty lists deny.
-func (p gitPrincipal) Allows(policy repositoryAccess, action gitAction) bool {
-	if p.subject == "" || action > gitAdmin {
-		return false
-	}
-	if p.operator {
-		return action == gitAdmin
-	}
-	allowed := [...][]string{policy.ReadGroups, policy.WriteGroups, policy.AdminGroups}[action]
-	return slices.ContainsFunc(p.groups, func(group string) bool {
-		return group != "" && slices.Contains(allowed, group)
-	})
 }

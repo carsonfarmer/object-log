@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v6/plumbing/transport"
 )
@@ -272,13 +273,17 @@ func TestDiscoveredLogMaintenanceRequiresScopeOperator(t *testing.T) {
 		if err != nil || route.LogID != "auto-123" || route.Service != operation || route.Action != gitAdmin {
 			t.Fatalf("route=%+v error=%v", route, err)
 		}
-		for _, principal := range []gitPrincipal{{}, {subject: "repository-admin", groups: []string{"operators"}}} {
-			if principal.Allows(route.Repository, route.Action) {
+		claims := authTestClaims(time.Now())
+		claims.Groups = []string{"operators"}
+		for _, subject := range []string{"", "repository-admin"} {
+			claims.Subject = subject
+			if status, err := authorizeForTest(t, route, claims); status == 0 || err == nil {
 				t.Fatal("discovered log bypassed repository policy without a scope operator")
 			}
 		}
-		if !(gitPrincipal{subject: "scheduler", operator: true}).Allows(route.Repository, route.Action) {
-			t.Fatal("scope operator cannot maintain a discovered log")
+		claims.Subject, claims.ClientID, claims.Scope = "scheduler", "maintenance-client", "git/access git/maintenance"
+		if status, err := authorizeForTest(t, route, claims); status != 0 || err != nil {
+			t.Fatalf("scope operator cannot maintain a discovered log: status=%d error=%v", status, err)
 		}
 		request.Method = http.MethodGet
 		if route, err := resolveRepository(nil, request); !errors.Is(err, errRepositoryMethod) || route.Action != gitAdmin {
@@ -342,9 +347,11 @@ func TestRepositoryRoutePolicyIsIndependentPerRepositoryAndAction(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			principal := gitPrincipal{subject: "person", groups: []string{tt.group}}
-			if got := principal.Allows(route.Repository, route.Action); got != tt.want {
-				t.Fatalf("permission = %v, want %v", got, tt.want)
+			claims := authTestClaims(time.Now())
+			claims.Groups = []string{tt.group}
+			status, err := authorizeForTest(t, route, claims)
+			if (status == 0 && err == nil) != tt.want {
+				t.Fatalf("authorization: status=%d error=%v, want allowed=%v", status, err, tt.want)
 			}
 		})
 	}
@@ -372,15 +379,21 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		}
 		first = route
 	}
-	principal := gitPrincipal{subject: "writer", groups: []string{"writers"}}
-	if !principal.Allows(first.Repository, gitWrite) || principal.Allows(first.Repository, gitRead) {
-		t.Fatal("automatic policy lost independent permissions")
+	claims := authTestClaims(time.Now())
+	claims.Groups = []string{"writers"}
+	if status, err := authorizeForTest(t, first, claims); status != 0 || err != nil {
+		t.Fatalf("automatic write policy: status=%d error=%v", status, err)
+	}
+	read := first
+	read.Action = gitRead
+	if status, err := authorizeForTest(t, read, claims); status != http.StatusForbidden || err == nil {
+		t.Fatalf("automatic policy lost independent permissions: status=%d error=%v", status, err)
 	}
 	private, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/team/private.git/git-receive-pack", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal.Allows(private.Repository, gitWrite) || private.LogID == first.LogID {
+	if status, err := authorizeForTest(t, private, claims); status != http.StatusForbidden || err == nil || private.LogID == first.LogID {
 		t.Fatal("exact denial or repository isolation lost")
 	}
 	for _, name := range []string{"*", "team/../project", "team//project", "%70roject"} {
@@ -420,9 +433,14 @@ func TestBackendValidationIsGlobalAdministration(t *testing.T) {
 				route.Action != gitAdmin || route.Name != "" || route.LogID != "" {
 				t.Fatalf("%s %s route=%+v error=%v", method, path, route, err)
 			}
-			if (gitPrincipal{subject: "admin-member", groups: []string{"operators"}}).Allows(route.Repository, route.Action) ||
-				!(gitPrincipal{subject: "operator", operator: true}).Allows(route.Repository, route.Action) {
+			claims := authTestClaims(time.Now())
+			claims.Groups = []string{"operators"}
+			if status, err := authorizeForTest(t, route, claims); status != http.StatusForbidden || err == nil {
 				t.Fatal("global validation inherited repository permissions")
+			}
+			claims.ClientID, claims.Scope = "maintenance-client", "git/access git/maintenance"
+			if status, err := authorizeForTest(t, route, claims); status != 0 || err != nil {
+				t.Fatalf("scope operator cannot validate the backend: status=%d error=%v", status, err)
 			}
 		}
 	}
