@@ -12,6 +12,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	packutil "github.com/go-git/go-git/v6/plumbing/format/packfile/util"
 	gitbinary "github.com/go-git/go-git/v6/utils/binary"
+	gitio "github.com/go-git/go-git/v6/utils/ioutil"
 )
 
 // Keep optional representations out of sparse catalog reads when they grow.
@@ -52,6 +53,9 @@ func (d storedDelta) Reader() (result io.ReadCloser, err error) {
 	defer func() {
 		if d.failure != nil {
 			observeRead(d.failure, err)
+			if err == nil {
+				result = watchedReader(result, d.failure)
+			}
 		}
 	}()
 	if d.delta.StoredSize == 0 {
@@ -66,25 +70,7 @@ func (d storedDelta) Reader() (result io.ReadCloser, err error) {
 		_ = source.Close()
 		return nil, err
 	}
-	return &deltaReader{ReadCloser: reader, source: source, failure: d.failure}, nil
-}
-
-type deltaReader struct {
-	io.ReadCloser
-	source  io.Closer
-	failure *error
-}
-
-func (r *deltaReader) Read(p []byte) (int, error) {
-	n, err := r.ReadCloser.Read(p)
-	if err != io.EOF && r.failure != nil {
-		observeRead(r.failure, err)
-	}
-	return n, err
-}
-
-func (r *deltaReader) Close() error {
-	return errors.Join(r.ReadCloser.Close(), r.source.Close())
+	return gitio.NewReadCloser(reader, gitio.CloserFunc(func() error { return errors.Join(reader.Close(), source.Close()) })), nil
 }
 
 type packOffsets map[int64]plumbing.Hash

@@ -54,7 +54,7 @@ func openStore(ctx context.Context, session *wal.Session, format config.ObjectFo
 		}
 	}()
 	s.meta = rootMeta{Format: format, Refs: map[string]string{}}
-	recovery, e := unwrap(session.Recover)
+	recovery, e := storeCall(s, session.Recover)
 	if e != nil {
 		return nil, e
 	}
@@ -174,83 +174,44 @@ func (s *store) RawObjectWriter(kind plumbing.ObjectType, size int64) (io.WriteC
 		_ = codec.Close()
 		return nil, err
 	}
-	return &objectWriter{s: s, kind: kind, size: size, codec: codec, sink: sink}, nil
+	writer := &objectWriter{Writer: codec, remaining: size}
+	return closingWriter(s.ctx, writer, &s.failure, func() (err error) {
+		defer func() {
+			if sink.writer != nil {
+				sink.writer.close()
+			}
+		}()
+		if err := errors.Join(s.failure, codec.Close()); err != nil {
+			return err
+		}
+		if writer.remaining != 0 {
+			return fmt.Errorf("incomplete object")
+		}
+		id := codec.Hash().String()
+		replaced := len(s.pending[id].Inline)
+		if sink.writer == nil && int64(len(sink.prefix)) > s.limits.inlineRemaining(s.pendingInline, replaced) {
+			if err := sink.spill(); err != nil {
+				return err
+			}
+		}
+		item := indexed{objectMeta: objectMeta{ID: id, Kind: kind, Size: size, Encoding: "zlib", StoredSize: sink.written}}
+		if sink.writer == nil {
+			item.Inline = sink.prefix
+		} else {
+			item.root, err = sink.writer.finish()
+			if err != nil {
+				return err
+			}
+			s.owned = append(s.owned, item.root)
+		}
+		sink.prefix = nil
+		s.pendingInline += int64(len(item.Inline) - replaced)
+		s.pending[id] = item
+		return nil
+	}), nil
 }
 func (*store) SetEncodedObject(plumbing.EncodedObject) (plumbing.Hash, error) {
 	return plumbing.ZeroHash, errors.ErrUnsupported
-}
-
-type objectWriter struct {
-	s             *store
-	kind          plumbing.ObjectType
-	size, written int64
-	codec         *objfile.Writer
-	sink          *objectSink
-	closed        bool
-	err           error
-}
-
-func (w *objectWriter) Write(p []byte) (int, error) {
-	if err := w.s.ctx.Err(); err != nil {
-		w.err = err
-		return 0, err
-	}
-	if w.closed || int64(len(p)) > w.size-w.written {
-		if w.err == nil {
-			w.err = fmt.Errorf("invalid object write")
-		}
-		return 0, w.err
-	}
-	n, err := w.codec.Write(p)
-	w.written += int64(n)
-	if err != nil {
-		w.err = err
-	}
-	return n, err
-}
-func (w *objectWriter) Close() (err error) {
-	if w.closed {
-		return w.err
-	}
-	w.closed = true
-	defer func() {
-		w.err = err
-		observeRead(&w.s.failure, err)
-		if w.sink.writer != nil {
-			w.sink.writer.close()
-		}
-	}()
-	closed := w.codec.Close()
-	if w.err != nil {
-		return w.err
-	}
-	if closed != nil {
-		return closed
-	}
-	if w.written != w.size {
-		return fmt.Errorf("incomplete object")
-	}
-	id := w.codec.Hash().String()
-	replaced := len(w.s.pending[id].Inline)
-	if w.sink.writer == nil && int64(len(w.sink.prefix)) > w.s.limits.inlineRemaining(w.s.pendingInline, replaced) {
-		if err := w.sink.spill(); err != nil {
-			return err
-		}
-	}
-	item := indexed{objectMeta: objectMeta{ID: id, Kind: w.kind, Size: w.size, Encoding: "zlib", StoredSize: w.sink.written}}
-	if w.sink.writer == nil {
-		item.Inline = w.sink.prefix
-	} else {
-		item.root, err = w.sink.writer.finish()
-		if err != nil {
-			return err
-		}
-		w.s.owned = append(w.s.owned, item.root)
-	}
-	w.sink.prefix = nil
-	w.s.pendingInline += int64(len(item.Inline) - replaced)
-	w.s.pending[id] = item
-	return nil
 }
 
 // Keep tiny compressed objects in the catalog without creating separate WAL objects.
@@ -299,8 +260,8 @@ func (o *storedObject) Writer() (io.WriteCloser, error) { return nil, fmt.Errorf
 func (o *storedObject) Reader() (reader io.ReadCloser, err error) {
 	defer func() {
 		observeRead(&o.s.failure, err)
-		if codec, ok := reader.(*looseReader); ok {
-			codec.failure = &o.s.failure
+		if err == nil {
+			reader = watchedReader(reader, &o.s.failure)
 		}
 	}()
 	if err := o.s.limits.checkObject(o.item.Kind, o.item.Size); err != nil {
@@ -413,21 +374,18 @@ func (s *store) publishRoot(root *wal.Object) (wal.Outcome, error) {
 	if _, e := rand.Read(transactionID); e != nil {
 		return wal.Outcome{}, e
 	}
-	candidate, e := unwrap(func() wt.Result[*wal.Candidate, wal.Failure] {
+	candidate, e := storeCall(s, func() wt.Result[*wal.Candidate, wal.Failure] {
 		return s.recovery.Prepare(transactionID, nil, nil, []*wal.Object{root})
 	})
 	if e != nil {
 		return wal.Outcome{}, e
 	}
 	defer candidate.Drop()
-	if e := s.ctx.Err(); e != nil {
-		return wal.Outcome{}, e
-	}
-	return unwrap(candidate.Publish)
+	return storeCall(s, candidate.Publish)
 }
 
 func (s *store) acceptRecovery(recovery *wal.Recovery) (*wal.Object, uint64, error) {
-	current, err := unwrap(recovery.Latest)
+	current, err := storeCall(s, recovery.Latest)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -488,22 +446,14 @@ func (s *store) Close() {
 	}
 }
 func (s *store) readNode(root *wal.Object) (wal.Entry, error) {
-	if err := s.ctx.Err(); err != nil {
-		observeRead(&s.failure, err)
-		return wal.Entry{}, err
-	}
-	entry, e := unwrap(func() wt.Result[wal.Entry, wal.Failure] { return s.recovery.ReadNode(root) })
-	observeRead(&s.failure, e)
+	entry, e := storeCall(s, func() wt.Result[wal.Entry, wal.Failure] { return s.recovery.ReadNode(root) })
 	if e == nil {
 		s.owned = append(s.owned, entry.Objects...)
 	}
 	return entry, e
 }
 func (s *store) putNode(b []byte, children []*wal.Object) (*wal.Object, error) {
-	if err := s.ctx.Err(); err != nil {
-		return nil, err
-	}
-	o, e := unwrap(func() wt.Result[*wal.Object, wal.Failure] { return s.recovery.PutNode(b, children) })
+	o, e := storeCall(s, func() wt.Result[*wal.Object, wal.Failure] { return s.recovery.PutNode(b, children) })
 	if e == nil {
 		s.owned = append(s.owned, o)
 	}
@@ -515,3 +465,13 @@ type pendingError struct{}
 func (*pendingError) Error() string { return "publication pending" }
 
 func (s *store) LowMemoryMode() bool { return true }
+
+// Every component operation checks the request deadline and records errors
+// before go-git has an opportunity to discard them.
+func storeCall[T any](s *store, call func() wt.Result[T, wal.Failure]) (value T, err error) {
+	if err = s.ctx.Err(); err == nil {
+		value, err = unwrap(call)
+	}
+	observeRead(&s.failure, err)
+	return value, err
+}

@@ -5,12 +5,9 @@ import (
 	"maps"
 )
 
-// A leaf fits the WAL's default child-reference limit. Internal nodes split
-// one hex digit at a time, so they have at most sixteen children.
-const indexLeafSize = 1024
-
-// Pack new leaves more tightly without changing the legal reader limit.
-const indexLeafTarget = 128
+// Each leaf holds at most 128 items; branches split one hexadecimal digit
+// at a time and hold at most sixteen children.
+const indexLeafSize = 128
 
 type radixNode[V, H any] struct {
 	Items    map[string]V
@@ -38,7 +35,7 @@ func updateRadix[V, H any](prefix string, node radixNode[V, H], updates map[stri
 		items := make(map[string]V, len(node.Items)+len(updates))
 		maps.Copy(items, node.Items)
 		maps.Copy(items, updates)
-		if len(items) <= indexLeafTarget {
+		if len(items) <= indexLeafSize {
 			return save(radixNode[V, H]{Items: items})
 		}
 		updates = items

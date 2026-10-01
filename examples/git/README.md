@@ -150,8 +150,9 @@ at most another 2 KiB of payload before spilling. Retained delta data has a sepa
 `git_max_catalog_bytes` allowance, so these two pending payload pools total at
 most 128 MiB under the defaults. This excludes slice capacity, maps, allocator
 overhead, and importer and storage buffers; it is not a process-memory ceiling.
-New catalog leaves target 128 items. Inline objects and deltas share a fixed
-512 KiB payload allowance per leaf; readers still accept up to 1,024 items.
+Catalog leaves hold at most 128 items. Inline objects and deltas share a fixed
+512 KiB payload allowance per leaf. Larger leaves from discarded revisions are
+unsupported; use a fresh storage namespace.
 When upgrading an existing repository containing larger objects, retain a
 configured limit high enough to read them; lowering it blocks those objects.
 

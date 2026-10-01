@@ -69,7 +69,7 @@ func TestLooseRoundTripAndValidation(t *testing.T) {
 					t.Fatal(err)
 				}
 				var failure error
-				r.(*looseReader).failure = &failure
+				r = watchedReader(r, &failure)
 				got, err := io.ReadAll(r)
 				if err != nil || !bytes.Equal(got, data) {
 					t.Fatalf("roundtrip: %v", err)
@@ -96,7 +96,7 @@ func TestLooseRoundTripAndValidation(t *testing.T) {
 					r, err = readLoose(source, format, test.kind, test.size, test.id)
 					if err == nil {
 						failure = nil
-						r.(*looseReader).failure = &failure
+						r = watchedReader(r, &failure)
 						_, err = io.ReadAll(r)
 						_ = r.Close()
 						if failure == nil || !errors.Is(failure, err) {
@@ -131,7 +131,7 @@ func TestLooseReaderRecordsCloseFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var failure error
-	r.(*looseReader).failure = &failure
+	r = watchedReader(r, &failure)
 	if err := r.Close(); !errors.Is(err, want) || !errors.Is(failure, want) {
 		t.Fatalf("close failure was not retained: %v / %v", err, failure)
 	}
@@ -219,7 +219,7 @@ func TestInlineMetadataBound(t *testing.T) {
 	}
 	meta.Inline = meta.Inline[:inlineObjectLimit]
 	meta.StoredSize--
-	leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafTarget)}
+	leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafSize)}
 	for i := range leaf.Items {
 		leaf.Items[i] = meta
 	}
