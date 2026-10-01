@@ -223,51 +223,61 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		return err
 	}
 	if service == transport.UploadPackService {
-		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
-			run := func() error {
-				s, err := openStore(r.Context(), session, pushFormat, limits)
-				if err != nil {
-					return err
-				}
-				defer s.Close()
-				if s.stateRoot == nil {
-					return errLogMissing
-				}
-				attempt.failure = &s.failure
-				if request.Method == http.MethodPost {
-					var body io.Reader = request.Body
-					if request.Header.Get("Content-Encoding") == "gzip" {
-						decoded, err := gzip.NewReader(body)
-						if err != nil {
-							return err
-						}
-						defer decoded.Close()
-						body = decoded
-						request.Header.Del("Content-Encoding")
-					}
-					tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
-					for _, id := range s.meta.Refs {
-						tips = append(tips, plumbing.NewHash(id))
-					}
-					body = http.MaxBytesReader(nil, io.NopCloser(body), limits.negotiationBytes)
-					body, err = filterFetch(s, tips, body, strings.Contains(request.Header.Get("Git-Protocol"), "version=2"))
+		// Keep go-git's generic error body from committing a storage failure.
+		stream := &readResponse{ResponseWriter: w}
+		capabilitiesOnly := method == http.MethodGet && r.Header.Get("Git-Protocol") == "version=2"
+		run := func() error {
+			open := func() (*store, error) { return openStore(r.Context(), session, pushFormat, limits) }
+			var s *store
+			var err error
+			if capabilitiesOnly {
+				s, err = retryOpenStore(open, refresh)
+			} else {
+				s, err = open()
+			}
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if s.stateRoot == nil {
+				return errLogMissing
+			}
+			stream.failure = &s.failure
+			if method == http.MethodPost {
+				var body io.Reader = r.Body
+				if r.Header.Get("Content-Encoding") == "gzip" {
+					decoded, err := gzip.NewReader(body)
 					if err != nil {
 						return err
 					}
-					request.Body = io.NopCloser(body)
+					defer decoded.Close()
+					body = decoded
+					r.Header.Del("Content-Encoding")
 				}
-				b := backend.New(loader{s})
-				b.ErrorLog = log.Default()
-				b.ServeHTTP(attempt, request)
-				return s.failure
+				tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
+				for _, id := range s.meta.Refs {
+					tips = append(tips, plumbing.NewHash(id))
+				}
+				body = http.MaxBytesReader(nil, io.NopCloser(body), limits.negotiationBytes)
+				body, err = filterFetch(s, tips, body, strings.Contains(r.Header.Get("Git-Protocol"), "version=2"))
+				if err != nil {
+					return err
+				}
+				r.Body = io.NopCloser(body)
 			}
-			// V2 discovery writes only capabilities from the recovered metadata.
-			if request.Method == http.MethodGet && request.Header.Get("Git-Protocol") == "version=2" {
-				return run()
-			}
+			b := backend.New(loader{s})
+			b.ErrorLog = log.Default()
+			b.ServeHTTP(stream, r)
+			return s.failure
+		}
+		// Retention advances the session before recovery and prevents view expiry.
+		// V2 discovery reads only metadata, so it retries recovery without retention.
+		if capabilitiesOnly {
+			e = run()
+		} else {
 			retain, release := sessionRetention(session)
-			return retained(r.Context(), retain, release, run)
-		})
+			e = retained(r.Context(), retain, release, run)
+		}
 		if e != nil {
 			log.Printf("git read failed: %v", e)
 			if !w.sent {
@@ -306,21 +316,13 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Git storage unavailable", status)
 		return
 	}
-	defer func() {
-		if s != nil {
-			s.Close()
-		}
-	}()
+	defer func() { s.Close() }()
 	if maintenance {
 		report, err := s.maintain()
 		writeMaintenance(w, report, err)
 		return
 	}
-	if s.stateRoot == nil && service != transport.ReceivePackService {
-		http.NotFound(w, r)
-		return
-	}
-	if service == transport.ReceivePackService && method == http.MethodPost {
+	if method == http.MethodPost {
 		e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {
 			s.Close()
 			if err := refresh(); err != nil {
@@ -339,10 +341,10 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if service == transport.ReceivePackService && method == http.MethodGet {
+	if method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
 		e = advertise(w, s, s.stateRoot == nil)
-	} else if service == transport.ReceivePackService {
+	} else {
 		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 		s.progress = newReceiveProgress(w, pushCapabilities, cancel)
 		commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
@@ -381,7 +383,5 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		if !w.sent {
 			http.Error(w, "Git operation failed", operationStatus(e))
 		}
-	} else if !w.sent {
-		w.WriteHeader(http.StatusOK)
 	}
 }

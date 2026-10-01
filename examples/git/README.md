@@ -318,7 +318,10 @@ verify those bytes. Continuous readers can delay cleanup; scheduling alone
 does not remove that constraint.
 
 Every fetch acquires WAL retention before opening catalog data and releases it
-after the last response byte. If a stopped instance loses a retention ID, stop
+after the last response byte. Acquisition updates the recovered view, and retention
+prevents collection from expiring that view; fetch bodies do not need replay.
+Capability-only protocol-v2 discovery uses no retention and retries expired
+recovery once before output. If a stopped instance loses a retention ID, stop
 new traffic and drain all readers. Start one authenticated instance with
 `wal_recover_retentions_after_drain = "true"`, call
 `/<repository>/recover-retentions-after-drain` for each configured repository,
