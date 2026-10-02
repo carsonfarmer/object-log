@@ -66,15 +66,20 @@ func (r *componentBody) Close() error {
 	return r.ReadCloser.Close()
 }
 
-type componentResponse struct{ http.ResponseWriter }
+type componentResponse struct {
+	http.ResponseWriter
+	sent bool
+}
 
-func (w componentResponse) Write(p []byte) (int, error) {
+func (w *componentResponse) Write(p []byte) (int, error) {
+	w.sent = true
 	imports.Lock()
 	defer finishImports()
 	return w.ResponseWriter.Write(p)
 }
 
-func (w componentResponse) WriteHeader(status int) {
+func (w *componentResponse) WriteHeader(status int) {
+	w.sent = true
 	imports.Lock()
 	defer finishImports()
 	w.ResponseWriter.WriteHeader(status)

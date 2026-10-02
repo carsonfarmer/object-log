@@ -58,36 +58,36 @@ func advertise(w io.Writer, s *store, unknownFormat bool) error {
 }
 func init() { wasihttp.HandleFunc(serve) }
 func main() {}
-func serve(response http.ResponseWriter, r *http.Request) {
-	response = componentResponse{response}
+func serve(output http.ResponseWriter, r *http.Request) {
+	w := &componentResponse{ResponseWriter: output}
 	requestID := rand.Text()
-	response.Header().Set("X-Request-ID", requestID)
+	w.Header().Set("X-Request-ID", requestID)
 	if r.Body != nil {
 		r.Body = &componentBody{ReadCloser: r.Body}
 		defer r.Body.Close()
 	}
-	response.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
-	response.Header().Set("X-Git-Target-ID", targetID(getConfig))
+	w.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
+	w.Header().Set("X-Git-Target-ID", targetID(getConfig))
 	repositories, configErr := loadRepositories(getConfig)
 	route, e := resolveRepository(repositories, r)
 	if configErr != nil && route.Service != "validate-backend" {
-		http.Error(response, configErr.Error(), http.StatusInternalServerError)
+		http.Error(w, configErr.Error(), http.StatusInternalServerError)
 		return
 	}
 	if errors.Is(e, errRepositoryMethod) {
-		response.Header().Set("Allow", route.Method)
-		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", route.Method)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if e != nil {
-		http.NotFound(response, r)
+		http.NotFound(w, r)
 		return
 	}
 	if status, err := authorizeRequest(r, route, getConfig, keyTransport{}); err != nil {
 		if status == http.StatusUnauthorized {
-			response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
 		}
-		http.Error(response, err.Error(), status)
+		http.Error(w, err.Error(), status)
 		return
 	}
 	service, method := route.Service, route.Method
@@ -106,14 +106,14 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		}
 		if e != nil {
 			log.Printf("backend validation failed id=%s: %v", requestID, e)
-			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
+			http.Error(w, "backend validation failed", http.StatusServiceUnavailable)
 		} else {
-			response.WriteHeader(http.StatusNoContent)
+			w.WriteHeader(http.StatusNoContent)
 		}
 		return
 	}
 	if e != nil {
-		http.Error(response, e.Error(), http.StatusInternalServerError)
+		http.Error(w, e.Error(), http.StatusInternalServerError)
 		return
 	}
 	if status := retentionRecoveryStatus(limits.recoverRetentions, recoverRetentions); status != 0 {
@@ -121,27 +121,27 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		if status == http.StatusServiceUnavailable {
 			message = "service is draining retained readers"
 		}
-		http.Error(response, message, status)
+		http.Error(w, message, status)
 		return
 	}
 	if limits.readOnly && (route.Action == gitWrite || maintenance || collect) {
-		http.Error(response, "repository is read-only", http.StatusForbidden)
+		http.Error(w, "repository is read-only", http.StatusForbidden)
 		return
 	}
-	r, cancel, e := limitedRequest(response, r, limits, service == transport.ReceivePackService && method == http.MethodPost)
+	r, cancel, e := limitedRequest(w, r, limits, service == transport.ReceivePackService && method == http.MethodPost)
 	if e != nil {
-		http.Error(response, e.Error(), operationStatus(e))
+		http.Error(w, e.Error(), operationStatus(e))
 		return
 	}
 	defer cancel()
 	if err := r.Context().Err(); err != nil {
-		http.Error(response, err.Error(), operationStatus(err))
+		http.Error(w, err.Error(), operationStatus(err))
 		return
 	}
 	if service == "authorize-read" {
-		response.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Cache-Control", "no-store")
 		log.Printf("wal %s %s id=%s calls=0 bytes=0", r.Method, r.URL.Path, requestID)
-		response.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	var pushCapabilities *capability.List
@@ -153,13 +153,13 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			if status == http.StatusInternalServerError {
 				status = http.StatusBadRequest
 			}
-			http.Error(response, "invalid push format", status)
+			http.Error(w, "invalid push format", status)
 			return
 		}
 		if format == "" {
-			response.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 			log.Printf("wal %s %s id=%s calls=0 bytes=0", r.Method, r.URL.Path, requestID)
-			response.WriteHeader(http.StatusOK)
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		pushFormat = format
@@ -169,7 +169,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 
 	settings, e := walSettings(getConfig, route.LogID, limits)
 	if e != nil {
-		http.Error(response, e.Error(), http.StatusInternalServerError)
+		http.Error(w, e.Error(), http.StatusInternalServerError)
 		return
 	}
 	openSession := wal.OpenExisting
@@ -178,18 +178,17 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	}
 	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] { return openSession(settings) })
 	if errors.Is(e, errLogMissing) && service == transport.ReceivePackService && method == http.MethodGet {
-		response.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
-		if err := advertise(response, &store{meta: rootMeta{Format: config.SHA1}}, true); err != nil {
+		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
+		if err := advertise(w, &store{meta: rootMeta{Format: config.SHA1}}, true); err != nil {
 			log.Printf("git discovery failed: %v", err)
 		}
 		return
 	}
 	if e != nil {
-		http.Error(response, e.Error(), operationStatus(e))
+		http.Error(w, e.Error(), operationStatus(e))
 		return
 	}
 	defer session.Drop()
-	w := &readResponse{ResponseWriter: response}
 	defer w.WriteHeader(http.StatusOK)
 	w.Header().Set("Trailer", "X-Wal-Calls, X-Wal-Bytes")
 	defer func() {

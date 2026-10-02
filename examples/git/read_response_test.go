@@ -30,7 +30,7 @@ func TestReadFailureStopsOutput(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			output := httptest.NewRecorder()
 			var failure error
-			response := &readResponse{ResponseWriter: output}
+			response := &componentResponse{ResponseWriter: output}
 			writer := &failedWriter{response, &failure}
 			if test.started {
 				if _, err := writer.Write([]byte("prefix")); err != nil {
@@ -55,7 +55,7 @@ func TestReadFailureStopsOutput(t *testing.T) {
 
 func TestReadFailurePreservesHTTPErrorStatus(t *testing.T) {
 	output := httptest.NewRecorder()
-	response := &readResponse{ResponseWriter: output}
+	response := &componentResponse{ResponseWriter: output}
 	var failure error = &http.MaxBytesError{Limit: 16}
 	writer := &failedWriter{response, &failure}
 	if n, err := writer.Write([]byte("incomplete pack")); n != 0 || err != failure {
@@ -82,7 +82,7 @@ func TestObservedStorageFailureStopsOutput(t *testing.T) {
 		observeRead(&failure, nil)
 		observeRead(&failure, errExpired)
 		output := httptest.NewRecorder()
-		response := &readResponse{ResponseWriter: output}
+		response := &componentResponse{ResponseWriter: output}
 		writer := &failedWriter{response, &failure}
 		if n, err := writer.Write([]byte("incomplete pack")); n != 0 || err != cause || response.sent || output.Body.Len() != 0 {
 			t.Fatalf("cause=%v n=%d err=%v sent=%v", cause, n, err, response.sent)
@@ -92,7 +92,7 @@ func TestObservedStorageFailureStopsOutput(t *testing.T) {
 
 func TestResponseHeadersAndTrailersSurviveReadResponse(t *testing.T) {
 	output := httptest.NewRecorder()
-	response := &readResponse{ResponseWriter: output}
+	response := &componentResponse{ResponseWriter: output}
 	response.Header().Set("Trailer", "X-Wal-Calls")
 	response.WriteHeader(http.StatusAccepted)
 	if _, err := response.Write([]byte("pack")); err != nil {
@@ -123,7 +123,7 @@ func (s failedAdvertisement) Config() (*gitconfig.Config, error) {
 func TestUploadPackObservedFailureBeforeHTTPOutput(t *testing.T) {
 	for _, cause := range []error{&http.MaxBytesError{Limit: 16}, io.ErrUnexpectedEOF, context.Canceled} {
 		output := httptest.NewRecorder()
-		response := &readResponse{ResponseWriter: output}
+		response := &componentResponse{ResponseWriter: output}
 		var failure error
 		s := failedAdvertisement{memory.NewStorage(), &failure, cause}
 		err := transport.UploadPack(t.Context(), s, nil, gitio.WriteNopCloser(&failedWriter{response, &failure}), &transport.UploadPackRequest{
@@ -173,7 +173,7 @@ func TestUploadPackFetchFailurePreservesHTTPStatus(t *testing.T) {
 				}
 			}
 			output := httptest.NewRecorder()
-			response := &readResponse{ResponseWriter: output}
+			response := &componentResponse{ResponseWriter: output}
 			cause := &http.MaxBytesError{Limit: 16}
 			var failure error
 			err := transport.UploadPack(t.Context(), failedFetch{s.Storage, &failure, cause}, io.NopCloser(&input), gitio.WriteNopCloser(&failedWriter{response, &failure}), &transport.UploadPackRequest{
