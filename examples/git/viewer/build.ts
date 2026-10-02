@@ -21,7 +21,7 @@ const component = await Bun.build({
 });
 if (!component.success) throw new AggregateError(component.logs, "Spin bundle failed");
 const manifest = await Bun.file("../spin.toml").text();
-const variables = [...manifest.matchAll(/^(wal_\w+|git_repositories) = "\{\{ (\w+) \}\}"$/gm)]
+const variables = [...manifest.matchAll(/^(wal_\w+) = "\{\{ (\w+) \}\}"$/gm)]
   .map((match) => `${match[1]} = "{{ ${match[2]} }}"\n`)
   .join("");
 const routes = ["/", "/_viewer/api", "/_viewer/client.js", "/_viewer/style.css"];

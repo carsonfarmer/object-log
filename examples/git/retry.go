@@ -8,6 +8,7 @@ import (
 const pushMaintenanceAttempts = 2
 
 var (
+	errExpired             = errors.New("expired view")
 	errPublicationConflict = errors.New("publication conflict or expired view")
 	errMaintenanceConflict = errors.New("maintenance conflicted; retry push")
 	errMaintenancePending  = errors.New("maintenance remains pending; retry push")
@@ -37,20 +38,17 @@ func retryOpenStore[T any](open func() (T, error), refresh func() error) (T, err
 func retryBeforePush(before func() (bool, error), reopen func() error) error {
 	for attempt := 1; ; attempt++ {
 		needsReopen, err := before()
-		if err == nil {
-			if needsReopen {
-				if err := reopen(); err != nil {
-					return fmt.Errorf("reopen after maintenance: %w", err)
-				}
-			}
-			return nil
-		}
 		retryable := errors.Is(err, errMaintenanceConflict) || errors.Is(err, errMaintenancePending)
-		if !retryable || attempt == pushMaintenanceAttempts {
+		if err != nil && (!retryable || attempt == pushMaintenanceAttempts) {
 			return err
 		}
-		if err := reopen(); err != nil {
-			return fmt.Errorf("reopen before maintenance retry: %w", err)
+		if needsReopen || err != nil {
+			if err := reopen(); err != nil {
+				return fmt.Errorf("reopen for maintenance: %w", err)
+			}
+		}
+		if err == nil {
+			return nil
 		}
 	}
 }

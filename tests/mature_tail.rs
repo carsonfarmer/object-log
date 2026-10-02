@@ -75,8 +75,13 @@ async fn measure(store: FaultStore) -> TestResult {
         let started = Instant::now();
         let through = view.tail().last().ok_or("empty history")?;
         assert!(matches!(
-            log.publish_checkpoint(&view, through, Bytes::from_static(b"snapshot"), vec![])
-                .await?,
+            log.publish_checkpoint(
+                &view,
+                Some(through),
+                Bytes::from_static(b"snapshot"),
+                vec![]
+            )
+            .await?,
             CheckpointStatus::Published(_)
         ));
         report("warm checkpoint", external, &store, started);

@@ -81,7 +81,7 @@ async fn acquisition_retries_commits_and_protects_original_view() -> TestResult 
     assert_eq!(retained.tail(), current.tail());
     assert_eq!(retained.collection_epoch(), source.collection_epoch());
     let CheckpointStatus::Published(checkpointed) = log
-        .publish_checkpoint(&retained, &source.tail()[0], Bytes::new(), Vec::new())
+        .publish_checkpoint(&retained, Some(&source.tail()[0]), Bytes::new(), Vec::new())
         .await?
     else {
         return Err("checkpoint did not publish".into());

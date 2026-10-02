@@ -95,7 +95,7 @@ async fn checkpoint_recognizes_applied_then_rejected_head_update() -> TestResult
         let CheckpointStatus::Published(published) = log
             .publish_checkpoint(
                 &committed,
-                &through,
+                Some(&through),
                 Bytes::from_static(b"snapshot"),
                 Vec::new(),
             )

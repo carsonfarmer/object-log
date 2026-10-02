@@ -44,6 +44,8 @@ mod storage_accounting_tests;
 /// reopen that namespace with the same options; changing limits requires a new
 /// namespace because format version 1 has no options-migration operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct Options {
     /// Maximum commit references in the active tail.
     pub max_tail_entries: usize,
@@ -1569,7 +1571,15 @@ impl Log {
             }))
     }
 
-    /// Publishes an opaque base that covers one exact prefix of `view`.
+    /// Publishes an opaque base for one exact applied boundary of `view`.
+    ///
+    /// `Some(through)` covers the active tail through that exact commit reference.
+    /// `None` authenticates and replaces the existing checkpoint at its unchanged
+    /// boundary, preserving the entire tail and transaction outcome window. The
+    /// snapshot represents only that prefix; the tail remains to be replayed. It
+    /// rejects a view without a checkpoint. Re-encoding or pruning the snapshot
+    /// is maintenance, not a new logical commit; domain equivalence is the caller's
+    /// responsibility.
     ///
     /// The base object becomes durable before the index update. Retention
     /// updates and commits appended after the covered prefix are reconciled
@@ -1601,13 +1611,24 @@ impl Log {
     pub async fn publish_checkpoint(
         &self,
         view: &View,
-        through: &CommitRef,
+        through: Option<&CommitRef>,
         snapshot: Bytes,
         objects: Vec<StagedObject>,
     ) -> Result<CheckpointStatus, Error> {
         self.validate_staged_objects(view, &objects)?;
         let subtree_objects =
             self.publication_objects(objects.iter().map(StagedObject::reference))?;
+        let (through_sequence, through_commit) = match through {
+            Some(through) if view.tail().contains(through) => (through.sequence, through.digest),
+            Some(_) => return Err(invalid("the checkpoint entry is not in the active tail")),
+            None => {
+                let checkpoint = view
+                    .checkpoint()
+                    .ok_or_else(|| invalid("no checkpoint to rewrite"))?;
+                self.read_checkpoint(view).await?;
+                (checkpoint.through_sequence, checkpoint.through_commit)
+            }
+        };
         self.verify_tail(view).await?;
         let objects = objects
             .into_iter()
@@ -1616,8 +1637,8 @@ impl Log {
         let checkpoint = format::Checkpoint {
             log_id: self.store.log_id().clone(),
             incarnation: self.incarnation,
-            through_sequence: through.sequence,
-            through_commit: through.digest,
+            through_sequence,
+            through_commit,
             snapshot,
             objects,
         };
@@ -1636,17 +1657,16 @@ impl Log {
         let pending = PendingCheckpoint {
             view: view.clone(),
             staging_domain: Arc::clone(&self.staging_domain),
-            through: through.clone(),
             checkpoint: CheckpointRef {
-                through_sequence: through.sequence,
-                through_commit: through.digest,
+                through_sequence,
+                through_commit,
                 object,
             },
         };
 
         match self
             .publish_checkpoint_head(view, |publication_view| {
-                Self::checkpoint_head(publication_view, through, pending.checkpoint.object.clone())
+                Self::checkpoint_head(publication_view, pending.checkpoint.clone())
             })
             .await?
         {
@@ -1687,16 +1707,7 @@ impl Log {
     ) -> Result<CheckpointResolution, Error> {
         let mut pending = pending;
         self.validate_view(&pending.view)?;
-        let original_candidate = Self::checkpoint_head(
-            &pending.view,
-            &pending.through,
-            pending.checkpoint.object.clone(),
-        )?;
-        if original_candidate.checkpoint.as_ref() != Some(&pending.checkpoint) {
-            return Err(invalid(
-                "pending checkpoint evidence does not match its candidate",
-            ));
-        }
+        Self::checkpoint_head(&pending.view, pending.checkpoint.clone())?;
 
         let Some(current) = publication_evidence(self.load().await)? else {
             return Ok(CheckpointResolution::StillPending(pending));
@@ -1733,7 +1744,7 @@ impl Log {
         pending.staging_domain = Arc::clone(&self.staging_domain);
         match self
             .publish_checkpoint_head(&publication_view, |view| {
-                Self::checkpoint_head(view, &pending.through, pending.checkpoint.object.clone())
+                Self::checkpoint_head(view, pending.checkpoint.clone())
             })
             .await
         {
@@ -2157,25 +2168,25 @@ impl Log {
         Ok(head)
     }
 
-    fn checkpoint_head(view: &View, through: &CommitRef, object: ObjectRef) -> Result<Head, Error> {
+    fn checkpoint_head(view: &View, checkpoint: CheckpointRef) -> Result<Head, Error> {
         let mut head = view.head().clone();
-        let through_index = head
-            .tail
-            .iter()
-            .position(|entry| entry == through)
-            .ok_or_else(|| invalid("the checkpoint entry is not in the active tail"))?;
-        head.recent_outcomes
-            .extend(head.tail.drain(..=through_index));
-        let resolution_window = head.options.resolution_window;
-        if head.recent_outcomes.len() > resolution_window {
-            let excess = head.recent_outcomes.len().saturating_sub(resolution_window);
-            head.recent_outcomes.drain(..excess);
+        if let Some(index) = head.tail.iter().position(|entry| {
+            entry.sequence == checkpoint.through_sequence
+                && entry.digest == checkpoint.through_commit
+        }) {
+            head.recent_outcomes.extend(head.tail.drain(..=index));
+            let resolution_window = head.options.resolution_window;
+            if head.recent_outcomes.len() > resolution_window {
+                let excess = head.recent_outcomes.len().saturating_sub(resolution_window);
+                head.recent_outcomes.drain(..excess);
+            }
+        } else if !head.checkpoint.as_ref().is_some_and(|base| {
+            base.through_sequence == checkpoint.through_sequence
+                && base.through_commit == checkpoint.through_commit
+        }) {
+            return Err(invalid("checkpoint boundary is not in this view"));
         }
-        head.checkpoint = Some(CheckpointRef {
-            through_sequence: through.sequence,
-            through_commit: through.digest,
-            object,
-        });
+        head.checkpoint = Some(checkpoint);
         head.advance_generation()?;
         Ok(head)
     }
@@ -2775,6 +2786,39 @@ mod tests {
 
     include!("request_guard_tests.rs");
     include!("open_existing_view_tests.rs");
+
+    #[tokio::test]
+    async fn checkpoint_requires_the_full_active_commit_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let log = test_log("checkpoint-exact-member", Options::default()).await?;
+        let prepared = log.prepare(
+            &log.load().await?,
+            TransactionId::new(),
+            Bytes::new(),
+            Bytes::new(),
+            Vec::new(),
+        )?;
+        let CommitStatus::Committed(view) = log.commit(prepared).await? else {
+            return Err("commit failed".into());
+        };
+        let through = &view.tail()[0];
+        for field in 0..3 {
+            let mut forged = through.clone();
+            match field {
+                0 => forged.len += 1,
+                1 => forged.transaction_id = TransactionId::new(),
+                _ => forged.storage_id = StorageId::new(),
+            }
+            assert!(matches!(
+                log.publish_checkpoint(&view, Some(&forged), Bytes::new(), Vec::new())
+                    .await,
+                Err(Error::InvalidFormat(_))
+            ));
+        }
+        assert_eq!(log.load().await?.generation(), view.generation());
+        assert!(log.load().await?.checkpoint().is_none());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn cold_resume_keeps_the_exact_token_when_the_first_head_read_fails()
@@ -3584,7 +3628,6 @@ mod tests {
         let pending = PendingCheckpoint {
             view: fenced,
             staging_domain: Arc::clone(&log.staging_domain),
-            through: through.clone(),
             checkpoint: CheckpointRef {
                 through_sequence: through.sequence,
                 through_commit: through.digest,
@@ -4215,7 +4258,7 @@ mod tests {
         let CheckpointStatus::Published(view) = cold
             .publish_checkpoint(
                 state.view(),
-                through,
+                Some(through),
                 Bytes::from_static(&[2]),
                 vec![current_root],
             )
@@ -4538,8 +4581,13 @@ mod tests {
         faults.reset();
         let through = state.view().tail().last().ok_or("tail is empty")?;
         assert!(matches!(
-            log.publish_checkpoint(state.view(), through, Bytes::from_static(&[96]), Vec::new())
-                .await?,
+            log.publish_checkpoint(
+                state.view(),
+                Some(through),
+                Bytes::from_static(&[96]),
+                Vec::new()
+            )
+            .await?,
             CheckpointStatus::Published(_)
         ));
         assert_eq!(faults.metrics().operation(Operation::Get).requests, 0);
@@ -4652,7 +4700,7 @@ mod tests {
                 let checkpoint = log
                     .publish_checkpoint(
                         &view,
-                        &view.tail()[2],
+                        Some(&view.tail()[2]),
                         Bytes::from_static(&[3]),
                         Vec::new(),
                     )
@@ -4679,7 +4727,7 @@ mod tests {
         let CheckpointStatus::Published(view) = log
             .publish_checkpoint(
                 &view,
-                &view.tail()[0],
+                Some(&view.tail()[0]),
                 Bytes::from_static(&[1]),
                 vec![object],
             )
@@ -4708,7 +4756,7 @@ mod tests {
         assert!(matches!(
             log.publish_checkpoint(
                 state.view(),
-                &view.tail()[0],
+                Some(&view.tail()[0]),
                 Bytes::from_static(&[3]),
                 state.state().objects.clone(),
             )
@@ -4724,7 +4772,12 @@ mod tests {
         let log = test_log("fold-expiry", Options::default()).await?;
         let old = fold_append(&log, &log.load().await?, Bytes::from_static(&[1])).await?;
         let CheckpointStatus::Published(view) = log
-            .publish_checkpoint(&old, &old.tail()[0], Bytes::from_static(&[1]), Vec::new())
+            .publish_checkpoint(
+                &old,
+                Some(&old.tail()[0]),
+                Bytes::from_static(&[1]),
+                Vec::new(),
+            )
             .await?
         else {
             return Err("checkpoint did not publish".into());

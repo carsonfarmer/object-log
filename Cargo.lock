@@ -1107,6 +1107,7 @@ dependencies = [
  "hex",
  "minicbor",
  "object_store",
+ "serde",
  "tempfile",
  "thiserror",
  "tokio",

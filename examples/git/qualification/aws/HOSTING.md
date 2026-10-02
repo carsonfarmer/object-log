@@ -39,8 +39,9 @@ The service now defaults to 64 MiB objects. Set
 `host_git_max_object_bytes = 537919488` for the 513 MiB qualification fixture;
 use that larger limit only on a host with measured headroom.
 
-`host_repositories` provisions canonical names, unique stable WAL IDs, SHA-1 or
-SHA-256 formats, default branches, and independent read/write/admin groups.
+`host_repositories` configures repository names and independent read/write/admin
+groups. Canonical names determine stable WAL identities; the first accepted push
+sets each repository's Git format and default branch.
 Declare all referenced groups in `host_groups`. Users and membership are managed
 in Cognito outside Terraform; self-registration is disabled. Named policies
 require a configuration change to admit new paths; a wildcard policy admits
@@ -150,9 +151,7 @@ git clone https://git.example.com/team/project.git
 ```
 
 A fresh repository returns 404 on reads until an authorized writer pushes its
-first branch. That push records the Git format and refs together. An optional
-policy format must match the local repository; use a matching repository before
-trying to clone it.
+first branch. That push records the Git format, default branch and refs together.
 
 The helper uses authorization-code S256 PKCE and sends the access token as an
 ordinary Basic password. Its fixed `http://localhost:53119` callback matches the
@@ -186,11 +185,11 @@ full provider suite, using a different repository for those checks. Keep the
 service URL public HTTPS throughout. The provider fixtures must have fresh WAL
 IDs or a fresh prefix before the first run and every rerun.
 
-The suite uses `sha1.git` (SHA-1) and `sha256.git` (SHA-256), each configured with
-default branch `main` and a distinct WAL ID. To include repository isolation,
-also configure `alpha/project.git` and `beta/project.git` as SHA-1 and
-`hash256/project.git` as SHA-256, with separate IDs and the same test permissions;
-set `GIT_MULTI_REPOSITORIES=1`. These are fixture names, not service restrictions.
+The suite first pushes SHA-1 to `sha1.git` and SHA-256 to `sha256.git`, selecting
+default branch `main`. Names determine distinct WAL IDs. To include repository
+isolation, allow `alpha/project.git`, `beta/project.git` and `hash256/project.git`
+with the same test permissions; set `GIT_MULTI_REPOSITORIES=1`. These are fixture
+names, not service restrictions.
 
 For first-push tests with a wildcard policy, set `GIT_PROBE_CREATE=1` and supply
 the maintenance client's access token as `GIT_PROBE_OPERATOR_PASSWORD`. Only

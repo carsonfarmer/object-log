@@ -55,24 +55,15 @@ func (p *receiveProgress) message(text string) error {
 }
 
 func (p *receiveProgress) OnHeader(total uint32) error {
-	if p == nil {
-		return nil
-	}
 	p.total = total
 	return p.message(fmt.Sprintf("Importing objects: 0/%d\n", total))
 }
 
 func (p *receiveProgress) OnInflatedObjectHeader(plumbing.ObjectType, int64, int64) error {
-	if p == nil {
-		return nil
-	}
 	return p.err
 }
 
 func (p *receiveProgress) OnInflatedObjectContent(plumbing.Hash, int64, uint32, []byte) error {
-	if p == nil {
-		return nil
-	}
 	p.done++
 	if time.Since(p.last) < time.Second {
 		return p.err
@@ -81,8 +72,5 @@ func (p *receiveProgress) OnInflatedObjectContent(plumbing.Hash, int64, uint32, 
 }
 
 func (p *receiveProgress) OnFooter(plumbing.Hash) error {
-	if p == nil {
-		return nil
-	}
 	return p.message(fmt.Sprintf("Importing objects: %d/%d\n", p.done, p.total))
 }

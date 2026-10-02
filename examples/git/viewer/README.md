@@ -35,8 +35,8 @@ prompts, use username `git` and password `local-git-password`.
 Enter `team/project` in the viewer and sign in with the same password to browse
 its files and commits. The default `"*"` policy admits new names without editing
 TOML or restarting. Browsing a missing repository creates nothing. Bare names
-and their `.git` URLs select the same repository. Exact policies may override
-permissions or pin a WAL identity, format or default branch.
+and their `.git` URLs select the same repository. Exact policies override
+permissions; names determine storage identity and first pushes set repository metadata.
 
 Credentials survive reloads using the tab's session storage and clear when the
 server rejects authentication. If browser storage is unavailable, login lasts

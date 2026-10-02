@@ -77,7 +77,7 @@ async fn rejected_checkpoint_head_is_pending_and_recoverable() -> TestResult {
         let CheckpointStatus::Pending(pending) = log
             .publish_checkpoint(
                 &committed,
-                &committed.tail()[0],
+                Some(&committed.tail()[0]),
                 Bytes::from_static(b"snapshot"),
                 Vec::new(),
             )

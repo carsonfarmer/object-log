@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// Configure these three names with distinct log IDs on a fresh storage prefix,
-// password/token authentication. The first push selects default branch main. The test uses the
-// supplied server as-is; it does not rebuild or relaunch Spin.
+// Configure these three names on a fresh storage prefix with password/token
+// authentication. Their names derive distinct WAL IDs, and the first push
+// selects default branch main. This uses the supplied server without relaunching it.
 func TestRepositoryIsolation(t *testing.T) {
 	if os.Getenv("GIT_MULTI_REPOSITORIES") != "1" {
 		t.Skip("set GIT_MULTI_REPOSITORIES=1 for configured repository isolation")

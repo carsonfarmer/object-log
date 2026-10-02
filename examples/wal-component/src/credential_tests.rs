@@ -19,7 +19,7 @@ fn settings() -> Config {
         session_token: Some("temporary-session-token".into()),
         prefix: "isolated-prefix".into(),
         log_id: "repo".into(),
-        log_limits: log_limits(),
+        log_options: b"{}".to_vec(),
         transport_limits: TransportLimits {
             max_calls: 10,
             max_bytes: 1024,
@@ -27,40 +27,24 @@ fn settings() -> Config {
     }
 }
 
-fn log_limits() -> LogLimits {
-    let options = object_log::Options::default();
-    LogLimits {
-        max_tail_entries: options.max_tail_entries as u64,
-        resolution_window: options.resolution_window as u64,
-        max_inline_operation_bytes: options.max_inline_operation_bytes as u64,
-        max_inline_result_bytes: options.max_inline_result_bytes as u64,
-        max_object_refs: options.max_object_refs as u64,
-        max_object_bytes: options.max_object_bytes as u64,
-        max_commit_bytes: options.max_commit_bytes as u64,
-        max_head_bytes: options.max_head_bytes as u64,
-        max_checkpoint_bytes: options.max_checkpoint_bytes as u64,
-        max_retention_ids: options.max_retention_ids as u64,
-        max_collection_objects: options.max_collection_objects as u64,
-        max_collection_plan_bytes: options.max_collection_plan_bytes as u64,
-    }
-}
-
 #[test]
 fn every_durable_limit_maps_to_the_matching_core_option() {
-    let mapped = log_options(LogLimits {
-        max_tail_entries: 1,
-        resolution_window: 2,
-        max_inline_operation_bytes: 3,
-        max_inline_result_bytes: 4,
-        max_object_refs: 5,
-        max_object_bytes: 6,
-        max_commit_bytes: 7,
-        max_head_bytes: 8,
-        max_checkpoint_bytes: 9,
-        max_retention_ids: 10,
-        max_collection_objects: 11,
-        max_collection_plan_bytes: 12,
-    })
+    let mapped = log_options(
+        br#"{
+        "max_tail_entries":1,
+        "resolution_window":2,
+        "max_inline_operation_bytes":3,
+        "max_inline_result_bytes":4,
+        "max_object_refs":5,
+        "max_object_bytes":6,
+        "max_commit_bytes":7,
+        "max_head_bytes":8,
+        "max_checkpoint_bytes":9,
+        "max_retention_ids":10,
+        "max_collection_objects":11,
+        "max_collection_plan_bytes":12
+    }"#,
+    )
     .unwrap();
     assert_eq!(
         [
@@ -79,6 +63,109 @@ fn every_durable_limit_maps_to_the_matching_core_option() {
         ],
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
+}
+
+#[test]
+fn byte_options_preserve_defaults_and_exact_git_geometry() {
+    assert_eq!(log_options(b"{}").unwrap(), object_log::Options::default());
+    assert_eq!(
+        log_options(br#"{"max_object_bytes":2097152,"max_collection_objects":100000}"#).unwrap(),
+        object_log::Options {
+            max_object_bytes: 2 << 20,
+            ..object_log::Options::default()
+        }
+    );
+}
+
+#[test]
+fn byte_options_reject_unknown_duplicate_invalid_and_oversized_values() {
+    for value in [
+        b"".as_slice(),
+        b"[]",
+        b"null",
+        b"{}{}",
+        br#"{"unknown":1}"#,
+        br#"{"maxObjectBytes":1}"#,
+        br#"{"max_object_bytes":1,"max_object_bytes":2}"#,
+        br#"{"max_object_bytes":-1}"#,
+        br#"{"max_object_bytes":1.5}"#,
+        br#"{"max_object_bytes":"1"}"#,
+        br#"{"max_object_bytes":18446744073709551616}"#,
+    ] {
+        assert!(log_options(value).is_err(), "accepted {value:?}");
+    }
+    let mut padded = b"{}".to_vec();
+    padded.resize(2048, b' ');
+    assert!(log_options(&padded).is_ok());
+    padded.push(b' ');
+    assert!(matches!(log_options(&padded), Err(Failure::Limit(_))));
+    #[cfg(target_pointer_width = "32")]
+    assert!(log_options(br#"{"max_object_bytes":4294967296}"#).is_err());
+}
+
+#[test]
+fn invalid_options_are_rejected_before_backend_validation_or_open() {
+    for options in [b"[]".to_vec(), vec![b' '; 2049]] {
+        let mut config = settings();
+        config.log_options = options;
+        assert!(Component::validate_backend(config.clone()).is_err());
+        assert!(Component::open(config.clone()).is_err());
+        assert!(Component::open_existing(config).is_err());
+    }
+}
+
+#[tokio::test]
+async fn refresh_preserves_bound_views_and_keeps_the_cached_head_after_failure() {
+    use object_log::sim::{Failure as Fault, FailurePhase, FaultStore, Operation};
+    use object_log::{CommitStatus, LogId, Options, TransactionId, ValidatedBackend};
+    use object_store::{memory::InMemory, path::Path};
+
+    let faults = FaultStore::new(InMemory::new());
+    let backend = ValidatedBackend::new(Arc::new(faults.clone()), Path::from("refresh"))
+        .await
+        .unwrap();
+    let log = Log::open(&backend, &LogId::new("view").unwrap(), Options::default())
+        .await
+        .unwrap();
+    let session = SessionState {
+        view: RefCell::new(log.load().await.unwrap()),
+        log,
+        transport: transport::Transport::new(10, 1024).unwrap(),
+    };
+    let mut bound = object_log::history(&session.log, session.current_view()).unwrap();
+    for id in 1..=2 {
+        let current = session.log.load().await.unwrap();
+        let prepared = session
+            .log
+            .prepare(
+                &current,
+                TransactionId::from_uuid(uuid::Uuid::from_u128(id)),
+                Bytes::new(),
+                Bytes::new(),
+                vec![],
+            )
+            .unwrap();
+        assert!(matches!(
+            session.log.commit(prepared).await.unwrap(),
+            CommitStatus::Committed(_)
+        ));
+        faults.reset();
+        for occurrence in 1..=3 {
+            faults.schedule(Fault {
+                operation: Operation::Get,
+                occurrence,
+                phase: FailurePhase::Before,
+            });
+        }
+        assert!(session.refresh().is_err());
+        assert_eq!(session.current_view().tail().len(), id as usize - 1);
+        faults.reset();
+        session.refresh().unwrap();
+        assert_eq!(session.current_view().tail().len(), id as usize);
+        assert!(bound.next().await.unwrap().is_none());
+        session.refresh().unwrap();
+        assert_eq!(session.current_view().tail().len(), id as usize);
+    }
 }
 
 fn instance_settings() -> Config {

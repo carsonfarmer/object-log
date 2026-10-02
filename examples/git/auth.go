@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/rsa"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"regexp"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -28,111 +26,86 @@ var (
 	errAuthInvalid     = errors.New("invalid or expired access token")
 	errAuthScope       = errors.New("access token lacks required scope")
 	errAuthUnavailable = errors.New("authentication keys unavailable")
-	cognitoIssuer      = regexp.MustCompile(
-		`^https://cognito-idp\.([a-z0-9-]+)\.amazonaws\.com(?:\.cn)?/([a-z0-9-]+)_[A-Za-z0-9]+$`,
-	)
+	errAuthConfig      = errors.New("invalid Cognito issuer, client, operator, scope or transport configuration")
 )
 
-type cognitoConfig struct {
-	issuer           string
-	clientID         string
-	operatorClientID string
-	requiredScope    string
-}
-
-type cognitoAuthenticator struct {
-	config cognitoConfig
-	client *http.Client
-	now    func() time.Time
-}
-
-// The transport must bound network waits and close bodies synchronously. The
-// WASIp2 integration must also serialize allocating imports through Unpin.
-func newCognitoAuthenticator(config cognitoConfig, transport http.RoundTripper) (*cognitoAuthenticator, error) {
-	issuer := cognitoIssuer.FindStringSubmatch(config.issuer)
-	if issuer == nil || issuer[1] != issuer[2] {
-		return nil, errors.New("Cognito issuer must be an HTTPS user-pool URL")
-	}
-	if config.clientID == "" || strings.TrimSpace(config.clientID) != config.clientID {
-		return nil, errors.New("Cognito client ID is required")
-	}
-	if config.operatorClientID != "" && (config.operatorClientID == config.clientID || strings.TrimSpace(config.operatorClientID) != config.operatorClientID) {
-		return nil, errors.New("maintenance requires a distinct Cognito client ID")
-	}
-	scopes := strings.Fields(config.requiredScope)
-	if len(scopes) != 1 || scopes[0] != config.requiredScope {
-		return nil, errors.New("one required Cognito scope must be configured")
-	}
-	if transport == nil {
-		return nil, errors.New("authentication HTTP transport is required")
-	}
-	return &cognitoAuthenticator{
-		config: config,
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   authFetchTimeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-		now: time.Now,
-	}, nil
-}
-
-type cognitoClaims struct {
-	jwt.Claims
-	ClientID string   `json:"client_id"`
-	TokenUse string   `json:"token_use"`
-	Scope    string   `json:"scope"`
-	Groups   []string `json:"cognito:groups"`
-}
-
-func (a *cognitoAuthenticator) Authenticate(r *http.Request) (gitPrincipal, error) {
-	if a == nil || a.client == nil {
-		return gitPrincipal{}, errAuthUnavailable
+func authorizeCognito(
+	r *http.Request,
+	route repositoryRoute,
+	getenv func(string) string,
+	transport http.RoundTripper,
+	now func() time.Time,
+) (int, error) {
+	issuer, clientID := getenv("GIT_COGNITO_ISSUER"), getenv("GIT_COGNITO_CLIENT_ID")
+	operatorID, scopes := getenv("GIT_COGNITO_OPERATOR_CLIENT_ID"), strings.Fields(getenv("GIT_COGNITO_SCOPE"))
+	endpoint, err := url.ParseRequestURI(issuer)
+	invalidIssuer := err != nil || endpoint.Scheme != "https" || endpoint.Host == ""
+	invalidClient := clientID == "" || operatorID == clientID
+	if invalidIssuer || invalidClient || len(scopes) != 1 || transport == nil {
+		return http.StatusInternalServerError, errAuthConfig
 	}
 	encoded, err := requestAccessToken(r)
 	if err != nil {
-		return gitPrincipal{}, err
+		return http.StatusUnauthorized, err
+	}
+	if r.Context().Err() != nil {
+		return http.StatusServiceUnavailable, errAuthUnavailable
 	}
 	token, err := jwt.ParseSigned(encoded, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
-		return gitPrincipal{}, errAuthInvalid
+		return http.StatusUnauthorized, errAuthInvalid
 	}
-	kid := token.Headers[0].KeyID
-	if kid == "" || len(kid) > 256 {
-		return gitPrincipal{}, errAuthInvalid
-	}
-	key, err := a.key(r.Context(), kid)
+	fetchContext, cancel := context.WithTimeout(r.Context(), authFetchTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, issuer+"/.well-known/jwks.json", nil)
 	if err != nil {
-		return gitPrincipal{}, err
+		return http.StatusInternalServerError, errAuthConfig
 	}
-	var claims cognitoClaims
-	if err := token.Claims(key, &claims); err != nil {
-		return gitPrincipal{}, errAuthInvalid
+	// One synchronous request prevents redirects and background key fetches.
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		return http.StatusServiceUnavailable, errAuthUnavailable
 	}
-	now := a.now()
-	if claims.Expiry == nil || !now.Before(claims.Expiry.Time()) {
-		return gitPrincipal{}, errAuthInvalid
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, authJWKSBytes+1))
+	var keys jose.JSONWebKeySet
+	if err != nil || fetchContext.Err() != nil || response.StatusCode != http.StatusOK ||
+		len(body) > authJWKSBytes || json.Unmarshal(body, &keys) != nil {
+		return http.StatusServiceUnavailable, errAuthUnavailable
 	}
-	expected := jwt.Expected{Issuer: a.config.issuer, Time: now}
-	if err := claims.ValidateWithLeeway(expected, 0); err != nil {
-		return gitPrincipal{}, errAuthInvalid
+	var claims struct {
+		jwt.Claims
+		ClientID string   `json:"client_id"`
+		TokenUse string   `json:"token_use"`
+		Scope    string   `json:"scope"`
+		Groups   []string `json:"cognito:groups"`
 	}
-	// Cognito access tokens identify the app by client_id, not the ID-token aud.
-	operator := a.config.operatorClientID != "" && claims.ClientID == a.config.operatorClientID
-	validClient := claims.ClientID == a.config.clientID || operator
-	validAccess := claims.TokenUse == "access" && validClient
-	if !validAccess || claims.Subject == "" {
-		return gitPrincipal{}, errAuthInvalid
+	if token.Claims(keys, &claims) != nil {
+		return http.StatusUnauthorized, errAuthInvalid
 	}
-	if !slices.Contains(strings.Fields(claims.Scope), a.config.requiredScope) {
-		return gitPrincipal{}, errAuthScope
+	// Cognito access tokens identify the app by client_id, not ID-token aud.
+	operator := operatorID != "" && claims.ClientID == operatorID
+	current := now()
+	if claims.Expiry == nil || !current.Before(claims.Expiry.Time()) ||
+		claims.ValidateWithLeeway(jwt.Expected{Issuer: issuer, Time: current}, 0) != nil ||
+		(claims.ClientID != clientID && !operator) || claims.TokenUse != "access" || claims.Subject == "" {
+		return http.StatusUnauthorized, errAuthInvalid
 	}
-	if operator && !slices.Contains(strings.Fields(claims.Scope), "git/maintenance") {
-		return gitPrincipal{}, errAuthScope
+	if !slices.Contains(strings.Fields(claims.Scope), scopes[0]) ||
+		(operator && !slices.Contains(strings.Fields(claims.Scope), "git/maintenance")) {
+		return http.StatusForbidden, errAuthScope
 	}
-	return gitPrincipal{subject: claims.Subject, groups: claims.Groups, operator: operator}, nil
+	// Actions are independent: write and admin do not imply read. Empty lists deny.
+	allowed := [...][]string{
+		route.Repository.ReadGroups, route.Repository.WriteGroups, route.Repository.AdminGroups,
+	}
+	if route.Action > gitAdmin || (operator && route.Action != gitAdmin) ||
+		(!operator && !slices.ContainsFunc(claims.Groups, func(group string) bool {
+			return group != "" && slices.Contains(allowed[route.Action], group)
+		})) {
+		return http.StatusForbidden, errors.New("repository access denied")
+	}
+	return 0, nil
 }
 
 func requestAccessToken(r *http.Request) (string, error) {
@@ -143,100 +116,18 @@ func requestAccessToken(r *http.Request) (string, error) {
 	if len(headers) != 1 || len(headers[0]) > 2*authTokenBytes {
 		return "", errAuthInvalid
 	}
-	var token string
-	scheme, value, _ := strings.Cut(headers[0], " ")
-	switch {
-	case strings.EqualFold(scheme, "Basic"):
-		_, password, ok := r.BasicAuth()
-		if !ok {
+	_, token, basic := r.BasicAuth()
+	if !basic {
+		scheme, value, _ := strings.Cut(headers[0], " ")
+		if !strings.EqualFold(scheme, "Bearer") {
 			return "", errAuthInvalid
 		}
-		token = password
-	case strings.EqualFold(scheme, "Bearer"):
 		token = value
-	default:
-		return "", errAuthInvalid
 	}
 	if token == "" || len(token) > authTokenBytes {
 		return "", errAuthInvalid
 	}
 	return token, nil
-}
-
-// Fetch per authentication; the synchronous WASIp2 instance is request-scoped.
-func (a *cognitoAuthenticator) key(ctx context.Context, kid string) (jose.JSONWebKey, error) {
-	if err := ctx.Err(); err != nil {
-		return jose.JSONWebKey{}, errAuthUnavailable
-	}
-	keys, err := a.fetchKeys(ctx)
-	if err != nil {
-		return jose.JSONWebKey{}, errAuthUnavailable
-	}
-	key, ok := keys[kid]
-	if !ok {
-		return jose.JSONWebKey{}, errAuthInvalid
-	}
-	return key, nil
-}
-
-func (a *cognitoAuthenticator) fetchKeys(ctx context.Context) (map[string]jose.JSONWebKey, error) {
-	ctx, cancel := context.WithTimeout(ctx, authFetchTimeout)
-	defer cancel()
-	// Only the configured issuer supplies the URL; token jku/x5u are never used.
-	endpoint := a.config.issuer + "/.well-known/jwks.json"
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		endpoint,
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	response, err := a.client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("JWKS HTTP status %d", response.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, authJWKSBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(body) > authJWKSBytes {
-		return nil, errors.New("JWKS exceeds byte limit")
-	}
-	var set jose.JSONWebKeySet
-	if err := json.Unmarshal(body, &set); err != nil {
-		return nil, err
-	}
-	if len(set.Keys) == 0 || len(set.Keys) > 16 {
-		return nil, errors.New("JWKS key count out of bounds")
-	}
-	keys := make(map[string]jose.JSONWebKey, len(set.Keys))
-	for _, key := range set.Keys {
-		public, ok := key.Key.(*rsa.PublicKey)
-		if !ok || !key.Valid() {
-			return nil, errors.New("JWKS requires RSA public keys")
-		}
-		if public.N.BitLen() < 2048 || public.N.BitLen() > 4096 {
-			return nil, errors.New("JWKS requires RSA public keys of 2048 to 4096 bits")
-		}
-		validKey := key.Use == "sig" && key.Algorithm == string(jose.RS256)
-		if !validKey || key.KeyID == "" || len(key.KeyID) > 256 {
-			return nil, errors.New("invalid Cognito signing key")
-		}
-		if _, exists := keys[key.KeyID]; exists {
-			return nil, errors.New("duplicate JWKS key ID")
-		}
-		keys[key.KeyID] = key
-	}
-	return keys, nil
 }
 
 type gitAction uint8
@@ -251,37 +142,4 @@ type repositoryAccess struct {
 	ReadGroups  []string `json:"read_groups"`
 	WriteGroups []string `json:"write_groups"`
 	AdminGroups []string `json:"admin_groups"`
-}
-
-type gitPrincipal struct {
-	subject  string
-	groups   []string
-	operator bool
-}
-
-// Actions are independent: write and admin do not imply read. Empty lists deny.
-func (p gitPrincipal) Allows(policy repositoryAccess, action gitAction) bool {
-	if p.subject == "" {
-		return false
-	}
-	if p.operator {
-		return action == gitAdmin
-	}
-	var allowed []string
-	switch action {
-	case gitRead:
-		allowed = policy.ReadGroups
-	case gitWrite:
-		allowed = policy.WriteGroups
-	case gitAdmin:
-		allowed = policy.AdminGroups
-	default:
-		return false
-	}
-	for _, group := range p.groups {
-		if group != "" && slices.Contains(allowed, group) {
-			return true
-		}
-	}
-	return false
 }

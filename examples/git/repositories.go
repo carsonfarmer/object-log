@@ -1,23 +1,18 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
-	"unicode/utf8"
 
-	"github.com/go-git/go-billy/v6/memfs"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/transport"
-	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 )
 
 const repositoriesConfigBytes = 64 << 10
@@ -26,34 +21,34 @@ var (
 	errRepositoryNotFound = errors.New("repository or Git endpoint not found")
 	errRepositoryMethod   = errors.New("method not allowed")
 	// Match the core's LogId contract; IDs are storage identities, not paths.
-	repositoryLogID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+	repositoryLogID    = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+	repositoryEndpoint = regexp.MustCompile(
+		`^/(.+)/(info/refs|git-upload-pack|git-receive-pack|authorize-read|` +
+			`maintenance|collect|recover-retentions-after-drain)$`,
+	)
 )
 
-// A map entry permits a name. Opening storage remains the caller's responsibility,
-// after checking the route's action against repositoryAccess.
-type repositoryConfig struct {
-	LogID         string              `json:"log_id"`
-	Format        config.ObjectFormat `json:"format"`
-	DefaultBranch string              `json:"default_branch,omitempty"`
-	repositoryAccess
-}
-
+// Configuration sets permissions only. The name determines storage identity;
+// the first accepted push establishes the format and default branch.
 // Exact policies override "*". Bare names and their .git URLs identify one log.
-func loadRepositories(getenv func(string) string) (map[string]repositoryConfig, error) {
+func loadRepositories(getenv func(string) string) (map[string]repositoryAccess, error) {
 	text := getenv("GIT_REPOSITORIES")
-	if len(text) > repositoriesConfigBytes || !utf8.ValidString(text) {
-		return nil, errors.New("GIT_REPOSITORIES exceeds 64 KiB or contains invalid UTF-8")
+	if len(text) > repositoriesConfigBytes {
+		return nil, errors.New("GIT_REPOSITORIES exceeds 64 KiB")
 	}
-	repositories := map[string]repositoryConfig{}
+	repositories := map[string]repositoryAccess{}
 	if strings.TrimSpace(text) == "" {
 		return repositories, nil
 	}
-	entries, err := uniqueRepositoryObject([]byte(text))
+	entries := map[string]*repositoryAccess{}
+	err := json.Unmarshal([]byte(text), &entries, json.RejectUnknownMembers(true))
 	if err != nil {
 		return nil, fmt.Errorf("GIT_REPOSITORIES: %w", err)
 	}
-	identities := map[string]string{}
-	for name, encoded := range entries {
+	for name, repository := range entries {
+		if repository == nil {
+			return nil, errors.New("repository policy must not be null")
+		}
 		if name != "*" && !validRepositoryName(name) {
 			return nil, fmt.Errorf("GIT_REPOSITORIES: noncanonical repository name %q", name)
 		}
@@ -63,125 +58,21 @@ func loadRepositories(getenv func(string) string) (map[string]repositoryConfig, 
 		if _, exists := repositories[name]; exists {
 			return nil, fmt.Errorf("duplicate repository name %q", name)
 		}
-		repository, err := parseRepository(encoded)
-		if err != nil {
-			return nil, fmt.Errorf("GIT_REPOSITORIES: repository %q: %w", name, err)
+		for _, groups := range [][]string{repository.ReadGroups, repository.WriteGroups, repository.AdminGroups} {
+			if slices.Contains(groups, "") {
+				return nil, errors.New("permission groups must be nonempty strings")
+			}
 		}
-		if name == "*" {
-			if repository.LogID != "" {
-				return nil, errors.New("wildcard policy must not specify log_id")
-			}
-		} else {
-			if repository.LogID == "" {
-				repository.LogID = automaticRepositoryID(name)
-			}
-			if other, exists := identities[repository.LogID]; exists {
-				return nil, fmt.Errorf("repositories %q and %q share log_id %q", other, name, repository.LogID)
-			}
-			identities[repository.LogID] = name
-		}
-		repositories[name] = repository
+		repositories[name] = *repository
 	}
 	return repositories, nil
 }
 
-func parseRepository(encoded []byte) (repositoryConfig, error) {
-	var repository repositoryConfig
-	fields, err := uniqueRepositoryObject(encoded)
-	if err != nil {
-		return repository, err
-	}
-	for name, value := range fields {
-		if bytes.Equal(value, []byte("null")) {
-			return repository, fmt.Errorf("%s must not be null", name)
-		}
-		switch name {
-		case "log_id", "format", "default_branch", "read_groups", "write_groups", "admin_groups":
-		default:
-			return repository, fmt.Errorf("unknown field %q", name)
-		}
-	}
-	if err := json.Unmarshal(encoded, &repository); err != nil {
-		return repository, err
-	}
-	validID := repositoryLogID.MatchString(repository.LogID)
-	if repository.LogID != "" && (!validID || repository.LogID == "." || repository.LogID == ".." ||
-		strings.HasPrefix(repository.LogID, "auto-")) {
-		return repository, errors.New("log_id must satisfy the WAL log identifier contract")
-	}
-	if repository.Format != "" && repository.Format != config.SHA1 && repository.Format != config.SHA256 {
-		return repository, config.ErrInvalidObjectFormat
-	}
-	if repository.DefaultBranch != "" {
-		err := plumbing.ValidateBranchName(repository.DefaultBranch)
-		if err == nil {
-			err = validateRefName(dotgit.New(memfs.New()), plumbing.NewBranchReferenceName(repository.DefaultBranch))
-		}
-		if err != nil {
-			return repository, fmt.Errorf("default_branch: %w", err)
-		}
-	}
-	for _, groups := range [][]string{repository.ReadGroups, repository.WriteGroups, repository.AdminGroups} {
-		for _, group := range groups {
-			if group == "" {
-				return repository, errors.New("permission groups must be nonempty strings")
-			}
-		}
-	}
-	return repository, nil
-}
-
-// Decode only an object, rejecting duplicate keys before normal JSON decoding
-// could silently overwrite them. Both repository names and fields use this path.
-func uniqueRepositoryObject(encoded []byte) (map[string]json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('{') {
-		return nil, errors.New("expected a JSON object")
-	}
-	fields := map[string]json.RawMessage{}
-	for decoder.More() {
-		key, err := decoder.Token()
-		if err != nil {
-			return nil, err
-		}
-		name, ok := key.(string)
-		if !ok {
-			return nil, errors.New("expected an object key")
-		}
-		if _, exists := fields[name]; exists {
-			return nil, fmt.Errorf("duplicate key %q", name)
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return nil, err
-		}
-		fields[name] = value
-	}
-	if _, err := decoder.Token(); err != nil {
-		return nil, err
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return nil, errors.New("unexpected trailing JSON")
-	}
-	return fields, nil
-}
-
 func validRepositoryName(name string) bool {
-	if len(name) == 0 || len(canonicalRepositoryName(name)) > 4096 || name == "*" || strings.Contains(name, `\`) {
-		return false
-	}
 	path := &url.URL{Path: name}
-	if path.EscapedPath() != name {
-		return false
-	}
-	segments := strings.Split(name, "/")
-	for _, segment := range segments {
-		if segment == "" || segment == "." || segment == ".." {
-			return false
-		}
-	}
-	return segments[len(segments)-1] != ".git"
+	return fs.ValidPath(name) && name != "." && name != "*" &&
+		len(canonicalRepositoryName(name)) <= 4096 && !strings.Contains(name, `\`) &&
+		path.EscapedPath() == name && !strings.HasSuffix("/"+name, "/.git")
 }
 
 func canonicalRepositoryName(name string) string {
@@ -197,88 +88,72 @@ func automaticRepositoryID(name string) string {
 
 type repositoryRoute struct {
 	Name       string
-	Repository repositoryConfig
+	LogID      string
+	Repository repositoryAccess
 	Service    string
 	Method     string
 	Action     gitAction
 }
 
-// Resolve exact permitted names and endpoint suffixes without cleaning or
-// decoding path aliases. The caller must authorize Action before opening a WAL.
+// Resolve permitted repository names and endpoint suffixes.
+// Decoded URL spellings share one canonical storage identity and access policy.
+// The caller must authorize Action before opening a WAL.
 // A method error preserves Method so the caller can send an Allow header.
-func resolveRepository(repositories map[string]repositoryConfig, r *http.Request) (repositoryRoute, error) {
-	var route repositoryRoute
-	if r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
-		return route, errRepositoryNotFound
-	}
-	if r.URL.Fragment != "" || r.URL.Opaque != "" || !strings.HasPrefix(r.URL.Path, "/") {
-		return route, errRepositoryNotFound
-	}
-	if r.URL.Path == "/_maintenance" {
+func resolveRepository(repositories map[string]repositoryAccess, r *http.Request) (repositoryRoute, error) {
+	route := repositoryRoute{Method: http.MethodPost, Action: gitAdmin}
+	// Validation retains its decoded path and ignores queries.
+	if r.URL.Path == "/_validate_backend" {
+		route.Service = "validate-backend"
+	} else {
 		query, err := url.ParseQuery(r.URL.RawQuery)
-		id, operation := query.Get("log_id"), query.Get("operation")
-		if err != nil || len(query) != 2 || len(query["log_id"]) != 1 || len(query["operation"]) != 1 ||
-			!repositoryLogID.MatchString(id) || id == "." || id == ".." ||
-			(operation != "maintenance" && operation != "collect") {
-			return route, errRepositoryNotFound
-		}
-		// Empty repository groups restrict discovered IDs to the scope-wide
-		// operator in Cognito mode.
-		route = repositoryRoute{Repository: repositoryConfig{LogID: id}, Service: operation, Method: http.MethodPost, Action: gitAdmin}
-		if r.Method != route.Method {
-			return route, errRepositoryMethod
-		}
-		return route, nil
-	}
-	for _, service := range []string{
-		"info/refs", transport.UploadPackService, transport.ReceivePackService,
-		"authorize-read", "maintenance", "collect", "recover-retentions-after-drain",
-	} {
-		suffix := "/" + service
-		if strings.HasSuffix(r.URL.Path, suffix) {
-			route.Name = strings.TrimPrefix(strings.TrimSuffix(r.URL.Path, suffix), "/")
-			route.Service = service
-			break
-		}
-	}
-	if !validRepositoryName(route.Name) {
-		return repositoryRoute{}, errRepositoryNotFound
-	}
-	route.Name = canonicalRepositoryName(route.Name)
-	repository, ok := repositories[route.Name]
-	if !ok {
-		repository, ok = repositories["*"]
-		repository.LogID = automaticRepositoryID(route.Name)
-	}
-	if !ok {
-		return repositoryRoute{}, errRepositoryNotFound
-	}
-	route.Repository = repository
-	route.Method = http.MethodPost
-	if route.Service == "info/refs" {
-		query, err := url.ParseQuery(r.URL.RawQuery)
-		services := query["service"]
-		if err != nil || len(query) != 1 || len(services) != 1 {
+		if err != nil {
 			return repositoryRoute{}, errRepositoryNotFound
 		}
-		route.Service = services[0]
-		route.Method = http.MethodGet
-		if route.Service != transport.UploadPackService && route.Service != transport.ReceivePackService {
-			return repositoryRoute{}, errRepositoryNotFound
+		if r.URL.Path == "/_maintenance" {
+			id := query.Get("log_id")
+			route.Service = query.Get("operation")
+			if len(query) != 2 || len(query["log_id"]) != 1 || len(query["operation"]) != 1 ||
+				!repositoryLogID.MatchString(id) || id == "." || id == ".." ||
+				(route.Service != "maintenance" && route.Service != "collect") {
+				return repositoryRoute{}, errRepositoryNotFound
+			}
+			// Discovered IDs have no repository groups; Cognito requires the operator.
+			route.LogID = id
+		} else {
+			endpoint := repositoryEndpoint.FindStringSubmatch(r.URL.Path)
+			if endpoint == nil || !validRepositoryName(endpoint[1]) {
+				return repositoryRoute{}, errRepositoryNotFound
+			}
+			route.Name, route.Service = canonicalRepositoryName(endpoint[1]), endpoint[2]
+			if route.Service == "info/refs" {
+				if len(query["service"]) != 1 {
+					return repositoryRoute{}, errRepositoryNotFound
+				}
+				route.Service = query.Get("service")
+				if route.Service != transport.UploadPackService && route.Service != transport.ReceivePackService {
+					return repositoryRoute{}, errRepositoryNotFound
+				}
+				route.Method = http.MethodGet
+			}
+			if route.Service == "authorize-read" {
+				route.Method = http.MethodGet
+			}
+			switch route.Service {
+			case transport.UploadPackService, "authorize-read":
+				route.Action = gitRead
+			case transport.ReceivePackService:
+				route.Action = gitWrite
+			}
+			var ok bool
+			route.Repository, ok = repositories[route.Name]
+			if !ok {
+				route.Repository, ok = repositories["*"]
+			}
+			if !ok {
+				return repositoryRoute{}, errRepositoryNotFound
+			}
+			route.LogID = automaticRepositoryID(route.Name)
 		}
-	} else if r.URL.RawQuery != "" || r.URL.ForceQuery {
-		return repositoryRoute{}, errRepositoryNotFound
-	}
-	if route.Service == "authorize-read" {
-		route.Method = http.MethodGet
-	}
-	switch route.Service {
-	case transport.UploadPackService, "authorize-read":
-		route.Action = gitRead
-	case transport.ReceivePackService:
-		route.Action = gitWrite
-	default:
-		route.Action = gitAdmin
 	}
 	if r.Method != route.Method {
 		return route, errRepositoryMethod

@@ -2,20 +2,6 @@ package object-log:storage@0.1.0;
 
 interface wal {
     enum credential-mode { static-credentials, instance-role }
-    record log-limits {
-        max-tail-entries: u64,
-        resolution-window: u64,
-        max-inline-operation-bytes: u64,
-        max-inline-result-bytes: u64,
-        max-object-refs: u64,
-        max-object-bytes: u64,
-        max-commit-bytes: u64,
-        max-head-bytes: u64,
-        max-checkpoint-bytes: u64,
-        max-retention-ids: u64,
-        max-collection-objects: u64,
-        max-collection-plan-bytes: u64,
-    }
     record transport-limits {
         max-calls: u64,
         max-bytes: u64,
@@ -31,14 +17,13 @@ interface wal {
         session-token: option<string>,
         prefix: string,
         log-id: string,
-        log-limits: log-limits,
+        // Strict JSON Options object, at most 2048 bytes; omitted fields use native defaults.
+        log-options: list<u8>,
         transport-limits: transport-limits,
     }
     variant failure { missing, expired, limit(string), other(string) }
     variant outcome { committed, conflict, pending(list<u8>) }
     variant resolution { committed, not-committed, still-pending(list<u8>), expired }
-    variant checkpoint-outcome { published, conflict, pending(own<pending-checkpoint>) }
-    enum checkpoint-resolution { published, not-published, still-pending, expired }
     enum retention-state { applied, active-collection, conflict, pending }
     enum maintenance-state { complete, more, conflict, pending, retained }
     record collection-result { state: maintenance-state, objects: u64, bytes: u64 }
@@ -53,6 +38,7 @@ interface wal {
         objects: list<own<object>>,
     }
     variant history-item { checkpoint(entry), commit(commit-record) }
+    record latest-record { tail-entries: u64, item: option<history-item> }
     resource candidate {
         recovery-token: func() -> result<list<u8>, failure>;
         // Save the token before publishing. After any publish error, reopen and
@@ -67,27 +53,32 @@ interface wal {
         length: func() -> u64;
         read-at: func(offset: u64, max-len: u32) -> result<list<u8>, failure>;
     }
-    resource pending-checkpoint {
-        resolve: func() -> result<checkpoint-resolution, failure>;
-    }
     resource recovery {
         // Returns the optional checkpoint first, then commits in sequence.
         next: func() -> result<option<history-item>, failure>;
+        // Reads only the last tail commit, or the checkpoint when the tail is empty.
+        // This does not advance next() or reconstruct application state.
+        latest: func() -> result<latest-record, failure>;
         write-bytes: func() -> result<own<byte-writer>, failure>;
         open-bytes: func(value: borrow<object>) -> result<own<byte-reader>, failure>;
         read-node: func(value: borrow<object>) -> result<entry, failure>;
         put-node: func(data: list<u8>, children: list<borrow<object>>) -> result<own<object>, failure>;
+        // Consumes and authenticates the remaining cursor before preparing publication.
         prepare: func(
             transaction-id: list<u8>,
             operation: list<u8>,
             recorded-result: list<u8>,
             roots: list<borrow<object>>,
         ) -> result<own<candidate>, failure>;
-        // Requires next() to have reached the end of this exact view.
+        // Authenticates this exact view's checkpoint and complete active tail.
+        // The caller's snapshot must preserve that view's logical application state.
+        // Covers the tail, or rewrites an existing checkpoint at the same boundary.
+        // Resolves an uncertain publication once; returns complete, conflict,
+        // or pending. Pending requires reopening and recovering the durable view.
         checkpoint: func(
             data: list<u8>,
             roots: list<borrow<object>>,
-        ) -> result<checkpoint-outcome, failure>;
+        ) -> result<maintenance-state, failure>;
     }
     resource session {
         // Reads the cached view; refresh to observe another session's changes.
@@ -98,7 +89,8 @@ interface wal {
         // Caps a new plan; an existing plan is resumed without shrinking it.
         collect: func(max-candidates: u64) -> result<collection-result, failure>;
         usage: func() -> usage;
-        refresh: func() -> result<own<session>, failure>;
+        // Updates the cached head; existing recovery cursors keep their exact views.
+        refresh: func() -> result<_, failure>;
         // Opens a bounded cursor over one exact authenticated view.
         recover: func() -> result<own<recovery>, failure>;
         resume: func(token: list<u8>) -> result<resolution, failure>;

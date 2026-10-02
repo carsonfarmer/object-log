@@ -15,17 +15,6 @@ const (
 	walTransportBytes = 24*(1040<<20) + 8<<20
 )
 
-func walLogLimits(collectionObjects uint64) wal.LogLimits {
-	return wal.LogLimits{
-		MaxTailEntries: 1024, ResolutionWindow: 1024,
-		MaxInlineOperationBytes: 64 << 10, MaxInlineResultBytes: 4 << 10,
-		MaxObjectRefs: 1024, MaxObjectBytes: 2 << 20,
-		MaxCommitBytes: 1 << 20, MaxHeadBytes: 256 << 10,
-		MaxCheckpointBytes: 16 << 20, MaxRetentionIds: 1024,
-		MaxCollectionObjects: collectionObjects, MaxCollectionPlanBytes: 16 << 20,
-	}
-}
-
 func walTransportLimits() wal.TransportLimits {
 	return wal.TransportLimits{MaxCalls: walTransportCalls, MaxBytes: walTransportBytes}
 }
@@ -38,6 +27,7 @@ func sessionToken(getenv func(string) string) cm.Option[string] {
 }
 
 func walSettings(getenv func(string) string, logID string, limits requestLimits) (wal.Config, error) {
+	options := []byte(fmt.Sprintf(`{"max_object_bytes":2097152,"max_collection_objects":%d}`, limits.collectionObjects))
 	mode := wal.CredentialModeStaticCredentials
 	switch getenv("WAL_CREDENTIAL_MODE") {
 	case "static":
@@ -50,7 +40,7 @@ func walSettings(getenv func(string) string, logID string, limits requestLimits)
 		Endpoint: getenv("WAL_ENDPOINT"), Bucket: getenv("WAL_BUCKET"), Region: getenv("WAL_REGION"),
 		CredentialMode: mode, AccessKey: getenv("WAL_ACCESS_KEY"), SecretKey: getenv("WAL_SECRET_KEY"),
 		SessionToken: sessionToken(getenv), Prefix: getenv("WAL_PREFIX"), LogId: logID,
-		LogLimits: walLogLimits(uint64(limits.collectionObjects)), TransportLimits: walTransportLimits(),
+		LogOptions: options, TransportLimits: walTransportLimits(),
 	}, nil
 }
 

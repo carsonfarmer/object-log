@@ -24,8 +24,6 @@ func TestMaintenance(t *testing.T) {
 	for _, format := range []string{"sha1", "sha256"} {
 		t.Run(format, func(t *testing.T) {
 			url := strings.TrimRight(endpoint, "/") + "/" + format + ".git"
-			post(t, url+"/git-receive-pack", "git-receive-pack", []byte("0000"))
-			finishGitMaintenance(t, url)
 			source := filepath.Join(t.TempDir(), "source")
 			liveBranch := fmt.Sprintf("cleanup-live-%d", time.Now().UnixNano())
 			deadBranch := liveBranch + "-dead"
@@ -35,6 +33,7 @@ func TestMaintenance(t *testing.T) {
 			git(t, nil, "-C", source, "add", ".")
 			git(t, nil, "-C", source, "commit", "-m", "live")
 			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+liveBranch)
+			finishGitMaintenance(t, url)
 			git(t, nil, "-C", source, "checkout", "--orphan", deadBranch)
 			git(t, nil, "-C", source, "rm", "-rf", ".")
 			write(t, filepath.Join(source, "discard"), []byte("maintenance unreachable content"))
@@ -44,19 +43,19 @@ func TestMaintenance(t *testing.T) {
 			git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+deadBranch)
 			git(t, nil, "-C", source, "push", url, ":refs/heads/"+deadBranch)
 			git(t, nil, "-C", source, "checkout", liveBranch)
-			// Begin from tail zero, then leave exactly 64 durable updates behind.
-			for i := range 61 {
+			// The checkpoint precedes two ref updates and 62 live commits.
+			for i := range 62 {
 				write(t, filepath.Join(source, "keep"), []byte(fmt.Sprintf("maintenance live content %d", i)))
 				git(t, nil, "-C", source, "add", ".")
 				git(t, nil, "-C", source, "commit", "-m", fmt.Sprint(i))
 				git(t, nil, "-C", source, "push", url, "HEAD:refs/heads/"+liveBranch)
 			}
 			live := strings.TrimSpace(string(git(t, nil, "-C", source, "rev-parse", "HEAD")))
-			// The empty receive checkpoints the as-is catalog without appending.
+			// An empty receive is a protocol no-op; maintenance performs the checkpoint.
 			post(t, url+"/git-receive-pack", "git-receive-pack", []byte("0000"))
 			first := requestGitMaintenance(t, url)
 			if first.State != "more" || first.Objects == 0 {
-				t.Fatalf("tail-zero pruning did not checkpoint and collect in one request: %+v", first)
+				t.Fatalf("pruning did not checkpoint and collect in one request: %+v", first)
 			}
 			write(t, filepath.Join(source, "keep"), []byte("intervening live update"))
 			git(t, nil, "-C", source, "add", ".")

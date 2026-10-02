@@ -727,6 +727,7 @@ dependencies = [
  "hex",
  "minicbor",
  "object_store",
+ "serde",
  "thiserror",
  "uuid",
 ]
@@ -745,6 +746,7 @@ dependencies = [
  "humantime",
  "object-log",
  "object_store",
+ "serde_json",
  "sha2",
  "spin-sdk",
  "tokio",

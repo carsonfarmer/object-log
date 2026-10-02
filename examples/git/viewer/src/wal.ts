@@ -9,10 +9,6 @@ const decode = new TextDecoder("utf-8", { fatal: true });
 export const json = <T>(data: Uint8Array): T => JSON.parse(decode.decode(data));
 export const hex = (bytes: Uint8Array) => bytes.toHex();
 
-export interface Repository {
-  log_id: string;
-  format?: "sha1" | "sha256" | "";
-}
 export const automaticLogId = async (name: string) =>
   `auto-${hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(name))))}`;
 export class MissingObject extends Error {}
@@ -23,14 +19,13 @@ interface Bucket {
     Kind: number;
     Size: number;
     StoredSize: number;
-    Encoding: string;
     Inline?: string;
     Delta?: { StoredSize: number };
   }[];
   Prefixes?: string[];
 }
 export interface Root {
-  Validated: boolean;
+  Version: number;
   Format: string;
   Head: string;
   Refs: Record<string, string>;
@@ -55,7 +50,7 @@ function validRef(name: string): boolean {
   );
 }
 
-export function settings(repository: Repository): wal.Config {
+export function settings(logId: string): wal.Config {
   return {
     endpoint: variable("wal_endpoint"),
     bucket: variable("wal_bucket"),
@@ -66,21 +61,10 @@ export function settings(repository: Repository): wal.Config {
     secretKey: variable("wal_secret_key"),
     sessionToken: variable("wal_session_token") || undefined,
     prefix: variable("wal_prefix"),
-    logId: repository.log_id,
-    logLimits: {
-      maxTailEntries: 1024n,
-      resolutionWindow: 1024n,
-      maxInlineOperationBytes: 65536n,
-      maxInlineResultBytes: 4096n,
-      maxObjectRefs: 1024n,
-      maxObjectBytes: 2097152n,
-      maxCommitBytes: 1048576n,
-      maxHeadBytes: 262144n,
-      maxCheckpointBytes: 16777216n,
-      maxRetentionIds: 1024n,
-      maxCollectionObjects: BigInt(variable("wal_max_collection_objects")),
-      maxCollectionPlanBytes: 16777216n,
-    },
+    logId,
+    logOptions: new TextEncoder().encode(
+      `{"max_object_bytes":2097152,"max_collection_objects":${BigInt(variable("wal_max_collection_objects"))}}`,
+    ),
     transportLimits: { maxCalls: 25984n, maxBytes: 26180845568n },
   };
 }
@@ -95,15 +79,11 @@ export class Catalog {
 
   constructor(
     session: wal.Session,
-    format: string | undefined,
     private budget: { bytes: number },
   ) {
     this.recovery = session.recover();
     try {
-      for (let record = this.recovery.next(); record; record = this.recovery.next()) {
-        for (const root of this.owned) drop(root);
-        this.owned = record.val.objects;
-      }
+      this.owned = this.recovery.latest().item?.val.objects ?? [];
       if (!this.owned.length) throw new NotFound("Repository has no published root");
       if (this.owned.length !== 1) throw new Error("Invalid repository root count");
       const node = this.node(this.owned[0]);
@@ -113,13 +93,12 @@ export class Catalog {
       const idPattern = new RegExp(`^[0-9a-f]{${this.root.Format === "sha1" ? 40 : 64}}$`);
       if (
         Object.keys(this.root).some(
-          (key) => !["Validated", "Format", "Head", "Refs", "Buckets"].includes(key),
+          (key) => !["Version", "Format", "Head", "Refs", "Buckets"].includes(key),
         ) ||
-        this.root.Validated !== true ||
+        this.root.Version !== 1 ||
         !["sha1", "sha256"].includes(this.root.Format) ||
         !validRef(this.root.Head) ||
         !this.root.Head.startsWith("refs/heads/") ||
-        (format && this.root.Format !== format) ||
         typeof this.root.Refs !== "object" ||
         Array.isArray(this.root.Refs) ||
         Object.entries(this.root.Refs).some(
@@ -182,9 +161,10 @@ export class Catalog {
       let child = 0;
       for (const item of bucket.Items ?? []) {
         const value = item.Inline ? undefined : node.objects[child++];
+        if (item.Delta?.StoredSize) child++;
         if (item.ID !== id) continue;
         if (item.Kind !== kind) throw new MissingObject("Git object has a different kind");
-        if (item.Encoding !== "zlib" || !Number.isSafeInteger(item.Size) || item.Size < 0)
+        if (!Number.isSafeInteger(item.Size) || item.Size < 0)
           throw new Error("Invalid Git object metadata");
         if (item.Size > maxBytes) {
           if (kind !== 3) throw new Error("Git object exceeds metadata limit");
@@ -194,8 +174,7 @@ export class Catalog {
         if (item.Inline) compressed = Uint8Array.fromBase64(item.Inline);
         else {
           if (!value) throw new Error("Missing object reference");
-          const full = item.Delta?.StoredSize ? this.node(value).objects[0] : value;
-          using reader = disposable(this.recovery.openBytes(full));
+          using reader = disposable(this.recovery.openBytes(value));
           if (reader.length() !== BigInt(item.StoredSize) || item.StoredSize > maxBytes + 65536)
             throw new Error("Invalid stored object length");
           compressed = new Uint8Array(item.StoredSize);

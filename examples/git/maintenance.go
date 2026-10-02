@@ -78,50 +78,10 @@ func (s *store) maintain() (wal.CollectionResult, error) {
 			return wal.CollectionResult{}, err
 		}
 	}
-	checkpointRecovery := s.recovery
-	if s.tailEntries == 0 {
-		outcome, err := s.publishRoot(root)
-		if err != nil {
-			return wal.CollectionResult{}, err
-		}
-		switch outcome.Tag() {
-		case wal.OutcomeCommitted:
-			fresh, err := unwrap(s.session.Refresh)
-			if err != nil {
-				return wal.CollectionResult{}, err
-			}
-			defer fresh.Drop()
-			current, err := unwrap(fresh.Recover)
-			if err != nil {
-				return wal.CollectionResult{}, err
-			}
-			defer current.Drop()
-			currentRoot, tailEntries, err := s.acceptRecovery(current)
-			if err != nil {
-				return wal.CollectionResult{}, err
-			}
-			if currentRoot == nil {
-				return wal.CollectionResult{}, fmt.Errorf("invalid published root")
-			}
-			// Another push may have followed pruning. Checkpoint its winning
-			// root, never the stale root we just published.
-			root = currentRoot
-			if tailEntries == 0 {
-				return s.collect()
-			}
-			checkpointRecovery = current
-		case wal.OutcomeConflict:
-			return wal.CollectionResult{State: wal.MaintenanceStateConflict}, nil
-		case wal.OutcomePending:
-			return wal.CollectionResult{State: wal.MaintenanceStatePending}, nil
-		default:
-			return wal.CollectionResult{}, fmt.Errorf("unknown publication outcome %d", outcome.Tag())
-		}
-	}
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	state, err := checkpoint(checkpointRecovery, root)
+	state, err := checkpoint(s.recovery, root)
 	if err != nil {
 		return wal.CollectionResult{}, err
 	}
@@ -141,34 +101,9 @@ func (s *store) checkpointTail() (wal.MaintenanceState, error) {
 }
 
 func checkpoint(recovery *wal.Recovery, root *wal.Object) (wal.MaintenanceState, error) {
-	outcome, err := unwrap(func() wt.Result[wal.CheckpointOutcome, wal.Failure] {
+	return unwrap(func() wt.Result[wal.MaintenanceState, wal.Failure] {
 		return recovery.Checkpoint(nil, []*wal.Object{root})
 	})
-	if err != nil {
-		return 0, err
-	}
-	switch outcome.Tag() {
-	case wal.CheckpointOutcomePublished:
-		return wal.MaintenanceStateComplete, nil
-	case wal.CheckpointOutcomeConflict:
-		return wal.MaintenanceStateConflict, nil
-	case wal.CheckpointOutcomePending:
-		pending := outcome.Pending()
-		defer pending.Drop()
-		resolution, err := unwrap(pending.Resolve)
-		if err != nil {
-			return 0, err
-		}
-		switch resolution {
-		case wal.CheckpointResolutionPublished:
-			return wal.MaintenanceStateComplete, nil
-		case wal.CheckpointResolutionNotPublished:
-			return wal.MaintenanceStateConflict, nil
-		case wal.CheckpointResolutionStillPending, wal.CheckpointResolutionExpired:
-			return wal.MaintenanceStatePending, nil
-		}
-	}
-	return 0, fmt.Errorf("unknown checkpoint outcome %d", outcome.Tag())
 }
 
 func (s *store) collect() (wal.CollectionResult, error) {
@@ -177,15 +112,10 @@ func (s *store) collect() (wal.CollectionResult, error) {
 	if err := s.ctx.Err(); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	session, err := unwrap(s.session.Refresh)
-	if err != nil {
+	if _, err := unwrap(s.session.Refresh); err != nil {
 		return wal.CollectionResult{}, err
 	}
-	defer session.Drop()
-	if err := s.ctx.Err(); err != nil {
-		return wal.CollectionResult{}, err
-	}
-	return collectSession(s.ctx, session, s.limits)
+	return collectSession(s.ctx, s.session, s.limits)
 }
 
 // Resume an installed deletion plan without loading the Git catalog again.

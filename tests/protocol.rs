@@ -435,7 +435,7 @@ async fn retention_updates_do_not_reject_an_in_flight_checkpoint(
         let status = writer
             .publish_checkpoint(
                 &view,
-                &through,
+                Some(&through),
                 Bytes::from_static(b"checkpoint"),
                 vec![root],
             )
@@ -982,7 +982,7 @@ async fn rejected_maintenance_stays_pending_when_the_winner_read_fails(
                 first
                     .publish_checkpoint(
                         &source,
-                        &source.tail()[0],
+                        Some(&source.tail()[0]),
                         Bytes::from_static(b"snapshot"),
                         Vec::new(),
                     )

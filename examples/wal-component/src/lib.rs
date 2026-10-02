@@ -2,8 +2,7 @@
 use bytes::Bytes;
 use exports::object_log::storage::wal::*;
 use object_log::{
-    CheckpointResolution as LogCheckpointResolution, CheckpointStatus, CommitStatus,
-    HistoryItem as LogHistoryItem, Log, PendingCheckpoint as LogPendingCheckpoint,
+    CheckpointResolution, CheckpointStatus, CommitStatus, HistoryItem as LogHistoryItem, Log,
     Resolution as LogResolution, RetentionId, RetentionStatus, StagedObject, TransactionId, View,
 };
 use std::cell::{Ref, RefCell};
@@ -26,7 +25,6 @@ struct LogState<T> {
 }
 type CandidateState = LogState<Option<object_log::PreparedCommit>>;
 type RecoveryState = LogState<object_log::HistoryCursor>;
-type PendingCheckpointState = LogState<Option<LogPendingCheckpoint>>;
 
 impl<T> LogState<Option<T>> {
     fn live(&self, closed: &str) -> Result<Ref<'_, T>, Failure> {
@@ -193,14 +191,11 @@ impl GuestSession for SessionState {
         let (calls, bytes) = self.transport.usage();
         Usage { calls, bytes }
     }
-    fn refresh(&self) -> Result<Session, Failure> {
+    fn refresh(&self) -> Result<(), Failure> {
         let current = self.current_view();
         let view = executor::run(self.log.refresh(&current))?.unwrap_or(current);
-        Ok(Session::new(Self {
-            log: self.log.clone(),
-            view: RefCell::new(view),
-            transport: self.transport.clone(),
-        }))
+        self.view.replace(view);
+        Ok(())
     }
 
     fn recover(&self) -> Result<Recovery, Failure> {
@@ -225,57 +220,75 @@ impl GuestSession for SessionState {
     }
 }
 impl RecoveryState {
-    fn recovered_view(&self) -> Result<Ref<'_, View>, Failure> {
-        let cursor = self.value.borrow();
-        if !cursor.is_complete() {
-            return Err(Failure::Other(
-                "recovery history must be consumed before publication".into(),
-            ));
+    fn bound_view(&self) -> Ref<'_, View> {
+        Ref::map(self.value.borrow(), object_log::HistoryCursor::view)
+    }
+
+    fn latest_record(&self) -> Result<(usize, Option<LogHistoryItem>), Failure> {
+        let view = self.bound_view();
+        let entries = view.tail().len();
+        let item = if let Some(index) = entries.checked_sub(1) {
+            Some(LogHistoryItem::Commit(executor::run(
+                object_log::tail_record(&self.log, &view, index),
+            )?))
+        } else {
+            executor::run(object_log::history(&self.log, view.clone())?.next())?
+        };
+        Ok((entries, item))
+    }
+}
+
+fn history_item(item: LogHistoryItem) -> HistoryItem {
+    match item {
+        LogHistoryItem::Checkpoint(authenticated) => {
+            let (record, objects) = authenticated.into_parts();
+            HistoryItem::Checkpoint(Entry {
+                data: record.snapshot().to_vec(),
+                objects: objects.into_iter().map(Object::new).collect(),
+            })
         }
-        Ok(Ref::map(cursor, object_log::HistoryCursor::view))
+        LogHistoryItem::Commit(authenticated) => {
+            let (record, objects) = authenticated.into_parts();
+            let reference = record.reference();
+            HistoryItem::Commit(CommitRecord {
+                sequence: reference.sequence(),
+                transaction_id: reference.transaction_id().as_uuid().as_bytes().to_vec(),
+                operation: record.operation().to_vec(),
+                recorded_result: record.result().to_vec(),
+                objects: objects.into_iter().map(Object::new).collect(),
+            })
+        }
     }
 }
 impl GuestRecovery for RecoveryState {
     fn next(&self) -> Result<Option<HistoryItem>, Failure> {
-        let item = executor::run(self.value.borrow_mut().next())?;
-        Ok(item.map(|item| match item {
-            LogHistoryItem::Checkpoint(authenticated) => {
-                let (record, objects) = authenticated.into_parts();
-                HistoryItem::Checkpoint(Entry {
-                    data: record.snapshot().to_vec(),
-                    objects: objects.into_iter().map(Object::new).collect(),
-                })
-            }
-            LogHistoryItem::Commit(authenticated) => {
-                let (record, objects) = authenticated.into_parts();
-                let reference = record.reference();
-                HistoryItem::Commit(CommitRecord {
-                    sequence: reference.sequence(),
-                    transaction_id: reference.transaction_id().as_uuid().as_bytes().to_vec(),
-                    operation: record.operation().to_vec(),
-                    recorded_result: record.result().to_vec(),
-                    objects: objects.into_iter().map(Object::new).collect(),
-                })
-            }
-        }))
+        Ok(executor::run(self.value.borrow_mut().next())?.map(history_item))
+    }
+
+    fn latest(&self) -> Result<LatestRecord, Failure> {
+        let (entries, item) = self.latest_record()?;
+        Ok(LatestRecord {
+            tail_entries: entries as u64,
+            item: item.map(history_item),
+        })
     }
 
     fn write_bytes(&self) -> Result<ByteWriter, Failure> {
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         let writer = self.log.byte_writer(&view)?;
         Ok(ByteWriter::new(WriterState(RefCell::new(Some(writer)))))
     }
 
     fn open_bytes(&self, value: ObjectBorrow<'_>) -> Result<ByteReader, Failure> {
         let value = value.get::<StagedObject>();
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         let reader = executor::run(self.log.open_bytes(&view, value.reference()))?;
         Ok(ByteReader::new(ReaderState(RefCell::new(reader))))
     }
 
     fn read_node(&self, value: ObjectBorrow<'_>) -> Result<Entry, Failure> {
         let value = value.get::<StagedObject>();
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         let (data, objects) = executor::run(self.log.read_staged_node(&view, value))?;
         Ok(Entry {
             data: data.into(),
@@ -283,7 +296,7 @@ impl GuestRecovery for RecoveryState {
         })
     }
     fn put_node(&self, data: Vec<u8>, children: Vec<ObjectBorrow<'_>>) -> Result<Object, Failure> {
-        let view = self.recovered_view()?;
+        let view = self.bound_view();
         Ok(Object::new(executor::run(self.log.put_node(
             &view,
             Bytes::from(data),
@@ -297,10 +310,11 @@ impl GuestRecovery for RecoveryState {
         result: Vec<u8>,
         roots: Vec<ObjectBorrow<'_>>,
     ) -> Result<Candidate, Failure> {
-        let view = self.recovered_view()?;
         let transaction_id = uuid::Uuid::from_slice(&transaction_id)
             .map(TransactionId::from_uuid)
             .map_err(|_| Failure::Other("transaction ID must contain 16 bytes".into()))?;
+        while executor::run(self.value.borrow_mut().next())?.is_some() {}
+        let view = self.bound_view();
         let prepared = self.log.prepare(
             &view,
             transaction_id,
@@ -318,42 +332,35 @@ impl GuestRecovery for RecoveryState {
         &self,
         data: Vec<u8>,
         roots: Vec<ObjectBorrow<'_>>,
-    ) -> Result<CheckpointOutcome, Failure> {
-        let view = self.recovered_view()?;
-        let through = view
-            .tail()
-            .last()
-            .ok_or_else(|| Failure::Other("checkpoint requires an active tail".into()))?;
-        match executor::run(self.log.publish_checkpoint(
-            &view,
-            through,
-            data.into(),
-            proofs(&roots),
-        ))? {
-            CheckpointStatus::Published(_) => Ok(CheckpointOutcome::Published),
-            CheckpointStatus::Conflict(_) => Ok(CheckpointOutcome::Conflict),
-            CheckpointStatus::Pending(pending) => Ok(CheckpointOutcome::Pending(
-                PendingCheckpoint::new(PendingCheckpointState {
-                    log: self.log.clone(),
-                    value: RefCell::new(Some(pending)),
-                }),
-            )),
+    ) -> Result<MaintenanceState, Failure> {
+        let view = self.bound_view();
+        let through = view.tail().last();
+        if through.is_some() {
+            executor::run(self.log.read_checkpoint(&view))?;
         }
+        checkpoint_state(
+            &self.log,
+            executor::run(self.log.publish_checkpoint(
+                &view,
+                through,
+                data.into(),
+                proofs(&roots),
+            ))?,
+        )
     }
 }
-impl GuestPendingCheckpoint for PendingCheckpointState {
-    fn resolve(&self) -> Result<CheckpointResolution, Failure> {
-        let pending = self.live("resolved checkpoint")?.clone();
-        let (resolution, pending) = match executor::run(self.log.resolve_checkpoint(pending))? {
-            LogCheckpointResolution::Published(_) => (CheckpointResolution::Published, None),
-            LogCheckpointResolution::NotPublished(_) => (CheckpointResolution::NotPublished, None),
-            LogCheckpointResolution::Expired(_) => (CheckpointResolution::Expired, None),
-            LogCheckpointResolution::StillPending(pending) => {
-                (CheckpointResolution::StillPending, Some(pending))
+fn checkpoint_state(log: &Log, status: CheckpointStatus) -> Result<MaintenanceState, Failure> {
+    match status {
+        CheckpointStatus::Published(_) => Ok(MaintenanceState::Complete),
+        CheckpointStatus::Conflict(_) => Ok(MaintenanceState::Conflict),
+        CheckpointStatus::Pending(pending) => match executor::run(log.resolve_checkpoint(pending))?
+        {
+            CheckpointResolution::Published(_) => Ok(MaintenanceState::Complete),
+            CheckpointResolution::NotPublished(_) => Ok(MaintenanceState::Conflict),
+            CheckpointResolution::Expired(_) | CheckpointResolution::StillPending(_) => {
+                Ok(MaintenanceState::Pending)
             }
-        };
-        self.value.replace(pending);
-        Ok(resolution)
+        },
     }
 }
 impl GuestCandidate for CandidateState {
@@ -378,7 +385,6 @@ impl Guest for Component {
     type ByteWriter = WriterState;
     type ByteReader = ReaderState;
     type Candidate = CandidateState;
-    type PendingCheckpoint = PendingCheckpointState;
     type Recovery = RecoveryState;
     type Session = SessionState;
     type Object = StagedObject;
@@ -389,6 +395,7 @@ impl Guest for Component {
         open_session(settings, false)
     }
     fn validate_backend(settings: Config) -> Result<(), Failure> {
+        log_options(&settings.log_options)?;
         executor::run(async {
             let (store, _) = connect_store(&settings)?;
             object_log::ValidatedBackend::new(
@@ -416,6 +423,7 @@ fn connect_store(
 }
 
 fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
+    let options = log_options(&settings.log_options)?;
     executor::run(async {
         let (store, transport) = connect_store(&settings)?;
         let backend = object_log::ValidatedBackend::assume_validated(
@@ -423,7 +431,6 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
             object_store::path::Path::from(settings.prefix),
         );
         let log_id = object_log::LogId::new(settings.log_id)?;
-        let options = log_options(settings.log_limits)?;
         let (log, view) = if create {
             let log = Log::open(&backend, &log_id, options).await?;
             let view = log.load().await?;
@@ -439,29 +446,14 @@ fn open_session(settings: Config, create: bool) -> Result<Session, Failure> {
     })
 }
 
-fn log_options(limits: LogLimits) -> Result<object_log::Options, Failure> {
-    let limit =
-        |value, name| usize::try_from(value).map_err(|_| Failure::Other(format!("invalid {name}")));
-    Ok(object_log::Options {
-        max_tail_entries: limit(limits.max_tail_entries, "tail entry limit")?,
-        resolution_window: limit(limits.resolution_window, "resolution window")?,
-        max_inline_operation_bytes: limit(
-            limits.max_inline_operation_bytes,
-            "inline operation limit",
-        )?,
-        max_inline_result_bytes: limit(limits.max_inline_result_bytes, "inline result limit")?,
-        max_object_refs: limit(limits.max_object_refs, "object reference limit")?,
-        max_object_bytes: limit(limits.max_object_bytes, "object byte limit")?,
-        max_commit_bytes: limit(limits.max_commit_bytes, "commit byte limit")?,
-        max_head_bytes: limit(limits.max_head_bytes, "head byte limit")?,
-        max_checkpoint_bytes: limit(limits.max_checkpoint_bytes, "checkpoint byte limit")?,
-        max_retention_ids: limit(limits.max_retention_ids, "retention limit")?,
-        max_collection_objects: limit(limits.max_collection_objects, "collection object limit")?,
-        max_collection_plan_bytes: limit(
-            limits.max_collection_plan_bytes,
-            "collection plan byte limit",
-        )?,
-    })
+fn log_options(data: &[u8]) -> Result<object_log::Options, Failure> {
+    if data.len() > 2048 {
+        return Err(Failure::Limit("options bytes".into()));
+    }
+    if data.trim_ascii_start().first() != Some(&b'{') {
+        return Err(Failure::Other("options must be a JSON object".into()));
+    }
+    serde_json::from_slice(data).map_err(|error| Failure::Other(error.to_string()))
 }
 
 #[cfg(test)]

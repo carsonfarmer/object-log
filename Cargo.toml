@@ -32,6 +32,7 @@ futures = "0.3"
 hex = "0.4"
 minicbor = { version = "2.3", features = ["derive", "std"] }
 object_store = { version = "0.14", default-features = false }
+serde = { version = "1", features = ["derive"], optional = true }
 thiserror = "2.0"
 uuid = { version = "1.18", features = ["v4"] }
 
@@ -43,6 +44,7 @@ tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "ti
 
 [features]
 default = []
+serde = ["dep:serde"]
 aws = ["object_store/aws"]
 test-util = []
 

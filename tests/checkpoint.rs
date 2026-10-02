@@ -40,7 +40,7 @@ async fn checkpoint_replaces_one_prefix_and_preserves_its_suffix() -> TestResult
     let CheckpointStatus::Published(compacted) = log
         .publish_checkpoint(
             &third,
-            &through,
+            Some(&through),
             Bytes::from_static(b"state after first"),
             Vec::new(),
         )
@@ -95,7 +95,12 @@ async fn append_before_checkpoint_preserves_both_entries() -> TestResult {
         return Err("append did not publish".into());
     };
     let CheckpointStatus::Published(current) = first
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
+        .publish_checkpoint(
+            &one,
+            Some(&through),
+            Bytes::from_static(b"one-state"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("checkpoint did not reconcile the appended entry".into());
@@ -125,7 +130,12 @@ async fn reconciled_suffix_needs_verification_before_another_checkpoint() -> Tes
         let through = one.tail()[0].clone();
         let appended = append(&second, &one, b"two").await?;
         let CheckpointStatus::Published(reconciled) = first
-            .publish_checkpoint(&one, &through, Bytes::from_static(b"state one"), Vec::new())
+            .publish_checkpoint(
+                &one,
+                Some(&through),
+                Bytes::from_static(b"state one"),
+                Vec::new(),
+            )
             .await?
         else {
             return Err("first checkpoint did not reconcile the append".into());
@@ -144,7 +154,7 @@ async fn reconciled_suffix_needs_verification_before_another_checkpoint() -> Tes
             first
                 .publish_checkpoint(
                     &reconciled,
-                    &reconciled.tail()[0],
+                    Some(&reconciled.tail()[0]),
                     Bytes::from_static(b"state two"),
                     Vec::new(),
                 )
@@ -176,7 +186,12 @@ async fn checkpoint_cas_racing_appends_keeps_the_new_suffix() -> TestResult {
     let mut pause = faults.pause_put_at(2, FailurePhase::Before);
     let checkpoint = tokio::spawn(async move {
         checkpoint_writer
-            .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
+            .publish_checkpoint(
+                &one,
+                Some(&through),
+                Bytes::from_static(b"one-state"),
+                Vec::new(),
+            )
             .await
     });
     pause::entered(pause.wait_until_entered()).await?;
@@ -228,7 +243,12 @@ async fn checkpoint_retry_losing_to_another_checkpoint_reports_conflict() -> Tes
     let mut pause = faults.pause_put_at(3, FailurePhase::Before);
     let checkpoint = tokio::spawn(async move {
         first
-            .publish_checkpoint(&one, &through, Bytes::from_static(b"first"), Vec::new())
+            .publish_checkpoint(
+                &one,
+                Some(&through),
+                Bytes::from_static(b"first"),
+                Vec::new(),
+            )
             .await
     });
     assert!(
@@ -240,7 +260,12 @@ async fn checkpoint_retry_losing_to_another_checkpoint_reports_conflict() -> Tes
     );
     let through = two.tail()[0].clone();
     let CheckpointStatus::Published(winner) = second
-        .publish_checkpoint(&two, &through, Bytes::from_static(b"second"), Vec::new())
+        .publish_checkpoint(
+            &two,
+            Some(&through),
+            Bytes::from_static(b"second"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("competing checkpoint did not publish".into());
@@ -277,7 +302,12 @@ async fn checkpoint_cas_does_not_cross_a_collection_epoch() -> TestResult {
     let mut pause = faults.pause_put_at(2, FailurePhase::Before);
     let checkpoint = tokio::spawn(async move {
         checkpoint_writer
-            .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
+            .publish_checkpoint(
+                &one,
+                Some(&through),
+                Bytes::from_static(b"one-state"),
+                Vec::new(),
+            )
             .await
     });
     pause::entered(pause.wait_until_entered()).await?;
@@ -317,7 +347,12 @@ async fn checkpoint_before_append_preserves_the_base() -> TestResult {
     )?;
 
     let CheckpointStatus::Published(checkpointed) = first
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"one-state"), Vec::new())
+        .publish_checkpoint(
+            &one,
+            Some(&through),
+            Bytes::from_static(b"one-state"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("checkpoint did not publish".into());
@@ -345,7 +380,7 @@ async fn stale_checkpoint_returns_the_current_view() -> TestResult {
     let CheckpointStatus::Published(published) = log
         .publish_checkpoint(
             &one,
-            &through,
+            Some(&through),
             Bytes::from_static(b"first base"),
             Vec::new(),
         )
@@ -356,7 +391,7 @@ async fn stale_checkpoint_returns_the_current_view() -> TestResult {
     let CheckpointStatus::Conflict(current) = log
         .publish_checkpoint(
             &one,
-            &through,
+            Some(&through),
             Bytes::from_static(b"stale base"),
             Vec::new(),
         )
@@ -385,8 +420,13 @@ async fn checkpoint_limit_fails_before_index_publication() -> TestResult {
     let through = one.tail()[0].clone();
 
     assert!(matches!(
-        log.publish_checkpoint(&one, &through, Bytes::from_static(b"too large"), Vec::new(),)
-            .await,
+        log.publish_checkpoint(
+            &one,
+            Some(&through),
+            Bytes::from_static(b"too large"),
+            Vec::new(),
+        )
+        .await,
         Err(object_log::Error::LimitExceeded("encoded checkpoint bytes"))
     ));
     let current = log.load().await?;
@@ -416,7 +456,7 @@ async fn checkpoint_root_limit_fails_before_index_publication() -> TestResult {
     assert!(matches!(
         log.publish_checkpoint(
             &one,
-            &through,
+            Some(&through),
             Bytes::from_static(b"page map"),
             vec![object],
         )
@@ -441,7 +481,7 @@ async fn checkpoint_declares_live_objects_for_lazy_restore() -> TestResult {
     let CheckpointStatus::Published(compacted) = log
         .publish_checkpoint(
             &one,
-            &through,
+            Some(&through),
             Bytes::from_static(b"page map"),
             vec![object.clone()],
         )
@@ -509,7 +549,7 @@ async fn checkpoint_can_root_a_traversable_object_tree() -> TestResult {
     let CheckpointStatus::Published(compacted) = log
         .publish_checkpoint(
             &one,
-            &through,
+            Some(&through),
             Bytes::from_static(b"root"),
             vec![node.clone()],
         )
@@ -587,7 +627,12 @@ async fn checkpoint_read_rejects_missing_and_corrupt_checkpoint_object() -> Test
     let one = append(&log, &log.load().await?, b"one").await?;
     let through = one.tail()[0].clone();
     let CheckpointStatus::Published(compacted) = log
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), Vec::new())
+        .publish_checkpoint(
+            &one,
+            Some(&through),
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("checkpoint did not publish".into());
@@ -637,7 +682,12 @@ async fn lost_checkpoint_success_resolves_as_published() -> TestResult {
     });
 
     let pending = match log
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), Vec::new())
+        .publish_checkpoint(
+            &one,
+            Some(&through),
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
         .await?
     {
         CheckpointStatus::Pending(pending) => pending,
@@ -683,7 +733,12 @@ async fn reopened_checkpoint_resolution_rejects_invalid_descendants() -> TestRes
             phase: FailurePhase::After,
         });
         let pending = match log
-            .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), vec![node])
+            .publish_checkpoint(
+                &one,
+                Some(&through),
+                Bytes::from_static(b"snapshot"),
+                vec![node],
+            )
             .await?
         {
             CheckpointStatus::Pending(pending) => pending,
@@ -747,7 +802,12 @@ async fn reopened_pending_checkpoint_retries_after_an_append() -> TestResult {
     });
 
     let pending = match log
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"snapshot"), Vec::new())
+        .publish_checkpoint(
+            &one,
+            Some(&through),
+            Bytes::from_static(b"snapshot"),
+            Vec::new(),
+        )
         .await?
     {
         CheckpointStatus::Pending(pending) => pending,
@@ -798,7 +858,12 @@ async fn pending_checkpoint_retry_losing_to_checkpoint_is_not_published() -> Tes
         phase: FailurePhase::Before,
     });
     let CheckpointStatus::Pending(pending) = first
-        .publish_checkpoint(&one, &through, Bytes::from_static(b"first"), Vec::new())
+        .publish_checkpoint(
+            &one,
+            Some(&through),
+            Bytes::from_static(b"first"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("failed checkpoint update was not pending".into());
@@ -817,7 +882,12 @@ async fn pending_checkpoint_retry_losing_to_checkpoint_is_not_published() -> Tes
     );
     let through = two.tail()[0].clone();
     let CheckpointStatus::Published(winner) = second
-        .publish_checkpoint(&two, &through, Bytes::from_static(b"second"), Vec::new())
+        .publish_checkpoint(
+            &two,
+            Some(&through),
+            Bytes::from_static(b"second"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("competing checkpoint did not publish".into());
@@ -853,7 +923,7 @@ async fn superseded_pending_checkpoint_reports_expired_not_conflict() -> TestRes
     let pending = match log
         .publish_checkpoint(
             &one,
-            &through_one,
+            Some(&through_one),
             Bytes::from_static(b"state one"),
             Vec::new(),
         )
@@ -871,7 +941,7 @@ async fn superseded_pending_checkpoint_reports_expired_not_conflict() -> TestRes
     let CheckpointStatus::Published(_) = log
         .publish_checkpoint(
             &two,
-            &through_two,
+            Some(&through_two),
             Bytes::from_static(b"state two"),
             Vec::new(),
         )
@@ -903,7 +973,7 @@ async fn checkpoint_retains_a_pending_commit_outcome() -> TestResult {
     let CheckpointStatus::Published(_) = log
         .publish_checkpoint(
             &committed,
-            &through,
+            Some(&through),
             Bytes::from_static(b"snapshot"),
             Vec::new(),
         )
@@ -952,7 +1022,7 @@ async fn checkpointed_winner_keeps_a_loser_definite() -> TestResult {
         let winner = append(&log, &source, b"winner").await?;
         let through = winner.tail()[0].clone();
         let CheckpointStatus::Published(compacted) = log
-            .publish_checkpoint(&winner, &through, Bytes::new(), Vec::new())
+            .publish_checkpoint(&winner, Some(&through), Bytes::new(), Vec::new())
             .await?
         else {
             return Err("winner checkpoint did not publish".into());
@@ -986,7 +1056,7 @@ async fn cold_resume_from_a_full_history_head() -> TestResult {
     }
     let through = view.tail()[LIMIT - 1].clone();
     let CheckpointStatus::Published(mut view) = log
-        .publish_checkpoint(&view, &through, Bytes::new(), Vec::new())
+        .publish_checkpoint(&view, Some(&through), Bytes::new(), Vec::new())
         .await?
     else {
         return Err("history checkpoint did not publish".into());
@@ -1036,7 +1106,7 @@ async fn checkpoint_resolution_window_keeps_only_the_newest_outcome() -> TestRes
     let CheckpointStatus::Published(compacted) = log
         .publish_checkpoint(
             &committed,
-            &through,
+            Some(&through),
             Bytes::from_static(b"snapshot"),
             Vec::new(),
         )
@@ -1077,7 +1147,7 @@ async fn checkpoint_reports_expired_when_the_durable_window_is_zero() -> TestRes
     let CheckpointStatus::Published(_) = log
         .publish_checkpoint(
             &committed,
-            &through,
+            Some(&through),
             Bytes::from_static(b"snapshot"),
             Vec::new(),
         )
@@ -1116,7 +1186,7 @@ async fn exact_recovery_does_not_report_conflict_after_evidence_expires() -> Tes
     let CheckpointStatus::Published(_) = log
         .publish_checkpoint(
             &committed,
-            &through,
+            Some(&through),
             Bytes::from_static(b"snapshot"),
             Vec::new(),
         )
@@ -1155,7 +1225,7 @@ async fn checkpoint_rejects_missing_source_history_before_publication() -> TestR
     assert!(matches!(
         log.publish_checkpoint(
             &committed,
-            &through,
+            Some(&through),
             Bytes::from_static(b"snapshot"),
             Vec::new(),
         )

@@ -4,28 +4,23 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
-	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 )
 
-func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
+func (s *receiveStore) validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	refs := map[string]string{}
 	maps.Copy(refs, st.meta.Refs)
-	seen := map[string]bool{}
-	refNames := dotgit.New(memfs.New())
 	for _, cmd := range cmds {
 		name := string(cmd.Name)
 		if cmd.Old.HexSize() != st.meta.Format.HexSize() || cmd.New.HexSize() != st.meta.Format.HexSize() {
 			return nil, fmt.Errorf("invalid object format")
 		}
-		if seen[name] || (cmd.Old.IsZero() && cmd.New.IsZero()) {
+		if cmd.Old.IsZero() && cmd.New.IsZero() {
 			return nil, fmt.Errorf("invalid ref update")
 		}
-		seen[name] = true
-		if e := validateRefName(refNames, cmd.Name); e != nil {
+		if e := validateRefName(cmd.Name); e != nil {
 			return nil, e
 		}
 		old, exists := st.meta.Refs[name]
@@ -45,10 +40,7 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 				return nil, e
 			}
 			if exists {
-				previous, e := object.GetCommit(st, cmd.Old)
-				if e != nil {
-					return nil, e
-				}
+				previous := object.Commit{Hash: cmd.Old}
 				ok, e := previous.IsAncestor(next)
 				if e != nil {
 					return nil, e
@@ -60,7 +52,7 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 		}
 		refs[name] = cmd.New.String()
 	}
-	if err := validateRefs(refNames, st.meta.Format, refs); err != nil {
+	if err := validateRefs(st.meta.Format, refs); err != nil {
 		return nil, err
 	}
 	ids := make([]plumbing.Hash, 0, len(st.pending))
@@ -69,6 +61,12 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	}
 	if err := verifyObjects(st, ids); err != nil {
 		return nil, err
+	}
+	s.validated = make(map[plumbing.Hash]bool, len(cmds))
+	for _, cmd := range cmds {
+		if !cmd.New.IsZero() {
+			s.validated[cmd.New] = true
+		}
 	}
 	return refs, nil
 }

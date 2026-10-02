@@ -33,20 +33,7 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             _ => "existing",
         }
         .into(),
-        log_limits: wal::LogLimits {
-            max_tail_entries: 1_024,
-            resolution_window: 1_024,
-            max_inline_operation_bytes: 64 << 10,
-            max_inline_result_bytes: 4 << 10,
-            max_object_refs: 1_024,
-            max_object_bytes: 2 << 20,
-            max_commit_bytes: 1 << 20,
-            max_head_bytes: 256 << 10,
-            max_checkpoint_bytes: 16 << 20,
-            max_retention_ids: 1_024,
-            max_collection_objects: 100_000,
-            max_collection_plan_bytes: 16 << 20,
-        },
+        log_options: br#"{"max_object_bytes":2097152}"#.to_vec(),
         transport_limits: wal::TransportLimits {
             max_calls: 25_984,
             max_bytes: 26_180_206_592,
@@ -79,6 +66,15 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
         }
         "/recovery-gates" => {
             let session = wal::open_existing(&settings)?;
+            let peeked = session.recover()?;
+            let Some(wal::HistoryItem::Commit(latest)) = peeked.latest()?.item else {
+                panic!("latest missed the fixture commit")
+            };
+            let Some(wal::HistoryItem::Commit(next)) = peeked.next()? else {
+                panic!("latest consumed the fixture commit")
+            };
+            assert_eq!(latest.transaction_id, vec![7; 16]);
+            assert_eq!(next.transaction_id, latest.transaction_id);
             let complete = session.recover()?;
             while complete.next()?.is_some() {}
             let writer = complete.write_bytes()?;
@@ -87,32 +83,37 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             let node = complete.put_node(b"node", &[])?;
 
             let incomplete = session.recover()?;
-            let requires_history = |result: Result<(), wal::Failure>| {
-                assert!(
-                    matches!(result, Err(wal::Failure::Other(message)) if message.contains("history must be consumed"))
-                );
-            };
-            requires_history(incomplete.write_bytes().map(|_| ()));
-            requires_history(incomplete.open_bytes(&bytes).map(|_| ()));
-            requires_history(incomplete.read_node(&node).map(|_| ()));
-            requires_history(incomplete.put_node(b"other", &[]).map(|_| ()));
-            requires_history(
-                incomplete
-                    .prepare(&[9; 16], b"op", b"result", &[])
-                    .map(|_| ()),
-            );
-            requires_history(incomplete.checkpoint(b"snapshot", &[]).map(|_| ()));
+            let writer = incomplete.write_bytes()?;
+            writer.write(b"other")?;
+            let other = writer.finish()?;
+            assert_eq!(incomplete.open_bytes(&bytes)?.read_at(0, 5)?, b"bytes");
+            assert_eq!(incomplete.open_bytes(&other)?.read_at(0, 5)?, b"other");
+            assert_eq!(incomplete.read_node(&node)?.data, b"node");
+            let other_node = incomplete.put_node(b"other", &[])?;
+            assert_eq!(incomplete.read_node(&other_node)?.data, b"other");
+            // Preparation authenticates the remaining history without publishing.
+            let _candidate = incomplete.prepare(&[9; 16], b"op", b"result", &[])?;
+            assert!(incomplete.next()?.is_none());
         }
         "/refresh" => {
             let session = wal::open_existing(&settings)?;
             let before = session.usage();
-            let unchanged = session.refresh()?;
+            session.refresh()?;
             // The first refresh renews the fixture's expired role credentials:
             // three metadata requests, then the conditional head GET.
-            assert_eq!(unchanged.usage().calls, before.calls + 4);
-            assert!(unchanged.usage().bytes > before.bytes);
-            assert_eq!(session.usage().calls, unchanged.usage().calls);
+            assert_eq!(session.usage().calls, before.calls + 4);
+            assert!(session.usage().bytes > before.bytes);
 
+            let stale = session.recover()?;
+            let lifetime = session.recover()?;
+            let writer = lifetime.write_bytes()?;
+            writer.write(b"before")?;
+            let readable = lifetime.write_bytes()?;
+            readable.write(b"reader")?;
+            let bytes = readable.finish()?;
+            let reader = lifetime.open_bytes(&bytes)?;
+            let prepared = lifetime.prepare(&[9; 16], b"unused", b"result", &[])?;
+            let token = prepared.recovery_token()?;
             let recovery = session.recover()?;
             assert!(matches!(
                 recovery.next()?,
@@ -122,16 +123,26 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             let candidate = recovery.prepare(&[8; 16], b"next", b"result", &[])?;
             assert!(matches!(candidate.publish()?, wal::Outcome::Committed));
 
-            let stale = unchanged.recover()?;
-            assert!(matches!(stale.next()?, Some(wal::HistoryItem::Commit(_))));
+            let before = session.usage();
+            session.refresh()?;
+            assert_eq!(session.usage().calls, before.calls + 1);
+            assert!(session.usage().bytes > before.bytes);
+            assert_eq!(reader.read_at(0, 6)?, b"reader");
+            writer.write(b"after")?;
+            let written = writer.finish()?;
+            assert_eq!(
+                lifetime.open_bytes(&written)?.read_at(0, 11)?,
+                b"beforeafter"
+            );
+            assert_eq!(prepared.recovery_token()?, token);
+            assert!(matches!(prepared.publish()?, wal::Outcome::Conflict));
+            let Some(wal::HistoryItem::Commit(commit)) = stale.next()? else {
+                panic!("session refresh changed an existing recovery view")
+            };
+            assert_eq!(commit.transaction_id, vec![7; 16]);
             assert!(stale.next()?.is_none());
-            let before = unchanged.usage();
-            let changed = unchanged.refresh()?;
-            assert_eq!(changed.usage().calls, before.calls + 1);
-            assert!(changed.usage().bytes > before.bytes);
-            assert_eq!(session.usage().calls, changed.usage().calls);
 
-            let recovery = changed.recover()?;
+            let recovery = session.recover()?;
             for transaction_id in [vec![7; 16], vec![8; 16]] {
                 let Some(wal::HistoryItem::Commit(commit)) = recovery.next()? else {
                     panic!("refreshed session missed a commit")
@@ -139,10 +150,10 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
                 assert_eq!(commit.transaction_id, transaction_id);
             }
             assert!(recovery.next()?.is_none());
-            let before = changed.usage();
-            let stable = changed.refresh()?;
-            assert_eq!(stable.usage().calls, before.calls + 1);
-            assert_eq!(stable.usage().bytes, before.bytes);
+            let before = session.usage();
+            session.refresh()?;
+            assert_eq!(session.usage().calls, before.calls + 1);
+            assert_eq!(session.usage().bytes, before.bytes);
         }
         "/checkpoint" => {
             let session = wal::open_existing(&settings)?;
@@ -150,10 +161,10 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             while recovery.next()?.is_some() {}
             assert!(matches!(
                 recovery.checkpoint(b"snapshot", &[])?,
-                wal::CheckpointOutcome::Published
+                wal::MaintenanceState::Complete
             ));
-            let current = session.refresh()?;
-            let recovery = current.recover()?;
+            session.refresh()?;
+            let recovery = session.recover()?;
             let Some(wal::HistoryItem::Checkpoint(entry)) = recovery.next()? else {
                 panic!("missing recovered checkpoint")
             };
@@ -173,7 +184,8 @@ fn exercise(path: &str) -> Result<(), wal::Failure> {
             ));
         }
         "/mismatched-options" => {
-            settings.log_limits.max_tail_entries += 1;
+            settings.log_options =
+                br#"{"max_object_bytes":2097152,"max_tail_entries":1025}"#.to_vec();
             assert!(matches!(
                 wal::open_existing(&settings),
                 Err(wal::Failure::Other(_))

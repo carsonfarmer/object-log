@@ -25,7 +25,7 @@ variables {
   # Only the file checksum is used by the mocked provider; this is not an app bundle.
   host_artifact_path = "./maintenance.py"
   host_repositories = {
-    "team/a.git" = { log_id = "a", format = "sha1" }
+    "team/a.git" = {}
   }
 }
 
@@ -76,8 +76,8 @@ run "host" {
     host_access_token_minutes = 5
     host_groups               = ["readers", "writers"]
     host_repositories = {
-      "team/a.git" = { log_id = "a", format = "sha1", read_groups = ["readers"], write_groups = ["writers"] }
-      "team/b.git" = { log_id = "b", format = "sha256" }
+      "team/a.git" = { read_groups = ["readers"], write_groups = ["writers"] }
+      "team/b.git" = {}
     }
   }
   assert {
@@ -165,6 +165,22 @@ run "hostname_without_zone" {
     host_name    = "git.example.com"
   }
   expect_failures = [aws_instance.host]
+}
+
+run "unknown_repository_permission" {
+  command = plan
+  variables {
+    host_repositories = { "team/a.git" = { readers = ["readers"] } }
+  }
+  expect_failures = [var.host_repositories]
+}
+
+run "null_repository_policy" {
+  command = plan
+  variables {
+    host_repositories = { "team/a.git" = null }
+  }
+  expect_failures = [var.host_repositories]
 }
 
 run "zone_without_hostname" {

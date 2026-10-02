@@ -8,9 +8,7 @@ import (
 )
 
 func TestAuthenticationModeNeverFallsBack(t *testing.T) {
-	route := repositoryRoute{Action: gitRead, Repository: repositoryConfig{
-		repositoryAccess: repositoryAccess{ReadGroups: []string{"readers"}},
-	}}
+	route := repositoryRoute{Action: gitRead, Repository: repositoryAccess{ReadGroups: []string{"readers"}}}
 	settings := map[string]string{
 		"GIT_AUTH_MODE": "cognito", "GIT_PASSWORD": "local-password",
 		"GIT_COGNITO_ISSUER": authTestIssuer, "GIT_COGNITO_CLIENT_ID": "git-client",
@@ -69,14 +67,20 @@ func TestMaintenanceClientCannotReadOrPushRepositories(t *testing.T) {
 	keys := authTestTransport(func(*http.Request) (*http.Response, error) {
 		return authKeyResponse(t, authTestJWKS(t)), nil
 	})
+	policy := repositoryAccess{
+		ReadGroups: []string{"readers"}, WriteGroups: []string{"readers"}, AdminGroups: []string{"readers"},
+	}
 	for _, client := range []string{"maintenance-client", "git-client", "other-client"} {
 		for _, scope := range []string{"git/access", "git/access git/maintenance"} {
 			claims := authTestClaims(time.Now())
 			claims.ClientID, claims.Scope = client, scope
 			request := authRequest(authSignedToken(t, claims, nil))
 			for _, action := range []gitAction{gitRead, gitWrite, gitAdmin} {
-				status, _ := authorizeRequest(request, repositoryRoute{Action: action}, get, keys)
-				want := 403 // No repository groups grant this token access.
+				status, _ := authorizeRequest(request, repositoryRoute{Action: action, Repository: policy}, get, keys)
+				want := 403
+				if client == "git-client" {
+					want = 0
+				}
 				if client == "other-client" {
 					want = 401
 				}

@@ -7,7 +7,8 @@ lockfiles record the resolved dependencies.
 
 ## Git example
 
-The example uses unmodified upstream [go-git revision `0f3a0a2`](https://github.com/go-git/go-git/commit/0f3a0a2c25513f2666ac9b88a6745f7b2382f572).
+The example uses unmodified upstream [go-git revision `6bcff7e`](https://github.com/go-git/go-git/commit/6bcff7e44598c9a22a5b3ca79e5394c4b005206a),
+which includes the delta-reader rewind fix from [PR #2379](https://github.com/go-git/go-git/pull/2379).
 The v6.0.0-alpha.5 release lacks the `plumbing.ValidateBranchName` API it uses.
 `examples/git/go.mod` also records the compatible go-billy v6 prerelease.
 

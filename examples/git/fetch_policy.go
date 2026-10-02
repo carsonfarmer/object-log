@@ -126,40 +126,33 @@ func visibleFetch(s storer.EncodedObjectStorer, tips, wants, haves []plumbing.Ha
 		if err != nil {
 			return nil, err
 		}
-		if fullWalk || o.Type() == plumbing.CommitObject {
+		kind := o.Type()
+		if fullWalk || kind == plumbing.CommitObject {
 			visible[id] = true
 			delete(needed, id)
 		}
 		if len(needed) == 0 {
 			break
 		}
-		switch o.Type() {
-		case plumbing.CommitObject:
-			commit, err := object.DecodeCommit(s, o)
+		if kind == plumbing.CommitObject || kind == plumbing.TagObject || (fullWalk && kind == plumbing.TreeObject) {
+			decoded, err := object.DecodeObject(s, o)
 			if err != nil {
 				return nil, err
 			}
-			for _, parent := range commit.ParentHashes {
-				if !seen[parent] {
-					parents[parent] = true
+			switch v := decoded.(type) {
+			case *object.Commit:
+				for _, parent := range v.ParentHashes {
+					if !seen[parent] && !parents[parent] {
+						parents[parent] = true
+					}
 				}
-			}
-			if fullWalk {
-				enqueue(commit.TreeHash)
-			}
-		case plumbing.TagObject:
-			tag, err := object.DecodeTag(s, o)
-			if err != nil {
-				return nil, err
-			}
-			enqueue(tag.Target)
-		case plumbing.TreeObject:
-			if fullWalk {
-				tree, err := object.DecodeTree(s, o)
-				if err != nil {
-					return nil, err
+				if fullWalk {
+					enqueue(v.TreeHash)
 				}
-				for _, entry := range tree.Entries {
+			case *object.Tag:
+				enqueue(v.Target)
+			case *object.Tree:
+				for _, entry := range v.Entries {
 					if entry.Mode == filemode.Submodule {
 						continue
 					}

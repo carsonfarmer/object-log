@@ -23,7 +23,7 @@ type closeProbe struct {
 
 func TestRootInfersOnlyAuthenticatedSupportedFormat(t *testing.T) {
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
-		data, err := json.Marshal(rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{
+		data, err := json.Marshal(rootMeta{Version: 1, Format: format, Head: "refs/heads/main", Refs: map[string]string{
 			"refs/heads/main": strings.Repeat("1", format.HexSize()),
 		}})
 		if err != nil {
@@ -69,7 +69,7 @@ func TestLooseRoundTripAndValidation(t *testing.T) {
 					t.Fatal(err)
 				}
 				var failure error
-				r.(*looseReader).failure = &failure
+				r = watchedReader(r, &failure)
 				got, err := io.ReadAll(r)
 				if err != nil || !bytes.Equal(got, data) {
 					t.Fatalf("roundtrip: %v", err)
@@ -96,7 +96,7 @@ func TestLooseRoundTripAndValidation(t *testing.T) {
 					r, err = readLoose(source, format, test.kind, test.size, test.id)
 					if err == nil {
 						failure = nil
-						r.(*looseReader).failure = &failure
+						r = watchedReader(r, &failure)
 						_, err = io.ReadAll(r)
 						_ = r.Close()
 						if failure == nil || !errors.Is(failure, err) {
@@ -131,7 +131,7 @@ func TestLooseReaderRecordsCloseFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var failure error
-	r.(*looseReader).failure = &failure
+	r = watchedReader(r, &failure)
 	if err := r.Close(); !errors.Is(err, want) || !errors.Is(failure, want) {
 		t.Fatalf("close failure was not retained: %v / %v", err, failure)
 	}
@@ -169,7 +169,7 @@ func TestInlineLooseObjects(t *testing.T) {
 			if err := w.Close(); err != nil {
 				t.Fatal(err)
 			}
-			original := objectMeta{ID: w.Hash().String(), Kind: plumbing.BlobObject, Size: int64(len(data)), Encoding: "zlib", StoredSize: int64(encoded.Len()), Inline: encoded.Bytes()}
+			original := objectMeta{ID: w.Hash().String(), Kind: plumbing.BlobObject, Size: int64(len(data)), StoredSize: int64(encoded.Len()), Inline: encoded.Bytes()}
 			r, err := original.readInline(format)
 			if err != nil {
 				t.Fatal(err)
@@ -186,7 +186,6 @@ func TestInlineLooseObjects(t *testing.T) {
 				"decoded length":    func(m *objectMeta) { m.Size++ },
 				"type":              func(m *objectMeta) { m.Kind = plumbing.TreeObject },
 				"identity":          func(m *objectMeta) { m.ID = strings.Repeat("0", len(m.ID)) },
-				"encoding":          func(m *objectMeta) { m.Encoding = "" },
 				"oversized":         func(m *objectMeta) { m.Inline = make([]byte, inlineObjectLimit+1); m.StoredSize = int64(len(m.Inline)) },
 			} {
 				t.Run(name, func(t *testing.T) {
@@ -208,7 +207,7 @@ func TestInlineLooseObjects(t *testing.T) {
 }
 
 func TestInlineMetadataBound(t *testing.T) {
-	meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, Encoding: "zlib", StoredSize: inlineObjectLimit, Inline: make([]byte, inlineObjectLimit)}
+	meta := objectMeta{ID: strings.Repeat("f", 64), Kind: plumbing.BlobObject, Size: math.MaxInt64, StoredSize: inlineObjectLimit, Inline: make([]byte, inlineObjectLimit)}
 	if !meta.validInline() {
 		t.Fatal("exact limit rejected")
 	}
@@ -219,7 +218,7 @@ func TestInlineMetadataBound(t *testing.T) {
 	}
 	meta.Inline = meta.Inline[:inlineObjectLimit]
 	meta.StoredSize--
-	leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafTarget)}
+	leaf := struct{ Items []objectMeta }{Items: make([]objectMeta, indexLeafSize)}
 	for i := range leaf.Items {
 		leaf.Items[i] = meta
 	}
@@ -237,7 +236,7 @@ func TestInlineMetadataBound(t *testing.T) {
 func TestRepositoryRootAdmission(t *testing.T) {
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
 		t.Run(format.String(), func(t *testing.T) {
-			empty := rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{}, Buckets: []string{}}
+			empty := rootMeta{Version: 1, Format: format, Head: "refs/heads/main", Refs: map[string]string{}, Buckets: []string{}}
 			data, err := json.Marshal(empty)
 			if err != nil {
 				t.Fatal(err)
@@ -246,18 +245,18 @@ func TestRepositoryRootAdmission(t *testing.T) {
 				t.Fatalf("rejected empty root: %v", err)
 			}
 			id := strings.Repeat("a", format.HexSize())
-			valid := rootMeta{Validated: true, Format: format, Head: "refs/heads/main", Refs: map[string]string{"refs/heads/main": id}, Buckets: []string{"0a", "ab"}}
+			valid := rootMeta{Version: 1, Format: format, Head: "refs/heads/main", Refs: map[string]string{"refs/heads/main": id}, Buckets: []string{"0a", "ab"}}
 			invalid := map[string]rootMeta{
-				"empty head":       {Validated: true, Format: format, Refs: valid.Refs, Buckets: valid.Buckets},
-				"head":             {Validated: true, Format: format, Head: "refs/tags/main", Refs: valid.Refs, Buckets: valid.Buckets},
-				"unsafe head":      {Validated: true, Format: format, Head: "refs/heads/\u200c./review-probe", Refs: valid.Refs, Buckets: valid.Buckets},
-				"reference":        {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"HEAD": id}, Buckets: valid.Buckets},
-				"unsafe reference": {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/\u200c./review-probe": id}, Buckets: valid.Buckets},
-				"hash":             {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.ToUpper(id)}, Buckets: valid.Buckets},
-				"zero hash":        {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.Repeat("0", format.HexSize())}, Buckets: valid.Buckets},
-				"ref collision":    {Validated: true, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": id, "refs/heads/main/nested": id}, Buckets: valid.Buckets},
-				"bucket order":     {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"ab", "0a"}},
-				"bucket encoding":  {Validated: true, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"AZ"}},
+				"empty head":       {Version: 1, Format: format, Refs: valid.Refs, Buckets: valid.Buckets},
+				"head":             {Version: 1, Format: format, Head: "refs/tags/main", Refs: valid.Refs, Buckets: valid.Buckets},
+				"unsafe head":      {Version: 1, Format: format, Head: "refs/heads/\u200c./review-probe", Refs: valid.Refs, Buckets: valid.Buckets},
+				"reference":        {Version: 1, Format: format, Head: valid.Head, Refs: map[string]string{"HEAD": id}, Buckets: valid.Buckets},
+				"unsafe reference": {Version: 1, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/\u200c./review-probe": id}, Buckets: valid.Buckets},
+				"hash":             {Version: 1, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.ToUpper(id)}, Buckets: valid.Buckets},
+				"zero hash":        {Version: 1, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": strings.Repeat("0", format.HexSize())}, Buckets: valid.Buckets},
+				"ref collision":    {Version: 1, Format: format, Head: valid.Head, Refs: map[string]string{"refs/heads/main": id, "refs/heads/main/nested": id}, Buckets: valid.Buckets},
+				"bucket order":     {Version: 1, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"ab", "0a"}},
+				"bucket encoding":  {Version: 1, Format: format, Head: valid.Head, Refs: valid.Refs, Buckets: []string{"AZ"}},
 			}
 			data, err = json.Marshal(valid)
 			if err != nil {
@@ -294,13 +293,14 @@ func TestRepositoryRootAdmission(t *testing.T) {
 				wantValid bool
 			}{
 				{"missing", nil, false},
-				{"unchecked", false, false},
-				{"validated", true, true},
+				{"old boolean marker", true, false},
+				{"unsupported", 2, false},
+				{"current", 1, true},
 			} {
 				t.Run(test.name, func(t *testing.T) {
 					root := map[string]any{"Format": format, "Head": "refs/heads/main", "Buckets": []string{"ab"}}
 					if test.marker != nil {
-						root["Validated"] = test.marker
+						root["Version"] = test.marker
 					}
 					data, err := json.Marshal(root)
 					if err != nil {
@@ -323,7 +323,7 @@ func TestCatalogMetadataAdmission(t *testing.T) {
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
 		t.Run(format.String(), func(t *testing.T) {
 			id := "ab" + strings.Repeat("1", format.HexSize()-2)
-			item := objectMeta{ID: id, Kind: plumbing.BlobObject, Size: 1, Encoding: "zlib", StoredSize: 1}
+			item := objectMeta{ID: id, Kind: plumbing.BlobObject, Size: 1, StoredSize: 1}
 			if !validObjectMeta(item, format, "ab") {
 				t.Fatal("rejected valid object metadata")
 			}
@@ -343,7 +343,6 @@ func TestCatalogMetadataAdmission(t *testing.T) {
 				"zero hash": func(m *objectMeta) { m.ID = strings.Repeat("0", format.HexSize()) },
 				"kind":      func(m *objectMeta) { m.Kind = plumbing.REFDeltaObject },
 				"size":      func(m *objectMeta) { m.Size = -1 },
-				"encoding":  func(m *objectMeta) { m.Encoding = "" },
 				"delta base": func(m *objectMeta) {
 					m.Delta = &deltaMeta{Base: strings.Repeat("0", format.HexSize()), Size: 2, Data: []byte{1}}
 				},

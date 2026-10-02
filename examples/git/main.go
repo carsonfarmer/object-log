@@ -7,14 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-git/go-git/v6/backend"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/transport"
-	"github.com/go-git/go-git/v6/storage"
 	gitio "github.com/go-git/go-git/v6/utils/ioutil"
 	"go.bytecodealliance.org/pkg/wasihttp"
 	wt "go.bytecodealliance.org/pkg/wit/types"
@@ -22,15 +20,10 @@ import (
 	"log"
 	"maps"
 	"net/http"
-	"net/url"
 	wal "object-log-git-proof/bindings/object_log_storage_wal"
 	"slices"
 	"strings"
 )
-
-type loader struct{ s storage.Storer }
-
-func (l loader) Load(*url.URL) (storage.Storer, error) { return l.s, nil }
 
 func sessionRetention(session *wal.Session) (retentionCall, retentionCall) {
 	return func(id []byte) (wal.RetentionState, error) {
@@ -45,12 +38,7 @@ func advertise(w io.Writer, s *store, unknownFormat bool) error {
 		return err
 	}
 	adv := &packp.AdvRefs{}
-	for _, feature := range []string{
-		capability.ReportStatus, capability.DeleteRefs, capability.OFSDelta,
-		capability.Atomic, capability.NoThin, capability.Sideband64k, capability.Quiet,
-	} {
-		adv.Capabilities.Add(feature)
-	}
+	capability.DecodeList([]byte("report-status delete-refs ofs-delta atomic no-thin side-band-64k quiet"), &adv.Capabilities)
 	adv.Capabilities.Set(capability.ObjectFormat, s.meta.Format.String())
 	if unknownFormat {
 		adv.Capabilities.Set(capability.ObjectFormat, "sha1", "sha256")
@@ -70,72 +58,36 @@ func advertise(w io.Writer, s *store, unknownFormat bool) error {
 }
 func init() { wasihttp.HandleFunc(serve) }
 func main() {}
-func serve(response http.ResponseWriter, r *http.Request) {
-	response = componentResponse{response}
+func serve(output http.ResponseWriter, r *http.Request) {
+	w := &componentResponse{ResponseWriter: output}
 	requestID := rand.Text()
-	response.Header().Set("X-Request-ID", requestID)
+	w.Header().Set("X-Request-ID", requestID)
 	if r.Body != nil {
 		r.Body = &componentBody{ReadCloser: r.Body}
 		defer r.Body.Close()
 	}
-	response.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
-	response.Header().Set("X-Git-Target-ID", targetID(getConfig))
-	if r.URL.Path == "/_validate_backend" {
-		if r.Method != http.MethodPost {
-			response.Header().Set("Allow", http.MethodPost)
-			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if status, err := authorizeRequest(r, repositoryRoute{Action: gitAdmin}, getConfig, keyTransport{}); err != nil {
-			if status == http.StatusUnauthorized {
-				response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
-			}
-			http.Error(response, err.Error(), status)
-			return
-		}
-		if _, err := loadRepositories(getConfig); err != nil {
-			log.Printf("backend validation failed id=%s: %v", requestID, err)
-			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
-			return
-		}
-		limits, err := loadLimits(getConfig)
-		if err != nil {
-			log.Printf("backend validation failed id=%s: %v", requestID, err)
-			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
-			return
-		}
-		settings, err := walSettings(getConfig, "backend-validation", limits)
-		if err == nil {
-			_, err = unwrap(func() wt.Result[wt.Unit, wal.Failure] { return wal.ValidateBackend(settings) })
-		}
-		if err != nil {
-			log.Printf("backend validation failed id=%s: %v", requestID, err)
-			http.Error(response, "backend validation failed", http.StatusServiceUnavailable)
-			return
-		}
-		response.WriteHeader(http.StatusNoContent)
-		return
-	}
-	repositories, e := loadRepositories(getConfig)
-	if e != nil {
-		http.Error(response, e.Error(), http.StatusInternalServerError)
-		return
-	}
+	w.Header().Set("X-Git-Boot-ID", getConfig("GIT_BOOT_ID"))
+	w.Header().Set("X-Git-Target-ID", targetID(getConfig))
+	repositories, configErr := loadRepositories(getConfig)
 	route, e := resolveRepository(repositories, r)
+	if configErr != nil && route.Service != "validate-backend" {
+		http.Error(w, configErr.Error(), http.StatusInternalServerError)
+		return
+	}
 	if errors.Is(e, errRepositoryMethod) {
-		response.Header().Set("Allow", route.Method)
-		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		w.Header().Set("Allow", route.Method)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if e != nil {
-		http.NotFound(response, r)
+		http.NotFound(w, r)
 		return
 	}
 	if status, err := authorizeRequest(r, route, getConfig, keyTransport{}); err != nil {
 		if status == http.StatusUnauthorized {
-			response.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="Git"`)
 		}
-		http.Error(response, err.Error(), status)
+		http.Error(w, err.Error(), status)
 		return
 	}
 	service, method := route.Service, route.Method
@@ -143,8 +95,25 @@ func serve(response http.ResponseWriter, r *http.Request) {
 	collect := service == "collect"
 	recoverRetentions := service == "recover-retentions-after-drain"
 	limits, e := loadLimits(getConfig)
+	e = errors.Join(configErr, e)
+	if service == "validate-backend" {
+		if e == nil {
+			settings, err := walSettings(getConfig, "backend-validation", limits)
+			e = err
+			if e == nil {
+				_, e = unwrap(func() wt.Result[wt.Unit, wal.Failure] { return wal.ValidateBackend(settings) })
+			}
+		}
+		if e != nil {
+			log.Printf("backend validation failed id=%s: %v", requestID, e)
+			http.Error(w, "backend validation failed", http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+		return
+	}
 	if e != nil {
-		http.Error(response, e.Error(), http.StatusInternalServerError)
+		http.Error(w, e.Error(), http.StatusInternalServerError)
 		return
 	}
 	if status := retentionRecoveryStatus(limits.recoverRetentions, recoverRetentions); status != 0 {
@@ -152,83 +121,75 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		if status == http.StatusServiceUnavailable {
 			message = "service is draining retained readers"
 		}
-		http.Error(response, message, status)
+		http.Error(w, message, status)
 		return
 	}
 	if limits.readOnly && (route.Action == gitWrite || maintenance || collect) {
-		http.Error(response, "repository is read-only", http.StatusForbidden)
+		http.Error(w, "repository is read-only", http.StatusForbidden)
 		return
 	}
-	r, cancel, e := limitedRequest(response, r, limits, service == transport.ReceivePackService && method == http.MethodPost)
+	r, cancel, e := limitedRequest(w, r, limits, service == transport.ReceivePackService && method == http.MethodPost)
 	if e != nil {
-		http.Error(response, e.Error(), operationStatus(e))
+		http.Error(w, e.Error(), operationStatus(e))
 		return
 	}
 	defer cancel()
 	if err := r.Context().Err(); err != nil {
-		http.Error(response, err.Error(), operationStatus(err))
+		http.Error(w, err.Error(), operationStatus(err))
 		return
 	}
 	if service == "authorize-read" {
-		response.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Cache-Control", "no-store")
 		log.Printf("wal %s %s id=%s calls=0 bytes=0", r.Method, r.URL.Path, requestID)
-		response.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	var pushCapabilities *capability.List
+	var pushFormat config.ObjectFormat
 	if service == transport.ReceivePackService && method == http.MethodPost {
 		format, capabilities, body, err := receiveFormat(r.Body, limits.negotiationBytes)
-		if err == nil && format != "" && route.Repository.Format != "" && route.Repository.Format != format {
-			err = config.ErrInvalidObjectFormat
-		}
 		if err != nil {
 			status := operationStatus(err)
 			if status == http.StatusInternalServerError {
 				status = http.StatusBadRequest
 			}
-			http.Error(response, "invalid push format", status)
+			http.Error(w, "invalid push format", status)
 			return
 		}
 		if format == "" {
-			response.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 			log.Printf("wal %s %s id=%s calls=0 bytes=0", r.Method, r.URL.Path, requestID)
-			response.WriteHeader(http.StatusOK)
+			w.WriteHeader(http.StatusOK)
 			return
 		}
-		route.Repository.Format = format
+		pushFormat = format
 		pushCapabilities = capabilities
 		r.Body = gitio.NewReadCloser(body, r.Body)
 	}
 
-	settings, e := walSettings(getConfig, route.Repository.LogID, limits)
+	settings, e := walSettings(getConfig, route.LogID, limits)
 	if e != nil {
-		http.Error(response, e.Error(), http.StatusInternalServerError)
+		http.Error(w, e.Error(), http.StatusInternalServerError)
 		return
 	}
-	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] {
-		if service == transport.ReceivePackService && method == http.MethodPost {
-			return wal.Open(settings)
-		}
-		return wal.OpenExisting(settings)
-	})
+	openSession := wal.OpenExisting
+	if service == transport.ReceivePackService && method == http.MethodPost {
+		openSession = wal.Open
+	}
+	session, e := unwrap(func() wt.Result[*wal.Session, wal.Failure] { return openSession(settings) })
 	if errors.Is(e, errLogMissing) && service == transport.ReceivePackService && method == http.MethodGet {
-		response.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
-		format := route.Repository.Format
-		if format == "" {
-			format = config.SHA1
-		}
-		if err := advertise(response, &store{meta: rootMeta{Format: format}}, route.Repository.Format == ""); err != nil {
+		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
+		if err := advertise(w, &store{meta: rootMeta{Format: config.SHA1}}, true); err != nil {
 			log.Printf("git discovery failed: %v", err)
 		}
 		return
 	}
 	if e != nil {
-		http.Error(response, e.Error(), operationStatus(e))
+		http.Error(w, e.Error(), operationStatus(e))
 		return
 	}
-	defer func() { session.Drop() }()
-	w := &readResponse{ResponseWriter: response}
-	defer w.commit()
+	defer session.Drop()
+	defer w.WriteHeader(http.StatusOK)
 	w.Header().Set("Trailer", "X-Wal-Calls, X-Wal-Bytes")
 	defer func() {
 		u := session.Usage()
@@ -240,66 +201,8 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		if err := r.Context().Err(); err != nil {
 			return err
 		}
-		fresh, err := unwrap(session.Refresh)
-		if err == nil {
-			session.Drop()
-			session = fresh
-		}
+		_, err := unwrap(session.Refresh)
 		return err
-	}
-	if service == transport.UploadPackService {
-		e = retryRead(w, r, refresh, func(attempt *readResponse, request *http.Request) error {
-			run := func() error {
-				s, err := openStore(r.Context(), session, route.Repository, limits)
-				if err != nil {
-					return err
-				}
-				defer s.Close()
-				if s.stateRoot == nil {
-					return errLogMissing
-				}
-				attempt.failure = &s.failure
-				if request.Method == http.MethodPost {
-					var body io.Reader = request.Body
-					if request.Header.Get("Content-Encoding") == "gzip" {
-						decoded, err := gzip.NewReader(body)
-						if err != nil {
-							return err
-						}
-						defer decoded.Close()
-						body = decoded
-						request.Header.Del("Content-Encoding")
-					}
-					tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
-					for _, id := range s.meta.Refs {
-						tips = append(tips, plumbing.NewHash(id))
-					}
-					body = http.MaxBytesReader(nil, io.NopCloser(body), limits.negotiationBytes)
-					body, err = filterFetch(s, tips, body, strings.Contains(request.Header.Get("Git-Protocol"), "version=2"))
-					if err != nil {
-						return err
-					}
-					request.Body = io.NopCloser(body)
-				}
-				b := backend.New(loader{s})
-				b.ErrorLog = log.Default()
-				b.ServeHTTP(attempt, request)
-				return s.failure
-			}
-			// V2 discovery writes only capabilities from the recovered metadata.
-			if request.Method == http.MethodGet && request.Header.Get("Git-Protocol") == "version=2" {
-				return run()
-			}
-			retain, release := sessionRetention(session)
-			return retained(r.Context(), retain, release, run)
-		})
-		if e != nil {
-			log.Printf("git read failed: %v", e)
-			if !w.sent {
-				http.Error(w, "Git read failed", operationStatus(e))
-			}
-		}
-		return
 	}
 	if recoverRetentions {
 		e = resolveDrainedRecovery(func() (wal.RetentionState, error) {
@@ -320,93 +223,137 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		writeMaintenance(w, report, err)
 		return
 	}
-	open := func() (*store, error) { return openStore(r.Context(), session, route.Repository, limits) }
-	s, e := retryOpenStore(open, refresh)
-	if e != nil {
-		log.Printf("git request setup failed stage=open-store: %v", e)
-		status := operationStatus(e)
-		if errors.Is(e, config.ErrInvalidObjectFormat) {
-			status = http.StatusBadRequest
-		}
-		http.Error(w, "Git storage unavailable", status)
-		return
+	open := func() (*store, error) { return openStore(r.Context(), session, pushFormat, limits) }
+	retainedRead := service == transport.UploadPackService && (method != http.MethodGet || r.Header.Get("Git-Protocol") != "version=2")
+	load := open
+	if !retainedRead {
+		load = func() (*store, error) { return retryOpenStore(open, refresh) }
 	}
-	defer func() {
-		if s != nil {
-			s.Close()
-		}
-	}()
-	if maintenance {
-		report, err := s.maintain()
-		writeMaintenance(w, report, err)
-		return
-	}
-	if s.stateRoot == nil && service != transport.ReceivePackService {
-		http.NotFound(w, r)
-		return
-	}
-	if service == transport.ReceivePackService && method == http.MethodPost {
-		e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {
-			s.Close()
-			if err := refresh(); err != nil {
-				return err
-			}
-			fresh, err := retryOpenStore(open, refresh)
-			if err != nil {
-				return err
-			}
-			s = fresh
-			return nil
-		})
+	run := func() error {
+		s, e := load()
 		if e != nil {
-			log.Printf("git request setup failed stage=before-push: %v", e)
-			http.Error(w, "Git maintenance unavailable", http.StatusServiceUnavailable)
-			return
+			return e
 		}
-	}
-	if service == transport.ReceivePackService && method == http.MethodGet {
-		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
-		e = advertise(w, s, s.stateRoot == nil && route.Repository.Format == "")
-	} else if service == transport.ReceivePackService {
-		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-		s.progress = newReceiveProgress(w, pushCapabilities, cancel)
-		commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
-		push := &receiveStore{Storer: s, commands: commands}
-		e = transport.ReceivePack(r.Context(), push, gitio.NewReadCloser(commands, r.Body), gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
-			if len(info.Commands) == 0 {
-				return nil
+		defer func() { s.Close() }()
+		if service == transport.UploadPackService {
+			if s.stateRoot == nil {
+				return errLogMissing
 			}
-			if s.progress != nil {
-				s.progress.writer = info.Progress
-			}
-			if err := s.progress.message("Validating update...\n"); err != nil {
-				return err
-			}
-			refs, e := validate(s, info.Commands)
-			if e != nil {
-				return e
-			}
-			if s.stateRoot == nil && route.Repository.DefaultBranch == "" {
-				for _, command := range info.Commands {
-					if command.Action() != packp.Delete && command.Name.IsBranch() {
-						s.meta.Head = command.Name.String()
-						break
+			var body io.Reader = r.Body
+			var err error
+			if method == http.MethodPost {
+				if r.Header.Get("Content-Encoding") == "gzip" {
+					decoded, err := gzip.NewReader(body)
+					if err != nil {
+						return err
 					}
+					defer decoded.Close()
+					body = decoded
+				}
+				tips := make([]plumbing.Hash, 0, len(s.meta.Refs))
+				for _, id := range s.meta.Refs {
+					tips = append(tips, plumbing.NewHash(id))
+				}
+				body = http.MaxBytesReader(nil, io.NopCloser(body), limits.negotiationBytes)
+				body, err = filterFetch(s, tips, body, strings.Contains(r.Header.Get("Git-Protocol"), "version=2"))
+				if err != nil {
+					return err
 				}
 			}
-			if err := s.progress.message("Publishing update...\n"); err != nil {
-				return err
+			if method == http.MethodGet {
+				w.Header().Set("Expires", "Fri, 01 Jan 1980 00:00:00 GMT")
+				w.Header().Set("Pragma", "no-cache")
+				w.Header().Set("Cache-Control", "no-cache, max-age=0, must-revalidate")
+				w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			} else {
+				if strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type"))) != "application/x-git-upload-pack-request" {
+					http.Error(w, "403 Forbidden", http.StatusForbidden)
+					return nil
+				}
+				w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
 			}
-			e = s.publish(refs)
-			return e
-		}}})
+			err = transport.UploadPack(r.Context(), s, io.NopCloser(body), gitio.WriteNopCloser(&failedWriter{w, &s.failure}), &transport.UploadPackRequest{
+				GitProtocol: r.Header.Get("Git-Protocol"), AdvertiseRefs: method == http.MethodGet, StatelessRPC: true,
+			})
+			if err != nil && s.failure == nil && !w.sent {
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			}
+			return errors.Join(s.failure, err)
+		}
+		if maintenance {
+			report, err := s.maintain()
+			writeMaintenance(w, report, err)
+			return nil
+		}
+		if method == http.MethodPost {
+			e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {
+				s.Close()
+				if err := refresh(); err != nil {
+					return err
+				}
+				fresh, err := retryOpenStore(open, refresh)
+				if err != nil {
+					return err
+				}
+				s = fresh
+				return nil
+			})
+			if e != nil {
+				log.Printf("git request setup failed stage=before-push: %v", e)
+				http.Error(w, "Git maintenance unavailable", http.StatusServiceUnavailable)
+				return nil
+			}
+		}
+		if method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
+			e = advertise(w, s, s.stateRoot == nil)
+		} else {
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+			s.progress = newReceiveProgress(w, pushCapabilities, cancel)
+			commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
+			push := &receiveStore{Storer: s, commands: commands}
+			e = transport.ReceivePack(r.Context(), push, gitio.NewReadCloser(commands, r.Body), gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
+				if s.progress != nil {
+					s.progress.writer = info.Progress
+				}
+				if err := s.progress.message("Validating update...\n"); err != nil {
+					return err
+				}
+				refs, e := push.validate(s, info.Commands)
+				if e != nil {
+					return e
+				}
+				if s.stateRoot == nil {
+					for _, command := range info.Commands {
+						if command.Action() != packp.Delete && command.Name.IsBranch() {
+							s.meta.Head = command.Name.String()
+							break
+						}
+					}
+				}
+				if err := s.progress.message("Publishing update...\n"); err != nil {
+					return err
+				}
+				return s.publish(refs)
+			}}})
+		}
+		return e
+	}
+	if retainedRead {
+		retain, release := sessionRetention(session)
+		e = retained(r.Context(), retain, release, run)
+	} else {
+		e = run()
 	}
 	if e != nil {
 		log.Printf("git request failed: %v", e)
 		if !w.sent {
-			http.Error(w, "Git operation failed", operationStatus(e))
+			status := operationStatus(e)
+			if errors.Is(e, config.ErrInvalidObjectFormat) && service != transport.UploadPackService {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, "Git operation failed", status)
 		}
-	} else if !w.sent {
-		w.WriteHeader(http.StatusOK)
 	}
 }

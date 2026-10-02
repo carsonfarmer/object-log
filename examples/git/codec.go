@@ -2,24 +2,22 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/objfile"
-	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	"io"
 	"strings"
 )
 
 type rootMeta struct {
-	Validated bool `json:",omitempty"`
-	Format    config.ObjectFormat
-	Head      string
-	Refs      map[string]string
-	Buckets   []string
+	Version uint8
+	Format  config.ObjectFormat
+	Head    string
+	Refs    map[string]string
+	Buckets []string
 }
 
 func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta, error) {
@@ -28,17 +26,16 @@ func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta
 		return meta, err
 	}
 	validFormat := meta.Format == config.SHA1 || meta.Format == config.SHA256
-	if !meta.Validated || !validFormat || len(meta.Buckets) != children {
+	if meta.Version != 1 || !validFormat || len(meta.Buckets) != children {
 		return meta, fmt.Errorf("invalid repository root")
 	}
 	if format != "" && meta.Format != format {
 		return meta, fmt.Errorf("%w: repository format differs from stored state", config.ErrInvalidObjectFormat)
 	}
-	refNames := dotgit.New(memfs.New())
-	if head := plumbing.ReferenceName(meta.Head); !head.IsBranch() || validateRefName(refNames, head) != nil {
+	if head := plumbing.ReferenceName(meta.Head); !head.IsBranch() || validateRefName(head) != nil {
 		return meta, fmt.Errorf("invalid repository head")
 	}
-	if err := validateRefs(refNames, meta.Format, meta.Refs); err != nil {
+	if err := validateRefs(meta.Format, meta.Refs); err != nil {
 		return meta, err
 	}
 	for i, prefix := range meta.Buckets {
@@ -50,21 +47,13 @@ func decodeRoot(data []byte, format config.ObjectFormat, children int) (rootMeta
 }
 
 func decodeMetadata(data []byte, value any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(value); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("invalid trailing metadata")
-	}
-	return nil
+	return json.Unmarshal(data, value, json.RejectUnknownMembers(true))
 }
 
-func validateRefs(refNames *dotgit.DotGit, format config.ObjectFormat, refs map[string]string) error {
+func validateRefs(format config.ObjectFormat, refs map[string]string) error {
 	for name, id := range refs {
 		ref := plumbing.ReferenceName(name)
-		if validateRefName(refNames, ref) != nil || !validID(format, id) {
+		if validateRefName(ref) != nil || !validID(format, id) {
 			return fmt.Errorf("invalid repository reference")
 		}
 		for parent := name; ; {
@@ -101,7 +90,7 @@ func validPrefix(value string, width int, parent string) bool {
 func validObjectMeta(item objectMeta, format config.ObjectFormat, prefix string) bool {
 	validKind := item.Kind == plumbing.BlobObject || item.Kind == plumbing.TreeObject ||
 		item.Kind == plumbing.CommitObject || item.Kind == plumbing.TagObject
-	validStorage := item.validInline() || len(item.Inline) == 0 && item.Encoding == "zlib" && item.StoredSize > 0
+	validStorage := item.validInline() || len(item.Inline) == 0 && item.StoredSize > 0
 	validDelta := item.Delta == nil || item.Delta.valid() && validID(format, item.Delta.Base) &&
 		item.Delta.Base != item.ID && (len(item.Inline) == 0 || item.Delta.StoredSize == 0)
 	return validID(format, item.ID) && strings.HasPrefix(item.ID, prefix) && validKind && item.Size >= 0 && validStorage && validDelta
@@ -114,14 +103,13 @@ type objectMeta struct {
 	ID         string
 	Kind       plumbing.ObjectType
 	Size       int64
-	Encoding   string     `json:",omitempty"`
 	StoredSize int64      `json:",omitempty"`
 	Inline     []byte     `json:",omitempty"`
 	Delta      *deltaMeta `json:",omitempty"`
 }
 
 func (m objectMeta) validInline() bool {
-	return len(m.Inline) > 0 && len(m.Inline) <= inlineObjectLimit && m.Encoding == "zlib" && int64(len(m.Inline)) == m.StoredSize
+	return len(m.Inline) > 0 && len(m.Inline) <= inlineObjectLimit && int64(len(m.Inline)) == m.StoredSize
 }
 
 func (m objectMeta) readInline(format config.ObjectFormat) (io.ReadCloser, error) {
@@ -158,7 +146,6 @@ type looseReader struct {
 	remaining int64
 	id        plumbing.Hash
 	err       error
-	failure   *error
 }
 
 func (r *looseReader) Read(p []byte) (int, error) {
@@ -187,17 +174,10 @@ func (r *looseReader) Read(p []byte) (int, error) {
 	}
 	if err != nil {
 		r.err = err
-		if r.failure != nil && !errors.Is(err, io.EOF) {
-			observeRead(r.failure, err)
-		}
 	}
 	return n, err
 }
 func (r *looseReader) Close() error {
-	err := errors.Join(r.body.Close(), r.source.Close())
-	if r.failure != nil {
-		observeRead(r.failure, err)
-	}
 	r.err = io.ErrClosedPipe
-	return err
+	return errors.Join(r.body.Close(), r.source.Close())
 }

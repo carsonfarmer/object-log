@@ -5,23 +5,23 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 )
 
 const repositoryTestConfig = `{
 	"team/alpha.git": {
-		"log_id": "alpha", "format": "sha1", "default_branch": "release/v1",
 		"read_groups": ["readers"], "write_groups": ["writers"], "admin_groups": ["operators"]
 	},
-	"team/beta.git": {"log_id": "beta", "format": "sha1", "read_groups": ["beta-readers"]},
-	"R&D/Lib+client@v2.git": {"log_id": "third", "format": "sha256"}
+	"team/beta.git": {"read_groups": ["beta-readers"]},
+	"R&D/Lib+client@v2.git": {}
 }`
 
-func repositoriesFromText(text string) (map[string]repositoryConfig, error) {
+func repositoriesFromText(text string) (map[string]repositoryAccess, error) {
 	return loadRepositories(func(name string) string {
 		if name == "GIT_REPOSITORIES" {
 			return text
@@ -30,7 +30,7 @@ func repositoriesFromText(text string) (map[string]repositoryConfig, error) {
 	})
 }
 
-func repositoriesForTest(t *testing.T) map[string]repositoryConfig {
+func repositoriesForTest(t *testing.T) map[string]repositoryAccess {
 	t.Helper()
 	repositories, err := repositoriesFromText(repositoryTestConfig)
 	if err != nil {
@@ -39,18 +39,20 @@ func repositoriesForTest(t *testing.T) map[string]repositoryConfig {
 	return repositories
 }
 
-func TestLoadRepositoriesIsolatesSameFormatRepositories(t *testing.T) {
+func TestRepositoryNamesDeriveIndependentIdentitiesAndDeferPushMetadata(t *testing.T) {
 	t.Parallel()
 	repositories := repositoriesForTest(t)
-	alpha, beta := repositories["team/alpha.git"], repositories["team/beta.git"]
-	if alpha.Format != config.SHA1 || beta.Format != config.SHA1 || alpha.LogID == beta.LogID {
-		t.Fatal("same-format repositories did not retain independent identities")
+	alpha, err := resolveRepository(repositories, httptest.NewRequest(http.MethodGet, "/team/alpha.git/authorize-read", nil))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if alpha.DefaultBranch != "release/v1" || beta.DefaultBranch != "" {
-		t.Fatal("per-repository default branches were not preserved")
+	beta, err := resolveRepository(repositories, httptest.NewRequest(http.MethodGet, "/team/beta.git/authorize-read", nil))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if repositories["R&D/Lib+client@v2.git"].Format != config.SHA256 {
-		t.Fatal("canonical URL-safe punctuation or SHA-256 was rejected")
+	if alpha.LogID != automaticRepositoryID("team/alpha.git") ||
+		beta.LogID != automaticRepositoryID("team/beta.git") || alpha.LogID == beta.LogID {
+		t.Fatal("repository names did not retain independent storage identities")
 	}
 	if _, exists := repositories["sha1.git"]; exists {
 		t.Fatal("configuration introduced an implicit repository")
@@ -64,36 +66,25 @@ func TestLoadRepositoriesRejectsInvalidConfiguration(t *testing.T) {
 		text string
 	}{
 		{name: "not object", text: `[]`},
-		{name: "null root", text: `null`},
 		{name: "null entry", text: `{"r.git":null}`},
+		{name: "null entry with wildcard", text: `{"*":{"read_groups":["readers"]},"r.git":null}`},
 		{name: "malformed", text: `{"r.git":`},
 		{name: "trailing document", text: `{} {}`},
 		{name: "duplicate name", text: `{"r.git":{},"r.git":{}}`},
 		{name: "escaped duplicate name", text: `{"r.git":{},"\u0072.git":{}}`},
-		{name: "duplicate field", text: `{"r.git":{"log_id":"one","log_id":"two","format":"sha1"}}`},
-		{name: "escaped duplicate field", text: `{"r.git":{"format":"sha1","\u0066ormat":"sha256"}}`},
-		{name: "case alias field", text: `{"r.git":{"log_id":"one","LOG_ID":"two","format":"sha1"}}`},
-		{name: "unknown field", text: `{"r.git":{"log_id":"one","format":"sha1","public":true}}`},
-		{name: "duplicate identity", text: `{
-			"a.git":{"log_id":"same","format":"sha1"},
-			"b.git":{"log_id":"same","format":"sha256"}
-		}`},
-		{name: "invalid format", text: `{"r.git":{"log_id":"one","format":"SHA1"}}`},
-		{name: "null format", text: `{"r.git":{"log_id":"one","format":null}}`},
-		{name: "path identity", text: `{"r.git":{"log_id":"a/b","format":"sha1"}}`},
-		{name: "dot identity", text: `{"r.git":{"log_id":"..","format":"sha1"}}`},
-		{name: "long identity", text: `{"r.git":{"log_id":"` + strings.Repeat("a", 129) + `","format":"sha1"}}`},
-		{name: "invalid branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"a..b"}}`},
-		{name: "HEAD branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"HEAD"}}`},
-		{name: "hyphen branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"-bad"}}`},
-		{name: "unsafe branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":"\u200c./review-probe"}}`},
-		{name: "null branch", text: `{"r.git":{"log_id":"one","format":"sha1","default_branch":null}}`},
-		{name: "string groups", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":"everyone"}}`},
-		{name: "null groups", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":null}}`},
-		{name: "wrong group type", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":[true]}}`},
-		{name: "null group element", text: `{"r.git":{"log_id":"one","format":"sha1","read_groups":[null]}}`},
+		{name: "duplicate field", text: `{"r.git":{"read_groups":["one"],"read_groups":["two"]}}`},
+		{name: "escaped duplicate field", text: `{"r.git":{"read_groups":[],"\u0072ead_groups":["reader"]}}`},
+		{name: "case alias field", text: `{"r.git":{"read_groups":[],"READ_GROUPS":["reader"]}}`},
+		{name: "unknown field", text: `{"r.git":{"public":true}}`},
+		{name: "string groups", text: `{"r.git":{"read_groups":"everyone"}}`},
+		{name: "wrong group type", text: `{"r.git":{"read_groups":[true]}}`},
+		{name: "null group element", text: `{"r.git":{"read_groups":[null]}}`},
+		{name: "empty read group", text: `{"r.git":{"read_groups":[""]}}`},
+		{name: "empty write group", text: `{"r.git":{"write_groups":[""]}}`},
+		{name: "empty admin group", text: `{"r.git":{"admin_groups":[""]}}`},
 		{name: "size bound", text: strings.Repeat(" ", repositoriesConfigBytes+1)},
 		{name: "invalid UTF-8", text: string([]byte{0xff})},
+		{name: "invalid UTF-8 group", text: `{"r.git":{"read_groups":["` + string([]byte{0xff}) + `"]}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -105,19 +96,48 @@ func TestLoadRepositoriesRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
+func TestNullPermissionListsKeepEmptyPolicy(t *testing.T) {
+	repositories, err := repositoriesFromText(`{"r.git":{"read_groups":null,"write_groups":null,"admin_groups":null}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/r.git/authorize-read", nil)
+	route, err := resolveRepository(repositories, request)
+	if err != nil || route.Name != "r.git" || len(route.Repository.ReadGroups)+len(route.Repository.WriteGroups)+len(route.Repository.AdminGroups) != 0 {
+		t.Fatalf("null lists changed empty policy: route=%+v error=%v", route, err)
+	}
+	// Password mode admits explicitly configured repositories, including {}.
+	request.SetBasicAuth("git", "password")
+	if status, err := authorizeRequest(request, route, func(name string) string {
+		return map[string]string{"GIT_AUTH_MODE": "password", "GIT_PASSWORD": "password"}[name]
+	}, nil); status != 0 || err != nil {
+		t.Fatalf("null lists changed explicit password-mode admission: status=%d error=%v", status, err)
+	}
+}
+
+func TestLoadRepositoriesRejectsDiscardedMetadataFields(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{`"log_id":"custom"`, `"format":"sha1"`, `"default_branch":"release"`} {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			if _, err := repositoriesFromText(`{"r.git":{` + field + `}}`); err == nil {
+				t.Fatal("discarded configuration field was silently accepted")
+			}
+		})
+	}
+}
+
 func TestLoadRepositoriesRejectsNoncanonicalNames(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{
-		"", ".git", "team/.git", "/r.git", "r.git/", "team//r.git", "./r.git",
+		"", ".", ".git", "team/.git", "/r.git", "r.git/", "team//r.git", "./r.git",
 		"team/./r.git", "team/../r.git", "../r.git", "r%2egit", `team\r.git`, "r?.git", "r#.git",
 		"r space.git", "résumé.git",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			encoded, err := json.Marshal(map[string]repositoryConfig{
-				name: {LogID: "one", Format: config.SHA1, repositoryAccess: repositoryAccess{
-					ReadGroups: []string{}, WriteGroups: []string{}, AdminGroups: []string{},
-				}},
+			encoded, err := json.Marshal(map[string]repositoryAccess{
+				name: {ReadGroups: []string{}, WriteGroups: []string{}, AdminGroups: []string{}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -129,9 +149,22 @@ func TestLoadRepositoriesRejectsNoncanonicalNames(t *testing.T) {
 	}
 }
 
+func TestRepositoryNameBoundaries(t *testing.T) {
+	for _, name := range []string{"...git", "team/...git", "team/a:b+c&d=e.git", strings.Repeat("a", 4092), strings.Repeat("a", 4092) + ".git"} {
+		if !validRepositoryName(name) {
+			t.Fatalf("rejected canonical repository name %q", name)
+		}
+	}
+	for _, name := range []string{strings.Repeat("a", 4093), strings.Repeat("a", 4093) + ".git", "team/../r", "team/./r", "team\x00r"} {
+		if validRepositoryName(name) {
+			t.Fatalf("accepted noncanonical or oversized name %q", name)
+		}
+	}
+}
+
 func TestLoadRepositoriesEmptyConfigDeniesAll(t *testing.T) {
 	t.Parallel()
-	for _, text := range []string{"", " ", "{}"} {
+	for _, text := range []string{"", " ", "{}", "null"} {
 		t.Run("config="+text, func(t *testing.T) {
 			t.Parallel()
 			repositories, err := repositoriesFromText(text)
@@ -153,14 +186,14 @@ func TestAddRepositoryRequiresOnlyConfiguration(t *testing.T) {
 		t.Fatalf("unprovisioned repository route error = %v", err)
 	}
 	text := strings.TrimSuffix(repositoryTestConfig, "}") + `,
-		"new/nested.git":{"log_id":"new-stable-id","format":"sha1"}
+		"new/nested.git":{}
 	}`
 	repositories, err := repositoriesFromText(text)
 	if err != nil {
 		t.Fatal(err)
 	}
 	route, err := resolveRepository(repositories, request)
-	if err != nil || route.Repository.LogID != "new-stable-id" {
+	if err != nil || route.LogID != automaticRepositoryID("new/nested.git") {
 		t.Fatalf("configured route=%+v error=%v", route, err)
 	}
 }
@@ -196,7 +229,7 @@ func TestResolveRepositorySelectsServiceAndAction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if route.Name != "team/alpha.git" || route.Repository.LogID != "alpha" {
+			if route.Name != "team/alpha.git" || route.LogID != automaticRepositoryID("team/alpha.git") {
 				t.Fatalf("wrong repository: %+v", route)
 			}
 			if route.Service != tt.service || route.Method != tt.method || route.Action != tt.action {
@@ -213,14 +246,10 @@ func TestResolveRepositoryRejectsAliasesAndUnknownRoutes(t *testing.T) {
 		"/missing.git/git-upload-pack", "/sha1.git/git-upload-pack", "/team/alpha.git",
 		"/team/alpha.git/unknown", "/team/alpha.git/create", "/team/alpha.git/git-upload-pack/", "/team/alpha.git//git-upload-pack",
 		"//team/alpha.git/git-upload-pack", "/team/./alpha.git/git-upload-pack",
-		"/team/other/../alpha.git/git-upload-pack", "/team%2falpha.git/git-upload-pack",
-		"/team/%61lpha.git/git-upload-pack", "/team/alpha%2egit/git-upload-pack",
-		"/team/alpha.git/git-upload-pack?", "/team/alpha.git/git-upload-pack?service=git-receive-pack",
+		"/team/other/../alpha.git/git-upload-pack",
 		"/team/alpha.git/info/refs", "/team/alpha.git/info/refs?service=unknown",
 		"/team/alpha.git/info/refs?service=git-upload-pack&service=git-receive-pack",
-		"/team/alpha.git/info/refs?service=git-upload-pack&extra=1",
 		"/team/alpha.git/info/refs?service=git-upload-pack&bad=%ZZ",
-		"/team/alpha.git/authorize-read?", "/team/alpha.git/authorize-read?service=git-upload-pack",
 		"/missing.git/authorize-read",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -229,6 +258,28 @@ func TestResolveRepositoryRejectsAliasesAndUnknownRoutes(t *testing.T) {
 				t.Fatalf("route error = %v, want not found", err)
 			}
 		})
+	}
+}
+
+func TestCanonicalHTTPAliasesKeepRepositoryIdentityAndPolicy(t *testing.T) {
+	repositories := repositoriesForTest(t)
+	for _, target := range []string{
+		"/team%2falpha.git/git-upload-pack", "/team/%61lpha.git/git-upload-pack", "/team/alpha%2egit/git-upload-pack",
+		"/team/alpha.git/git-upload-pack?", "/team/alpha.git/git-upload-pack?service=git-receive-pack",
+		"/team/alpha.git/info/refs?service=git-upload-pack&extra=1",
+		"/team/alpha.git/authorize-read?", "/team/alpha.git/authorize-read?service=git-receive-pack",
+	} {
+		method := http.MethodPost
+		if strings.Contains(target, "info/refs") || strings.Contains(target, "authorize-read") {
+			method = http.MethodGet
+		}
+		route, err := resolveRepository(repositories, httptest.NewRequest(method, target, nil))
+		if err != nil || route.Name != "team/alpha.git" || route.LogID != automaticRepositoryID("team/alpha.git") || route.Action != gitRead {
+			t.Fatalf("alias %s changed identity or action: route=%+v error=%v", target, route, err)
+		}
+		if !reflect.DeepEqual(route.Repository, repositories["team/alpha.git"]) {
+			t.Fatalf("alias %s selected another access policy: %+v", target, route.Repository)
+		}
 	}
 }
 
@@ -256,16 +307,20 @@ func TestDiscoveredLogMaintenanceRequiresScopeOperator(t *testing.T) {
 	for _, operation := range []string{"maintenance", "collect"} {
 		request := httptest.NewRequest(http.MethodPost, "/_maintenance?log_id=auto-123&operation="+operation, nil)
 		route, err := resolveRepository(nil, request)
-		if err != nil || route.Repository.LogID != "auto-123" || route.Service != operation || route.Action != gitAdmin {
+		if err != nil || route.LogID != "auto-123" || route.Service != operation || route.Action != gitAdmin {
 			t.Fatalf("route=%+v error=%v", route, err)
 		}
-		for _, principal := range []gitPrincipal{{}, {subject: "repository-admin", groups: []string{"operators"}}} {
-			if principal.Allows(route.Repository.repositoryAccess, route.Action) {
+		claims := authTestClaims(time.Now())
+		claims.Groups = []string{"operators"}
+		for _, subject := range []string{"", "repository-admin"} {
+			claims.Subject = subject
+			if status, err := authorizeForTest(t, route, claims); status == 0 || err == nil {
 				t.Fatal("discovered log bypassed repository policy without a scope operator")
 			}
 		}
-		if !(gitPrincipal{subject: "scheduler", operator: true}).Allows(route.Repository.repositoryAccess, route.Action) {
-			t.Fatal("scope operator cannot maintain a discovered log")
+		claims.Subject, claims.ClientID, claims.Scope = "scheduler", "maintenance-client", "git/access git/maintenance"
+		if status, err := authorizeForTest(t, route, claims); status != 0 || err != nil {
+			t.Fatalf("scope operator cannot maintain a discovered log: status=%d error=%v", status, err)
 		}
 		request.Method = http.MethodGet
 		if route, err := resolveRepository(nil, request); !errors.Is(err, errRepositoryMethod) || route.Action != gitAdmin {
@@ -285,9 +340,9 @@ func TestDiscoveredLogMaintenanceRequiresScopeOperator(t *testing.T) {
 		}
 	}
 	// A repository with this name still has ordinary Git routes and permissions.
-	route, err := resolveRepository(map[string]repositoryConfig{"_maintenance.git": {LogID: "named", Format: config.SHA1}},
+	route, err := resolveRepository(map[string]repositoryAccess{"_maintenance.git": {}},
 		httptest.NewRequest(http.MethodGet, "/_maintenance/info/refs?service=git-upload-pack", nil))
-	if err != nil || route.Repository.LogID != "named" || route.Action != gitRead {
+	if err != nil || route.LogID != automaticRepositoryID("_maintenance.git") || route.Action != gitRead {
 		t.Fatalf("named repository route=%+v error=%v", route, err)
 	}
 }
@@ -329,9 +384,11 @@ func TestRepositoryRoutePolicyIsIndependentPerRepositoryAndAction(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			principal := gitPrincipal{subject: "person", groups: []string{tt.group}}
-			if got := principal.Allows(route.Repository.repositoryAccess, route.Action); got != tt.want {
-				t.Fatalf("permission = %v, want %v", got, tt.want)
+			claims := authTestClaims(time.Now())
+			claims.Groups = []string{tt.group}
+			status, err := authorizeForTest(t, route, claims)
+			if (status == 0 && err == nil) != tt.want {
+				t.Fatalf("authorization: status=%d error=%v, want allowed=%v", status, err, tt.want)
 			}
 		})
 	}
@@ -346,38 +403,48 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var first repositoryRoute
-	for _, name := range []string{"team/project", "team/project.git"} {
+	for _, name := range []string{"team/project", "team/project.git", "team/%70roject"} {
 		route, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/git-receive-pack", nil))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if route.Name != "team/project.git" || route.Action != gitWrite || route.Repository.Format != "" {
+		if route.Name != "team/project.git" || route.Action != gitWrite {
 			t.Fatalf("unexpected automatic route: %+v", route)
 		}
-		if first.Name != "" && first.Repository.LogID != route.Repository.LogID {
+		if first.Name != "" && first.LogID != route.LogID {
 			t.Fatal("URL aliases select different logs")
 		}
 		first = route
 	}
-	principal := gitPrincipal{subject: "writer", groups: []string{"writers"}}
-	if !principal.Allows(first.Repository.repositoryAccess, gitWrite) || principal.Allows(first.Repository.repositoryAccess, gitRead) {
-		t.Fatal("automatic policy lost independent permissions")
+	claims := authTestClaims(time.Now())
+	claims.Groups = []string{"writers"}
+	if status, err := authorizeForTest(t, first, claims); status != 0 || err != nil {
+		t.Fatalf("automatic write policy: status=%d error=%v", status, err)
+	}
+	read := first
+	read.Action = gitRead
+	if status, err := authorizeForTest(t, read, claims); status != http.StatusForbidden || err == nil {
+		t.Fatalf("automatic policy lost independent permissions: status=%d error=%v", status, err)
 	}
 	private, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/team/private.git/git-receive-pack", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal.Allows(private.Repository.repositoryAccess, gitWrite) || private.Repository.LogID == first.Repository.LogID {
+	if status, err := authorizeForTest(t, private, claims); status != http.StatusForbidden || err == nil || private.LogID == first.LogID {
 		t.Fatal("exact denial or repository isolation lost")
 	}
-	for _, name := range []string{"*", "team/../project", "team//project", "%70roject"} {
+	for _, name := range []string{"*", "team/../project", "team//project"} {
 		if _, err := resolveRepository(repositories, httptest.NewRequest(http.MethodPost, "/"+name+"/git-receive-pack", nil)); err == nil {
 			t.Fatalf("wildcard accepted invalid name %q", name)
 		}
 	}
 	// Adding a permission override must preserve the automatically created log.
 	override, err := repositoriesFromText(`{"team/project":{"read_groups":["readers"]}}`)
-	if err != nil || override["team/project.git"].LogID != first.Repository.LogID {
+	if err != nil {
+		t.Fatal(err)
+	}
+	overridden, err := resolveRepository(override, httptest.NewRequest(http.MethodGet, "/team/project.git/authorize-read", nil))
+	if err != nil || overridden.LogID != first.LogID {
 		t.Fatal("permission override moved storage")
 	}
 	for _, text := range []string{
@@ -387,6 +454,36 @@ func TestAutomaticRepositoryPolicyAndIdentity(t *testing.T) {
 	} {
 		if _, err := repositoriesFromText(text); err == nil {
 			t.Fatalf("accepted ambiguous policy: %s", text)
+		}
+	}
+}
+
+func TestBackendValidationIsGlobalAdministration(t *testing.T) {
+	for _, path := range []string{"/_validate_backend", "/_validate_backend?", "/_validate_backend?bad=%ZZ", "/%5fvalidate_backend"} {
+		for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodHead} {
+			route, err := resolveRepository(nil, httptest.NewRequest(method, path, nil))
+			want := error(nil)
+			if method != http.MethodPost {
+				want = errRepositoryMethod
+			}
+			if !errors.Is(err, want) || route.Service != "validate-backend" || route.Method != http.MethodPost ||
+				route.Action != gitAdmin || route.Name != "" || route.LogID != "" {
+				t.Fatalf("%s %s route=%+v error=%v", method, path, route, err)
+			}
+			claims := authTestClaims(time.Now())
+			claims.Groups = []string{"operators"}
+			if status, err := authorizeForTest(t, route, claims); status != http.StatusForbidden || err == nil {
+				t.Fatal("global validation inherited repository permissions")
+			}
+			claims.ClientID, claims.Scope = "maintenance-client", "git/access git/maintenance"
+			if status, err := authorizeForTest(t, route, claims); status != 0 || err != nil {
+				t.Fatalf("scope operator cannot validate the backend: status=%d error=%v", status, err)
+			}
+		}
+	}
+	for _, path := range []string{"/_validate_backend/", "//_validate_backend", "/_validate_backend/authorize-read"} {
+		if _, err := resolveRepository(nil, httptest.NewRequest(http.MethodPost, path, nil)); !errors.Is(err, errRepositoryNotFound) {
+			t.Fatalf("accepted validation alias %s: %v", path, err)
 		}
 	}
 }

@@ -298,7 +298,12 @@ async fn checkpoint_and_collection_have_one_cas_winner() -> TestResult {
     assert!(matches!(
         first
             .log
-            .publish_checkpoint(&one, &through, Bytes::from_static(b"state"), Vec::new())
+            .publish_checkpoint(
+                &one,
+                Some(&through),
+                Bytes::from_static(b"state"),
+                Vec::new()
+            )
             .await?,
         CheckpointStatus::Conflict(_)
     ));
@@ -306,7 +311,7 @@ async fn checkpoint_and_collection_have_one_cas_winner() -> TestResult {
         .log
         .publish_checkpoint(
             &fenced,
-            &through,
+            Some(&through),
             Bytes::from_static(b"safe state"),
             Vec::new(),
         )
@@ -333,7 +338,12 @@ async fn checkpoint_and_collection_have_one_cas_winner() -> TestResult {
     assert!(matches!(
         second
             .log
-            .publish_checkpoint(&one, &through, Bytes::from_static(b"state"), Vec::new())
+            .publish_checkpoint(
+                &one,
+                Some(&through),
+                Bytes::from_static(b"state"),
+                Vec::new()
+            )
             .await?,
         CheckpointStatus::Published(_)
     ));
@@ -370,7 +380,7 @@ async fn collection_preserves_the_checkpoint_tail_and_nested_live_graph() -> Tes
         .log
         .publish_checkpoint(
             &base,
-            &base.tail()[0],
+            Some(&base.tail()[0]),
             Bytes::from_static(b"checkpoint"),
             vec![node.clone()],
         )
@@ -471,7 +481,7 @@ async fn compacted_commit_resolves_after_collection_removes_its_body() -> TestRe
         .log
         .publish_checkpoint(
             &committed,
-            &through,
+            Some(&through),
             Bytes::from_static(b"checkpoint"),
             Vec::new(),
         )
@@ -524,7 +534,7 @@ async fn collection_fence_rejects_stale_and_planned_dependencies() -> TestResult
             .log
             .publish_checkpoint(
                 &fenced,
-                &source.tail()[0],
+                Some(&source.tail()[0]),
                 Bytes::from_static(b"stale checkpoint proof"),
                 vec![planned.clone()],
             )
@@ -1524,7 +1534,12 @@ async fn compacted_commit_and_checkpoint_reads_expire_with_their_views() -> Test
     let through_one = one.tail()[0].clone();
     let CheckpointStatus::Published(first_checkpoint) = fixture
         .log
-        .publish_checkpoint(&one, &through_one, Bytes::from_static(b"first"), Vec::new())
+        .publish_checkpoint(
+            &one,
+            Some(&through_one),
+            Bytes::from_static(b"first"),
+            Vec::new(),
+        )
         .await?
     else {
         return Err("first checkpoint did not publish".into());
@@ -1535,7 +1550,7 @@ async fn compacted_commit_and_checkpoint_reads_expire_with_their_views() -> Test
         .log
         .publish_checkpoint(
             &two,
-            &through_two,
+            Some(&through_two),
             Bytes::from_static(b"second"),
             Vec::new(),
         )

@@ -37,10 +37,17 @@ transaction identity, operation bytes, recorded result bytes, and object proofs.
 Consumers decide what application state to retain; the component never lifts a
 whole configurable tail into memory.
 
+`recovery.latest` reads only the last active commit, or the checkpoint when the
+tail is empty, and reports the active-tail length. It neither advances the cursor
+nor reconstructs application state. A consumer can treat that record as its
+current root only when every application record contains a complete root.
+
 View-bound reads, writes, preparation, and checkpointing live on the recovery
-resource. They are enabled after `next` reaches the end, so an application
-cannot publish from partially reconstructed state or accidentally checkpoint a
-newer view with an older snapshot. `recovery.prepare` accepts a 16-byte UUID,
+resource and always use its exact view. Callers reconstruct their application
+state before preparing updates. Preparation consumes and authenticates the
+remaining cursor. Checkpoint publication authenticates the existing checkpoint and
+complete active tail, even when the caller has read only the latest record.
+`recovery.prepare` accepts a 16-byte UUID,
 operation bytes, recorded result bytes, and staged object roots. Call
 `candidate.recovery-token` and persist the returned bytes before
 `candidate.publish` when an operation must survive process loss. Publication
@@ -50,13 +57,14 @@ committed. After `candidate.publish` returns an error, do not retry that same
 candidate: its immutable object may already exist. Reopen a session and use
 `session.resume` with the token instead.
 
-An uncertain checkpoint returns an owned `pending-checkpoint` resource. Its
-`resolve` method keeps the same evidence while storage remains uncertain and
-distinguishes published, not-published, still-pending, and expired results.
-After process loss, open a fresh session and reconstruct the durable view before
-attempting another checkpoint.
+`recovery.checkpoint` publishes and resolves an uncertain result once, returning
+complete, conflict, or pending. Pending includes expired resolution evidence;
+it never proves that the checkpoint was not published. Reopen a session and
+reconstruct the durable view before attempting another checkpoint. Native Rust
+callers can use `PendingCheckpoint` and `Log::resolve_checkpoint` for repeated
+resolution of the exact original candidate.
 
-Object, recovery, reader, writer, candidate, pending-checkpoint, and session
+Object, recovery, reader, writer, candidate, and session
 values are owned component resources. Consumers must drop handles they no longer
 need. Byte streams retain the core's authenticated chunk geometry and bounded
 offset reads.

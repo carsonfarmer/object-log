@@ -103,3 +103,19 @@ until status=$(curl --max-time 2 -sS -u git:config-test-password -o /dev/null -w
   sleep 0.1
 done
 [ "$status" = 503 ] || fail
+
+kill "$pid"; wait "$pid" 2>/dev/null || :
+rm -f "$tmp/hits"
+spin up --listen 127.0.0.1:19101 --variable "@$tmp/variables.toml" --variable wal_max_collection_objects=4294967296 >"$tmp/spin.log" 2>&1 &
+pid=$!
+tries=0
+until status=$(curl --max-time 2 -sS -u git:config-test-password -o /dev/null -w '%{http_code}' "$access_url" 2>/dev/null); do
+  tries=$((tries + 1))
+  [ "$tries" -lt 50 ] || fail
+  sleep 0.1
+done
+[ "$status" = 204 ] || fail
+status=$(curl --max-time 5 -sS -u git:config-test-password -X POST -o "$tmp/body" -w '%{http_code}' 'http://127.0.0.1:19101/_validate_backend')
+[ "$status" = 503 ] || fail
+[ "$(cat "$tmp/body")" = 'backend validation failed' ] || fail
+[ ! -e "$tmp/hits" ] || fail
