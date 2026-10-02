@@ -39,55 +39,26 @@ func retained(ctx context.Context, retain, release retentionCall, run func() err
 	if _, err = rand.Read(id); err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, resolveRelease(release, id)) }()
-	if err = resolveAcquire(ctx, retain, id); err != nil {
+	// Release ignores request cancellation so a disconnect does not abandon a
+	// retention. Exhaustion remains explicit for drained operator recovery.
+	defer func() {
+		err = errors.Join(err, resolveRetention(context.Background(), func() (wal.RetentionState, error) { return release(id) }, "release"))
+	}()
+	if err = resolveRetention(ctx, func() (wal.RetentionState, error) { return retain(id) }, "acquire"); err != nil {
 		return err
 	}
 	return run()
 }
 
-func resolveAcquire(ctx context.Context, call retentionCall, id []byte) error {
+func resolveDrainedRecovery(call func() (wal.RetentionState, error)) error {
+	return resolveRetention(context.Background(), call, "recovery")
+}
+
+func resolveRetention(ctx context.Context, call func() (wal.RetentionState, error), operation string) error {
 	for attempt := range retentionResolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		state, err := call(id)
-		if err != nil {
-			return err
-		}
-		switch state {
-		case wal.RetentionStateApplied:
-			return nil
-		case wal.RetentionStateActiveCollection:
-			if attempt == retentionResolutionAttempts-1 {
-				return errCollectionActive
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(retentionCollectionDelay):
-			}
-		case wal.RetentionStateConflict:
-			// The bridge advances the session to the returned head. Repeat with
-			// the same ID so an acquisition race has one durable identity.
-		case wal.RetentionStatePending:
-		}
-	}
-	return errRetentionUnresolved
-}
-
-// Release ignores the request context: a disconnect must not abandon a
-// retention. Exhaustion remains explicit for drained operator recovery.
-func resolveRelease(call retentionCall, id []byte) error {
-	return resolveRetention(func() (wal.RetentionState, error) { return call(id) }, "release")
-}
-
-func resolveDrainedRecovery(call func() (wal.RetentionState, error)) error {
-	return resolveRetention(call, "recovery")
-}
-
-func resolveRetention(call func() (wal.RetentionState, error), operation string) error {
-	for range retentionResolutionAttempts {
 		state, err := call()
 		if err != nil {
 			return err
@@ -97,7 +68,17 @@ func resolveRetention(call func() (wal.RetentionState, error), operation string)
 			return nil
 		case wal.RetentionStateConflict, wal.RetentionStatePending:
 		case wal.RetentionStateActiveCollection:
-			return fmt.Errorf("invalid %s state: active collection", operation)
+			if operation != "acquire" {
+				return fmt.Errorf("invalid %s state: active collection", operation)
+			}
+			if attempt == retentionResolutionAttempts-1 {
+				return errCollectionActive
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retentionCollectionDelay):
+			}
 		}
 	}
 	return errRetentionUnresolved

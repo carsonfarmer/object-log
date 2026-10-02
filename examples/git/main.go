@@ -205,25 +205,43 @@ func serve(response http.ResponseWriter, r *http.Request) {
 		_, err := unwrap(session.Refresh)
 		return err
 	}
-	if service == transport.UploadPackService {
-		capabilitiesOnly := method == http.MethodGet && r.Header.Get("Git-Protocol") == "version=2"
-		run := func() error {
-			open := func() (*store, error) { return openStore(r.Context(), session, pushFormat, limits) }
-			var s *store
-			var err error
-			if capabilitiesOnly {
-				s, err = retryOpenStore(open, refresh)
-			} else {
-				s, err = open()
-			}
-			if err != nil {
-				return err
-			}
-			defer s.Close()
+	if recoverRetentions {
+		e = resolveDrainedRecovery(func() (wal.RetentionState, error) {
+			return unwrap(session.ClearRetentionsAfterDrain)
+		})
+		if e != nil {
+			http.Error(w, "drained retention recovery failed: "+e.Error(), operationStatus(e))
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(struct {
+				State string `json:"state"`
+			}{"complete"})
+		}
+		return
+	}
+	if collect || (maintenance && session.HasActiveCollection()) {
+		report, err := collectSession(r.Context(), session, limits)
+		writeMaintenance(w, report, err)
+		return
+	}
+	open := func() (*store, error) { return openStore(r.Context(), session, pushFormat, limits) }
+	retainedRead := service == transport.UploadPackService && (method != http.MethodGet || r.Header.Get("Git-Protocol") != "version=2")
+	load := open
+	if !retainedRead {
+		load = func() (*store, error) { return retryOpenStore(open, refresh) }
+	}
+	run := func() error {
+		s, e := load()
+		if e != nil {
+			return e
+		}
+		defer func() { s.Close() }()
+		if service == transport.UploadPackService {
 			if s.stateRoot == nil {
 				return errLogMissing
 			}
 			var body io.Reader = r.Body
+			var err error
 			if method == http.MethodPost {
 				if r.Header.Get("Content-Encoding") == "gzip" {
 					decoded, err := gzip.NewReader(body)
@@ -264,114 +282,79 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			}
 			return errors.Join(s.failure, err)
 		}
-		// Retention advances the session before recovery and prevents view expiry.
-		// V2 discovery reads only metadata, so it retries recovery without retention.
-		if capabilitiesOnly {
-			e = run()
-		} else {
-			retain, release := sessionRetention(session)
-			e = retained(r.Context(), retain, release, run)
-		}
-		if e != nil {
-			log.Printf("git read failed: %v", e)
-			if !w.sent {
-				http.Error(w, "Git read failed", operationStatus(e))
-			}
-		}
-		return
-	}
-	if recoverRetentions {
-		e = resolveDrainedRecovery(func() (wal.RetentionState, error) {
-			return unwrap(session.ClearRetentionsAfterDrain)
-		})
-		if e != nil {
-			http.Error(w, "drained retention recovery failed: "+e.Error(), operationStatus(e))
-		} else {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(struct {
-				State string `json:"state"`
-			}{"complete"})
-		}
-		return
-	}
-	if collect || (maintenance && session.HasActiveCollection()) {
-		report, err := collectSession(r.Context(), session, limits)
-		writeMaintenance(w, report, err)
-		return
-	}
-	open := func() (*store, error) { return openStore(r.Context(), session, pushFormat, limits) }
-	s, e := retryOpenStore(open, refresh)
-	if e != nil {
-		log.Printf("git request setup failed stage=open-store: %v", e)
-		status := operationStatus(e)
-		if errors.Is(e, config.ErrInvalidObjectFormat) {
-			status = http.StatusBadRequest
-		}
-		http.Error(w, "Git storage unavailable", status)
-		return
-	}
-	defer func() { s.Close() }()
-	if maintenance {
-		report, err := s.maintain()
-		writeMaintenance(w, report, err)
-		return
-	}
-	if method == http.MethodPost {
-		e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {
-			s.Close()
-			if err := refresh(); err != nil {
-				return err
-			}
-			fresh, err := retryOpenStore(open, refresh)
-			if err != nil {
-				return err
-			}
-			s = fresh
+		if maintenance {
+			report, err := s.maintain()
+			writeMaintenance(w, report, err)
 			return nil
-		})
-		if e != nil {
-			log.Printf("git request setup failed stage=before-push: %v", e)
-			http.Error(w, "Git maintenance unavailable", http.StatusServiceUnavailable)
-			return
 		}
-	}
-	if method == http.MethodGet {
-		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
-		e = advertise(w, s, s.stateRoot == nil)
-	} else {
-		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-		s.progress = newReceiveProgress(w, pushCapabilities, cancel)
-		commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
-		push := &receiveStore{Storer: s, commands: commands}
-		e = transport.ReceivePack(r.Context(), push, gitio.NewReadCloser(commands, r.Body), gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
-			if s.progress != nil {
-				s.progress.writer = info.Progress
-			}
-			if err := s.progress.message("Validating update...\n"); err != nil {
-				return err
-			}
-			refs, e := push.validate(s, info.Commands)
+		if method == http.MethodPost {
+			e = retryBeforePush(func() (bool, error) { return s.beforePush() }, func() error {
+				s.Close()
+				if err := refresh(); err != nil {
+					return err
+				}
+				fresh, err := retryOpenStore(open, refresh)
+				if err != nil {
+					return err
+				}
+				s = fresh
+				return nil
+			})
 			if e != nil {
-				return e
+				log.Printf("git request setup failed stage=before-push: %v", e)
+				http.Error(w, "Git maintenance unavailable", http.StatusServiceUnavailable)
+				return nil
 			}
-			if s.stateRoot == nil {
-				for _, command := range info.Commands {
-					if command.Action() != packp.Delete && command.Name.IsBranch() {
-						s.meta.Head = command.Name.String()
-						break
+		}
+		if method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
+			e = advertise(w, s, s.stateRoot == nil)
+		} else {
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+			s.progress = newReceiveProgress(w, pushCapabilities, cancel)
+			commands := &commandReader{LimitedReader: io.LimitedReader{R: r.Body, N: limits.negotiationBytes}}
+			push := &receiveStore{Storer: s, commands: commands}
+			e = transport.ReceivePack(r.Context(), push, gitio.NewReadCloser(commands, r.Body), gitio.WriteNopCloser(w), &transport.ReceivePackRequest{StatelessRPC: true, Hooks: transport.ReceivePackHooks{PreReceive: func(_ context.Context, info *transport.PreReceiveInfo) error {
+				if s.progress != nil {
+					s.progress.writer = info.Progress
+				}
+				if err := s.progress.message("Validating update...\n"); err != nil {
+					return err
+				}
+				refs, e := push.validate(s, info.Commands)
+				if e != nil {
+					return e
+				}
+				if s.stateRoot == nil {
+					for _, command := range info.Commands {
+						if command.Action() != packp.Delete && command.Name.IsBranch() {
+							s.meta.Head = command.Name.String()
+							break
+						}
 					}
 				}
-			}
-			if err := s.progress.message("Publishing update...\n"); err != nil {
-				return err
-			}
-			return s.publish(refs)
-		}}})
+				if err := s.progress.message("Publishing update...\n"); err != nil {
+					return err
+				}
+				return s.publish(refs)
+			}}})
+		}
+		return e
+	}
+	if retainedRead {
+		retain, release := sessionRetention(session)
+		e = retained(r.Context(), retain, release, run)
+	} else {
+		e = run()
 	}
 	if e != nil {
 		log.Printf("git request failed: %v", e)
 		if !w.sent {
-			http.Error(w, "Git operation failed", operationStatus(e))
+			status := operationStatus(e)
+			if errors.Is(e, config.ErrInvalidObjectFormat) && service != transport.UploadPackService {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, "Git operation failed", status)
 		}
 	}
 }

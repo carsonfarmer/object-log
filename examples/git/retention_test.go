@@ -30,7 +30,10 @@ func TestRetentionResolvesUncertainOutcomesAndDisconnect(t *testing.T) {
 			}
 		}
 		start := time.Now()
-		err := retained(t.Context(), next(&acquire), next(&release), func() error {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		err := retained(ctx, next(&acquire), next(&release), func() error {
+			cancel()
 			return io.ErrClosedPipe
 		})
 		if !errors.Is(err, io.ErrClosedPipe) || len(acquire) != 0 || len(release) != 0 || len(ids) != 8 {
