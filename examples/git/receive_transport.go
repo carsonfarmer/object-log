@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
@@ -61,7 +62,17 @@ func receiveFormat(body io.Reader, limit int64) (config.ObjectFormat, *capabilit
 // Release their smaller read limit; the HTTP body retains the total push limit.
 type receiveStore struct {
 	storage.Storer
-	commands *commandReader
+	commands  *commandReader
+	validated map[plumbing.Hash]bool
+}
+
+// PreReceive already proved these targets before publishing; do not turn a
+// confirmed publication into a failed existence check by rereading its buckets.
+func (s *receiveStore) HasEncodedObject(id plumbing.Hash) error {
+	if s.validated[id] {
+		return nil
+	}
+	return s.Storer.HasEncodedObject(id)
 }
 
 func (s *receiveStore) PackfileWriter() (io.WriteCloser, error) {

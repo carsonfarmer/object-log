@@ -36,7 +36,10 @@ func TestReceiveRefNamesBeforePublication(t *testing.T) {
 	for _, format := range []config.ObjectFormat{config.SHA1, config.SHA256} {
 		t.Run(format.String(), func(t *testing.T) {
 			zero := plumbing.NewHash(strings.Repeat("0", format.HexSize()))
-			tip := plumbing.NewHash(strings.Repeat("1", format.HexSize()))
+			tip, err := plumbing.FromObjectFormat(format).Compute(plumbing.BlobObject, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			published := 0
 			hook := func(info *transport.PreReceiveInfo) error {
 				for _, cmd := range info.Commands {
@@ -84,6 +87,11 @@ func receiveRefForTest(t *testing.T, format config.ObjectFormat, command *packp.
 	}
 	request.Write(pack)
 	sink := &refNameSink{Storage: memory.NewStorage(memory.WithObjectFormat(format))}
+	object := sink.NewEncodedObject()
+	object.SetType(plumbing.BlobObject)
+	if _, err := sink.SetEncodedObject(object); err != nil {
+		t.Fatal(err)
+	}
 	if !command.Old.IsZero() {
 		if err := sink.SetReference(plumbing.NewHashReference(command.Name, command.Old)); err != nil {
 			t.Fatal(err)

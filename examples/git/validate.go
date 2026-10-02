@@ -9,7 +9,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 )
 
-func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
+func (s *receiveStore) validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	refs := map[string]string{}
 	maps.Copy(refs, st.meta.Refs)
 	for _, cmd := range cmds {
@@ -61,6 +61,12 @@ func validate(st *store, cmds []*packp.Command) (map[string]string, error) {
 	}
 	if err := verifyObjects(st, ids); err != nil {
 		return nil, err
+	}
+	s.validated = make(map[plumbing.Hash]bool, len(cmds))
+	for _, cmd := range cmds {
+		if !cmd.New.IsZero() {
+			s.validated[cmd.New] = true
+		}
 	}
 	return refs, nil
 }

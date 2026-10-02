@@ -350,7 +350,7 @@ func serve(response http.ResponseWriter, r *http.Request) {
 			if err := s.progress.message("Validating update...\n"); err != nil {
 				return err
 			}
-			refs, e := validate(s, info.Commands)
+			refs, e := push.validate(s, info.Commands)
 			if e != nil {
 				return e
 			}
